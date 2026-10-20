@@ -1,0 +1,212 @@
+"""布局回归：命名规则、原子验证、磁盘回退与多框架内容迁移。"""
+
+import copy
+import json
+
+import pytest
+from mindmap_docking import DockManager, DockPosition, DockTarget, ViewMode
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QPlainTextEdit
+
+
+def test_snapshot_restores_mode_location_theme_and_content(docking):
+    manager = docking.manager
+    manager.activate("alpha", focus=False)
+    content = manager.panel("alpha").content
+    content.setPlainText("恢复布局时不得替换")
+    manager.move("alpha", DockTarget(DockPosition.RIGHT_BOTTOM))
+    manager.set_view_mode("alpha", ViewMode.WINDOW)
+    manager.set_option("show_names", True)
+    manager.set_theme("dark")
+    snapshot = manager.capture_layout()
+    manager.hide("alpha")
+    manager.move("alpha", DockTarget(DockPosition.LEFT_TOP))
+    manager.set_theme("light")
+    manager.set_option("show_names", False)
+    manager.restore_layout(snapshot)
+    state = manager.states["alpha"]
+    assert state.position == DockPosition.RIGHT_BOTTOM
+    assert state.mode == ViewMode.WINDOW
+    assert state.visible
+    assert manager.theme.name == "dark"
+    assert manager.settings.show_names
+    assert manager.panel("alpha").content is content
+    assert content.toPlainText() == "恢复布局时不得替换"
+    assert docking.calls["alpha"] == 1
+
+
+def test_named_layout_apply_rename_and_delete(docking):
+    manager = docking.manager
+    manager.activate("alpha", focus=False)
+    manager.save_layout("编码布局")
+    manager.move("alpha", DockTarget(DockPosition.RIGHT_TOP))
+    manager.save_layout("调试布局")
+    assert manager.current_layout == "调试布局"
+    manager.restore_layout("编码布局")
+    assert manager.states["alpha"].position == DockPosition.LEFT_TOP
+    manager.rename_layout("编码布局", "日常编码")
+    assert manager.current_layout == "日常编码"
+    assert "编码布局" not in manager.layout_names
+    manager.delete_layout("调试布局")
+    assert "调试布局" not in manager.layout_names
+    assert manager.storage_file.exists()
+    payload = json.loads(manager.storage_file.read_text("utf-8"))
+    assert "日常编码" in payload["layouts"]
+
+
+@pytest.mark.parametrize("operation", ["save", "rename", "delete"])
+def test_factory_default_layout_is_read_only(docking, operation):
+    manager = docking.manager
+    before = manager.capture_layout()
+    with pytest.raises(ValueError):
+        if operation == "save":
+            manager.save_layout("默认")
+        elif operation == "rename":
+            manager.rename_layout("默认", "覆盖默认")
+        else:
+            manager.delete_layout("默认")
+    assert manager.capture_layout() == before
+    assert manager.layout_names == ["默认"]
+
+
+def test_current_layout_cannot_be_deleted(docking):
+    manager = docking.manager
+    manager.save_layout("当前布局")
+    with pytest.raises(ValueError):
+        manager.delete_layout("当前布局")
+    manager.restore_layout("默认")
+    manager.delete_layout("当前布局")
+    assert "当前布局" not in manager.layout_names
+
+
+@pytest.mark.parametrize("name", ["", "   ", "过" * 81])
+def test_invalid_layout_name_does_not_create_entry(docking, name):
+    before = docking.manager.layout_names
+    with pytest.raises(ValueError):
+        docking.manager.save_layout(name)
+    assert docking.manager.layout_names == before
+
+
+@pytest.mark.parametrize("damage", ["version", "duplicate", "position", "host", "geometry"])
+def test_invalid_snapshot_is_rejected_before_mutation(docking, damage):
+    manager = docking.manager
+    manager.activate("alpha", focus=False)
+    before = manager.capture_layout()
+    invalid = copy.deepcopy(before)
+    if damage == "version":
+        invalid["schema_version"] = 99
+    elif damage == "duplicate":
+        invalid["tools"].append(copy.deepcopy(invalid["tools"][0]))
+    elif damage == "position":
+        invalid["tools"][0]["position"] = "not_a_position"
+    elif damage == "host":
+        invalid["tools"][0]["host_id"] = "missing_host"
+    else:
+        invalid["tools"][0]["geometry"] = [0, 0, -1, 300]
+    with pytest.raises(ValueError):
+        manager.restore_layout(invalid)
+    assert manager.capture_layout() == before
+
+
+def test_unknown_tool_and_document_are_ignored_on_restore(docking):
+    manager = docking.manager
+    snapshot = manager.capture_layout()
+    unknown = copy.deepcopy(snapshot["tools"][0])
+    unknown.update(id="removed_plugin", visible=True)
+    snapshot["tools"].append(unknown)
+    node = snapshot["hosts"]["main"]["editor"]
+    while node["kind"] == "split":
+        node = node["children"][0]
+    node["tokens"].append("removed_document")
+    manager.restore_layout(snapshot)
+    assert "removed_plugin" not in manager.states
+    assert set(manager.states) == {"alpha", "beta", "gamma", "peer"}
+    assert docking.host.editor.find_token("removed_document") is None
+    assert docking.host.editor.find_token("doc") is not None
+    assert docking.document.toPlainText().startswith("def sample")
+
+
+@pytest.mark.parametrize("raw", ["{broken", '{"schema_version":99}', "[]"])
+def test_corrupt_session_falls_back_to_default(docking, qtbot, raw):
+    manager = docking.manager
+    manager.activate("alpha", focus=False)
+    manager.set_default_layout()
+    manager.move("alpha", DockTarget(DockPosition.RIGHT_TOP))
+    manager.set_theme("dark")
+    manager.storage_dir.mkdir(parents=True, exist_ok=True)
+    manager.storage_file.write_text(raw, encoding="utf-8")
+    with qtbot.waitSignal(manager.message, timeout=1000) as signal:
+        assert manager.load_session() is False
+    assert "恢复默认布局" in signal.args[0]
+    assert manager.states["alpha"].position == DockPosition.LEFT_TOP
+    assert manager.states["alpha"].visible
+    assert manager.theme.name == "light"
+
+
+def test_session_round_trip_uses_fresh_factories(system_factory, tmp_path):
+    first = system_factory(tmp_path / "共享存储")
+    first.manager.activate("alpha", focus=False)
+    first.manager.move("alpha", DockTarget(DockPosition.BOTTOM_RIGHT))
+    first.manager.set_view_mode("alpha", ViewMode.WINDOW)
+    first.manager.set_theme("dark")
+    first.manager.save_layout("中文命名布局")
+    first.manager.save_session()
+    first.manager.shutdown()
+    second = system_factory(tmp_path / "共享存储")
+    assert second.manager.load_session() is True
+    assert second.manager.theme.name == "dark"
+    assert second.manager.states["alpha"].position == DockPosition.BOTTOM_RIGHT
+    assert second.manager.states["alpha"].mode == ViewMode.WINDOW
+    assert second.manager.current_layout == "中文命名布局"
+    assert "中文命名布局" in second.manager.layout_names
+    assert second.calls["alpha"] == 1
+    assert second.manager.panel("alpha").content is not first.manager.panel("alpha").content
+
+
+def test_multiframe_tools_documents_and_editor_docking_keep_instances(docking):
+    manager = docking.manager
+    manager.activate("alpha", focus=False)
+    content = manager.panel("alpha").content
+    content.setPlainText("跨框架保留")
+    frame = manager.create_frame("辅助框架")
+    manager.move_document("doc", frame.host_id)
+    manager.move("alpha", DockTarget("editor", frame.host_id))
+    assert frame.editor.find_token("doc")[0].area.host is frame
+    assert frame.editor.find_token("tool:alpha")[0].area.host is frame
+    snapshot = manager.capture_layout()
+    manager.close_frame(frame.host_id)
+    assert set(manager.hosts) == {"main"}
+    assert manager.states["alpha"].host_id == "main"
+    assert docking.host.editor.find_token("doc")[0].area.host is docking.host
+    manager.restore_layout(snapshot)
+    restored = manager.hosts["辅助框架"]
+    assert restored.editor.find_token("doc")[0].area.host is restored
+    assert restored.editor.find_token("tool:alpha")[0].area.host is restored
+    assert manager.panel("alpha").content is content
+    assert content.toPlainText() == "跨框架保留"
+    assert manager.documents["doc"]["widget"] is docking.document
+    assert docking.calls["alpha"] == 1
+
+
+def test_nested_editor_split_restores_same_documents(docking):
+    manager, host = docking.manager, docking.host
+    second = QPlainTextEdit("第二份文档")
+    manager.add_document("second", "second.py", second)
+    host.editor.split_token("second", Qt.Orientation.Horizontal)
+    first_group = host.editor.find_token("doc")[0]
+    second_group = host.editor.find_token("second")[0]
+    assert first_group is not second_group
+    snapshot = manager.capture_layout()
+    manager.move_document("second", "main", first_group.group_id)
+    manager.restore_layout(snapshot)
+    assert host.editor.find_token("doc")[0] is not host.editor.find_token("second")[0]
+    assert manager.documents["second"]["widget"] is second
+    assert second.toPlainText() == "第二份文档"
+
+
+def test_offscreen_floating_geometry_is_repaired_to_visible_screen(qapp):
+    rect = DockManager.visible_geometry([999999, -999999, 30000, 30000])
+    screen = QApplication.primaryScreen().availableGeometry()
+    assert screen.contains(rect)
+    assert rect.width() > 0
+    assert rect.height() > 0

@@ -1,0 +1,1281 @@
+"""状态协调器：原子迁移、焦点语义、跨框架拖放与版本化布局持久化。"""
+
+import copy
+import json
+import re
+from collections.abc import Iterable
+from dataclasses import asdict, fields
+from pathlib import Path
+from uuid import uuid4
+
+from PySide6.QtCore import QEvent, QMimeData, QObject, QPoint, QRect, QStandardPaths, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QCursor, QDrag, QKeySequence
+from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QTabWidget, QWidget
+
+from .models import (
+    MODE_LABELS,
+    POSITION_LABELS,
+    DockPosition,
+    DockTarget,
+    DocumentSpec,
+    LayoutSettings,
+    ToolState,
+    ToolWindowSpec,
+    ViewMode,
+    default_region_sizes,
+)
+from .panels import FloatingToolWindow, ToolPanel
+from .storage import JsonLayoutStore
+from .theme import Theme
+
+MIME_TYPE = "application/x-mindmap-dock-v1"
+DEFAULT_LAYOUT = "默认"
+
+
+class DockManager(QObject):
+    """公共协调接口；所有方法应在 QApplication 所在主线程调用。
+
+    工具内容与其 ToolPanel 持续保留，布局只是状态快照。保存动作只写应用专属
+    配置目录；注册工厂不进入 JSON，也不执行持久化文件中的任何代码。
+    """
+
+    layout_changed = Signal()
+    active_changed = Signal(str)
+    theme_changed = Signal(str)
+    message = Signal(str)
+    tool_failed = Signal(str, str)
+    tool_registered = Signal(str)
+    tool_unregistered = Signal(str)
+    document_closed = Signal(str)
+
+    def __init__(self, storage_dir=None, parent=None, *, application_id="mindmap-app",
+                 theme=None, layout_store=None, frame_factory=None,
+                 shortcut_context=Qt.ShortcutContext.WidgetWithChildrenShortcut):
+        """创建独立会话，可注入主题、存储和框架工厂；不会修改应用全局样式。
+
+        application_id 是配置目录的稳定标识，不能包含路径分隔符。默认快捷键仅在
+        本组件及浮窗内部生效；完整工作台可以显式选择 WindowShortcut。
+        frame_factory(manager, host_id) 必须返回含 host 属性的 QMainWindow。
+        """
+        super().__init__(parent)
+        if QApplication.instance() is None:
+            raise RuntimeError("请先创建 QApplication，再创建 DockManager")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", application_id):
+            raise ValueError("应用标识只能包含字母、数字、点、连字符和下划线")
+        self.application_id = application_id
+        self.frame_factory = frame_factory
+        self.shortcut_context = shortcut_context
+        self.specs = {}
+        self.states = {}
+        self.panels = {}
+        self.hosts = {}
+        self.frames = {}
+        self.floating = {}
+        self.documents = {}
+        self._last_editor = {}
+        self.actions = {}
+        self.settings = LayoutSettings()
+        self.theme = theme or Theme()
+        self._pending_tool_states = {}
+        self.parking = QWidget()
+        self.parking.setObjectName("dock_content_parking")
+        self.parking.hide()
+        self.active_id = ""
+        self.last_active_id = ""
+        self.maximized_id = ""
+        self.refreshing = False
+        self.closing = False
+        self._dragging = False
+        self._drag_cancelled = False
+        self.drag_committed = False
+        self.session_token = uuid4().hex
+        self._hidden_snapshot = None
+        self._layouts = {}
+        self.current_layout = DEFAULT_LAYOUT
+        self._default_snapshot = None
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(250)
+        self._save_timer.timeout.connect(self.save_session)
+        # 使用项目专属配置命名空间；布局与 preferences.ini 按 application_id 隔离。
+        # 显式传入 storage_dir 时完全使用宿主指定目录，不访问默认配置位置。
+        root = (
+            Path(storage_dir) if storage_dir is not None else
+            Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericConfigLocation))
+            / "mindmap" / application_id
+        )
+        self.storage_dir = root
+        self.storage_file = root / "layouts-v1.json"
+        self.layout_store = layout_store or JsonLayoutStore(self.storage_file)
+        app = QApplication.instance()
+        app.focusChanged.connect(self._focus_changed)
+        app.installEventFilter(self)
+
+    def register_tool_window(self, spec: ToolWindowSpec):
+        """注册元信息，不立即调用工厂；重复 id 直接报错，避免覆盖已有控件。"""
+        if spec.id in self.specs:
+            raise ValueError(f"工具窗口标识重复：{spec.id}")
+        if spec.shortcut:
+            self._check_shortcut(spec.shortcut)
+        self.specs[spec.id] = spec
+        peers = [state for state in self.states.values() if state.position == spec.position]
+        self.states[spec.id] = ToolState(spec.id, spec.position, mode=spec.mode, available=spec.available, order=len(peers), last_position=spec.position)
+        if spec.shortcut:
+            self._add_action("tool:" + spec.id, spec.title, spec.shortcut, lambda: self.toggle(spec.id))
+        pending = self._pending_tool_states.pop(spec.id, None)
+        if pending is not None:
+            self.states[spec.id] = ToolState(**pending)
+            self.states[spec.id].available = spec.available
+            if self.states[spec.id].host_id not in self.hosts:
+                self.states[spec.id].host_id = "main"
+            if self.hosts:
+                self.refresh()
+        self.tool_registered.emit(spec.id)
+        return self.states[spec.id]
+
+    def panel(self, tool_id):
+        """取得持久面板实例；首次调用触发工厂，后续调用不重新构造业务控件。"""
+        self._require_tool(tool_id)
+        if tool_id not in self.panels:
+            try:
+                self.panels[tool_id] = ToolPanel(self, self.specs[tool_id])
+            except Exception as error:
+                self.tool_failed.emit(tool_id, str(error))
+                raise
+        return self.panels[tool_id]
+
+    def unregister_tool_window(self, tool_id, *, keep_layout=True, dispose=True):
+        """卸载工具并清理动作和外壳；可保留返回位置供插件稍后重新注册。
+
+        默认销毁内容；dispose=False 时将隐藏、无父对象的内容返回给调用方接管。
+        先解除所有容器归属，再删除包装控件，避免 Qt 连带销毁已交还的内容。
+        """
+        self._require_tool(tool_id)
+        state = self.states[tool_id]
+        if keep_layout:
+            self._pending_tool_states[tool_id] = asdict(state)
+        else:
+            self._pending_tool_states.pop(tool_id, None)
+            for snapshot in [self._default_snapshot, *self._layouts.values()]:
+                if snapshot:
+                    snapshot["tools"] = [item for item in snapshot["tools"] if item["id"] != tool_id]
+        panel = self.panels.pop(tool_id, None)
+        floating = self.floating.pop(tool_id, None)
+        if floating:
+            floating.takeCentralWidget()
+            floating._retiring = True
+            floating.close()
+            floating.deleteLater()
+        content = None
+        if panel:
+            panel.hide()
+            if not dispose:
+                content = panel.content
+                content.hide()
+                content.setParent(None)
+            panel.setParent(None)
+            panel.deleteLater()
+        action = self.actions.pop("tool:" + tool_id, None)
+        if action:
+            for widget in action.associatedObjects():
+                if isinstance(widget, QWidget):
+                    widget.removeAction(action)
+            action.deleteLater()
+        del self.specs[tool_id], self.states[tool_id]
+        if self.active_id == tool_id:
+            self.active_id = ""
+        if self.last_active_id == tool_id:
+            self.last_active_id = ""
+        if self.maximized_id == tool_id:
+            self.maximized_id = ""
+        self.refresh()
+        self.tool_unregistered.emit(tool_id)
+        return content
+
+    def _check_shortcut(self, shortcut, excluding=""):
+        sequence = QKeySequence(shortcut)
+        if sequence.isEmpty():
+            raise ValueError("快捷键无效")
+        if any(key != excluding and sequence in action.shortcuts() for key, action in self.actions.items()):
+            raise ValueError(f"快捷键已被占用：{shortcut}")
+
+    def register_action(self, action_id, title, callback, *, shortcut="", icon=""):
+        """注册业务动作；按钮、菜单和快捷键可以复用返回的同一个 QAction。"""
+        if not action_id or action_id in self.actions:
+            raise ValueError("动作标识为空或重复")
+        action = self._add_action(action_id, title, shortcut, callback)
+        if icon:
+            action.setIcon(self.theme.icon(icon))
+            action.setProperty("mindmap_icon", icon)
+        return action
+
+    def set_shortcut(self, action_id, shortcut):
+        """修改或清空快捷键；冲突在变更前拒绝，不影响原来的按键绑定。"""
+        if shortcut:
+            self._check_shortcut(shortcut, excluding=action_id)
+        self.actions[action_id].setShortcut(QKeySequence(shortcut))
+        if action_id.startswith("tool:"):
+            self.specs[action_id[5:]].shortcut = shortcut
+
+    def _require_tool(self, tool_id):
+        if tool_id not in self.states:
+            raise KeyError(f"未知工具窗口：{tool_id}")
+
+    def _add_action(self, key, title, shortcut, callback):
+        if key in self.actions:
+            return self.actions[key]
+        action = QAction(title, self)
+        if shortcut:
+            self._check_shortcut(shortcut)
+            action.setShortcut(QKeySequence(shortcut))
+            action.setShortcutContext(self.shortcut_context)
+        action.triggered.connect(callback)
+        self.actions[key] = action
+        for host in self.hosts.values():
+            host.addAction(action)
+        for floating in self.floating.values():
+            floating.addAction(action)
+        return action
+
+    def install_window_actions(self, host):
+        """给宿主关联共享 QAction；多个框架复用同一动作，避免快捷键重复注册。"""
+        definitions = [
+            ("hide_active", "隐藏活动工具窗口", "Shift+Escape", self.hide_active),
+            ("hide_all", "隐藏全部工具窗口 / 恢复", "Ctrl+Shift+F12", self.hide_restore_all),
+            ("editor_focus", "返回中央工作区", "Escape", self.focus_editor),
+            ("last_tool", "跳转到最后工具窗口", "F12", self.focus_last_tool),
+            ("default", "恢复默认布局", "Shift+F12", lambda: self.restore_layout(DEFAULT_LAYOUT)),
+            ("maximize", "最大化工具窗口 / 恢复", "Ctrl+Shift+'", lambda: self.toggle_maximize(self.active_id)),
+            ("resize_left", "向左拉伸", "Ctrl+Alt+Shift+Left", lambda: self.resize_active(-36, 0)),
+            ("resize_right", "向右拉伸", "Ctrl+Alt+Shift+Right", lambda: self.resize_active(36, 0)),
+            ("resize_up", "向上拉伸", "Ctrl+Alt+Shift+Up", lambda: self.resize_active(0, -36)),
+            ("resize_down", "向下拉伸", "Ctrl+Alt+Shift+Down", lambda: self.resize_active(0, 36)),
+            ("previous_view", "上一个内容页", "Alt+Left", lambda: self.cycle_content(-1)),
+            ("next_view", "下一个内容页", "Alt+Right", lambda: self.cycle_content(1)),
+        ]
+        for key, title, shortcut, callback in definitions:
+            self._add_action(key, title, shortcut, callback)
+        for action in self.actions.values():
+            host.addAction(action)
+
+    def activate(self, tool_id, focus=True):
+        """显示并激活工具窗；同一停靠格仅有一个占位面板，覆盖窗可以叠在其上。"""
+        self._require_tool(tool_id)
+        state = self.states[tool_id]
+        if not state.available:
+            return False
+        # 先验证并构造内容，再改变任何布局状态。工厂抛出异常时原布局和活动项保持不变。
+        self.panel(tool_id)
+        if state.host_id not in self.hosts:
+            state.host_id = "main"
+        if self.maximized_id and self.maximized_id != tool_id:
+            self.maximized_id = ""
+        for other in self.states.values():
+            if other.id == tool_id or not other.visible:
+                continue
+            if other.mode in (ViewMode.DOCK_UNPINNED, ViewMode.UNDOCK):
+                other.visible = False
+            if state.position != "editor" and state.mode in (ViewMode.DOCK_PINNED, ViewMode.DOCK_UNPINNED) and other.host_id == state.host_id and other.position == state.position and other.mode in (ViewMode.DOCK_PINNED, ViewMode.DOCK_UNPINNED):
+                other.visible = False
+        state.visible = True
+        self.specs[tool_id].notification = False
+        self.mark_active(tool_id)
+        self.refresh()
+        if focus:
+            self._focus_panel(tool_id)
+        return True
+
+    def _focus_panel(self, tool_id):
+        panel = self.panel(tool_id)
+        state = self.states[tool_id]
+        floating = self.floating.get(tool_id) if state.position != "editor" and state.mode in (ViewMode.FLOAT, ViewMode.WINDOW) else None
+        window = floating or self.hosts[self.states[tool_id].host_id].window()
+        if window.isMinimized():
+            window.showNormal()
+        window.raise_()
+        window.activateWindow()
+        content = panel.content.currentWidget() if isinstance(panel.content, QTabWidget) else panel.content
+        content.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def mark_active(self, tool_id):
+        """仅更新活动标识和标题显隐，不迁移控件，适用于鼠标按下与焦点事件。"""
+        if tool_id not in self.states:
+            return
+        changed = self.active_id != tool_id
+        self.active_id = self.last_active_id = tool_id
+        for panel in self.panels.values():
+            panel.update_header()
+        if changed:
+            self.active_changed.emit(tool_id)
+
+    def toggle(self, tool_id):
+        """活动窗口再次点击会隐藏；已显示但不活动的窗口先取得焦点。"""
+        state = self.states[tool_id]
+        if state.visible and self.active_id == tool_id:
+            self.hide(tool_id)
+        else:
+            self.activate(tool_id)
+
+    def hide(self, tool_id):
+        """隐藏并清除当前最大化状态，保留模式、内容、浮窗几何和返回位置。"""
+        self._require_tool(tool_id)
+        self.states[tool_id].visible = False
+        if self.active_id == tool_id:
+            self.active_id = ""
+        if self.maximized_id == tool_id:
+            self.maximized_id = ""
+        self.refresh()
+
+    def set_available(self, tool_id, available):
+        """控制插件式工具的可用性；不可用时移除栏入口，且不能继续占据最大化布局。"""
+        self._require_tool(tool_id)
+        self.states[tool_id].available = bool(available)
+        if not available:
+            self.states[tool_id].visible = False
+            if self.active_id == tool_id:
+                self.active_id = ""
+            if self.maximized_id == tool_id:
+                self.maximized_id = ""
+        self.refresh()
+
+    def move(self, tool_id, target: DockTarget):
+        """原子移动：所有目标验证成功后才更改状态和 QWidget 所属容器。"""
+        self._require_tool(tool_id)
+        if target.host_id not in self.hosts:
+            raise ValueError(f"目标框架不存在：{target.host_id}")
+        if self.states[tool_id].available:
+            self.panel(tool_id)
+        state = self.states[tool_id]
+        if state.position != "editor":
+            state.last_position = state.position
+        peers = sorted((s for s in self.states.values() if s.id != tool_id and s.host_id == target.host_id and s.position == target.position), key=lambda s: s.order)
+        index = len(peers) if target.index < 0 else min(target.index, len(peers))
+        peers.insert(index, state)
+        for order, peer in enumerate(peers):
+            peer.order = order
+        state.host_id = target.host_id
+        state.position = str(target.position)
+        state.editor_group = target.group_id
+        if target.position == "editor":
+            group = self.hosts[target.host_id].editor.group(target.group_id)
+            state.editor_group = group.group_id
+            token = "tool:" + tool_id
+            order = [group.tabBar().tabData(n) for n in range(group.count()) if group.tabBar().tabData(n) != token]
+            order.insert(len(order) if target.index < 0 else min(target.index, len(order)), token)
+            group._desired_order = order
+        if target.position != "editor":
+            state.last_position = str(target.position)
+        state.mode = ViewMode.DOCK_PINNED
+        state.visible = False
+        self.maximized_id = ""
+        self.activate(tool_id)
+
+    def set_view_mode(self, tool_id, mode: ViewMode):
+        """转换五种模式；编辑器内工具先回到最后停靠位置，隐藏工具保持隐藏。"""
+        self._require_tool(tool_id)
+        mode = ViewMode(mode)
+        state = self.states[tool_id]
+        if state.position == "editor":
+            state.position = state.last_position
+        state.mode = mode
+        self.maximized_id = ""
+        if state.visible:
+            state.visible = False
+            self.activate(tool_id)
+        else:
+            self.refresh()
+
+    def set_option(self, key, value):
+        """设置已定义的布尔布局选项，并同步所有框架；未知键在变更前拒绝。"""
+        if key not in {field.name for field in fields(LayoutSettings)}:
+            raise KeyError(f"未知布局选项：{key}")
+        setattr(self.settings, key, bool(value))
+        if key == "compact":
+            self.theme = self.theme.with_options(compact=self.settings.compact)
+        self.refresh()
+        self.theme_changed.emit(self.theme.name)
+
+    def set_theme(self, name):
+        """原地刷新局部主题，保留业务输入焦点、光标和未提交草稿。"""
+        self.theme = name.with_options(compact=self.settings.compact) if isinstance(name, Theme) else self.theme.with_options(name=name, compact=self.settings.compact)
+        # 主题切换不改变内容归属，不能走拆卸/重挂面板的布局刷新路径。
+        # 否则真实输入框会收到 FocusOut，把业务的防抖草稿意外提交。
+        for host in self.hosts.values():
+            host.refresh_theme()
+        for panel in self.panels.values():
+            panel.refresh_theme()
+        for floating in self.floating.values():
+            self.theme.apply(floating)
+        for action in self.actions.values():
+            if icon := action.property("mindmap_icon"):
+                action.setIcon(self.theme.icon(icon))
+        self.theme_changed.emit(self.theme.name)
+        self.schedule_save()
+
+    def _detach_panels(self):
+        # QMainWindow 需要显式 takeCentralWidget，防止更换 centralWidget 时删除旧内容。
+        for floating in self.floating.values():
+            if floating.centralWidget():
+                floating.takeCentralWidget()
+        for panel in self.panels.values():
+            panel.hide()
+            panel.setParent(self.parking)
+        for host in self.hosts.values():
+            host.clear_panels()
+
+    def refresh(self):
+        """批量提交状态到 Qt 容器；迁移期间屏蔽焦点回调，完成后只发一次布局信号。"""
+        if self.refreshing or self.closing:
+            return
+        self.refreshing = True
+        try:
+            # 辅助框架关闭或旧配置合并时可能出现同一格多个可见占位窗，统一消解。
+            slots = {}
+            for state in self.states.values():
+                if state.visible and state.available and state.position != "editor" and state.mode in (ViewMode.DOCK_PINNED, ViewMode.DOCK_UNPINNED):
+                    key = (state.host_id, state.position)
+                    old = slots.get(key)
+                    if old:
+                        if old.id == self.active_id:
+                            state.visible = False
+                            continue
+                        old.visible = False
+                    slots[key] = state
+            selection = {}
+            orders = {}
+            for host in self.hosts.values():
+                for group in host.editor.groups:
+                    selection[(host.host_id, group.group_id)] = group.tabBar().tabData(group.currentIndex()) if group.currentIndex() >= 0 else ""
+                    orders[(host.host_id, group.group_id)] = [group.tabBar().tabData(n) for n in range(group.count())]
+            self._detach_panels()
+            for action in self.actions.values():
+                if name := action.property("mindmap_icon"):
+                    action.setIcon(self.theme.icon(name))
+            for tool_id, floating in list(self.floating.items()):
+                state = self.states[tool_id]
+                if not floating.independent and state.host_id in self.hosts:
+                    owner = self.hosts[state.host_id].window()
+                    if floating.parentWidget() is not owner:
+                        floating.setParent(owner, Qt.WindowType.Tool)
+                if not state.visible or state.position == "editor" or state.mode not in (ViewMode.FLOAT, ViewMode.WINDOW):
+                    floating.hide()
+                if state.mode in (ViewMode.FLOAT, ViewMode.WINDOW) and floating.independent != (state.mode == ViewMode.WINDOW):
+                    floating._retiring = True
+                    floating.hide()
+                    floating.deleteLater()
+                    del self.floating[tool_id]
+            for host in list(self.hosts.values()):
+                host.refresh()
+                for group in host.editor.groups:
+                    order = getattr(group, "_desired_order", None)
+                    if order is not None:
+                        group._desired_order = None
+                    else:
+                        order = orders.get((host.host_id, group.group_id), [])
+                    present = [group.tabBar().tabData(n) for n in range(group.count())]
+                    order = [token for token in order if token in present]
+                    for desired, token in enumerate(order):
+                        current = next(n for n in range(group.count()) if group.tabBar().tabData(n) == token)
+                        if current != desired:
+                            group.tabBar().moveTab(current, desired)
+                    token = getattr(group, "_desired_selection", None)
+                    if token is not None:
+                        group._desired_selection = None
+                    else:
+                        token = selection.get((host.host_id, group.group_id), "")
+                        active = self.states.get(self.active_id)
+                        if active and active.visible and active.host_id == host.host_id and active.position == "editor" and host.editor.group(active.editor_group) is group:
+                            token = "tool:" + active.id
+                    if token:
+                        for index in range(group.count()):
+                            if group.tabBar().tabData(index) == token:
+                                group.setCurrentIndex(index)
+                                break
+        finally:
+            self.refreshing = False
+        self.layout_changed.emit()
+        self.schedule_save()
+
+    def place_floating(self, tool_id):
+        state = self.states[tool_id]
+        floating = self.floating.get(tool_id)
+        if floating is None:
+            floating = self.floating[tool_id] = FloatingToolWindow(self, tool_id, state.mode == ViewMode.WINDOW)
+            for action in self.actions.values():
+                floating.addAction(action)
+        floating.setCentralWidget(self.panel(tool_id))
+        self.theme.apply(floating)
+        self.panel(tool_id).show()
+        rect = self.visible_geometry(state.geometry)
+        floating.setGeometry(rect)
+        # Qt.Tool 会自动跟随所有者；额外检查用于从已最小化主窗恢复会话的情况。
+        owner = self.hosts[state.host_id].window()
+        floating.setVisible(state.visible and (state.mode == ViewMode.WINDOW or not owner.isMinimized()))
+
+    @staticmethod
+    def visible_geometry(geometry):
+        """找不到原显示器时限制到最近可用屏幕，保证窗口标题仍能被鼠标访问。"""
+        x, y, width, height = [int(value) for value in geometry]
+        rect = QRect(x, y, max(240, width), max(160, height))
+        screens = QApplication.screens()
+        screen = next((screen for screen in screens if screen.availableGeometry().contains(rect.center())), QApplication.primaryScreen())
+        if screen:
+            available = screen.availableGeometry()
+            rect.setWidth(min(rect.width(), available.width()))
+            rect.setHeight(min(rect.height(), available.height()))
+            rect.moveLeft(max(available.left(), min(rect.left(), available.right() - rect.width() + 1)))
+            rect.moveTop(max(available.top(), min(rect.top(), available.bottom() - rect.height() + 1)))
+        return rect
+
+    def _focus_changed(self, old, new):
+        if self.closing or self.refreshing or self._dragging:
+            return
+        # 菜单/下拉框会暂时改变 Qt 焦点；等同一事件循环完成后依据真实归属判断。
+        QTimer.singleShot(0, self._process_focus)
+
+    def _process_focus(self):
+        if self.closing or self.refreshing or self._dragging:
+            return
+        app = QApplication.instance()
+        if app.activePopupWidget() is not None:
+            return
+        focus = app.focusWidget()
+        if focus is None:
+            return
+        for document_id, doc in self.documents.items():
+            page = doc["widget"]
+            if focus is page or page.isAncestorOf(focus):
+                for host in self.hosts.values():
+                    location = host.editor.find_token(document_id)
+                    if location and location[0].area.host is host:
+                        self._last_editor[host.host_id] = document_id
+                        break
+                break
+        owner_id = ""
+        widget = focus
+        while widget:
+            if isinstance(widget, ToolPanel) and widget.manager is self:
+                owner_id = widget.tool_id
+                break
+            widget = widget.parentWidget()
+        changed = False
+        for state in self.states.values():
+            if not state.visible or state.id == owner_id:
+                continue
+            if state.mode == ViewMode.DOCK_UNPINNED:
+                state.visible = False
+                changed = True
+            elif state.mode == ViewMode.UNDOCK and owner_id:
+                state.visible = False
+                changed = True
+        if owner_id:
+            self.mark_active(owner_id)
+        elif focus:
+            self.active_id = ""
+            for panel in self.panels.values():
+                panel.update_header()
+        if changed:
+            self.refresh()
+
+    def eventFilter(self, watched, event):
+        if self.closing:
+            return False
+        if event.type() == QEvent.Type.KeyPress and self._dragging and event.key() == Qt.Key.Key_Escape:
+            self._drag_cancelled = True
+        if event.type() == QEvent.Type.WindowStateChange:
+            for host in list(self.hosts.values()):
+                if watched is host.window():
+                    QTimer.singleShot(0, self._sync_owned_windows)
+                    break
+        if event.type() == QEvent.Type.MouseButtonPress and not self._dragging:
+            widget = watched if isinstance(watched, QWidget) else None
+            while widget:
+                if isinstance(widget, ToolPanel) and widget.manager is self:
+                    self.mark_active(widget.tool_id)
+                    break
+                widget = widget.parentWidget()
+        return False
+
+    def _sync_owned_windows(self):
+        if self.closing:
+            return
+        for tool_id, window in self.floating.items():
+            state = self.states[tool_id]
+            if state.mode == ViewMode.FLOAT:
+                owner = self.hosts.get(state.host_id)
+                window.setVisible(state.visible and owner is not None and not owner.window().isMinimized())
+
+    def focus_editor(self):
+        """返回所属框架最后获得焦点的文档，保留光标；不把编辑器内工具标签当作文档。"""
+        if self._dragging:
+            return
+        host = self.hosts.get(self.states[self.last_active_id].host_id) if self.last_active_id in self.states else self.hosts.get("main")
+        if host:
+            document_id = self._last_editor.get(host.host_id)
+            location = host.editor.find_token(document_id) if document_id else None
+            if not location or location[0].area.host is not host:
+                location = None
+                for group in host.editor.groups:
+                    indexes = [group.currentIndex()] + list(range(group.count()))
+                    for index in indexes:
+                        if index >= 0 and group.tabBar().tabData(index) in self.documents:
+                            location = (group, index)
+                            break
+                    if location:
+                        break
+            host.window().raise_()
+            host.window().activateWindow()
+            if location:
+                group, index = location
+                group.setCurrentIndex(index)
+                group.widget(index).setFocus(Qt.FocusReason.ShortcutFocusReason)
+            else:
+                host.editor.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.active_id = ""
+        for panel in self.panels.values():
+            panel.update_header()
+
+    def focus_last_tool(self):
+        if self.last_active_id:
+            self.activate(self.last_active_id)
+
+    def focus_workspace(self):
+        """返回中央工作区最后取得焦点的文档；保留 focus_editor 作为已有调用的别名。"""
+        self.focus_editor()
+
+    def hide_active(self):
+        if self.active_id:
+            self.hide(self.active_id)
+            self.focus_editor()
+
+    def hide_restore_all(self):
+        """交替隐藏及恢复先前打开集合；恢复时跳过已卸载或不可用的工具。"""
+        if self._hidden_snapshot is None:
+            self._hidden_snapshot = [state.id for state in self.states.values() if state.visible]
+            for state in self.states.values():
+                state.visible = False
+            self.maximized_id = ""
+        else:
+            for tool_id in self._hidden_snapshot:
+                if tool_id in self.states and self.states[tool_id].available:
+                    self.states[tool_id].visible = True
+            self._hidden_snapshot = None
+        self.refresh()
+
+    def toggle_maximize(self, tool_id):
+        """嵌入工具只在本宿主最大化；浮动/独立工具交给原生窗口管理器处理。"""
+        if tool_id not in self.states or not self.states[tool_id].visible:
+            return
+        if self.states[tool_id].mode in (ViewMode.FLOAT, ViewMode.WINDOW):
+            window = self.floating[tool_id]
+            window.showNormal() if window.isMaximized() else window.showMaximized()
+            return
+        self.maximized_id = "" if self.maximized_id == tool_id else tool_id
+        self.refresh()
+
+    def resize_active(self, dx, dy):
+        if self.active_id not in self.states:
+            return
+        state = self.states[self.active_id]
+        host = self.hosts[state.host_id]
+        if state.mode in (ViewMode.FLOAT, ViewMode.WINDOW):
+            window = self.floating[state.id]
+            window.resize(max(240, window.width() + dx), max(160, window.height() + dy))
+        elif state.mode == ViewMode.UNDOCK:
+            region = state.position.split("_")[0]
+            change = -dy if region == "bottom" else -dx if region == "right" else dx
+            if change:
+                overlay = host.overlays.get(state.id)
+                current = host.region_sizes["overlay"][region]
+                if overlay is not None and overlay.isVisible():
+                    current = overlay.height() if region == "bottom" else overlay.width()
+                host._set_region_extent(state.position, current + change, overlay=True)
+        elif state.position != "editor":
+            region = state.position.split("_")[0]
+            change = -dy if region == "bottom" else -dx if region == "right" else dx
+            if change:
+                widget = getattr(host, region)
+                current = widget.height() if region == "bottom" else widget.width()
+                center = host.vertical.widget(0) if region == "bottom" else host.horizontal.widget(1)
+                room = center.height() - 140 if region == "bottom" else center.width() - 220
+                host._set_region_extent(state.position, current + min(change, max(0, room)))
+        self.schedule_save()
+
+    def cycle_content(self, direction):
+        if self.active_id in self.panels:
+            self.panels[self.active_id].cycle_view(direction)
+
+    def tool_menu(self, tool_id, parent=None):
+        state = self.states[tool_id]
+        menu = QMenu(parent or self.hosts[state.host_id])
+        menu.addAction("隐藏", lambda: self.hide(tool_id))
+        menu.addAction("最大化 / 恢复", lambda: self.toggle_maximize(tool_id))
+        modes = menu.addMenu("视图模式")
+        mode_group = QActionGroup(modes)
+        mode_group.setExclusive(True)
+        for mode in ViewMode:
+            action = modes.addAction(MODE_LABELS[mode])
+            action.setCheckable(True)
+            action.setChecked(state.mode == mode and state.position != "editor")
+            mode_group.addAction(action)
+            action.triggered.connect(lambda checked=False, selected=mode: self.set_view_mode(tool_id, selected))
+        positions = menu.addMenu("移至")
+        for position in DockPosition:
+            action = positions.addAction(POSITION_LABELS[position])
+            action.triggered.connect(lambda checked=False, selected=position: self.move(tool_id, DockTarget(selected, state.host_id)))
+        positions.addSeparator()
+        positions.addAction("编辑器标签", lambda: self.move(tool_id, DockTarget("editor", state.host_id)))
+        positions.addAction("新框架", lambda: self.detach_token("tool:" + tool_id))
+        if len(self.hosts) > 1:
+            for host_id in self.hosts:
+                if host_id != state.host_id:
+                    positions.addAction("框架：" + host_id, lambda checked=False, selected=host_id: self.move(tool_id, DockTarget(state.last_position, selected)))
+        menu.addSeparator()
+        grouped = menu.addAction("分组标签")
+        grouped.setCheckable(True)
+        grouped.setChecked(state.grouped_tabs)
+        grouped.setEnabled(isinstance(self.panel(tool_id).content, QTabWidget))
+        grouped.triggered.connect(lambda checked: self.set_grouped_tabs(tool_id, checked))
+        return menu
+
+    def set_grouped_tabs(self, tool_id, grouped):
+        """切换内容页的标签/下拉呈现；页面对象与当前页面不会因此重新创建。"""
+        self.states[tool_id].grouped_tabs = bool(grouped)
+        self.panel(tool_id).update_header()
+        self.schedule_save()
+
+    def encode_drag(self, kind, item_id):
+        mime = QMimeData()
+        mime.setData(MIME_TYPE, json.dumps({"session": self.session_token, "kind": kind, "id": item_id}).encode())
+        return mime
+
+    def decode_drag(self, mime):
+        if not mime.hasFormat(MIME_TYPE):
+            return None
+        try:
+            data = json.loads(bytes(mime.data(MIME_TYPE)))
+            if data.get("session") != self.session_token:
+                return None
+            if data.get("kind") == "tool" and data.get("id") in self.states:
+                return data
+            if data.get("kind") == "document" and data.get("id") in self.documents:
+                return data
+        except (ValueError, TypeError, AttributeError):
+            return None
+        return None
+
+    def start_tool_drag(self, tool_id, source, hotspot):
+        self._start_drag("tool", tool_id, source, hotspot)
+
+    def start_document_drag(self, token, source, hotspot):
+        if token.startswith("tool:"):
+            self._start_drag("tool", token[5:], source, hotspot)
+        else:
+            self._start_drag("document", token, source, hotspot)
+
+    def _start_drag(self, kind, item_id, source, hotspot):
+        if self._dragging:
+            return
+        self._dragging, self._drag_cancelled, self.drag_committed = True, False, False
+        drag = QDrag(source)
+        drag.setMimeData(self.encode_drag(kind, item_id))
+        drag.setPixmap(source.grab())
+        drag.setHotSpot(hotspot)
+        try:
+            result = drag.exec(Qt.DropAction.MoveAction)
+            # Escape 和非法目标均不改变状态；释放到应用框架外才执行显式分离。
+            # Windows 原生拖放循环可能直接消费 Esc，应用事件过滤器不一定收到按键。
+            # 只有鼠标已释放的 IgnoreAction 才能解释成框架外分离；仍按住左键表示取消。
+            released = not bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+            if result == Qt.DropAction.IgnoreAction and released and not self._drag_cancelled and not self.drag_committed:
+                cursor = QCursor.pos()
+                outside = not any(host.window().frameGeometry().contains(cursor) for host in self.hosts.values())
+                if outside:
+                    if kind == "tool":
+                        state = self.states[item_id]
+                        state.geometry[:2] = [cursor.x() - 80, cursor.y() - 15]
+                        self.set_view_mode(item_id, ViewMode.FLOAT)
+                        self.activate(item_id)
+                    else:
+                        self.detach_token(item_id, cursor)
+        finally:
+            self._dragging = False
+            for host in self.hosts.values():
+                host.preview.hide()
+                # Windows 原生拖放取消时不一定补发 dragLeaveEvent；统一释放两侧临时落点。
+                host.left_rail.reset_drag()
+                host.right_rail.reset_drag()
+            drag.deleteLater()
+
+    def add_document(self, document_id, title, widget, host_id="main", icon="document", *,
+                     can_close=None, on_closed=None, modified=False):
+        """注册已有文档控件并显示；标识必须唯一，文档内容不进入布局配置。"""
+        if document_id in self.documents or not document_id or document_id.startswith("tool:"):
+            raise ValueError(f"文档标识重复：{document_id}")
+        if host_id not in self.hosts or not isinstance(widget, QWidget):
+            raise ValueError("文档内容或目标宿主无效")
+        self.documents[document_id] = {"title": title, "widget": widget, "icon": icon,
+                                       "can_close": can_close, "on_closed": on_closed,
+                                       "modified": bool(modified), "closed": False, "host_id": host_id}
+        self.move_document(document_id, host_id)
+        self.set_document_modified(document_id, modified)
+
+    def register_document(self, spec: DocumentSpec, host_id="main"):
+        """通过声明式规格注入业务文档；工厂失败时不注册半成品。"""
+        if spec.id in self.documents or host_id not in self.hosts:
+            raise ValueError("文档重复或宿主不存在")
+        widget = spec.factory()
+        self.add_document(spec.id, spec.title, widget, host_id, spec.icon,
+                          can_close=spec.can_close, on_closed=spec.on_closed, modified=spec.modified)
+        return widget
+
+    def set_document_title(self, document_id: str, title: str) -> None:
+        """更新已注册文档的显示标题，并保留修改标记和控件实例。
+
+        document_id 不存在时抛出 KeyError；title 必须是非空字符串，否则抛出
+        ValueError。关闭后保留的文档也能改名，重新打开时使用新标题。该方法
+        只更新元信息，不修改业务数据、文档归属或布局中的稳定标识。
+        """
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError("文档标题不能为空")
+        doc = self.documents[document_id]
+        doc["title"] = title
+        self.set_document_modified(document_id, doc["modified"])
+
+    def set_document_actions(self, document_id: str, actions: Iterable[QAction]) -> None:
+        """设置当前文档在标签栏右侧显示的图标动作，传入空序列可清除。
+
+        document_id 必须已注册，否则抛出 KeyError；actions 按迭代顺序展示，
+        含非 QAction 对象时抛出 TypeError，原有配置保持不变。动作由调用方
+        持有和管理生命周期，必须在文档注销或清除这些入口前保持有效；框架
+        不改变其父对象、不复制动作，也不另外配置快捷键。
+
+        按钮直接跟随原动作的图标、提示和启用状态。每个编辑组仅展示当前
+        文档的动作，切换标签、分屏、跨框架迁移、关闭后重开及布局恢复时
+        自动同步；隐藏文档的配置仍然保留。此接口仅限 Qt GUI 线程调用，
+        不修改文档内容、修改标记或布局快照，也不取得动作的所有权。
+        """
+        doc = self.documents[document_id]
+        values = tuple(actions)
+        if any(not isinstance(action, QAction) for action in values):
+            raise TypeError("文档操作必须全部为 QAction")
+        doc["header_actions"] = values
+        for host in self.hosts.values():
+            for group in host.editor.groups:
+                if group.currentWidget() is doc["widget"]:
+                    group._sync_document_actions()
+
+    def set_document_modified(self, document_id, modified=True):
+        """设置业务修改标记并更新所有框架中的标签；状态不包含文档实际内容。"""
+        doc = self.documents[document_id]
+        doc["modified"] = bool(modified)
+        for host in self.hosts.values():
+            location = host.editor.find_token(document_id)
+            if location:
+                location[0].setTabText(location[1], doc["title"] + (" *" if modified else ""))
+
+    def can_close_document(self, document_id):
+        """业务关闭决策由回调负责；无决策的已修改文档默认拒绝关闭。"""
+        doc = self.documents[document_id]
+        callback = doc["can_close"]
+        try:
+            allowed = bool(callback()) if callback else not doc["modified"]
+        except Exception as error:
+            self.message.emit(f"文档关闭检查失败：{error}")
+            return False
+        if not allowed:
+            self.message.emit(f"关闭已取消：{doc['title']}")
+        return allowed
+
+    def can_close_documents(self):
+        """主窗口退出前检查所有仍打开的业务文档；任一拒绝即保留整个工作台。"""
+        return all(self.can_close_document(key) for key, doc in list(self.documents.items()) if not doc["closed"])
+
+    def close_document(self, document_id, *, dispose=False):
+        """关闭标签并保留内容，或显式销毁并注销。取消时不修改容器及父对象。"""
+        doc = self.documents[document_id]
+        if not doc["closed"] and not self.can_close_document(document_id):
+            return False
+        for host in self.hosts.values():
+            location = host.editor.find_token(document_id)
+            if location:
+                location[0].removeTab(location[1])
+                break
+        doc["widget"].hide()
+        doc["widget"].setParent(self.parking)
+        first_close = not doc["closed"]
+        doc["closed"] = True
+        if first_close:
+            if doc["on_closed"]:
+                try:
+                    doc["on_closed"]()
+                except Exception as error:
+                    self.message.emit(f"文档关闭通知失败：{error}")
+            self.document_closed.emit(document_id)
+        if dispose:
+            doc["widget"].deleteLater()
+            del self.documents[document_id]
+        self.schedule_save()
+        return True
+
+    def open_document(self, document_id, host_id="main"):
+        """重新打开已关闭的文档，继续使用同一内容实例和业务修改状态。"""
+        self.move_document(document_id, host_id)
+
+    def move_document(self, document_id, host_id, group_id="", index=-1):
+        """将同一文档实例移到目标编辑组；index=-1 追加，未知框架或文档报错。"""
+        if host_id not in self.hosts or document_id not in self.documents:
+            raise ValueError("文档或目标框架不存在")
+        doc = self.documents[document_id]
+        doc["closed"] = False
+        doc["host_id"] = host_id
+        self.hosts[host_id].editor.group(group_id).add_token(document_id, doc["widget"], doc["title"], self.theme.icon(doc["icon"], 16), index)
+        self.set_document_modified(document_id, doc["modified"])
+        self.schedule_save()
+
+    def create_frame(self, host_id=None, geometry=None):
+        """新建共享管理器的编辑器框架，返回其 DockHost；省略标识时生成唯一值。"""
+        from .frame import DockFrame
+        host_id = host_id or "frame-" + uuid4().hex[:6]
+        if host_id in self.hosts:
+            raise ValueError("框架标识重复")
+        frame = self.frame_factory(self, host_id) if self.frame_factory else DockFrame(self, host_id)
+        if not hasattr(frame, "host") or self.hosts.get(host_id) is not frame.host:
+            raise TypeError("框架工厂必须创建并返回含正确 DockHost 的窗口")
+        self.frames[host_id] = frame
+        if geometry:
+            frame.setGeometry(self.visible_geometry(geometry))
+        frame.show()
+        self.refresh()
+        return frame.host
+
+    def detach_token(self, token, cursor=None):
+        host = self.create_frame()
+        if cursor:
+            host.window().move(cursor - QPoint(80, 20))
+        if token.startswith("tool:"):
+            self.move(token[5:], DockTarget("editor", host.host_id))
+        else:
+            self.move_document(token, host.host_id)
+        return host
+
+    def close_frame(self, host_id):
+        if host_id == "main" or host_id not in self.hosts:
+            return
+        host = self.hosts[host_id]
+        # 关闭辅助框架时将全部内容交还主框架，避免 Qt 父子销毁导致丢失页面。
+        for group in list(host.editor.groups):
+            for index in reversed(range(group.count())):
+                token = group.tabBar().tabData(index)
+                if token in self.documents:
+                    self.move_document(token, "main")
+        for state in self.states.values():
+            if state.host_id == host_id:
+                state.host_id = "main"
+                if state.position == "editor":
+                    state.editor_group = ""
+        for state in self._pending_tool_states.values():
+            if state["host_id"] == host_id:
+                state["host_id"] = "main"
+                state["editor_group"] = ""
+        self._retire_frame(host_id)
+        self.refresh()
+
+    def _retire_frame(self, host_id):
+        frame = self.frames.pop(host_id, None)
+        self.hosts.pop(host_id, None)
+        if frame:
+            frame._retiring = True
+            frame.hide()
+            frame.deleteLater()
+
+    def capture_layout(self):
+        """生成纯数据快照，包含六区、编辑器完整标签顺序、辅助框架和浮窗状态。"""
+        return {
+            "schema_version": 1,
+            "theme": self.theme.name,
+            "settings": asdict(self.settings),
+            "tools": [asdict(state) for state in self.states.values()] + [copy.deepcopy(item) for key, item in self._pending_tool_states.items() if key not in self.states],
+            "active": self.active_id,
+            "hosts": {host_id: {"sizes": copy.deepcopy(host._sizes),
+                                "region_sizes": copy.deepcopy(host.region_sizes),
+                                "editor": host.editor.snapshot(),
+                                "geometry": [host.window().x(), host.window().y(), host.window().width(), host.window().height()]}
+                      for host_id, host in self.hosts.items()},
+        }
+
+    def set_default_layout(self):
+        """应用完成初始注册与布局后调用，建立不可被命名保存覆盖的内建模板。"""
+        self._default_snapshot = copy.deepcopy(self.capture_layout())
+        self._layouts[DEFAULT_LAYOUT] = copy.deepcopy(self._default_snapshot)
+
+    def save_layout(self, name):
+        """保存命名布局；默认布局永远来自应用内建模板，不接受覆盖。"""
+        name = name.strip()
+        if not name or len(name) > 80 or name == DEFAULT_LAYOUT:
+            raise ValueError("布局名称应为1至80个字符，且不能使用“默认”")
+        self._layouts[name] = self.capture_layout()
+        self.current_layout = name
+        self.save_session()
+        self.layout_changed.emit()
+
+    @property
+    def layout_names(self):
+        return list(self._layouts)
+
+    def rename_layout(self, old_name, new_name):
+        """原子替换布局名称，保护默认模板且不允许与已有名称冲突。"""
+        new_name = new_name.strip()
+        if old_name == DEFAULT_LAYOUT or old_name not in self._layouts or not new_name or len(new_name) > 80 or new_name in self._layouts:
+            raise ValueError("默认布局不可改名；新名称必须有效且不能重复")
+        self._layouts[new_name] = self._layouts.pop(old_name)
+        if self.current_layout == old_name:
+            self.current_layout = new_name
+        self.save_session()
+
+    def delete_layout(self, name):
+        """删除非当前自定义布局；默认模板与正在使用的布局必须先保留。"""
+        if name in (DEFAULT_LAYOUT, self.current_layout):
+            raise ValueError("默认布局和当前布局不可删除")
+        del self._layouts[name]
+        self.save_session()
+
+    def restore_layout(self, layout):
+        """接受布局名或版本化字典；完整预检在任何 QWidget 迁移前完成。"""
+        if isinstance(layout, str):
+            if layout not in self._layouts:
+                raise KeyError("布局不存在")
+            data = copy.deepcopy(self._layouts[layout])
+            current = layout
+        else:
+            data = copy.deepcopy(layout)
+            current = self.current_layout
+        self._validate_snapshot(data)
+        data = self._normalize_snapshot(data)
+        self._restore_snapshot(data)
+        if isinstance(layout, str):
+            self._layouts[layout] = copy.deepcopy(data)
+        self.current_layout = current
+        self._hidden_snapshot = None
+        self.schedule_save()
+
+    def _validate_snapshot(self, data):
+        if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("tools"), list) or not isinstance(data.get("hosts"), dict) or "main" not in data["hosts"]:
+            raise ValueError("不支持或损坏的布局格式")
+        if data.get("theme") not in ("light", "dark"):
+            raise ValueError("布局主题无效")
+        if not isinstance(data.get("active", ""), str):
+            raise ValueError("活动工具标识无效")
+        if not isinstance(data.get("settings", {}), dict) or not all(isinstance(value, bool) for value in data.get("settings", {}).values()):
+            raise ValueError("布局选项无效")
+        if len(data["hosts"]) > 32 or len(data["tools"]) > 1000:
+            raise ValueError("布局内容过大")
+        seen = set()
+        for item in data["tools"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or item.get("id") in seen:
+                raise ValueError("工具窗口状态无效或标识重复")
+            seen.add(item.get("id"))
+            if item.get("position") != "editor":
+                DockPosition(item.get("position"))
+            DockPosition(item.get("last_position", DockPosition.LEFT_TOP))
+            ViewMode(item.get("mode"))
+            if item.get("host_id") not in data["hosts"]:
+                raise ValueError("布局引用不存在的框架")
+            geometry = item.get("geometry")
+            if not isinstance(geometry, list) or len(geometry) != 4 or not all(isinstance(value, int) and abs(value) <= 1000000 for value in geometry) or geometry[2] <= 0 or geometry[3] <= 0:
+                raise ValueError("浮窗尺寸无效")
+            if not isinstance(item.get("order"), int) or not isinstance(item.get("extent", 300), int):
+                raise ValueError("窗口顺序或尺寸无效")
+            if not all(isinstance(item.get(key, False), bool) for key in ("visible", "available", "grouped_tabs")) or not isinstance(item.get("editor_group", ""), str):
+                raise ValueError("工具窗口的可见性或分组无效")
+        def validate_editor(node, depth=0):
+            if not isinstance(node, dict) or depth > 12:
+                raise ValueError("编辑器分屏树无效")
+            if node.get("kind") == "tabs":
+                if not isinstance(node.get("tokens"), list) or not all(isinstance(token, str) for token in node["tokens"]):
+                    raise ValueError("编辑器标签无效")
+                if not isinstance(node.get("current", 0), int) or not isinstance(node.get("id"), str):
+                    raise ValueError("编辑器当前页或标识无效")
+            elif node.get("kind") == "split":
+                if not isinstance(node.get("children"), list) or len(node["children"]) > 16:
+                    raise ValueError("编辑器分屏过多")
+                sizes = node.get("sizes", [])
+                if not isinstance(sizes, list) or not all(isinstance(value, int) and 0 <= value <= 1000000 for value in sizes):
+                    raise ValueError("编辑器比例无效")
+                for child in node["children"]:
+                    validate_editor(child, depth + 1)
+            else:
+                raise ValueError("编辑器容器类型无效")
+        for host in data["hosts"].values():
+            if not isinstance(host, dict):
+                raise ValueError("框架状态无效")
+            geometry = host.get("geometry", [0, 0, 1080, 760])
+            if not isinstance(geometry, list) or len(geometry) != 4 or not all(isinstance(value, int) and abs(value) <= 1000000 for value in geometry) or min(geometry[2:]) <= 0:
+                raise ValueError("框架几何无效")
+            if not isinstance(host.get("sizes", {}), dict):
+                raise ValueError("框架比例无效")
+            for values in host.get("sizes", {}).values():
+                if not isinstance(values, list) or not all(isinstance(value, int) and 0 <= value <= 1000000 for value in values):
+                    raise ValueError("框架比例无效")
+            region_sizes = host.get("region_sizes", {})
+            if not isinstance(region_sizes, dict) or region_sizes.keys() - {"dock", "overlay"}:
+                raise ValueError("区域尺寸类别无效")
+            for values in region_sizes.values():
+                if not isinstance(values, dict) or values.keys() - {"left", "right", "bottom"}:
+                    raise ValueError("区域尺寸位置无效")
+                if any(type(value) is not int or not 1 <= value <= 1000000 for value in values.values()):
+                    raise ValueError("区域尺寸必须为有效的正整数")
+            validate_editor(host.get("editor"))
+
+    def _normalize_snapshot(self, data):
+        """将已预检的版本 1 快照迁移为区域尺寸模型，始终返回独立副本。
+
+        新尺寸字段允许部分缺失。旧宿主的非零外部尺寸优先，工具尺寸仅用于一次性
+        回填；活动、可见工具优先，同优先级沿用保存顺序。迁移不执行工厂或改变界面。
+        """
+        data = copy.deepcopy(data)
+
+        def valid(value):
+            return type(value) is int and 1 <= value <= 1000000
+
+        for host_id, host in data["hosts"].items():
+            region_sizes = default_region_sizes()
+            peers = sorted((item for item in data["tools"] if item["host_id"] == host_id),
+                           key=lambda item: (item["id"] != data.get("active"), not item.get("visible", False)))
+            old_sizes = host.get("sizes", {})
+            for region, splitter, index in [("left", "horizontal", 0), ("right", "horizontal", 2),
+                                             ("bottom", "vertical", 1)]:
+                old_values = old_sizes.get(splitter, [])
+                previous = old_values[index] if index < len(old_values) else 0
+                extent = next((item["extent"] for item in peers if valid(item.get("extent"))
+                               and (item.get("last_position", "left_top") if item["position"] == "editor"
+                                    else item["position"]).startswith(region + "_")), None)
+                if valid(previous):
+                    region_sizes["dock"][region] = previous
+                elif extent is not None:
+                    region_sizes["dock"][region] = extent
+                if extent is not None:
+                    region_sizes["overlay"][region] = extent
+            for kind, values in host.get("region_sizes", {}).items():
+                region_sizes[kind].update(values)
+            host["region_sizes"] = region_sizes
+        data.get("settings", {}).pop("remember_size", None)
+        for item in data["tools"]:
+            item.pop("extent", None)
+        return data
+
+    def _restore_snapshot(self, data):
+        # 恢复前先创建即将显示的已注册工具；业务工厂失败时尚未拆卸任何现有容器。
+        for item in data["tools"]:
+            if item["id"] in self.specs and item.get("visible") and item.get("available", True):
+                self.panel(item["id"])
+        self.refreshing = True
+        try:
+            self._detach_panels()
+            for doc in self.documents.values():
+                doc["widget"].hide()
+                doc["widget"].setParent(self.parking)
+            for host_id in list(self.frames):
+                self._retire_frame(host_id)
+            self.settings = LayoutSettings(**{key: bool(value) for key, value in data.get("settings", {}).items() if key in {field.name for field in fields(LayoutSettings)}})
+            self.theme = self.theme.with_options(name=data["theme"], compact=self.settings.compact)
+            for host_id, host_data in data["hosts"].items():
+                if host_id != "main":
+                    self.create_frame(host_id, host_data.get("geometry"))
+                host = self.hosts[host_id]
+                host.region_sizes = copy.deepcopy(host_data["region_sizes"])
+                sizes = host_data.get("sizes", {})
+                for key, values in sizes.items():
+                    if key in host._sizes and isinstance(values, list) and all(isinstance(v, int) and v >= 0 for v in values):
+                        host._sizes[key] = values
+                host.editor.restore_structure(host_data["editor"])
+            valid_fields = {field.name for field in fields(ToolState)}
+            self._pending_tool_states = {}
+            for state in self.states.values():
+                state.visible = False
+                state.host_id = "main"
+            for item in data["tools"]:
+                if item["id"] in self.states:
+                    self.states[item["id"]] = ToolState(**{key: value for key, value in item.items() if key in valid_fields})
+                else:
+                    self._pending_tool_states[item["id"]] = {key: value for key, value in item.items() if key in valid_fields}
+            for host in self.hosts.values():
+                host.editor.restore_documents()
+            for document_id, doc in self.documents.items():
+                doc["closed"] = not any(host.editor.find_token(document_id) for host in self.hosts.values())
+                self.set_document_modified(document_id, doc["modified"])
+            self.active_id = data.get("active", "") if data.get("active") in self.states else ""
+            self.last_active_id = self.active_id
+            self.maximized_id = ""
+        finally:
+            self.refreshing = False
+        self.refresh()
+        self.theme_changed.emit(self.theme.name)
+
+    def schedule_save(self):
+        if not self.closing and not self.refreshing:
+            self._save_timer.start()
+
+    def save_session(self):
+        """将完整会话提交给可替换的存储器；默认 JSON 存储采用原子替换。"""
+        if self.closing or not self.hosts:
+            return
+        payload = {"schema_version": 1, "current_layout": self.current_layout, "session": self.capture_layout(), "layouts": {name: data for name, data in self._layouts.items() if name != DEFAULT_LAYOUT}}
+        try:
+            self.layout_store.save(payload)
+        except OSError as error:
+            self.message.emit(f"布局未能保存：{error}")
+
+    def load_session(self):
+        """加载保存的会话并返回成功标记；损坏配置回到内建模板，不执行配置中的代码。"""
+        try:
+            payload = self.layout_store.load()
+            if payload is None:
+                return False
+            if payload.get("schema_version") != 1:
+                raise ValueError("不支持的会话版本")
+            if not isinstance(payload.get("current_layout", DEFAULT_LAYOUT), str) or not isinstance(payload.get("layouts", {}), dict):
+                raise ValueError("当前布局名称或命名布局集合无效")
+            self._validate_snapshot(payload["session"])
+            layouts = {}
+            for name, data in payload.get("layouts", {}).items():
+                if name != DEFAULT_LAYOUT:
+                    self._validate_snapshot(data)
+                    layouts[name] = self._normalize_snapshot(data)
+            self._restore_snapshot(self._normalize_snapshot(payload["session"]))
+            self._layouts.update(layouts)
+            self.current_layout = payload.get("current_layout", DEFAULT_LAYOUT)
+            if self.current_layout not in self._layouts:
+                self.current_layout = DEFAULT_LAYOUT
+            return True
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+            if self._default_snapshot:
+                self._restore_snapshot(copy.deepcopy(self._default_snapshot))
+            self.message.emit(f"布局文件无效，已恢复默认布局：{error}")
+            return False
+
+    def prompt_save_layout(self, parent):
+        name, accepted = QInputDialog.getText(parent, "保存布局", "布局名称：")
+        if accepted and name.strip():
+            try:
+                self.save_layout(name)
+            except ValueError as error:
+                self.message.emit(str(error))
+
+    def shutdown(self):
+        """应用退出前调用：先保存，再断开全局事件与计时器，最后释放隐藏内容。"""
+        if self.closing:
+            return
+        self.save_session()
+        self.closing = True
+        self._save_timer.stop()
+        app = QApplication.instance()
+        app.removeEventFilter(self)
+        app.focusChanged.disconnect(self._focus_changed)
+        for floating in self.floating.values():
+            floating._retiring = True
+            floating.close()
+        for frame in self.frames.values():
+            frame._retiring = True
+            frame.close()
+        self.parking.deleteLater()

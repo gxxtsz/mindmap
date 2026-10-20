@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def child(scale, platform):
     """每个缩放在新进程创建 QApplication，避免运行期间修改 Qt 缩放基线。"""
-    from harbor_docking import ViewMode
+    from mindmap_docking import ViewMode
     from mindmap_engine import Theme
-    from mindmap_workbench.harbor_adapter import DOCUMENT_ID, build_window
+    from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
     from PySide6.QtCore import QCoreApplication, QEvent, Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
@@ -31,7 +31,7 @@ def child(scale, platform):
                 window.engine.update_node(root, text="思维导图工作台")
                 first = window.engine.add_child(root, "整理想法")
                 window.engine.add_child(first, "画布与引擎保持独立")
-                window.engine.add_child(first, "外壳修改只维护 Harbor")
+                window.engine.add_child(first, "外壳修改只维护 桌面外壳")
                 window.engine.add_child(root, "文件保存与图形导出")
             window.resize(1440, 960)
             window.show()

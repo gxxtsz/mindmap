@@ -1,6 +1,6 @@
 # mindmap-qt
 
-基于 PySide6 的原生思维导图组件，依赖 `mindmap-engine`，不依赖 Harbor。
+基于 PySide6 的原生思维导图组件，依赖 `mindmap-engine`，不依赖桌面外壳或停靠框架。
 独立包要求 Python 3.12+、PySide6 `>=6.9,<7`；当前工作区与工作台共同使用 PySide6 6.12.0 验收。
 
 ```python
@@ -66,7 +66,7 @@ finally:
 使用 `from mindmap_qt import MindMapWorkspace` 创建包含原画布、完整大纲、节点属性及全局设置的工作区，
 其构造参数与画布一致，原画布可以通过 `workspace.canvas` 访问。
 工作区可嵌入普通 Qt 布局，也可作为 `QMainWindow` 的中央控件；无需新增界面依赖。
-Harbor 工作台通过下文的 `MindMapPanels` 接入框架，由 Harbor 管理外壳与停靠布局。
+桌面工作台通过下文的 `MindMapPanels` 接入项目内置外壳，由 `mindmap-shell` 和 `mindmap-docking` 管理桌面布局。
 
 工作区采用卡片分区：浅色外围为 `#E9EAEE`、三个侧栏为 `#F5F6F8`，深色外围为 `#1E1F22`、侧栏为 `#2B2D30`。
 大纲、节点属性和全局设置的标题、内容、滚动区空白及底部圆角留白使用同一底色，左侧、右侧、底部停靠和浮动状态保持一致。
@@ -104,7 +104,7 @@ Harbor 工作台通过下文的 `MindMapPanels` 接入框架，由 Harbor 管理
 
 在独立 Qt 工作区中通过右侧齿轮按钮、Alt+3 或 `workspace.show_tool_window("settings")` 打开，
 面板可通过 `workspace.settings` 访问；组件不自带应用菜单。
-Harbor 工作台将同一面板注册为“导图设置”，菜单由 Harbor 外壳提供。
+桌面工作台将同一面板注册为“导图设置”，菜单由 `mindmap-shell` 提供。
 默认右侧收起，宽度 360 逻辑像素，分为滚轮、布局、分支和外观四组，共用一个滚动区。
 布局方向、紧凑布局、分支和主题从当前导图读取，修改后支持撤销、重做及保存重开。
 主题支持浅色和深色；已有自定义主题显示“自定义”，打开或刷新面板不会替换它。
@@ -117,7 +117,7 @@ Harbor 工作台将同一面板注册为“导图设置”，菜单由 Harbor �
 提交文档设置前先保存节点属性中的有效待提交输入，并验证完整候选文档；失败后恢复控件显示并通过错误信号报告。
 只读或文字编辑期间禁用文档设置，滚轮仍可调整；不支持的布局能力单独禁用并提供中文提示。
 `MindMapWorkspace.save_state()` 返回版本 1 的布局字典。
-该版本只描述独立 Qt 工作区布局，与导图文件版本 2、Harbor 会话布局分别管理。
+该版本只描述独立 Qt 工作区布局，与导图文件版本 2、桌面会话布局分别管理。
 
 
 ## 独立宿主集成
@@ -143,7 +143,7 @@ Harbor 工作台将同一面板注册为“导图设置”，菜单由 Harbor �
 `MindMapWidget.set_ui_colors(colors)` 与
 `MindMapPanels.set_ui_colors(colors)` 接受 `UiColors` 或 None，可覆盖界面控件和菜单色板，
 不改变导图主题、撤销历史或图形导出；传入 None 恢复默认的文档主题派生配色。
-独立 Qt 工作区上文列出的色值属于默认配色，Harbor 工作台会按外壳主题映射界面色板。
+独立 Qt 工作区上文列出的色值属于默认配色，桌面工作台会按外壳主题映射界面色板。
 公共接口的完整签名及生命周期说明见[面板组合](src/mindmap_qt/panels.py)、
 [文件控制器](src/mindmap_qt/files.py)；框架接入示例见
-[Harbor 适配层](../../apps/mindmap-workbench/src/mindmap_workbench/harbor_adapter.py)。
+[桌面适配层](../../apps/mindmap-workbench/src/mindmap_workbench/shell_adapter.py)。

@@ -1,13 +1,12 @@
 # 思维导图工作台
 
-基于 Harbor 的单文档桌面应用，画布、大纲、属性和导图设置复用 `mindmap-qt`。
+基于项目内置 `mindmap-shell`、`mindmap-docking` 的单文档桌面应用，画布、大纲、属性和导图设置复用 `mindmap-qt`。
 支持 Python 3.12、3.13，当前工作区锁定 PySide6 6.12.0。
 
-开发时先将 [harbor-workbench](https://github.com/gxxtsz/harbor-workbench) 放在本仓库同级目录，
-再在本仓库根目录运行：
+克隆本仓库后直接在根目录运行，开发与发行均不需要其他源码目录：
 
 ```powershell
-uv sync --all-packages --group dev
+uv sync --locked --all-packages --group dev
 uv run --locked --package mindmap-workbench mindmap-workbench
 ```
 
@@ -17,8 +16,8 @@ uv run --locked --package mindmap-workbench mindmap-workbench
 | --- | --- |
 | `--theme light|dark` | 设置外壳主题，优先于已保存的外壳主题 |
 | `--state-dir 目录` | 使用独立的本机配置目录 |
-| `--no-restore` | 跳过 Harbor 会话布局恢复；滚轮偏好仍从本机配置读取 |
-| `--compact` | 启用 Harbor 外壳紧凑模式；导图紧凑布局由“导图设置”管理 |
+| `--no-restore` | 跳过桌面会话布局恢复；滚轮偏好仍从本机配置读取 |
+| `--compact` | 启用外壳紧凑模式；导图紧凑布局由“导图设置”管理 |
 | `--size 宽x高` | 指定逻辑像素尺寸，默认 1440x900，范围为 860x540 至 8000x8000 |
 | `--screenshot 文件.png` | 保存窗口截图及同名 JSON 元数据后退出；导图图形导出使用应用中的导出操作 |
 
@@ -34,10 +33,11 @@ F6 返回画布，Escape 取消原地文字编辑或退出分支聚焦。
 取消原来的第二行工具栏，画布直接接在标签栏下方；浮条固定在视口内，不随导图平移或缩放。
 按钮沿用原有动作、快捷键和只读限制，切换明暗主题、调整窗口尺寸或重开标签后继续可用，且不进入 PNG/SVG/PDF 导出。
 
-Harbor 的应用主题与导图主题独立，窗口布局和滚轮偏好不进入导图文件。
-本机布局与偏好位于 Harbor 的 `mindmap-workbench` 配置目录；
+外壳的应用主题与导图主题独立，窗口布局和滚轮偏好不进入导图文件。
+本机布局与偏好位于 Qt 用户配置位置下的 `mindmap/mindmap-workbench/`；
 其中 `preferences.ini` 保存滚轮偏好。导图主题影响画布、节点、连接线和 PNG/SVG/PDF 导出。
 
-开发期对 Harbor 的两个包使用可编辑依赖，普通源码更新后重启即可使用，包元数据更新后需要重新同步。
-正式交付使用普通 wheel，不依赖相邻源码目录；框架更新后仍需重新构建和验收交付包。
+开发期通过 uv workspace 引用本仓库的八个成员，普通源码更新后重启即可使用，包元数据更新后需要重新同步。
+正式交付使用同一仓库构建的 wheel；桌面基础包的版本和验收随应用统一管理。
+适配入口为 `mindmap_workbench.shell_adapter`，配置说明见[桌面框架](../../docs/桌面框架.md)。
 检查与构建步骤见[仓库说明](../../README.md)。

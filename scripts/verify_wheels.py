@@ -1,4 +1,4 @@
-"""在仓库外创建六个干净环境，分别验证成员 wheel 的依赖隔离与桌面完整流程。
+"""在仓库外创建八个干净环境，分别验证成员 wheel 的依赖隔离与桌面完整流程。
 
 本脚本只使用 uv 管理环境和依赖。临时目录退出前会被清理，执行任何递归清理前
 先确认其绝对路径仍是本次创建的系统临时目录子项，避免删除工作区或其他目录。
@@ -16,8 +16,8 @@ import tomllib
 from pathlib import Path
 
 
-def run(harbor_wheel_dir=None):
-    """按成员的实际目录查找构建元数据，并验证六个包在仓库外的安装与运行。"""
+def run():
+    """仅从本仓库 dist 读取八个成员的 wheel，在独立环境中验证依赖与运行。"""
     repository = Path(__file__).resolve().parents[1]
     distribution = repository / "dist"
     wheels = {}
@@ -29,6 +29,8 @@ def run(harbor_wheel_dir=None):
         "mindmap_formats": "packages/engine/mindmap-formats",
         "mindmap_engine": "packages/engine/mindmap-engine",
         "mindmap_qt": "packages/mindmap-qt",
+        "mindmap_docking": "packages/mindmap-docking",
+        "mindmap_shell": "packages/mindmap-shell",
         "mindmap_workbench": "apps/mindmap-workbench",
     }
     for name, member_path in member_paths.items():
@@ -37,14 +39,7 @@ def run(harbor_wheel_dir=None):
         )
         wheels[name] = distribution / f"{name}-{metadata['project']['version']}-py3-none-any.whl"
     if not all(path.is_file() for path in wheels.values()):
-        raise RuntimeError("请先运行 uv build --all-packages 构建六个成员的 wheel")
-    # 验证发布形态时只读取 Harbor wheel，不导入相邻框架的源码或虚拟环境。
-    harbor_distribution = Path(harbor_wheel_dir) if harbor_wheel_dir else repository.parent / "harbor-workbench/dist"
-    for name in ("harbor_docking", "harbor_workbench"):
-        candidates = list(harbor_distribution.glob(name + "-*.whl"))
-        if len(candidates) != 1:
-            raise RuntimeError(f"{harbor_distribution} 需要唯一的 {name} wheel，请先构建 Harbor")
-        wheels[name] = candidates[0].resolve()
+        raise RuntimeError("请先运行 uv build --all-packages 构建八个成员的 wheel")
     uv = shutil.which("uv")
     if not uv:
         raise RuntimeError("未找到 uv")
@@ -174,6 +169,8 @@ import mindmap_engine
 import mindmap_core
 from mindmap_engine import LayoutConfig, MindMapEngine, create_default_layout_registry, load_document, save_document
 assert importlib.util.find_spec("PySide6") is None
+assert importlib.util.find_spec("mindmap_docking") is None
+assert importlib.util.find_spec("mindmap_shell") is None
 assert mindmap_engine.MindMapEngine is mindmap_core.MindMapEngine
 assert mindmap_engine.MindMapDocument is mindmap_core.MindMapDocument
 assert mindmap_engine.BranchStyle is mindmap_core.BranchStyle
@@ -217,8 +214,8 @@ from PySide6.QtWidgets import QApplication
 from mindmap_engine import MindMapEngine
 from mindmap_qt import MindMapWidget, MindMapWorkspace
 assert importlib.util.find_spec("mindmap_workbench") is None
-assert importlib.util.find_spec("harbor_docking") is None
-assert importlib.util.find_spec("harbor_workbench") is None
+assert importlib.util.find_spec("mindmap_docking") is None
+assert importlib.util.find_spec("mindmap_shell") is None
 app = QApplication([])
 engine = MindMapEngine()
 widget = MindMapWidget(engine)
@@ -250,20 +247,84 @@ print(json.dumps({"Qt包独立安装与依赖解析": True, "停靠工作区独�
 """,
             ]
         )
+        # 基础包各用一个环境安装，验证资源、模板和依赖方向，避免完整工作台
+        # 环境中的其他成员掩盖漏声明依赖。运行目录位于仓库外，不使用 PYTHONPATH。
+        docking_env = temporary / "docking"
+        execute([uv, "venv", "--python", "3.12", docking_env])
+        execute([uv, "pip", "install", "--python", interpreter(docking_env),
+                 "--constraint", constraints, wheels["mindmap_docking"]])
+        docking = execute([interpreter(docking_env), "-c", """
+import hashlib, importlib.util, json, sys
+from pathlib import Path
+import mindmap_docking
+from mindmap_docking import DockHost, DockManager, DocumentSpec
+from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
+assert importlib.util.find_spec("mindmap_shell") is None
+assert importlib.util.find_spec("mindmap_engine") is None
+assert importlib.util.find_spec("mindmap_qt") is None
+assert Path(mindmap_docking.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+resources = Path(mindmap_docking.__file__).parent / "resources"
+manifest = json.loads((resources / "manifest.json").read_text("utf-8"))
+assert len(manifest["files"]) == 44
+for entry in manifest["files"]:
+    assert hashlib.sha256((resources / entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
+app = QApplication([])
+window = QMainWindow()
+manager = DockManager(storage_dir=Path("docking-state"))
+window.setCentralWidget(DockHost(manager, "main", window))
+manager.register_document(DocumentSpec("document", "独立停靠组件", lambda: QLabel("内容")))
+assert not manager.theme.icon("mindmap").isNull()
+manager.set_theme("dark")
+assert not manager.theme.icon("mindmap").isNull()
+manager.shutdown()
+window.close()
+print(json.dumps({"停靠包独立安装与资源完整性": True, "停靠包依赖隔离": True}))
+"""])
+        shell_env = temporary / "shell"
+        execute([uv, "venv", "--python", "3.12", shell_env])
+        execute([uv, "pip", "install", "--python", interpreter(shell_env),
+                 "--constraint", constraints, wheels["mindmap_shell"]])
+        shell = execute([interpreter(shell_env), "-c", """
+import importlib.util, json, sys, tomllib
+from pathlib import Path
+import mindmap_shell
+from mindmap_shell.scaffold import generate_project
+from PySide6.QtWidgets import QApplication
+assert importlib.util.find_spec("mindmap_engine") is None
+assert importlib.util.find_spec("mindmap_qt") is None
+assert importlib.util.find_spec("mindmap_workbench") is None
+assert Path(mindmap_shell.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+generated = generate_project(Path("generated-desktop"), project_name="example-desktop", title="安装模板验收")
+metadata = tomllib.loads((generated / "pyproject.toml").read_text("utf-8"))
+assert metadata["project"]["dependencies"] == ["mindmap-shell>=0.1.0,<0.2.0"]
+assert "sources" not in metadata.get("tool", {}).get("uv", {})
+assert (generated / ".python-version").is_file() and (generated / "LICENSE").is_file()
+source = generated / "src/example_desktop/app.py"
+namespace = {"__name__": "template_acceptance"}
+exec(compile(source.read_text("utf-8"), str(source), "exec"), namespace)
+app = QApplication([])
+window = namespace["build_window"](storage_dir=Path("shell-state"), restore=False)
+window.show()
+app.processEvents()
+assert window.spec.title == "安装模板验收" and len(window.manager.documents) == 1
+window.manager.set_theme("dark")
+window.close()
+print(json.dumps({"外壳包独立安装与依赖隔离": True, "随包模板生成与运行": True}))
+"""])
         workbench_env = temporary / "workbench"
         execute([uv, "venv", "--python", "3.12", workbench_env])
         execute([uv, "pip", "install", "--python", interpreter(workbench_env),
                  "--constraint", constraints, wheels["mindmap_workbench"]])
         workbench = execute([interpreter(workbench_env), "-c", """
-import json, sys
+import importlib.util, json, sys
 from importlib.metadata import distributions
 from pathlib import Path
-import harbor_docking, harbor_workbench, mindmap_workbench, mindmap_qt, mindmap_engine
-from harbor_docking import DockPosition, DockTarget
+import mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_qt, mindmap_engine
+from mindmap_docking import DockPosition, DockTarget
 from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
-from mindmap_workbench.harbor_adapter import build_window
+from mindmap_workbench.shell_adapter import build_window
 from mindmap_engine import load_document
 app = QApplication([])
 window = build_window(storage_dir=Path("workbench-state").absolute(), restore=False)
@@ -306,7 +367,7 @@ for suffix in ("png", "svg", "pdf"):
     target = Path("workbench." + suffix)
     window.canvas.export(target)
     assert target.stat().st_size > 500
-for module in (harbor_docking, harbor_workbench, mindmap_workbench, mindmap_qt, mindmap_engine):
+for module in (mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_qt, mindmap_engine):
     assert Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 window.close()
 assert window.canvas._disposed
@@ -318,7 +379,7 @@ print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台
         pins = {name.lower().replace("_", "-"): version
                 for name, version in workbench_result.pop("已验证运行依赖").items()}
         # 发行约束来自真正通过验收的干净环境，避免交付时重新解析出其他版本。
-        # 同时列出全部六个成员和两个框架包，完整保留本次验证的固定版本。
+        # 八个成员全部来自当前仓库，完整保留本次验证的固定版本。
         for name, wheel in wheels.items():
             pins[name.replace("_", "-")] = wheel.name.split("-")[1]
         release_constraints = repository / ".artifacts/release-constraints.txt"
@@ -331,6 +392,8 @@ print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台
             "独立能力包": independent,
             **json.loads(core),
             **json.loads(qt),
+            **json.loads(docking),
+            **json.loads(shell),
             **workbench_result,
             "Python": "3.12",
             "PySide6": qt_version,
@@ -347,6 +410,6 @@ print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="验证全部独立安装包及 Harbor 接入")
-    parser.add_argument("--harbor-wheel-dir", type=Path, help="框架 wheel 目录，默认使用相邻 Harbor 的 dist")
-    run(parser.parse_args().harbor_wheel_dir)
+    parser = argparse.ArgumentParser(description="验证本仓库全部独立安装包和桌面应用")
+    parser.parse_args()
+    run()

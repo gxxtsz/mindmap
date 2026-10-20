@@ -1,11 +1,11 @@
-"""唯一的 Harbor 接入边界：文档、停靠面板、应用动作与局部主题映射。"""
+"""桌面外壳接入边界：文档、停靠面板、应用动作与局部主题映射。"""
 
 from pathlib import Path
 
-from harbor_docking import DockPosition, DocumentSpec, Theme, ToolWindowSpec
-from harbor_workbench import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
+from mindmap_docking import DockPosition, DocumentSpec, Theme, ToolWindowSpec
 from mindmap_engine import MindMapEngine
 from mindmap_qt import MindMapFileController, MindMapPanels, MindMapWidget, UiColors
+from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
 from PySide6.QtCore import QLibraryInfo, QSettings, QTimer, QTranslator
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QMenu
 DOCUMENT_ID = "mindmap.document"
 
 
-def ui_colors_from_harbor(theme) -> UiColors:
+def ui_colors_from_shell(theme) -> UiColors:
     """把框架主题映射为通用色板；两种 Theme 不相互依赖或写回文档。"""
     def color(key):
         return theme.color(key).name()
@@ -28,7 +28,7 @@ def ui_colors_from_harbor(theme) -> UiColors:
 
 
 class MindMapWorkbenchWindow(WorkbenchWindow):
-    """一个文档会话的工作台；注册内容后由 Harbor 管理 QWidget 归属。
+    """一个文档会话的工作台；注册内容后由桌面外壳管理 QWidget 归属。
 
     storage_dir 可隔离布局与滚轮偏好，测试和截图必须指定临时目录。
     注册表原样注入画布，菜单、文件操作和导出共用同一实例。普通标签关闭
@@ -51,7 +51,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.engine, layout_registry=layout_registry, format_registry=format_registry,
             toolbar=False, view_controls=True,
         )
-        # Harbor 对中央内容调用 QWidget.setFocus，组合画布把焦点交给真实视图。
+        # 外壳对中央内容调用 QWidget.setFocus，组合画布把焦点交给真实视图。
         self.canvas.setFocusProxy(self.canvas.view)
         self.panels = MindMapPanels(self.canvas, self)
         self.files = MindMapFileController(self.canvas, self.panels, self)
@@ -200,11 +200,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         return menu
 
     def refresh_theme(self):
-        """把 Harbor 局部主题应用于控件，导图主题始终由引擎单独管理。"""
+        """把外壳局部主题应用于控件，导图主题始终由引擎单独管理。"""
         super().refresh_theme()
         # 基类构造期间会调用本方法，此时业务控件尚未创建。
         if hasattr(self, "canvas"):
-            colors = ui_colors_from_harbor(self.manager.theme)
+            colors = ui_colors_from_shell(self.manager.theme)
             self.canvas.set_ui_colors(colors)
             self.panels.set_ui_colors(colors)
 
@@ -248,7 +248,7 @@ def build_window(*, storage_dir=None, theme=None, restore=True,
 
 
 def run(argv=None):
-    """复用 Harbor 启动器，追加文件参数和中文 Qt 翻译，截图路径由框架处理。"""
+    """复用桌面启动器，追加文件参数和中文 Qt 翻译，截图路径由框架处理。"""
     def configure(parser):
         parser.add_argument("file", nargs="?", type=Path, help="启动时打开的导图或可导入文件")
 

@@ -1,0 +1,32 @@
+{
+  "name": "dark",
+  "license": "MIT",
+  "author": "mindmap contributors",
+  "colors": {
+    "main-window-bg": "#17202D",
+    "tool-window-bg": "#202D3D",
+    "editor-bg": "#202D3D",
+    "text-default": "#E3EBF6",
+    "text-muted": "#97A8BD",
+    "toolbar-bg-hovered": "#2C3B4F",
+    "toolbar-selected-bg-active": "#24685F",
+    "control-brand-border": "#52CDBA",
+    "tool-window-border": "#35465C",
+    "ToolWindow.Header.borderColor": "#35465C",
+    "ToolWindow.Button.selectedForeground": "#FFFFFF",
+    "success": "#63D6A6",
+    "warning": "#F3BD69",
+    "danger": "#F28F99"
+  },
+  "metrics": {
+    "rail_width": 40,
+    "button_height": 40,
+    "compact_rail_width": 34,
+    "compact_button_height": 34,
+    "gap": 8,
+    "compact_gap": 5,
+    "radius": 8,
+    "header_height": 36,
+    "compact_header_height": 30
+  }
+}

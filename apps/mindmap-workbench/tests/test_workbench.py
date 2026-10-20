@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 import pytest
-from harbor_docking import DockPosition, DockTarget, ViewMode
+from mindmap_docking import DockPosition, DockTarget, ViewMode
 from mindmap_engine import (
     FormatInfo,
     FormatRegistry,
@@ -17,7 +17,7 @@ from mindmap_engine import (
     load_document,
     save_document,
 )
-from mindmap_workbench.harbor_adapter import DOCUMENT_ID, build_window
+from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QToolButton
