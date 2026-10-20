@@ -107,9 +107,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def _register_file_actions(self):
         """文件快捷键只注册到工作台一次，节点快捷键仍由画布和焦点决定。"""
         for identifier, title, callback, shortcut, icon, toolbar in (
-            ("new", "新建", self.new_document, "Ctrl+N", "document", True),
-            ("open", "打开 / 导入…", self.open_dialog, "Ctrl+O", "folder", True),
-            ("save", "保存", self.files.save, "Ctrl+S", "save", True),
+            ("new", "新建", self.new_document, "Ctrl+N", "document", False),
+            ("open", "打开 / 导入…", self.open_dialog, "Ctrl+O", "folder", False),
+            ("save", "保存", self.files.save, "Ctrl+S", "save", False),
             ("save_as", "另存为…", lambda: self.files.save(save_as=True), "Ctrl+Shift+S", "save", False),
             ("export", "导出图形…", self.files.export_dialog, "", "document", False),
             ("quit", "退出", self.close, "Ctrl+Q", "close", False),
