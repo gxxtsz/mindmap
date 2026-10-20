@@ -18,9 +18,9 @@ from mindmap_engine import (
     save_document,
 )
 from mindmap_workbench.harbor_adapter import DOCUMENT_ID, build_window
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QToolButton
 
 
 @pytest.fixture
@@ -51,6 +51,74 @@ def test_default_single_document_and_editable_framework(window):
     assert window.host.region_sizes["dock"]["right"] == 360
     bar = window.title_bar
     assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.theme) for button in bar.action_buttons)
+
+
+def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, qtbot):
+    """按钮和键盘共享真实历史动作，原地编辑、只读及重开标签不产生额外入口。"""
+    canvas, engine = window.canvas, window.engine
+    group, _ = window.host.editor.find_token(DOCUMENT_ID)
+    toolbar = group.cornerWidget()
+    assert canvas.toolbar.isHidden()
+    assert toolbar.actions() == [canvas.action("undo"), canvas.action("redo")]
+    engine.add_child(engine.root_id, "验证撤销与重做")
+    qtbot.mouseClick(toolbar.widgetForAction(canvas.action("undo")), Qt.MouseButton.LeftButton)
+    assert len(engine.document.nodes) == 1
+    qtbot.mouseClick(toolbar.widgetForAction(canvas.action("redo")), Qt.MouseButton.LeftButton)
+    assert len(engine.document.nodes) == 2
+    window.activateWindow()
+    canvas.view.setFocus()
+    QApplication.processEvents()
+    qtbot.keyClick(canvas.view, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert len(engine.document.nodes) == 1
+    canvas.begin_edit(engine.root_id)
+    assert not toolbar.widgetForAction(canvas.action("undo")).isEnabled()
+    canvas.finish_edit(commit=False)
+    canvas.set_editable(False)
+    assert all(not toolbar.widgetForAction(action).isEnabled() for action in toolbar.actions())
+    assert canvas.action("fit").isEnabled() and canvas.action("center").isEnabled()
+    engine.mark_saved()
+    assert window.manager.close_document(DOCUMENT_ID)
+    window.show_document()
+    group, _ = window.host.editor.find_token(DOCUMENT_ID)
+    assert group.cornerWidget().actions() == [canvas.action("undo"), canvas.action("redo")]
+    assert canvas._view_controls.isVisible() and canvas.toolbar.isHidden()
+
+
+def test_canvas_controls_follow_viewport_theme_and_stay_out_of_export(window, qtbot, tmp_path):
+    """浮条固定在可见视口中，窗口与侧栏变化后仍可点按，界面外观不进入图形导出。"""
+    canvas = window.canvas
+    controls = canvas._view_controls
+    buttons = {button.defaultAction(): button for button in controls.findChildren(QToolButton)}
+    assert set(buttons) == {canvas.action("fit"), canvas.action("center")}
+    document, revision = window.engine.document, window.engine.revision
+    for size in ((1200, 800), (860, 540), (1440, 900)):
+        window.resize(*size)
+        QApplication.processEvents()
+        viewport = canvas.view.viewport()
+        position = controls.pos()
+        assert controls.isVisible() and viewport.geometry().contains(controls.geometry())
+        assert viewport.geometry().right() - controls.geometry().right() == 16
+        assert viewport.geometry().bottom() - controls.geometry().bottom() == 16
+        # 文档正文从标签栏下方直接开始，隐藏工具栏没有残留高度。
+        assert canvas._view_card.mapTo(canvas, QPoint(0, 0)).y() == 0
+    canvas.view.zoom(1.3)
+    qtbot.mouseClick(buttons[canvas.action("fit")], Qt.MouseButton.LeftButton)
+    scale = canvas.view.transform().m11()
+    canvas.view.centerOn(500, 500)
+    assert controls.pos() == position
+    qtbot.mouseClick(buttons[canvas.action("center")], Qt.MouseButton.LeftButton)
+    assert canvas.view.transform().m11() == scale
+    for theme in ("light", "dark"):
+        window.manager.set_theme(theme)
+        QApplication.processEvents()
+        assert controls._colors == canvas._ui_colors
+        assert window.engine.document == document and window.engine.revision == revision
+        visible, hidden = tmp_path / f"{theme}-显示浮条.png", tmp_path / f"{theme}-隐藏浮条.png"
+        canvas.export(visible)
+        controls.hide()
+        canvas.export(hidden)
+        assert QImage(str(visible)) == QImage(str(hidden))
+        controls.show()
 
 
 def test_file_save_flushes_properties_and_inline_text(window, tmp_path):

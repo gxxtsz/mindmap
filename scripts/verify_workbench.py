@@ -14,7 +14,7 @@ def child(scale, platform):
     """每个缩放在新进程创建 QApplication，避免运行期间修改 Qt 缩放基线。"""
     from harbor_docking import ViewMode
     from mindmap_engine import Theme
-    from mindmap_workbench.harbor_adapter import build_window
+    from mindmap_workbench.harbor_adapter import DOCUMENT_ID, build_window
     from PySide6.QtCore import QCoreApplication, QEvent, Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
@@ -40,6 +40,8 @@ def child(scale, platform):
             app.processEvents()
             window.canvas.fit_to_view()
             app.processEvents()
+            group, _ = window.host.editor.find_token(DOCUMENT_ID)
+            controls = window.canvas._view_controls
             checks = {
                 "平台": app.platformName() == platform,
                 "缩放": abs(window.devicePixelRatioF() - scale) < 0.01,
@@ -47,6 +49,12 @@ def child(scale, platform):
                 "面板内容可见": window.panels.properties.fields["style.font_size"].isVisible(),
                 "画布可用": window.canvas.view.width() > 400 and window.canvas.view.height() > 400,
                 "单一文档": len(window.manager.documents) == 1,
+                "标签栏历史入口": group.cornerWidget().actions() == [
+                    window.canvas.action("undo"), window.canvas.action("redo"),
+                ],
+                "无第二行工具栏": window.canvas.toolbar.isHidden(),
+                "画布导航浮条": controls.isVisible()
+                and window.canvas.view.viewport().geometry().contains(controls.geometry()),
             }
             assert window.grab().save(str(output / (name + ".png")))
             window.manager.activate("settings", focus=False)

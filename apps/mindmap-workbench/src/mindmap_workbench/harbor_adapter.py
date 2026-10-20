@@ -49,6 +49,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.engine = MindMapEngine()
         self.canvas = MindMapWidget(
             self.engine, layout_registry=layout_registry, format_registry=format_registry,
+            toolbar=False, view_controls=True,
         )
         # Harbor 对中央内容调用 QWidget.setFocus，组合画布把焦点交给真实视图。
         self.canvas.setFocusProxy(self.canvas.view)
@@ -70,6 +71,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.manager.register_document(DocumentSpec(
             DOCUMENT_ID, "未命名", lambda: self.canvas, can_close=self.files.confirm_replace,
         ))
+        # 标签栏复用画布历史动作，不另建 QAction，菜单、快捷键、只读限制与
+        # 原地编辑期间的启用状态因此保持同源；视图入口留在画布右下角。
+        self.manager.set_document_actions(
+            DOCUMENT_ID, [self.canvas.action("undo"), self.canvas.action("redo")],
+        )
         self._document_registered = True
         for identifier, title, panel, icon, position, shortcut in (
             ("outline", "大纲", self.panels.outline, "folder", DockPosition.LEFT_TOP, "Alt+1"),

@@ -45,6 +45,7 @@ from .items import NodeEditor, NodeItem
 from .rendering import BranchItem, VisualFactory, decode_image
 from .ui_style import CardFrame, UiColors, apply_ui_palette, dialog_styles, ui_colors
 from .view import MindMapView
+from .view_controls import _ViewControls
 
 CLIPBOARD_MIME = "application/x-python-mindmap+json"
 
@@ -76,10 +77,17 @@ class MindMapWidget(QWidget):
         *,
         editable=True,
         toolbar=True,
+        view_controls=False,
         layout_registry: LayoutRegistry | None = None,
         format_registry: FormatRegistry | None = None,
     ):
-        """注入实例级布局和格式能力；省略时分别建立独立的内置注册表。"""
+        """构造画布并注入实例级布局和格式能力，省略时建立独立默认注册表。
+
+        toolbar 控制传统顶部工具栏是否可见；view_controls=True 在视口右下角
+        提供适应窗口和回到中心，适合由宿主接管历史动作的布局。两项可以独立
+        配置，默认保持独立组件原有布局。浮条复用已有动作，由画布随 Qt 父子
+        关系销毁，不创建场景元素，不改变导图内容、快捷键或图形导出。
+        """
         super().__init__(parent)
         self.setObjectName("mindmap_canvas")
         self.setAutoFillBackground(True)
@@ -124,6 +132,10 @@ class MindMapWidget(QWidget):
         self.network = QNetworkAccessManager(self)
         self._downloads = set()
         self._create_actions()
+        self._view_controls = (
+            _ViewControls(self.view, [self.action("fit"), self.action("center")])
+            if view_controls else None
+        )
         self.scene.selectionChanged.connect(self._selection_changed)
         self._unsubscribe = self.engine.subscribe(self._engine_changed)
         # 捕获取消函数而不捕获 QWidget，确保宿主删除组件时引擎不会继续持有绑定方法。
@@ -523,6 +535,8 @@ class MindMapWidget(QWidget):
             # 深色后透明圆角仍露出首次显示时的浅色底。
             apply_ui_palette(self, colors, window=colors.shell)
         apply_toolbar_theme(self.toolbar, theme)
+        if self._view_controls is not None:
+            self._view_controls.set_ui_colors(colors)
         # 菜单选项复用组件动作，并非工具栏的直接子动作，主题刷新时单独同步其图标。
         # 属性按钮移出工具栏后，编辑菜单和右键菜单仍沿用当前主题的属性图标。
         set_action_icon(self._actions["properties"], "properties", theme)
