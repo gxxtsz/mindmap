@@ -53,6 +53,30 @@ def test_default_single_document_and_editable_framework(window):
     assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.options) for button in bar.action_buttons)
 
 
+def test_panel_and_file_icons_stay_distinct_and_available_after_theme_changes(window):
+    """核对真实菜单与侧栏的图标，避免资源删除、主题切换后空白或不同操作混用图形。"""
+    manager = window.manager
+    for theme in ("light", "dark"):
+        manager.set_theme(theme)
+        menu = window.main_menu()
+        file_menu = next(action.menu() for action in menu.actions() if action.text() == "文件")
+        actions = [action for action in file_menu.actions() if not action.isSeparator()]
+        assert all(not action.icon().isNull() for action in actions)
+        assert len({action.property("mindmap_icon") for action in actions}) == len(actions)
+        for action in actions:
+            expected = manager.theme.icon(action.property("mindmap_icon")).pixmap(20, 20).toImage()
+            assert action.icon().pixmap(20, 20).toImage() == expected
+        images = []
+        for tool_id in ("outline", "properties", "settings"):
+            spec = manager.specs[tool_id]
+            assert spec.icon == tool_id
+            icon = manager.theme.icon(spec.icon)
+            assert not icon.isNull()
+            images.append(icon.pixmap(20, 20).toImage())
+        assert all(left != right for index, left in enumerate(images) for right in images[index + 1:])
+        menu.deleteLater()
+
+
 def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, qtbot):
     """按钮和键盘共享真实历史动作，原地编辑、只读及重开标签不产生额外入口。"""
     canvas, engine = window.canvas, window.engine

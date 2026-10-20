@@ -6,9 +6,12 @@ import json
 import tomllib
 from pathlib import Path
 
-from mindmap_docking import DockManager
+import pytest
+from mindmap_docking import DockManager, Theme
 from mindmap_workbench.shell_adapter import build_window
-from PySide6.QtCore import QSettings, QStandardPaths
+from PySide6.QtCore import QSettings, QSize, QStandardPaths
+from PySide6.QtGui import QIcon
+from PySide6.QtSvg import QSvgRenderer
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -61,11 +64,12 @@ def test_desktop_resource_manifest_and_project_license_are_complete():
     """主题与图标完整随包交付，资源摘要和本项目许可保持一致。"""
     resources = ROOT / "packages/mindmap-docking/src/mindmap_docking/resources"
     manifest = json.loads((resources / "manifest.json").read_text("utf-8"))
-    assert manifest["license"] == "MIT" and len(manifest["files"]) == 44
+    assert manifest["license"] == "MIT"
     expected = {entry["path"] for entry in manifest["files"]}
     actual = {path.relative_to(resources).as_posix() for path in resources.rglob("*")
               if path.is_file() and path.name != "manifest.json"}
-    assert expected == actual and "icons/mindmap.svg" in expected
+    assert len(expected) == len(manifest["files"])
+    assert expected == actual and {"dark.json", "light.json", "icons/mindmap.svg"} <= expected
     for entry in manifest["files"]:
         path = resources / entry["path"]
         assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"]
@@ -93,3 +97,21 @@ def test_project_configuration_namespace_and_preferences_are_isolated(qtbot, tmp
     qtbot.addWidget(window)
     assert window.manager.storage_dir == configuration and window.canvas.wheel_mode == "zoom"
     window.close()
+
+
+@pytest.mark.parametrize("theme_name", ["light", "dark"])
+def test_packaged_icons_render_at_small_sizes_and_multiple_dpi(qapp, theme_name):
+    """所有随包 SVG 都能解析，并在菜单、侧栏与高分屏尺寸生成非空像素。"""
+    theme = Theme(theme_name)
+    resources = ROOT / "packages/mindmap-docking/src/mindmap_docking/resources/icons"
+    for path in resources.glob("*.svg"):
+        assert QSvgRenderer(str(path)).isValid(), path.name
+        icon = theme.icon(path.stem)
+        assert not icon.isNull(), path.name
+        for size in (16, 20):
+            for ratio in (1.0, 1.5, 2.0):
+                for mode in (QIcon.Mode.Normal, QIcon.Mode.Disabled):
+                    image = icon.pixmap(QSize(size, size), ratio, mode).toImage()
+                    assert not image.isNull(), path.name
+                    assert any(image.pixelColor(x, y).alpha()
+                               for y in range(image.height()) for x in range(image.width())), path.name

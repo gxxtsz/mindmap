@@ -277,7 +277,7 @@ class GlobalSettingsPanel(QWidget):
         for field, icons in (
             (self.wheel, ("wheel_scroll", "wheel_zoom")),
             (self.direction, ("layout_both", "layout_right", "layout_left", "layout_down")),
-            (self.theme, ("sun", "moon", "settings")),
+            (self.theme, ("sun", "moon", "palette")),
         ):
             for index, icon in enumerate(icons):
                 field.setItemIcon(index, _toolbar_icon(icon, colors.text, colors.muted, colors.accent))

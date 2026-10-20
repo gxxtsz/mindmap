@@ -190,7 +190,7 @@ def test_workbench_auxiliary_frame_keeps_brand_and_shared_business_actions(qapp,
     calls = []
     window = WorkbenchWindow(AppSpec("custom-app", "定制业务软件", storage_dir=tmp_path,
                                     actions=(ActionSpec("business.add", "新增", lambda: calls.append(1),
-                                                        icon="plus", toolbar=True),)))
+                                                        icon="document", toolbar=True),)))
     qtbot.addWidget(window)
     window.show()
     host = window.manager.create_frame("aux")

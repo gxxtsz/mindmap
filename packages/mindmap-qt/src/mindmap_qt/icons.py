@@ -50,7 +50,7 @@ class IconMenuOptionButton(QToolButton):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
 
-# 所有图形共用 24×24 坐标、两单位描边和圆角端点；节点图形与加号、箭头组合表达动作。
+# 所有图形共用 24×24 坐标、两单位描边和圆角端点；只保留界面实际引用的图形。
 _SVG_BODIES = {
     "panel_menu": '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
     "panel_hide": '<path d="M5 12h14"/>',
@@ -65,13 +65,6 @@ _SVG_BODIES = {
         '<rect x="11" y="4" width="9" height="5" rx="1"/>'
         '<path d="M12 13h8m-8 6h8"/>'
     ),
-    "add_child": (
-        '<rect x="3" y="3" width="7" height="5" rx="1.5"/>'
-        '<path d="M6.5 8v9H13"/>'
-        '<rect x="13" y="13" width="8" height="8" rx="1.5"/>'
-        '<path d="M17 15v4m-2-2h4"/>'
-    ),
-    "edit": '<path d="m14.5 4.5 5 5M4 20l4.5-1L20 7.5a2.12 2.12 0 0 0-3-3L5 16Z"/>',
     "properties": (
         '<path d="M4 6h3m4 0h9M4 12h9m4 0h3M4 18h3m4 0h9"/>'
         '<circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/>'
@@ -81,6 +74,13 @@ _SVG_BODIES = {
         '<path d="m10 3-.5 2-2 1-2-.6-2 3.4L5 10.3v2.4l-1.5 1.5 2 3.4 2-.6 2 1 .5 2h4l.5-2 '
         '2-1 2 .6 2-3.4-1.5-1.5v-2.4l1.5-1.5-2-3.4-2 .6-2-1-.5-2Z"/>'
         '<circle cx="12" cy="11.5" r="3"/>'
+    ),
+    # 调色板表示文档中的自定义配色，避免与打开设置面板的齿轮混淆。
+    "palette": (
+        '<path d="M12 3a9 9 0 1 0 0 18h1a2 2 0 0 0 1.4-3.4 1.5 1.5 0 0 1 1.1-2.6H18'
+        'a3 3 0 0 0 3-3 9 9 0 0 0-9-9Z"/>'
+        '<circle cx="7" cy="11" r=".8"/><circle cx="10" cy="7" r=".8"/>'
+        '<circle cx="15" cy="7" r=".8"/><circle cx="17" cy="11" r=".8"/>'
     ),
     "undo": '<path d="m9 5-5 5 5 5M4 10h9a6 6 0 0 1 6 6v3"/>',
     "redo": '<path d="m15 5 5 5-5 5M20 10h-9a6 6 0 0 0-6 6v3"/>',
@@ -98,11 +98,6 @@ _SVG_BODIES = {
         '<rect x="2" y="3" width="9" height="16" rx="4.5"/>'
         '<path d="M6.5 6v3"/><circle cx="16" cy="12" r="4"/>'
         '<path d="m19 15 3 4M16 10v4m-2-2h4"/>'
-    ),
-    "compact": (
-        '<rect x="4" y="3" width="16" height="4" rx="1"/>'
-        '<rect x="4" y="17" width="16" height="4" rx="1"/>'
-        '<path d="M12 8v3m-2-2 2 2 2-2M12 16v-3m-2 2 2-2 2 2"/>'
     ),
     "layout_both": (
         '<rect x="9" y="9" width="6" height="6" rx="1"/>'

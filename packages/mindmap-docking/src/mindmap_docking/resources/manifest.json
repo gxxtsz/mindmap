@@ -7,18 +7,6 @@
       "sha256": "30daef3d4e2767ffb6ab18ca876fa7cb0b33a47f3eec339adf2c10b970dbac5c"
     },
     {
-      "path": "icons/bug.svg",
-      "sha256": "c3a29b395977b693de065cf54b1d5dc02e7808e6966ab5c568a9dfd4a91bf1f4"
-    },
-    {
-      "path": "icons/chart.svg",
-      "sha256": "eddf63d54a1c52d9cad2c2f2b70b9006c18ad2c126304c58dc0fee7d0faf2108"
-    },
-    {
-      "path": "icons/check.svg",
-      "sha256": "fc76a54527e81f86d4469f1a6294ee9666da177d1169130ef10343db99f1bff8"
-    },
-    {
       "path": "icons/chevron-down.svg",
       "sha256": "e3c42696a658edf280a8867c9219ed3e25e010bba9758998cc8307d948b933a8"
     },
@@ -27,52 +15,20 @@
       "sha256": "a2df2780af85e0d2519a4144dc9a0961fa964571c74e992217cf40e10fad64a6"
     },
     {
-      "path": "icons/connection.svg",
-      "sha256": "88133b5b02eb6ef55a2a952b368a701a6892854b0e64a28b37fb9295057ae5a5"
-    },
-    {
-      "path": "icons/database.svg",
-      "sha256": "670eeaeaca3ed3c6e25dea2902ff1ac45a17123cbba6d4816fc861ba6da24178"
-    },
-    {
-      "path": "icons/device.svg",
-      "sha256": "74dec66c6fdf9e4a1c393fa6d9e63a843e159ef164c75a3f236a7c6a993e6bef"
-    },
-    {
       "path": "icons/document.svg",
       "sha256": "eac0f1052b91c0f7b94bd38456ec981afc8401126018812a0980d4a2a61bcdb7"
     },
     {
-      "path": "icons/download.svg",
-      "sha256": "0fb5231aec7c5f9c3adf7fb529cb32dd0ddcafa4fc509c751e4fb75997d5a9e1"
+      "path": "icons/exit.svg",
+      "sha256": "6a65d1d1b358ef329314e7340b528821d8ca49a1b29a0c5e6d5f0b9a14bfecad"
     },
     {
-      "path": "icons/filter.svg",
-      "sha256": "433ac2ce08e0beafce623908de53595a015582181035bcd0ca9e71f1fa8be92d"
+      "path": "icons/export-image.svg",
+      "sha256": "6fc2e79d2a7746af1e0896e578183811d3b808bf2b4babbcea111c7a4128fc8a"
     },
     {
       "path": "icons/folder.svg",
       "sha256": "9f658b0216c0b62b0c61a3cf1fa67c6ea793d0bd0adc9f9acc027a4e61a8f0ab"
-    },
-    {
-      "path": "icons/grid.svg",
-      "sha256": "257d70db280a504b41e6f2d05c4bbdc3363cead3ad6eca705f415732185ff87d"
-    },
-    {
-      "path": "icons/mindmap.svg",
-      "sha256": "e8e1793525d6b646fbf30678d069d8a5ebc86d882db402655225b84f491f7c48"
-    },
-    {
-      "path": "icons/help.svg",
-      "sha256": "cc7a9ec108d4b41c7af3ae5a072250b48f6fbb24b93436e10b18c7a53b4c0f4a"
-    },
-    {
-      "path": "icons/info.svg",
-      "sha256": "47c5bb2c560b64cee77f565f999613f9e6e6a8a31c2b3ef3084aa89723a354ef"
-    },
-    {
-      "path": "icons/layout.svg",
-      "sha256": "8b4e0a209ae9a4a99ca39670f44a0f1eef0919b39126e002137589ab9c7f751d"
     },
     {
       "path": "icons/log.svg",
@@ -87,92 +43,48 @@
       "sha256": "f711e690ffa535cbf4d2d28cdec66823d6bc61c37ed9a0bdfa496a51815bf496"
     },
     {
+      "path": "icons/mindmap.svg",
+      "sha256": "e8e1793525d6b646fbf30678d069d8a5ebc86d882db402655225b84f491f7c48"
+    },
+    {
       "path": "icons/minus.svg",
       "sha256": "68b311c04fb629d620369be617ecc257c68a68f1102a4623d28839fdae0e2f1b"
-    },
-    {
-      "path": "icons/monitor.svg",
-      "sha256": "a1fbe7f9f88a9ad78c8f155f0efbdb6224ce186282ef1cb8b8a833d1b9609396"
-    },
-    {
-      "path": "icons/moon.svg",
-      "sha256": "ca59adaa8f7ed8a44082ed6e9cca8024c9d824aa04d7eba601b49779a01a1af3"
     },
     {
       "path": "icons/more.svg",
       "sha256": "b1b6392d5fcebd120cf304032d9a5bb8cbf6579f905fd48b13d04a08f6d80ae4"
     },
     {
+      "path": "icons/new-document.svg",
+      "sha256": "123d54c99d0a56bdcbe6fafc4cd4c905fecf3232940203623494311285604243"
+    },
+    {
+      "path": "icons/outline.svg",
+      "sha256": "40ff9a2c0a5d750ea30af4e790635605d89cbb5bdc8a05622d5a130350622b93"
+    },
+    {
       "path": "icons/panel.svg",
       "sha256": "0c5c05b3471e7a588fd4a93904d18c87a03a9b2d6092bfbeb113945740168c4d"
     },
     {
-      "path": "icons/pause.svg",
-      "sha256": "42f69a2c2882a5917248bb714de89f7924a71149ef789c3b256c3410ea1b7830"
-    },
-    {
-      "path": "icons/pin.svg",
-      "sha256": "a56cc27e7707110702adc50bd59f020d1c60f0ae928edf9cda936ea44b801327"
-    },
-    {
-      "path": "icons/play.svg",
-      "sha256": "5964d48e0e71ae21f8de01f0461b8732e9c1f8fb2bbe51701428a31a60ad9c2f"
-    },
-    {
-      "path": "icons/plus.svg",
-      "sha256": "7c58884167713ef5f1f5ae9e493ed8e0ad6a4202afbad42010412f2bb8cd62bc"
-    },
-    {
-      "path": "icons/refresh.svg",
-      "sha256": "2b5a50e6b68ed9da3ba79b1cb468faf596d939561411901d93f66b66dd03e62b"
+      "path": "icons/properties.svg",
+      "sha256": "d7f340b04af7e057bc6c8e801ede3621313df1f0598b35663b871aea015e19c7"
     },
     {
       "path": "icons/restore.svg",
       "sha256": "2c1f6057f7b715e78800f8ed5ef62fa45cd5dcb186074a68f82f12df31c155bb"
     },
     {
+      "path": "icons/save-as.svg",
+      "sha256": "34a8bf30ab0ba0a67af26251974dba7b9136ad6246e7d5d99c1168df49409775"
+    },
+    {
       "path": "icons/save.svg",
       "sha256": "e4b2b9c10ababe8ced86054f79c34b77b3849262a4935d29ab7f4baa0a9d4294"
     },
     {
-      "path": "icons/search.svg",
-      "sha256": "e6ca236fbb13882bf559854baf3c62912a6e98a735a4541395eb8b9bbfe29d7d"
-    },
-    {
       "path": "icons/settings.svg",
-      "sha256": "55bf843e809a1dae70ee098ccfdb5f8bd5d39f906ec69ef00391c57cedf701a5"
-    },
-    {
-      "path": "icons/split-horizontal.svg",
-      "sha256": "e53785f0e03d8ecbd425e38789a74e9b23545a87dbe05d22843bd1e433751ce0"
-    },
-    {
-      "path": "icons/split-vertical.svg",
-      "sha256": "3908d15ae0afa7bfb213fc7a9b35ca9430ced5e48843333c9af419eea20c03ae"
-    },
-    {
-      "path": "icons/stop.svg",
-      "sha256": "971ad6ed83135233673fc065a137f94dad04a6452998f07793ea63cbeadd6683"
-    },
-    {
-      "path": "icons/sun.svg",
-      "sha256": "f1783947e9f3d99d6dd47dddd151d3be1fcb3483bbac3dbebba56b1b01c81e74"
-    },
-    {
-      "path": "icons/table.svg",
-      "sha256": "5ff8712c1930b028f8ecb7088e7cdf543b90cbc7f7ec58ca41132d68f57bc2ae"
-    },
-    {
-      "path": "icons/terminal.svg",
-      "sha256": "c32f55bae61c8363745263d5e798d38f224af5cd639a982d4a88597db91530c8"
-    },
-    {
-      "path": "icons/warning.svg",
-      "sha256": "495c1757981902c1dda9fa88670079dfb264fbbaa2add442cca137535f7989ae"
-    },
-    {
-      "path": "icons/window.svg",
-      "sha256": "c3f17c416744abaff068c4c3f0ea1ddc592fc081c1cc4890f0cf1adc60df086a"
+      "sha256": "5c12f89638137a09335a94e075465f3f8a570d10d3106d78e4bff9b92be3a549"
     },
     {
       "path": "light.json",

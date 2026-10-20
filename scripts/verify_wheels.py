@@ -265,7 +265,11 @@ assert importlib.util.find_spec("mindmap_qt") is None
 assert Path(mindmap_docking.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 resources = Path(mindmap_docking.__file__).parent / "resources"
 manifest = json.loads((resources / "manifest.json").read_text("utf-8"))
-assert len(manifest["files"]) == 44
+expected = {entry["path"] for entry in manifest["files"]}
+actual = {path.relative_to(resources).as_posix() for path in resources.rglob("*")
+          if path.is_file() and path.name != "manifest.json"}
+assert len(expected) == len(manifest["files"])
+assert expected == actual and {"dark.json", "light.json", "icons/mindmap.svg"} <= expected
 for entry in manifest["files"]:
     assert hashlib.sha256((resources / entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
 app = QApplication([])

@@ -78,8 +78,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         )
         self._document_registered = True
         for identifier, title, panel, icon, position, shortcut in (
-            ("outline", "大纲", self.panels.outline, "folder", DockPosition.LEFT_TOP, "Alt+1"),
-            ("properties", "节点属性", self.panels.properties, "settings", DockPosition.RIGHT_TOP, "Alt+2"),
+            ("outline", "大纲", self.panels.outline, "outline", DockPosition.LEFT_TOP, "Alt+1"),
+            ("properties", "节点属性", self.panels.properties, "properties", DockPosition.RIGHT_TOP, "Alt+2"),
             ("settings", "导图设置", self.panels.settings, "settings", DockPosition.RIGHT_TOP, "Alt+3"),
         ):
             self.manager.register_tool_window(ToolWindowSpec(
@@ -107,12 +107,12 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def _register_file_actions(self):
         """文件快捷键只注册到工作台一次，节点快捷键仍由画布和焦点决定。"""
         for identifier, title, callback, shortcut, icon, toolbar in (
-            ("new", "新建", self.new_document, "Ctrl+N", "document", False),
+            ("new", "新建", self.new_document, "Ctrl+N", "new-document", False),
             ("open", "打开 / 导入…", self.open_dialog, "Ctrl+O", "folder", False),
             ("save", "保存", self.files.save, "Ctrl+S", "save", False),
-            ("save_as", "另存为…", lambda: self.files.save(save_as=True), "Ctrl+Shift+S", "save", False),
-            ("export", "导出图形…", self.files.export_dialog, "", "document", False),
-            ("quit", "退出", self.close, "Ctrl+Q", "close", False),
+            ("save_as", "另存为…", lambda: self.files.save(save_as=True), "Ctrl+Shift+S", "save-as", False),
+            ("export", "导出图形…", self.files.export_dialog, "", "export-image", False),
+            ("quit", "退出", self.close, "Ctrl+Q", "exit", False),
         ):
             self.add_action(ActionSpec(
                 "app." + identifier, title, callback, icon, shortcut, "文件", toolbar,
