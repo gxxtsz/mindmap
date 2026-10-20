@@ -4,7 +4,7 @@
   "author": "mindmap contributors",
   "colors": {
     "main-window-bg": "#17202D",
-    "main-window-titlebar-bg": "#131C28",
+    "main-window-titlebar-bg": "#17202D",
     "main-window-outline": "#4D617A",
     "tool-window-bg": "#202D3D",
     "editor-bg": "#202D3D",

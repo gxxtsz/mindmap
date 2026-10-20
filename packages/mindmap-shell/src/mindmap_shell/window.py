@@ -54,9 +54,8 @@ class _WindowControlButton(QToolButton):
     def refresh_theme(self):
         """同步深浅主题及最大化状态；切换主题时保留当前悬停反馈。"""
         theme = self.title_bar.window.manager.theme
-        background = theme.color("main-window-titlebar-bg")
-        hover = background.lighter(165) if theme.dark else background.darker(110)
-        pressed = hover.lighter(115) if theme.dark else hover.darker(110)
+        hover = theme.color("toolbar-bg-hovered")
+        pressed = theme.color("toolbar-selected-bg-active")
         if self.role == "close":
             hover, pressed = QColor("#C42B1C"), QColor("#A82318")
         self.setStyleSheet(f"""
@@ -131,6 +130,7 @@ class _TitleBar(QWidget):
         self.box.addWidget(self.options)
         # 顶部纯图标入口统一为正方形，清除通用水平留白，避免按钮变窄后再次挤压图标。
         for button in (self.menu, self.options):
+            button.setProperty("titleBarAction", True)
             button.setFixedSize(32, 32)
             button.setIconSize(QSize(20, 20))
             button.setStyleSheet("QToolButton { padding:0; }")
@@ -149,7 +149,9 @@ class _TitleBar(QWidget):
             self.box.addWidget(button)
 
     def add_action(self, action):
+        """将业务动作加入顶栏，并标记为透明工具按钮；动态追加时沿用当前主题。"""
         button = QToolButton(self)
+        button.setProperty("titleBarAction", True)
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setDefaultAction(action)
         self.action_buttons.append(button)
@@ -161,9 +163,30 @@ class _TitleBar(QWidget):
             self.box.addWidget(button)
 
     def refresh_theme(self):
+        """同步顶栏底色和按钮交互状态，局部样式不影响菜单及设置页面的控件。"""
         theme = self.window.manager.theme
+        # 仅匹配显式标记的顶栏按钮；窗口控制按钮保留独立的关闭警示色和绘制规则。
+        # 默认透明使图标融入外围背景，预留透明边框避免键盘聚焦时发生尺寸变化。
+        self.setStyleSheet(f"""
+            QToolButton[titleBarAction="true"] {{
+                background:transparent; border:1px solid transparent; border-radius:5px;
+            }}
+            QToolButton[titleBarAction="true"]:hover {{
+                background:{theme.css('toolbar-bg-hovered')};
+            }}
+            QToolButton[titleBarAction="true"]:pressed,
+            QToolButton[titleBarAction="true"]:checked {{
+                background:{theme.css('toolbar-selected-bg-active')};
+            }}
+            QToolButton[titleBarAction="true"]:focus {{
+                border-color:{theme.css('control-brand-border')};
+            }}
+            QToolButton[titleBarAction="true"]:disabled {{
+                background:transparent; border-color:transparent; color:{theme.css('text-muted')};
+            }}
+        """)
         self.setFixedHeight(42 if theme.compact else 52)
-        self.logo.setPixmap(theme.icon(self.window.spec.icon, 24).pixmap(26, 26))
+        self.logo.setPixmap(theme.icon(self.window.spec.icon, 20).pixmap(20, 20))
         for button, name in [(self.menu, "menu"), (self.options, "settings")]:
             button.setIcon(theme.icon(name))
         for button in (self.minimize, self.maximize, self.close):
