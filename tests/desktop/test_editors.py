@@ -97,3 +97,38 @@ def test_split_theme_and_restore_keep_documents_and_close_routing(docking, qtbot
     assert not manager.states["alpha"].visible
     assert area.find_token("tool:alpha") is None
     assert manager.panel("alpha").content is tool_content
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_card_corners_are_antialiased_after_resize_and_theme_changes(docking, theme, compact):
+    """四角都包含平滑过渡色，侧栏与编辑组采用相同轮廓且不使用整数圆角遮罩。"""
+    manager = docking.manager
+    manager.activate("alpha", focus=False)
+    manager.activate("gamma", focus=False)
+    manager.set_option("compact", compact)
+    manager.set_theme(theme)
+    cards = [manager.panel("alpha"), docking.host.editor.groups[0], manager.panel("gamma")]
+    for width in (1120, 1280):
+        docking.window.resize(width, 760)
+        QApplication.processEvents()
+        outside = manager.theme.color("main-window-bg").rgb()
+        inside = manager.theme.color("tool-window-bg").rgb()
+        for card in cards:
+            image = card.grab().toImage()
+            radius = round(manager.theme.radius * image.devicePixelRatio())
+            assert card.mask().isEmpty()
+            for right, bottom in ((False, False), (True, False), (False, True), (True, True)):
+                colors = {
+                    image.pixelColor(image.width() - 1 - x if right else x,
+                                     image.height() - 1 - y if bottom else y).rgb()
+                    for x in range(radius) for y in range(radius)
+                }
+                assert outside in colors and inside in colors
+                # 硬遮罩只有内外两色；真正抗锯齿的弧边应有多个覆盖率对应的混合色。
+                assert len(colors - {outside, inside}) >= 3
+            # 角部装饰不挡住真实输入控件，也不改变文档的实例与父子关系。
+            content = card.currentWidget() if hasattr(card, "currentWidget") else card.content
+            center = content.mapTo(card, content.rect().center())
+            assert card.childAt(center) not in card._corners.corners
+    assert docking.host.editor.groups[0].currentWidget() is docking.document

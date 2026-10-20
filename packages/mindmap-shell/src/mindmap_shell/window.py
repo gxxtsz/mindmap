@@ -277,16 +277,21 @@ class WorkbenchWindow(QMainWindow):
 
     def _refresh_window_frame(self):
         """同步不占布局空间的细边框和系统阴影，原生标题栏模式保留系统装饰。"""
-        self._frame_outline.setGeometry(self.rect())
-        self._frame_outline.setVisible(
-            not self.spec.native_title_bar and not self.isMaximized() and not self.isFullScreen()
-        )
-        self._frame_outline.raise_()
-        self._frame_outline.update()
+        self._refresh_frame_outline()
         if self.isVisible() and not self.spec.native_title_bar and QApplication.platformName() == "windows":
             # 合并连续的缩放与状态事件；退出当前原生消息后再更新 DWM，避免窗口
             # 正在计算客户区时重入系统装饰接口，也减少实时拖动中的重复合成调用。
             self._frame_update_timer.start(0)
+
+    def _refresh_frame_outline(self):
+        """仅在系统无法提供边框时显示 Qt 轮廓，避免圆角被直角线条覆盖或裁断。"""
+        self._frame_outline.setGeometry(self.rect())
+        self._frame_outline.setVisible(
+            not self.spec.native_title_bar and not self.isMaximized() and not self.isFullScreen()
+            and not (self._native_frame is not None and self._native_frame.native_border)
+        )
+        self._frame_outline.raise_()
+        self._frame_outline.update()
 
     def _sync_native_frame(self):
         """在事件循环空闲时更新系统装饰，原生句柄变化后重新接入系统阴影。"""
@@ -296,9 +301,12 @@ class WorkbenchWindow(QMainWindow):
         if self._native_frame is None or self._native_frame.hwnd != hwnd:
             self._native_frame = _create_windows_frame(hwnd)
         if self._native_frame is not None:
+            color = self.manager.theme.color("main-window-outline")
             self._native_frame.refresh(
                 maximized=self.isMaximized(), fullscreen=self.isFullScreen(), dark=self.manager.theme.dark,
+                border_color=color.red() | (color.green() << 8) | (color.blue() << 16),
             )
+        self._refresh_frame_outline()
 
     def showEvent(self, event):
         """窗口可见后安排同步装饰，保持 Qt 自身的显示与最大化流程完整。"""

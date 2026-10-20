@@ -2,11 +2,11 @@
 
 from uuid import uuid4
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt
-from PySide6.QtGui import QPainter, QPainterPath, QRegion
+from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QTabBar, QTabWidget, QToolBar, QWidget
 
-from .controls import DockSplitter, IconButton
+from .controls import DockSplitter, IconButton, _CardCorners
 from .models import DockTarget
 
 
@@ -207,6 +207,7 @@ class EditorGroup(QTabWidget):
         self.setAcceptDrops(True)
         self.currentChanged.connect(self._current_changed)
         self.tabBar().tabMoved.connect(lambda *_: self.manager.schedule_save())
+        self._corners = _CardCorners(self, self.manager)
         self.refresh_theme()
 
     def refresh_theme(self):
@@ -233,7 +234,7 @@ class EditorGroup(QTabWidget):
             document = self.manager.documents.get(token)
             if spec is not None or document is not None:
                 self.setTabIcon(index, self.manager.theme.icon(spec.icon if spec else document["icon"], 16))
-        self._update_mask()
+        self._corners.refresh()
         self.update()
 
     def _sync_document_actions(self):
@@ -251,17 +252,6 @@ class EditorGroup(QTabWidget):
                 button.setAccessibleName(action.text())
                 button.setAccessibleDescription(action.toolTip())
         self._document_actions.setVisible(bool(actions))
-
-    def _update_mask(self):
-        """每个分屏单独裁剪自身及子控件；组间空隙显示宿主背景，不再裁剪整个编辑区域。"""
-        path = QPainterPath()
-        radius = self.manager.theme.radius
-        path.addRoundedRect(QRectF(self.rect()), radius, radius)
-        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_mask()
 
     def paintEvent(self, event):
         super().paintEvent(event)

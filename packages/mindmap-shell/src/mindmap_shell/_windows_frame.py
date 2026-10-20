@@ -36,6 +36,7 @@ class _WindowsFrame:
 
     def __init__(self, hwnd: int):
         self.hwnd = hwnd
+        self.native_border = False
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
         suffix = "PtrW" if ctypes.sizeof(ctypes.c_void_p) == 8 else "W"
@@ -87,16 +88,22 @@ class _WindowsFrame:
             raise ctypes.WinError(ctypes.get_last_error())
         return True
 
-    def refresh(self, *, maximized: bool, fullscreen: bool, dark: bool) -> None:
+    def refresh(self, *, maximized: bool, fullscreen: bool, dark: bool, border_color: int) -> None:
         """同步合成外观；最大化、全屏时收起外阴影，主题切换沿用同一 HWND。
 
-        窗口轮廓由 Qt 绘制，Windows 11 的额外系统描边设为不可见，以免叠成双线；
-        旧版 Windows 不支持该属性时会返回失败码，可安全忽略这项可选修饰。
+        border_color 使用 Win32 COLORREF（0x00BBGGRR），由宿主主题转换传入。
+        Windows 11 统一绘制轮廓和圆角，避免 Qt 的直角描边被系统圆角裁断。
+        native_border 仅在系统接受边框属性时为 True，宿主据此隐藏自绘轮廓；
+        旧系统或合成失败时为 False，继续使用自绘边框，不影响窗口内容及几何。
         """
         policy = ctypes.c_int(2)  # DWMWA_NCRENDERING_POLICY / DWMNCRP_ENABLED
         self.dwm.DwmSetWindowAttribute(self.hwnd, 2, ctypes.byref(policy), ctypes.sizeof(policy))
-        border = wintypes.DWORD(0xFFFFFFFE)  # DWMWA_BORDER_COLOR / DWMWA_COLOR_NONE
-        self.dwm.DwmSetWindowAttribute(self.hwnd, 34, ctypes.byref(border), ctypes.sizeof(border))
+        # 普通窗口请求系统圆角；最大化和全屏保持直角且不额外描边。
+        corner = ctypes.c_int(1 if maximized or fullscreen else 2)  # DWMWCP_DONOTROUND / ROUND
+        self.dwm.DwmSetWindowAttribute(self.hwnd, 33, ctypes.byref(corner), ctypes.sizeof(corner))
+        border = wintypes.DWORD(0xFFFFFFFE if maximized or fullscreen else border_color)
+        result = self.dwm.DwmSetWindowAttribute(self.hwnd, 34, ctypes.byref(border), ctypes.sizeof(border))
+        self.native_border = result >= 0
         appearance = wintypes.BOOL(dark)  # DWMWA_USE_IMMERSIVE_DARK_MODE
         self.dwm.DwmSetWindowAttribute(self.hwnd, 20, ctypes.byref(appearance), ctypes.sizeof(appearance))
         margin = 0 if maximized or fullscreen else 1

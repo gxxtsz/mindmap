@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .controls import IconButton, MenuButton
+from .controls import IconButton, MenuButton, _CardCorners
 
 
 class DraggableTitle(MenuButton):
@@ -137,6 +137,7 @@ class ToolPanel(QFrame):
             self.content.currentChanged.connect(self.tabs.setCurrentIndex)
         else:
             self.tabs.hide()
+        self._corners = _CardCorners(self, manager)
         self.refresh_theme()
 
     def refresh_theme(self):
@@ -145,19 +146,12 @@ class ToolPanel(QFrame):
         title_font = self.title_button.font()
         title_font.setPixelSize(12 if theme.compact else 13)
         self.title_button.setFont(title_font)
-        self.setStyleSheet(f"QFrame#{self.objectName()} {{ background:{theme.css('tool-window-bg')}; border-radius:{theme.radius}px; }}")
+        # 底层完整填色，四角由同一抗锯齿覆盖层绘制，避免双重圆角混色与子控件露角。
+        self.setStyleSheet(f"QFrame#{self.objectName()} {{ background:{theme.css('tool-window-bg')}; border:0; }}")
         self.title_button.setStyleSheet(f"QToolButton {{background:transparent; border:0; color:{theme.css('text-default')}; padding:0 2px;}} QToolButton:hover {{background:{theme.css('toolbar-bg-hovered')};border-radius:4px;}}")
         self.update_header()
+        self._corners.refresh()
         self.update()
-
-    def resizeEvent(self, event):
-        from PySide6.QtCore import QRectF
-        from PySide6.QtGui import QPainterPath, QRegion
-        super().resizeEvent(event)
-        path = QPainterPath()
-        radius = self.manager.theme.radius
-        path.addRoundedRect(QRectF(self.rect()), radius, radius)
-        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def update_header(self):
         grouped = self.manager.states[self.tool_id].grouped_tabs

@@ -1,8 +1,69 @@
 """统一图标按钮、分割器和拖放预览；尺寸均使用 Qt 逻辑像素。"""
 
-from PySide6.QtCore import QPoint, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QAbstractButton, QSplitter, QToolButton, QWidget
+
+
+class _CardCorner(QWidget):
+    """覆盖一个卡片转角外侧的小控件；用背景色平滑遮住矩形子控件的角。
+
+    仅绘制圆弧外侧，不渲染或缓存业务内容，也不截获鼠标和键盘事件。
+    路径保持浮点坐标，Qt 在当前设备像素比下计算抗锯齿，避免 QRegion 的硬裁切。
+    """
+
+    def __init__(self, owner, right, bottom):
+        super().__init__(owner.parent())
+        self.owner = owner
+        self.right, self.bottom = right, bottom
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, event):
+        radius = self.width()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.translate(radius if self.right else 0, radius if self.bottom else 0)
+        painter.scale(-1 if self.right else 1, -1 if self.bottom else 1)
+        path = QPainterPath()
+        path.moveTo(0, 0)
+        path.lineTo(radius, 0)
+        path.arcTo(QRectF(0, 0, radius * 2, radius * 2), 90, 90)
+        path.closeSubpath()
+        painter.fillPath(path, self.owner.manager.theme.color("main-window-bg"))
+
+
+class _CardCorners(QObject):
+    """为工具卡片和文档卡片共用四角绘制，保持布局尺寸与业务控件实例不变。
+
+    parent 为实际卡片，manager 提供主题圆角和卡片外侧工作区颜色。四个覆盖控件
+    由卡片拥有，始终位于内容上方；仅占圆角区域，不创建覆盖整个画布的绘制层。
+    调用 refresh 可同步主题；尺寸、显示及新增子控件由事件过滤器自动同步。
+    """
+
+    def __init__(self, parent, manager):
+        super().__init__(parent)
+        self.manager = manager
+        self.corners = [_CardCorner(self, right, bottom)
+                        for right, bottom in ((False, False), (True, False), (False, True), (True, True))]
+        parent.installEventFilter(self)
+        self.refresh()
+
+    def refresh(self):
+        parent = self.parent()
+        radius = max(0, min(self.manager.theme.radius, parent.width() // 2, parent.height() // 2))
+        for corner in self.corners:
+            corner.setGeometry(parent.width() - radius if corner.right else 0,
+                               parent.height() - radius if corner.bottom else 0, radius, radius)
+            corner.setVisible(radius > 0)
+            corner.raise_()
+            corner.update()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.ChildPolished):
+            self.refresh()
+        return super().eventFilter(watched, event)
 
 
 class MenuButton(QToolButton):

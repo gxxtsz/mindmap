@@ -38,7 +38,11 @@ def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme
     assert window.status.geometry() == QRect(0, 772, 1200, 28)
     assert window._frame_outline.geometry() == window.rect()
     image = window.grab().toImage()
-    assert image.pixelColor(0, image.height() // 2) == window.manager.theme.color("main-window-outline")
+    if window._native_frame is not None and window._native_frame.native_border:
+        # QWidget.grab 不包含 DWM 合成的外边框；系统属性在原生窗口用例中核验。
+        assert window._frame_outline.isHidden()
+    else:
+        assert image.pixelColor(0, image.height() // 2) == window.manager.theme.color("main-window-outline")
     title = window.title_bar.grab().toImage()
     assert title.pixelColor(3, 3) == window.manager.theme.color("main-window-titlebar-bg")
     button = window.title_bar.action_buttons[0]
@@ -84,7 +88,7 @@ def test_windows_shadow_preserves_geometry_and_maximized_work_area(frame_window,
     assert window.screen().availableGeometry().contains(bottom)
     window.showNormal()
     qtbot.waitUntil(lambda: window.geometry() == original)
-    assert window._frame_outline.isVisible()
+    assert window._frame_outline.isVisible() == (not frame.native_border)
     window.showFullScreen()
     qtbot.waitUntil(window.isFullScreen)
     assert window._frame_outline.isHidden()
@@ -94,4 +98,47 @@ def test_windows_shadow_preserves_geometry_and_maximized_work_area(frame_window,
     qtbot.waitUntil(window.isMinimized)
     window.showNormal()
     qtbot.waitUntil(lambda: window.geometry() == original)
-    assert window._frame_outline.isVisible()
+    assert window._frame_outline.isVisible() == (not frame.native_border)
+
+
+def test_native_border_follows_theme_and_window_state(frame_window, qtbot, monkeypatch):
+    """系统圆角和描边由同一层绘制；切换主题、最大化及全屏后正确恢复。"""
+    if QApplication.platformName() != "windows":
+        pytest.skip("圆角描边需要真实 Windows 平台窗口")
+    window = frame_window
+    window.show()
+    qtbot.waitUntil(lambda: window._native_frame is not None)
+    frame = window._native_frame
+    if not frame.native_border:
+        pytest.skip("当前系统不支持 DWM 边框颜色")
+    accepted = {}
+    original = frame.dwm.DwmSetWindowAttribute
+
+    def record(hwnd, key, address, size):
+        # 边框颜色与圆角偏好是只写属性；记录真实系统调用成功接收的值，
+        # 不使用 DwmGetWindowAttribute 读取不支持查询的属性。
+        result = original(hwnd, key, address, size)
+        if key in (33, 34) and result >= 0:
+            accepted[key] = ctypes.cast(address, ctypes.POINTER(wintypes.DWORD)).contents.value
+        return result
+
+    monkeypatch.setattr(frame.dwm, "DwmSetWindowAttribute", record)
+
+    def assert_decoration(color, corner):
+        qtbot.waitUntil(lambda: accepted.get(34) == color and accepted.get(33) == corner)
+        assert frame.native_border
+        assert window._frame_outline.isHidden()
+
+    for theme in ("light", "dark"):
+        window.manager.set_theme(theme)
+        color = window.manager.theme.color("main-window-outline")
+        native_color = color.red() | (color.green() << 8) | (color.blue() << 16)
+        assert_decoration(native_color, 2)
+        window.showMaximized()
+        assert_decoration(0xFFFFFFFE, 1)
+        window.showNormal()
+        assert_decoration(native_color, 2)
+        window.showFullScreen()
+        assert_decoration(0xFFFFFFFE, 1)
+        window.showNormal()
+        assert_decoration(native_color, 2)
