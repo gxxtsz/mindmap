@@ -1160,6 +1160,8 @@ class DockManager(QObject):
                 region_sizes[kind].update(values)
             host["region_sizes"] = region_sizes
         data.get("settings", {}).pop("remember_size", None)
+        # 旧布局允许保留已移除的名称开关；迁移后不再应用或写回该字段。
+        data.get("settings", {}).pop("show_names", None)
         for item in data["tools"]:
             item.pop("extent", None)
         return data

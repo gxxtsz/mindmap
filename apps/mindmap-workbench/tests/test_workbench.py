@@ -50,7 +50,7 @@ def test_default_single_document_and_editable_framework(window):
     assert not window.manager.states["settings"].visible
     assert window.host.region_sizes["dock"]["right"] == 360
     bar = window.title_bar
-    assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.theme) for button in bar.action_buttons)
+    assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.options) for button in bar.action_buttons)
 
 
 def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, qtbot):

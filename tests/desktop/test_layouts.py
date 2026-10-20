@@ -16,23 +16,47 @@ def test_snapshot_restores_mode_location_theme_and_content(docking):
     content.setPlainText("恢复布局时不得替换")
     manager.move("alpha", DockTarget(DockPosition.RIGHT_BOTTOM))
     manager.set_view_mode("alpha", ViewMode.WINDOW)
-    manager.set_option("show_names", True)
+    manager.set_option("compact", True)
     manager.set_theme("dark")
     snapshot = manager.capture_layout()
     manager.hide("alpha")
     manager.move("alpha", DockTarget(DockPosition.LEFT_TOP))
     manager.set_theme("light")
-    manager.set_option("show_names", False)
+    manager.set_option("compact", False)
     manager.restore_layout(snapshot)
     state = manager.states["alpha"]
     assert state.position == DockPosition.RIGHT_BOTTOM
     assert state.mode == ViewMode.WINDOW
     assert state.visible
     assert manager.theme.name == "dark"
-    assert manager.settings.show_names
+    assert manager.settings.compact
     assert manager.panel("alpha").content is content
     assert content.toPlainText() == "恢复布局时不得替换"
     assert docking.calls["alpha"] == 1
+
+
+def test_legacy_name_setting_is_removed_when_loading_saved_layout(docking):
+    """旧命名布局仍可恢复，已删除的名称开关不会影响侧栏或再次写入磁盘。"""
+    manager = docking.manager
+    manager.save_layout("旧布局")
+    manager.save_session()
+    payload = manager.layout_store.load()
+    payload["session"]["settings"]["show_names"] = True
+    payload["layouts"]["旧布局"]["settings"]["show_names"] = True
+    manager.layout_store.save(payload)
+    assert manager.load_session()
+    manager.restore_layout("旧布局")
+    for rail in (docking.host.left_rail, docking.host.right_rail):
+        assert rail.width() == manager.theme.rail_width
+        assert all(button.text() == "" for button in rail._buttons.values())
+    assert "show_names" not in manager.capture_layout()["settings"]
+    assert "show_names" not in manager._layouts["旧布局"]["settings"]
+    with pytest.raises(KeyError, match="未知布局选项"):
+        manager.set_option("show_names", True)
+    manager.save_session()
+    payload = json.loads(manager.storage_file.read_text("utf-8"))
+    assert "show_names" not in payload["session"]["settings"]
+    assert "show_names" not in payload["layouts"]["旧布局"]["settings"]
 
 
 def test_named_layout_apply_rename_and_delete(docking):

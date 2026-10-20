@@ -55,21 +55,18 @@ def assert_no_overlap(rail):
 @pytest.mark.parametrize("side", POSITIONS)
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("compact", [False, True])
-@pytest.mark.parametrize("show_names", [False, True])
-def test_group_separator_is_painted_and_bottom_stays_at_bottom(docking, side, theme, compact, show_names):
+def test_group_separator_is_painted_and_bottom_stays_at_bottom(docking, side, theme, compact):
     rail, members = populate(docking, side)
     docking.manager.set_theme(theme)
     docking.manager.set_option("compact", compact)
-    docking.manager.set_option("show_names", show_names)
     QApplication.processEvents()
     top, lower, bottom = [rail._buttons[members[p][0]] for p in POSITIONS[side]]
     height = 34 if compact else 40
-    width = 146 if show_names else height
-    # 工具和更多入口占用相同方格；名称模式只增加宽度，不改变行高。
+    # 工具和更多入口均只显示图标，占用相同方格。
     for button in [top, lower, bottom, rail.more]:
-        assert (button.width(), button.height()) == (width, height)
-    assert rail.more.text() == ("更多工具窗口" if show_names else "")
-    assert top.text() == (docking.manager.specs[top.tool_id].title if show_names else "")
+        assert (button.width(), button.height()) == (height, height)
+    assert rail.more.text() == ""
+    assert top.text() == ""
     assert rail.more.icon_name == "more"
     separator_height = 8 if compact else 12
     assert lower.y() == top.y() + top.height() + separator_height
@@ -81,7 +78,7 @@ def test_group_separator_is_painted_and_bottom_stays_at_bottom(docking, side, th
     line_y = top.y() + top.height() + separator_height // 2
     assert image.pixelColor(int(rail.width() / 2 * dpr), int(line_y * dpr)) == (
         docking.manager.theme.color("tool-window-border"))
-    line_start = 8 if show_names else (rail.width() - 24) // 2
+    line_start = (rail.width() - 24) // 2
     assert image.pixelColor(int(line_start * dpr), int(line_y * dpr)) == (
         docking.manager.theme.color("tool-window-border"))
     assert docking.calls == {}
@@ -89,10 +86,9 @@ def test_group_separator_is_painted_and_bottom_stays_at_bottom(docking, side, th
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("compact", [False, True])
-@pytest.mark.parametrize("show_names", [False, True])
 @pytest.mark.parametrize("active", [False, True])
-def test_rendered_icons_use_actual_canvas_size_including_active_and_name_modes(
-        docking, tmp_path, theme, compact, show_names, active):
+def test_rendered_icons_use_actual_canvas_size_including_active_modes(
+        docking, tmp_path, theme, compact, active):
     """用满画布 SVG 检查真实像素，防止资源请求变小而绘制或选中着色仍放大。"""
     rail, members = populate(docking, "left")
     manager = docking.manager
@@ -103,7 +99,6 @@ def test_rendered_icons_use_actual_canvas_size_including_active_and_name_modes(
         manager.theme.icons.register(name, source)
     manager.set_theme(theme)
     manager.set_option("compact", compact)
-    manager.set_option("show_names", show_names)
     tool_id = members[DockPosition.LEFT_TOP][0]
     if active:
         manager.activate(tool_id, focus=False)
@@ -118,10 +113,10 @@ def test_rendered_icons_use_actual_canvas_size_including_active_and_name_modes(
         def matches(x, y):
             return image.pixelColor(int((x + 0.5) * dpr), int((y + 0.5) * dpr)) == color
 
-        left = 8 if show_names else (button.width() - icon_size) // 2
+        left = (button.width() - icon_size) // 2
         top = (button.height() - icon_size) // 2
-        # 名称文字可能与活动图标同色，仅检查文字起点之前的列；纵向检查图标中心。
-        columns = [x for x in range(left + icon_size + 1 if show_names else button.width())
+        # 横向和纵向分别检查图标中心，确认实际绘制尺寸与主题一致。
+        columns = [x for x in range(button.width())
                    if matches(x, button.height() // 2)]
         rows = [y for y in range(button.height()) if matches(left + icon_size // 2, y)]
         assert columns == list(range(left, left + icon_size))

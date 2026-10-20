@@ -30,17 +30,17 @@ class _StripeLayout:
 class _StripeEntryButton(IconButton):
     """侧栏工具与更多入口共用的绘制规格；生命周期由所属侧栏管理。
 
-    点击区域由侧栏布局统一定位。图标模式的状态背景普通为 32 方格、紧凑为
-    28 方格；名称模式仅延展背景宽度，图标、文字和圆角沿用同一绘制路径。
+    点击区域由侧栏布局统一定位。入口只显示图标，状态背景普通为 32 方格、
+    紧凑为 28 方格；工具名称通过悬停提示和无障碍名称提供。
     """
 
     def sizeHint(self):
         theme = self.manager.theme
-        return QSize(146 if self.manager.settings.show_names else theme.rail_width, theme.button_height)
+        return QSize(theme.rail_width, theme.button_height)
 
     def _background_rect(self):
         size = 28 if self.manager.theme.compact else 32
-        width = max(0, self.width() - 8) if self.text() else min(size, self.width())
+        width = min(size, self.width())
         height = min(size, self.height())
         return QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height)
 
@@ -125,8 +125,7 @@ class StripeColumn(QWidget):
     def refresh(self):
         """从管理器同步入口与外观；复用按钮，不触发任何业务内容工厂。"""
         theme = self.manager.theme
-        width = 146 if self.manager.settings.show_names else theme.rail_width
-        self.setFixedWidth(width)
+        self.setFixedWidth(theme.rail_width)
         self.setVisible(self.manager.settings.show_bars)
         for tool_id in list(self._buttons):
             if tool_id not in self.manager.states:
@@ -225,13 +224,11 @@ class StripeColumn(QWidget):
             button.setFixedSize(rect.size())
             button.move(rect.topLeft())
             button.setChecked(self.manager.states[tool_id].visible)
-            button.setText(self.manager.specs[tool_id].title if self.manager.settings.show_names else "")
             button.notification = self.manager.specs[tool_id].notification
             button.show()
             button.update()
         self.more.setFixedSize(layout.more.size())
         self.more.move(layout.more.topLeft())
-        self.more.setText("更多工具窗口" if self.manager.settings.show_names else "")
         self.more.raise_()
         self.more.update()
         self.update()
@@ -267,11 +264,10 @@ class StripeColumn(QWidget):
         for tool_id in others:
             add_tool(tool_id)
         menu.addSeparator()
-        for text, attr in [("显示工具窗口名称", "show_names"), ("紧凑布局", "compact")]:
-            action = menu.addAction(text)
-            action.setCheckable(True)
-            action.setChecked(getattr(self.manager.settings, attr))
-            action.triggered.connect(lambda checked, key=attr: self.manager.set_option(key, checked))
+        action = menu.addAction("紧凑布局")
+        action.setCheckable(True)
+        action.setChecked(self.manager.settings.compact)
+        action.triggered.connect(lambda checked: self.manager.set_option("compact", checked))
         return menu
 
     def show_more(self):
@@ -420,7 +416,7 @@ class StripeColumn(QWidget):
         theme = self.manager.theme
         separator = self._layout_data.separator
         if not separator.isEmpty():
-            length = max(0, self.width() - 16) if self.manager.settings.show_names else min(24, self.width())
+            length = min(24, self.width())
             x = (self.width() - length) // 2
             painter.fillRect(QRect(x, separator.top() + separator.height() // 2, length, 1),
                              theme.color("tool-window-border"))

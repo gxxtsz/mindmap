@@ -125,7 +125,7 @@ class IconButton(QAbstractButton):
             else:
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.symbol or "◇")
         if self.text():
-            # 标签与图标共用一套状态和位置计算；名称模式不再另画一套固定 20 像素图标。
+            # 通用按钮的可选标签与图标共用状态和位置计算，随紧凑布局同步调整。
             text_rect = self.rect().adjusted(rect.right() + 7, 0, -8, 0)
             label = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight,
                                                 max(0, text_rect.width()))

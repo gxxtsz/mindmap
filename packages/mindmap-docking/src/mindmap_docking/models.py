@@ -134,7 +134,6 @@ class ToolState:
 class LayoutSettings:
     """全局外观和布局选项；每个独立编辑器框架使用相同设置。"""
 
-    show_names: bool = False
     show_bars: bool = True
     compact: bool = False
     widescreen: bool = False

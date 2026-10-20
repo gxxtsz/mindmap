@@ -124,18 +124,13 @@ class _TitleBar(QWidget):
         for spec in window._action_specs:
             if spec.toolbar:
                 self.add_action(window.manager.actions[spec.id])
-        self.theme = QToolButton(self)
-        self.theme.setToolTip("切换深浅主题")
-        self.theme.setAccessibleName("切换深浅主题")
-        self.theme.clicked.connect(lambda: window.manager.set_theme("light" if window.manager.theme.dark else "dark"))
-        self.box.addWidget(self.theme)
         self.options = QToolButton(self)
         self.options.setToolTip("外观与布局")
         self.options.setAccessibleName("外观与布局")
         self.options.clicked.connect(lambda: window.appearance_menu().exec(self.options.mapToGlobal(QPoint(0, self.options.height()))))
         self.box.addWidget(self.options)
         # 顶部纯图标入口统一为正方形，清除通用水平留白，避免按钮变窄后再次挤压图标。
-        for button in (self.menu, self.theme, self.options):
+        for button in (self.menu, self.options):
             button.setFixedSize(32, 32)
             button.setIconSize(QSize(20, 20))
             button.setStyleSheet("QToolButton { padding:0; }")
@@ -159,9 +154,9 @@ class _TitleBar(QWidget):
         button.setDefaultAction(action)
         self.action_buttons.append(button)
         # 运行期间追加业务动作时，仍放在外观和原生窗口控制按钮之前。
-        # 初始构造阶段 theme 按钮尚不存在，此时按声明顺序正常追加。
-        if hasattr(self, "theme"):
-            self.box.insertWidget(self.box.indexOf(self.theme), button)
+        # 初始构造阶段外观按钮尚不存在，此时按声明顺序正常追加。
+        if hasattr(self, "options"):
+            self.box.insertWidget(self.box.indexOf(self.options), button)
         else:
             self.box.addWidget(button)
 
@@ -169,8 +164,7 @@ class _TitleBar(QWidget):
         theme = self.window.manager.theme
         self.setFixedHeight(42 if theme.compact else 52)
         self.logo.setPixmap(theme.icon(self.window.spec.icon, 24).pixmap(26, 26))
-        for button, name in [(self.menu, "menu"), (self.theme, "sun" if theme.dark else "moon"),
-                             (self.options, "settings")]:
+        for button, name in [(self.menu, "menu"), (self.options, "settings")]:
             button.setIcon(theme.icon(name))
         for button in (self.minimize, self.maximize, self.close):
             button.refresh_theme()
@@ -357,8 +351,6 @@ class WorkbenchWindow(QMainWindow):
             workspace.addAction(self.manager.actions[key])
         menu.addMenu(self.appearance_menu())
         menu.addSeparator()
-        menu.addAction("关于 " + self.spec.title,
-                       lambda: self.show_status_message(f"{self.spec.title} {self.spec.version} · 思维导图工作台 · MIT"))
         menu.addAction("关闭窗口", self.close)
         return menu
 
@@ -378,7 +370,7 @@ class WorkbenchWindow(QMainWindow):
             action.triggered.connect(lambda checked=False, value=name: self.manager.set_theme(value))
         menu.addSeparator()
         for key, label in [("compact", "紧凑模式"), ("show_bars", "显示停靠栏"),
-                           ("show_names", "显示工具名称"), ("always_header_icons", "始终显示标题按钮"),
+                           ("always_header_icons", "始终显示标题按钮"),
                            ("widescreen", "宽屏布局"), ("left_side_by_side", "左侧并排"),
                            ("right_side_by_side", "右侧并排")]:
             action = menu.addAction(label)
