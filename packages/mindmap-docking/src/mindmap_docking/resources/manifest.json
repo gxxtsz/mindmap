@@ -4,7 +4,7 @@
   "files": [
     {
       "path": "dark.json",
-      "sha256": "ffbc39bf6b3654ebddcc4957bcab53de420e4fcc5c5bb032c17bb3c594bbe833"
+      "sha256": "30daef3d4e2767ffb6ab18ca876fa7cb0b33a47f3eec339adf2c10b970dbac5c"
     },
     {
       "path": "icons/bug.svg",
@@ -176,7 +176,7 @@
     },
     {
       "path": "light.json",
-      "sha256": "6f2b2d88facbd2c85b92f5b9c8ca9ccae3b44e2ee219c5cfacbe8446046e0902"
+      "sha256": "58801feb9bbbf28b4f46b6330a290ce64a389a4364feb22209b4572ac34a7321"
     }
   ]
 }

@@ -29,6 +29,13 @@ raise SystemExit(run_desktop(build_window))
 
 `AppSpec` 声明稳定应用 ID、标题、版本、图标、主题和配置目录。
 `ActionSpec` 描述由菜单、标题栏按钮及快捷键共享的业务动作；`WorkbenchWindow` 通过 `manager` 暴露停靠管理器。
+
+集成标题栏采用略深的背景、一像素细边框和 Windows 系统阴影。细边框是透传输入的覆盖层，
+不增加内容边距，不改变停靠区域、按钮排列或状态栏高度；最大化、全屏时收起轮廓和外阴影。
+设置 `native_title_bar=True` 时继续使用系统自身的窗口装饰。其他平台或系统合成不可用时保留
+细边框与标题栏配色；离屏截图只包含 Qt 绘制的内容，不包含系统在窗口外部绘制的投影。
+业务可以通过 `ThemeTokens` 的 `main-window-titlebar-bg`、`main-window-outline` 覆盖这两项颜色，
+并分别提供浅色和深色值。系统阴影接入方式参见 [Windows 自定义窗口框架文档](https://learn.microsoft.com/windows/win32/dwm/customframe)。
 `run_desktop(builder, argv, ...)` 处理主题、紧凑布局、窗口尺寸、独立配置目录和截图退出等通用启动参数，
 调用方通过 `configure_parser` 添加业务参数，通过窗口的关闭决策管理数据保存。
 

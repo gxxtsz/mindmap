@@ -3,8 +3,8 @@
 import sys
 
 from mindmap_docking import DockHost, DockManager
-from PySide6.QtCore import QPoint, Qt, Slot
-from PySide6.QtGui import QCursor
+from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, Slot
+from PySide6.QtGui import QCursor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -17,7 +17,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ._windows_frame import _create_windows_frame
 from .specs import ActionSpec, AppSpec
+
+
+class _WindowOutline(QWidget):
+    """覆盖在主窗口上的一像素轮廓；不参与布局，也不截获鼠标或键盘输入。"""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, event):
+        theme = self.parentWidget().manager.theme
+        painter = QPainter(self)
+        painter.setPen(QPen(theme.color("main-window-outline"), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # 画笔中心内缩半个逻辑像素，保证四边等粗且不挤占内部控件的空间。
+        painter.drawRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
 
 
 class _TitleBar(QWidget):
@@ -25,6 +44,8 @@ class _TitleBar(QWidget):
 
     def __init__(self, window):
         super().__init__(window)
+        self.setObjectName("mindmap_shell_title_bar")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.window = window
         self.box = QHBoxLayout(self)
         self.box.setContentsMargins(12, 5, 6, 5)
@@ -121,6 +142,7 @@ class WorkbenchWindow(QMainWindow):
             flags |= Qt.WindowType.FramelessWindowHint
         super().__init__(None, flags)
         self.spec = spec
+        self._native_frame = None
         self.host_id = host_id
         self._retiring = False
         self.manager = manager or DockManager(
@@ -156,6 +178,10 @@ class WorkbenchWindow(QMainWindow):
         self.manager.message.connect(self.show_status_message)
         self.manager.theme_changed.connect(self.refresh_theme)
         self.manager.tool_failed.connect(self.report_tool_error)
+        self._frame_update_timer = QTimer(self)
+        self._frame_update_timer.setSingleShot(True)
+        self._frame_update_timer.timeout.connect(self._sync_native_frame)
+        self._frame_outline = _WindowOutline(self)
         self.refresh_theme()
 
     def _register_action(self, spec):
@@ -185,14 +211,59 @@ class WorkbenchWindow(QMainWindow):
 
     @Slot()
     def refresh_theme(self):
+        """刷新局部外观及窗口装饰，保持业务内容、停靠尺寸和全局主题开关的原语义。"""
         theme = self.manager.theme
-        theme.apply(self)
+        theme.apply(self, f"QWidget#mindmap_shell_title_bar {{background:{theme.css('main-window-titlebar-bg')};}}")
         if self.spec.global_theme:
             theme.apply_global(QApplication.instance())
         self.setWindowIcon(theme.icon(self.spec.icon, 32))
         self.title_bar.refresh_theme()
         self.status.setFixedHeight(24 if theme.compact else 28)
+        self._refresh_window_frame()
         self.update()
+
+    def _refresh_window_frame(self):
+        """同步不占布局空间的细边框和系统阴影，原生标题栏模式保留系统装饰。"""
+        self._frame_outline.setGeometry(self.rect())
+        self._frame_outline.setVisible(
+            not self.spec.native_title_bar and not self.isMaximized() and not self.isFullScreen()
+        )
+        self._frame_outline.raise_()
+        self._frame_outline.update()
+        if self.isVisible() and not self.spec.native_title_bar and QApplication.platformName() == "windows":
+            # 合并连续的缩放与状态事件；退出当前原生消息后再更新 DWM，避免窗口
+            # 正在计算客户区时重入系统装饰接口，也减少实时拖动中的重复合成调用。
+            self._frame_update_timer.start(0)
+
+    def _sync_native_frame(self):
+        """在事件循环空闲时更新系统装饰，原生句柄变化后重新接入系统阴影。"""
+        if not self.isVisible():
+            return
+        hwnd = int(self.winId())
+        if self._native_frame is None or self._native_frame.hwnd != hwnd:
+            self._native_frame = _create_windows_frame(hwnd)
+        if self._native_frame is not None:
+            self._native_frame.refresh(
+                maximized=self.isMaximized(), fullscreen=self.isFullScreen(), dark=self.manager.theme.dark,
+            )
+
+    def showEvent(self, event):
+        """窗口可见后安排同步装饰，保持 Qt 自身的显示与最大化流程完整。"""
+        super().showEvent(event)
+        self._refresh_window_frame()
+
+    def resizeEvent(self, event):
+        """覆盖层随窗口边界更新，中央布局、停靠尺寸和状态栏位置均由原布局负责。"""
+        super().resizeEvent(event)
+        if hasattr(self, "_frame_outline"):
+            self._refresh_window_frame()
+
+    def changeEvent(self, event):
+        """系统贴靠或双击标题栏改变窗口状态时，同步装饰和最大化按钮图标。"""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "_frame_outline"):
+            self.title_bar.refresh_theme()
+            self._refresh_window_frame()
 
     @Slot(str)
     def show_status_message(self, text):
@@ -288,7 +359,16 @@ class WorkbenchWindow(QMainWindow):
         if sys.platform == "win32" and not self.spec.native_title_bar:
             from ctypes import wintypes
             msg = wintypes.MSG.from_address(int(message))
-            if msg.message == 0x0084:
+            if msg.message == 0x0083 and msg.wParam and self._native_frame is not None:
+                # WM_NCCALCSIZE：恢复系统阴影所需的样式后仍保留完整客户区；
+                # 最大化时额外限制到工作区，防止标题栏和状态栏被屏幕边界裁掉。
+                if not self.isFullScreen():
+                    self._native_frame.constrain_maximized_client(msg.lParam)
+                return True, 0
+            if msg.message == 0x031E and self._native_frame is not None:
+                # WM_DWMCOMPOSITIONCHANGED：系统重启合成器后重新提交阴影设置。
+                self._refresh_window_frame()
+            elif msg.message == 0x0084:
                 # 集成标题栏仍将边框与最大化按钮的命中结果交给 Windows，保留系统缩放和贴靠。
                 point = self.mapFromGlobal(QCursor.pos())
                 button = self.title_bar.maximize
