@@ -1,2 +1,9 @@
 <!-- SPDX-License-Identifier: MIT; Copyright (c) 2026 mindmap contributors -->
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12H5V7M15 12h4.5V7m0 5v5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/><rect x="2" y="3" width="6" height="4" rx="1"/><rect x="17" y="3" width="5" height="4" rx="1"/><rect x="17" y="17" width="5" height="4" rx="1"/></svg>
+<!-- 左侧根节点通过平滑弧线连接右侧三个子节点；颜色随应用主题统一调整。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M7 12C11.5 12 11.5 4 16 4M7 12h9M7 12C11.5 12 11.5 20 16 20"/>
+  <rect x="2" y="9" width="5" height="6" rx="1.2"/>
+  <rect x="16" y="2" width="6" height="4" rx="1"/>
+  <rect x="16" y="10" width="6" height="4" rx="1"/>
+  <rect x="16" y="18" width="6" height="4" rx="1"/>
+</svg>
