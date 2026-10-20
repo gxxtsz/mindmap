@@ -1,0 +1,52 @@
+"""稳定的思维导图核心；不导入布局、格式、组合包或 Qt。"""
+
+from .branch_styles import BranchStyle, apply_branch_style, branch_style_targets, get_branch_style
+from .config import Direction, LayoutConfig
+from .engine import MindMapEngine
+from .errors import MindMapError, OperationRejected
+from .events import ChangeEvent
+from .extensions import (
+    DocumentExporter,
+    DocumentImporter,
+    FormatInfo,
+    FormatRegistration,
+    FormatRegistry,
+    LayoutAlgorithm,
+    LayoutInfo,
+    LayoutRegistry,
+)
+from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point, Rect
+from .history import ChangeSet
+from .models import Asset, MindMapDocument, Node, Theme
+
+__all__ = [
+    "Asset",
+    "BranchPath",
+    "BranchStyle",
+    "ChangeEvent",
+    "ChangeSet",
+    "Curve",
+    "Direction",
+    "DocumentExporter",
+    "DocumentImporter",
+    "FormatInfo",
+    "FormatRegistration",
+    "FormatRegistry",
+    "LayoutAlgorithm",
+    "LayoutConfig",
+    "LayoutInfo",
+    "LayoutRegistry",
+    "LayoutResult",
+    "MindMapDocument",
+    "MindMapEngine",
+    "MindMapError",
+    "Node",
+    "OperationRejected",
+    "PathCommand",
+    "Point",
+    "Rect",
+    "Theme",
+    "apply_branch_style",
+    "branch_style_targets",
+    "get_branch_style",
+]

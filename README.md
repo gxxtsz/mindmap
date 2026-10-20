@@ -1,0 +1,107 @@
+# 原生思维导图
+
+使用 Python、PySide6 与 uv workspace 构建的思维导图引擎及 Harbor 单文档桌面工作台。
+工作台支持 Python 3.12、3.13；当前工作区使用 Python 3.12，锁定 PySide6 6.12.0。
+各引擎包的 Python 要求为 3.12+，不依赖 Qt 或 Harbor。
+
+## 快速开始
+
+先将 [harbor-workbench](https://github.com/gxxtsz/harbor-workbench) 与本仓库放在同级目录：
+
+```text
+my_code/
+├─ harbor-workbench/
+└─ mindmap/
+```
+
+在 mindmap 仓库根目录执行：
+
+```powershell
+uv sync --all-packages --group dev
+uv run --locked --package mindmap-workbench mindmap-workbench
+```
+
+也可在启动时打开指定文件：
+
+```powershell
+uv run --locked --package mindmap-workbench mindmap-workbench 我的导图.mindmap
+```
+
+框架以可编辑依赖引用，普通源码更新后重启工作台即可使用；依赖或包元数据更新后重新同步。
+工作台支持 `--theme light|dark`、`--state-dir`、`--no-restore`、`--compact`、
+`--size` 和 `--screenshot`，详细用法可执行
+`uv run --locked --package mindmap-workbench mindmap-workbench --help` 查看。
+
+## 当前功能
+
+支持节点编辑、11 种分支连接线、四方向树布局、图片、复制粘贴、撤销重做和 PNG/SVG/PDF 导出。
+桌面工作区提供可拖动的工具窗口按钮，大纲、节点属性和导图设置可停靠到左、右、底部或浮动。
+界面采用中性外围、独立圆角卡片和窄间隙，菜单、侧栏、浮动面板及应用自有弹窗统一适配明暗主题。
+Harbor 外壳主题与导图主题独立；画布仍使用导图的背景色，界面装饰不进入 PNG、SVG、PDF 导出。
+属性侧栏自动提交，支持多选样式及分支批量编辑；面板位置、尺寸和展开状态保存在本机。
+节点属性按字体、主题、分支纵向分组，无 Tab 或内容编辑字段；支持字体搜索、色块选择及自定义最大文本宽度。
+节点属性的“分支”分组提供四列图形选择器，可选择“整个子树”或“仅本级”；未设置样式的节点保留原有曲线。
+导图设置通过 Alt+3 或工具窗口菜单打开，集中提供滚轮、布局方向、紧凑布局、整图分支样式和导图主题切换。
+全局分支设置覆盖整张导图，后续新增节点沿用父节点样式；节点属性仍可单独设置局部分支。
+顶部工具栏提供撤销、重做、适应窗口和回到中心；通过侧边按钮、编辑菜单或 Alt+2 打开属性侧栏。
+画布隐藏两条滚动条，随可见节点和图片自动扩展、收缩，四周各保留一屏操作余量。
+
+始终使用一个文档会话，新建和打开替换当前导图；中央标签关闭后可通过“视图 → 显示导图”恢复。
+大纲、节点属性和导图设置分别使用 Alt+1、Alt+2、Alt+3，默认仅展开右侧节点属性。
+布局和滚轮偏好只保存在本机，应用配置命名空间为 `mindmap-workbench`。
+
+布局与文档格式支持实例级显式注册，工作台的算法菜单与文件筛选项根据能力自动生成。
+当前文件格式为版本 2，只读取当前版本，不提供旧数据迁移。
+
+## 工作区
+
+源码按子系统分组，四个无界面引擎包统一位于 `packages/engine/`：
+
+```text
+packages/
+├─ engine/
+│  ├─ mindmap-core/
+│  ├─ mindmap-layouts/
+│  ├─ mindmap-formats/
+│  └─ mindmap-engine/
+└─ mindmap-qt/
+apps/
+└─ mindmap-workbench/
+```
+
+`engine/` 仅用于目录分组；各成员保留独立的 `pyproject.toml`、`src/`、`tests/` 和许可证，
+包名、Python 导入名及独立构建方式保持一致。
+
+| 成员 | 导入名 | 职责 |
+| --- | --- | --- |
+| mindmap-core | mindmap_core | 模型、编辑、事务、历史、事件、几何及扩展协议，无项目内依赖 |
+| mindmap-layouts | mindmap_layouts | 内置树布局和默认布局注册表，只依赖核心 |
+| mindmap-formats | mindmap_formats | 原生容器、JSON、大纲和原子文件读写，只依赖核心 |
+| mindmap-engine | mindmap_engine | 默认组合入口，重新导出上述三个包的公开接口，无 Qt 依赖 |
+| mindmap-qt | mindmap_qt | 原生画布、输入、图片及图形导出 |
+| mindmap-workbench | mindmap_workbench | Harbor 单文档工作台 |
+
+工作区共用根目录的 `.venv` 和 `uv.lock`。成员各自声明运行依赖，通过
+`tool.uv.sources` 的 `workspace = true` 引用本地成员。
+
+## 检查与构建
+
+```powershell
+uv run --locked --all-packages pytest
+uv run --locked --all-packages ruff check .
+uv build --all-packages
+uv run --locked --all-packages python scripts/verify_wheels.py
+uv run --locked --all-packages python scripts/verify_workbench.py
+```
+
+运行 wheel 验收前，先在相邻 Harbor 仓库执行 `uv build --all-packages --out-dir dist`；
+也可通过 `--harbor-wheel-dir` 指定框架 wheel 目录。
+六个成员分别构建，在仓库外的干净环境中验证依赖隔离和工作台完整流程。
+安装报告与固定版本约束写入 `.artifacts/`，视觉验收结果写入 `.artifacts/workbench-visual/`。
+视觉验收检查 100%、150%、200% 三档缩放；Windows 默认使用原生 `windows` 平台，
+其他系统默认使用 `offscreen`。Windows 也可传入 `--platform offscreen` 执行离屏检查。
+
+`mindmap-qt` 的独立画布、面板组合、文件控制器和嵌入工作区接口见
+[组件说明](packages/mindmap-qt/README.md)，它们不依赖 Harbor。
+`scripts/branch_style_lab.py` 直接调用正式路由及绘制代码，输出四种布局方向的样式验收图；
+`scripts/benchmark.py` 用于千节点性能验收。

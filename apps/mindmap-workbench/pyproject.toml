@@ -1,0 +1,19 @@
+[project]
+name = "mindmap-workbench"
+version = "0.1.0"
+description = "基于共享 Harbor 框架的原生思维导图工作台"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = ["mindmap-qt>=0.1.0,<0.2", "mindmap-engine>=0.1.0,<0.2", "harbor-workbench>=0.1.0,<0.2", "harbor-docking>=0.1.0,<0.2", "PySide6>=6.12,<7"]
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.gui-scripts]
+mindmap-workbench = "mindmap_workbench:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mindmap_workbench"]

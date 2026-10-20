@@ -1,0 +1,19 @@
+# Python 生成文件
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# 虚拟环境
+.venv
+
+# 开发工具缓存与本地编辑器设置
+.idea/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.tmp
+.artifacts/

@@ -1,0 +1,39 @@
+[project]
+name = "mindmap"
+version = "0.1.0"
+description = "使用 uv workspace 管理的原生思维导图项目"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+# engine 仅用于归集引擎子系统，四个子包分别作为成员；Qt 组件与应用保留现有位置。
+members = ["packages/engine/*", "packages/mindmap-qt", "apps/*"]
+
+[tool.uv.sources]
+mindmap-core = { workspace = true }
+mindmap-layouts = { workspace = true }
+mindmap-formats = { workspace = true }
+mindmap-engine = { workspace = true }
+mindmap-qt = { workspace = true }
+# 框架源码只保留在相邻仓库，可编辑安装使普通源码改动在重启后生效。
+harbor-workbench = { path = "../harbor-workbench/packages/workbench", editable = true }
+harbor-docking = { path = "../harbor-workbench/packages/docking", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/engine/mindmap-core/tests", "packages/engine/mindmap-layouts/tests", "packages/engine/mindmap-formats/tests", "packages/engine/mindmap-engine/tests", "packages/mindmap-qt/tests", "apps/mindmap-workbench/tests"]
+addopts = "--import-mode=importlib"
+qt_api = "pyside6"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

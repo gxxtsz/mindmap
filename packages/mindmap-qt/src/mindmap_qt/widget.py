@@ -1,0 +1,927 @@
+"""可嵌入宿主窗口的完整思维导图组件。"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from copy import deepcopy
+from pathlib import Path
+
+from mindmap_engine import (
+    BranchStyle,
+    FormatRegistry,
+    LayoutConfig,
+    LayoutRegistry,
+    MindMapDocument,
+    MindMapEngine,
+    MindMapError,
+    apply_branch_style,
+    branch_style_targets,
+    create_default_format_registry,
+    create_default_layout_registry,
+    decode_document,
+    encode_document,
+    get_branch_style,
+)
+from PySide6.QtCore import QMimeData, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QKeySequence
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QGraphicsScene,
+    QInputDialog,
+    QMenu,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
+)
+
+from .branch_styles import BranchStyleMenu, branch_style_icon
+from .dialogs import node_properties
+from .exporting import export_document
+from .icons import IconMenuOptionButton, IconOptionMenu, add_icon_action, apply_toolbar_theme, set_action_icon
+from .items import NodeEditor, NodeItem
+from .rendering import BranchItem, VisualFactory, decode_image
+from .ui_style import CardFrame, UiColors, apply_ui_palette, dialog_styles, ui_colors
+from .view import MindMapView
+
+CLIPBOARD_MIME = "application/x-python-mindmap+json"
+
+
+class MindMapWidget(QWidget):
+    """原生画布组件。
+
+    宿主先创建 QApplication，再将本组件加入任意布局。engine 可省略，此时创建
+    独立引擎。只读模式约束组件发起的修改，宿主仍可通过引擎加载或更新文档。
+    所有图形接口应在 GUI 线程使用，使用 dispose() 可主动解除订阅和网络请求。
+    """
+
+    selection_changed = Signal(list)
+    document_changed = Signal(object)
+    history_changed = Signal(bool, bool, bool)
+    error_occurred = Signal(str)
+    image_imported = Signal(str)
+    wheel_mode_changed = Signal(str)
+    editable_changed = Signal(bool)
+    editing_changed = Signal(bool)
+    document_changing = Signal(object)
+    edits_flush_requested = Signal()
+    branch_scope_changed = Signal(str)
+
+    def __init__(
+        self,
+        engine: MindMapEngine | None = None,
+        parent=None,
+        *,
+        editable=True,
+        toolbar=True,
+        layout_registry: LayoutRegistry | None = None,
+        format_registry: FormatRegistry | None = None,
+    ):
+        """注入实例级布局和格式能力；省略时分别建立独立的内置注册表。"""
+        super().__init__(parent)
+        self.setObjectName("mindmap_canvas")
+        self.setAutoFillBackground(True)
+        self._ui_colors = None
+        self._ui_colors_override = None
+        self.engine = engine or MindMapEngine()
+        self.editable = editable
+        self._properties_handler = None
+        self._wheel_mode = "scroll"
+        self.factory = VisualFactory()
+        self.layout_registry = (
+            layout_registry if layout_registry is not None else create_default_layout_registry()
+        )
+        self.format_registry = (
+            format_registry if format_registry is not None else create_default_format_registry()
+        )
+        self.scene = QGraphicsScene(self)
+        self.view = MindMapView(self, self.scene)
+        self.toolbar = QToolBar("思维导图工具栏", self)
+        self.toolbar.setMovable(False)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.toolbar)
+        # 圆角只属于界面承载层；视口与场景仍是原生矩形，导出不读取卡片外观。
+        self._view_card = CardFrame(self.view, self)
+        layout.addWidget(self._view_card)
+        self.toolbar.setVisible(toolbar)
+        self.node_items, self.branch_items = {}, {}
+        self.editor = None
+        self.focus_id = None
+        self._refreshing = False
+        self._disposed = False
+        self._branch_scope = "subtree"
+        self._preview_layout = None
+        self._measurements = {}
+        self._selection_undo, self._selection_redo = [], []
+        self._document = self.engine.document
+        self._actions = {}
+        self._mutating = set()
+        self._custom_actions = []
+        self.network = QNetworkAccessManager(self)
+        self._downloads = set()
+        self._create_actions()
+        self.scene.selectionChanged.connect(self._selection_changed)
+        self._unsubscribe = self.engine.subscribe(self._engine_changed)
+        # 捕获取消函数而不捕获 QWidget，确保宿主删除组件时引擎不会继续持有绑定方法。
+        unsubscribe = self._unsubscribe
+        self.destroyed.connect(lambda: unsubscribe())
+        self.refresh()
+        self.select_nodes([self.engine.root_id])
+        QTimer.singleShot(0, self.center_root)
+
+    def dispose(self):
+        """主动释放订阅与下载；多次调用安全，通常用于宿主移除标签页。"""
+        if self._disposed:
+            return
+        self._cancel_branch_menu(restore=False)
+        self._disposed = True
+        self.view.cancel_interaction()
+        self._unsubscribe()
+        for reply in tuple(self._downloads):
+            reply.abort()
+
+    def call(self, callback):
+        """界面动作的异常边界：通过错误信号报告失败，不弹出阻塞宿主的对话框。"""
+        try:
+            return callback()
+        except (MindMapError, OSError, ValueError, KeyError) as exc:
+            self.error_occurred.emit(str(exc))
+            return None
+
+    def register_action(
+        self, action_id: str, text: str, callback, *, shortcut=None, mutating=True
+    ) -> QAction:
+        """注册扩展动作，callback 接收本组件；返回 QAction 可加入宿主菜单或工具栏。"""
+        if action_id in self._actions:
+            raise MindMapError(f"动作名称重复：{action_id}")
+        action = QAction(text, self)
+        action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        if shortcut:
+            action.setShortcuts(
+                [QKeySequence(value) for value in shortcut]
+                if isinstance(shortcut, list)
+                else [QKeySequence(shortcut)]
+            )
+        action.triggered.connect(lambda checked=False: self.call(lambda: callback(self)))
+        self.addAction(action)
+        self._actions[action_id] = action
+        self._custom_actions.append(action_id)
+        if mutating:
+            self._mutating.add(action_id)
+        action.setEnabled(not mutating or self.editable)
+        return action
+
+    def action(self, action_id: str) -> QAction:
+        """取得内置或扩展动作，宿主可直接复用其启用状态和快捷键。"""
+        return self._actions[action_id]
+
+    def set_properties_handler(self, handler: Callable[[], None] | None) -> None:
+        """由宿主接管属性入口；传入 None 恢复独立组件原有的属性弹窗。
+
+        接管后属性动作属于查看入口，只读及原地编辑期间仍可打开侧栏；宿主负责
+        结束原地编辑、同步选择及约束写入。这里不改变其他节点操作的快捷键范围。
+        """
+        if handler is not None and not callable(handler):
+            raise MindMapError("属性处理器必须可调用或为 None")
+        self._properties_handler = handler
+        self.action("properties").setText("节点属性" if handler else "属性…")
+        self._update_actions()
+
+    def set_shortcuts(self, mapping: dict[str, str | list[str]]) -> None:
+        """按动作标识覆盖快捷键；传入空列表可禁用对应快捷键。"""
+        for key, values in mapping.items():
+            if key not in self._actions:
+                raise MindMapError(f"动作不存在：{key}")
+            self._actions[key].setShortcuts(
+                [QKeySequence(value) for value in ([values] if isinstance(values, str) else values)]
+            )
+
+    @property
+    def wheel_mode(self) -> str:
+        """普通滚轮当前行为：scroll 上下滚动，zoom 围绕鼠标缩放，默认 scroll。
+
+        这是组件实例的视图偏好，不属于导图文档。宿主需要持久化时应监听
+        wheel_mode_changed 信号保存，并在创建组件后调用 set_wheel_mode 恢复。
+        """
+        return self._wheel_mode
+
+    def set_wheel_mode(self, mode: str) -> None:
+        """切换普通滚轮行为并同步动作及全局设置；Ctrl＋滚轮始终缩放。
+
+        仅接受 scroll 和 zoom，非法参数抛出 MindMapError 且保持原状态。实际变化
+        才发送 wheel_mode_changed(str)，不修改引擎文档、脏标记或撤销历史；只读和
+        文字编辑期间均可调用，组件自身不读写宿主应用的持久化设置。
+        """
+        if mode not in ("scroll", "zoom"):
+            raise MindMapError("滚轮模式必须为 scroll 或 zoom")
+        if mode == self._wheel_mode:
+            return
+        self._wheel_mode = mode
+        self.view._wheel_scroll_remainder = 0.0
+        self._sync_wheel_actions()
+        self.wheel_mode_changed.emit(mode)
+
+    def _sync_wheel_actions(self):
+        """由组件偏好统一刷新菜单勾选、图标和中文提示，避免界面状态反向漂移。"""
+        for mode in ("scroll", "zoom"):
+            option = self._actions[f"wheel_{mode}"]
+            option.setChecked(mode == self._wheel_mode)
+            set_action_icon(option, f"wheel_{mode}", (self._ui_colors_override or self._document.theme))
+        action = self._actions["wheel_mode"]
+        label = self._actions[f"wheel_{self._wheel_mode}"].text()
+        action.setText(f"滚轮行为：{label}")
+        action.setToolTip(f"{label}；点击切换滚轮行为，Ctrl＋滚轮始终缩放")
+        set_action_icon(action, f"wheel_{self._wheel_mode}", (self._ui_colors_override or self._document.theme))
+
+    def _create_actions(self):
+        definitions = [
+            ("add_child", "添加子节点", "Tab", lambda w: w.add_child(), True),
+            ("add_sibling", "添加同级节点", "Return", lambda w: w.add_sibling(), True),
+            ("insert_parent", "插入父节点", "Shift+Return", lambda w: w.insert_parent(), True),
+            ("edit", "编辑文字", "F2", lambda w: w.edit_selected(), True),
+            ("properties", "属性…", "Alt+Return", lambda w: w.edit_properties(), True),
+            ("delete", "删除", "Delete", lambda w: w.delete_selected(), True),
+            ("copy", "复制", "Ctrl+C", lambda w: w.copy(), False),
+            ("cut", "剪切", "Ctrl+X", lambda w: w.cut(), True),
+            ("paste", "粘贴", "Ctrl+V", lambda w: w.paste(), True),
+            ("undo", "撤销", "Ctrl+Z", lambda w: w.engine.undo(), True),
+            ("redo", "重做", ["Ctrl+Y", "Ctrl+Shift+Z"], lambda w: w.engine.redo(), True),
+            ("move_up", "上移", "Ctrl+Up", lambda w: w.engine.move_up(w.current_node_id()), True),
+            (
+                "move_down",
+                "下移",
+                "Ctrl+Down",
+                lambda w: w.engine.move_up(w.current_node_id(), down=True),
+                True,
+            ),
+            ("fold", "折叠 / 展开", "Space", lambda w: w.toggle_expanded(), True),
+            (
+                "expand_all",
+                "展开全部",
+                None,
+                lambda w: w.engine.set_expanded(w.engine.root_id, True, recursive=True),
+                True,
+            ),
+            (
+                "collapse_all",
+                "折叠所选分支",
+                None,
+                lambda w: w.engine.set_expanded(w.current_node_id(), False, recursive=True),
+                True,
+            ),
+            ("image", "插入本地图片…", None, lambda w: w.choose_image(), True),
+            ("image_url", "从网址导入图片…", None, lambda w: w.choose_image_url(), True),
+            (
+                "remove_image",
+                "移除图片",
+                None,
+                lambda w: w.engine.update_node(w.current_node_id(), image_id=None),
+                True,
+            ),
+            ("hyperlink", "打开超链接", None, lambda w: w.open_hyperlink(), False),
+            ("focus", "聚焦此分支", "Ctrl+F", lambda w: w.focus_node(w.current_node_id()), False),
+            ("unfocus", "返回完整导图", "Escape", lambda w: w.focus_node(None), False),
+            ("zoom_in", "放大", "Ctrl+=", lambda w: w.view.zoom(1.2), False),
+            ("zoom_out", "缩小", "Ctrl+-", lambda w: w.view.zoom(1 / 1.2), False),
+            ("fit", "适应窗口", "Ctrl+0", lambda w: w.fit_to_view(), False),
+            ("center", "回到中心", "Home", lambda w: w.center_root(), False),
+            ("wheel_mode", "滚轮行为", None, lambda w: None, False),
+            ("wheel_scroll", "滚轮上下滚动", None, lambda w: w.set_wheel_mode("scroll"), False),
+            ("wheel_zoom", "滚轮缩放", None, lambda w: w.set_wheel_mode("zoom"), False),
+            ("branch_style", "分支连接线样式", None, lambda w: None, True),
+        ]
+        for key, label, shortcut, callback, mutating in definitions:
+            self.register_action(key, label, callback, shortcut=shortcut, mutating=mutating)
+        self._custom_actions.clear()
+        # 默认工具栏只保留历史和视图操作；添加子节点、编辑文字、节点属性及分支样式
+        # 仍注册为组件动作，供快捷键、右键菜单和宿主菜单复用。未加入工具栏的动作
+        # 不会进入其溢出菜单，也不会留下占位按钮；属性与分支由属性面板继续提供。
+        for key in ("undo", "redo", "fit", "center"):
+            # 历史操作从工具栏起始处排列，仅在视图操作前分隔，避免开头留下空白占位。
+            if key == "fit":
+                self.toolbar.addSeparator()
+            add_icon_action(self.toolbar, self._actions[key], key)
+        # 滚轮设置移至工作区侧栏；保留动作和菜单，独立画布与宿主仍可直接复用。
+        wheel_action = self._actions["wheel_mode"]
+        self.wheel_menu = IconOptionMenu(self.toolbar)
+        self.wheel_menu.setAccessibleName("滚轮行为选择")
+        self._wheel_action_group = QActionGroup(self)
+        self._wheel_action_group.setExclusive(True)
+        for mode in ("scroll", "zoom"):
+            action = self._actions[f"wheel_{mode}"]
+            action.setCheckable(True)
+            self._wheel_action_group.addAction(action)
+            # 展示动作只负责承载图标按钮，原动作继续管理模式、选中状态和宿主集成。
+            # 因此无需清空动作中文名称，状态栏、悬停提示和无障碍信息仍能正常使用。
+            button = IconMenuOptionButton(self.wheel_menu)
+            button.setDefaultAction(action)
+            button.setAccessibleName(action.text())
+            button.setAccessibleDescription(action.toolTip())
+            menu_action = QWidgetAction(self.wheel_menu)
+            menu_action.setText(action.text())
+            menu_action.setDefaultWidget(button)
+            menu_action.triggered.connect(action.trigger)
+            action.changed.connect(
+                lambda original=action, display=menu_action: display.setEnabled(original.isEnabled())
+            )
+            self.wheel_menu.addAction(menu_action)
+            action.triggered.connect(self.wheel_menu.close)
+        wheel_action.setMenu(self.wheel_menu)
+        self._sync_wheel_actions()
+        # 分支动作及其四列菜单继续供宿主复用，但不创建默认工具栏按钮。
+        # 保留菜单的预览、作用范围和提交连接，已有组件调用无需迁移。
+        self.branch_menu = BranchStyleMenu(self.toolbar)
+        self.branch_menu.aboutToShow.connect(self._prepare_branch_menu)
+        self.branch_menu.preview_requested.connect(
+            lambda kind: self.call(lambda: self.preview_branch_style(kind, scope=self._branch_scope))
+        )
+        self.branch_menu.preview_finished.connect(self.clear_branch_preview)
+        self.branch_menu.scope_changed.connect(self._set_branch_scope)
+        self.branch_menu.style_selected.connect(
+            lambda kind: self.call(lambda: self._commit_branch_menu_style(kind))
+        )
+        branch_action = self._actions["branch_style"]
+        branch_action.setMenu(self.branch_menu)
+        self._sync_branch_actions()
+
+    def _update_actions(self):
+        editing = self.editor is not None
+        for key, action in self._actions.items():
+            action.setEnabled(
+                key in ("wheel_mode", "wheel_scroll", "wheel_zoom")
+                or (not editing and (self.editable or key not in self._mutating))
+            )
+        self._actions["undo"].setEnabled(self.editable and not editing and self.engine.can_undo)
+        self._actions["redo"].setEnabled(self.editable and not editing and self.engine.can_redo)
+        if self._properties_handler is not None:
+            self._actions["properties"].setEnabled(True)
+        self._actions["branch_style"].setEnabled(
+            self.editable
+            and not editing
+            and self.layout_registry.info(self._document.layout.algorithm_id).supports_branch_styles
+        )
+        self._sync_branch_actions()
+
+    def set_editable(self, editable: bool) -> None:
+        """切换只读模式，取消尚未提交的文本编辑与下载后续写入。"""
+        changed = self.editable != bool(editable)
+        if not editable:
+            self._cancel_branch_menu()
+            self.finish_edit(commit=False)
+        self.editable = editable
+        self._update_actions()
+        self.view.cancel_interaction()
+        if changed:
+            self.editable_changed.emit(bool(editable))
+
+    def _ensure_editable(self):
+        if not self.editable:
+            raise MindMapError("当前画布为只读模式")
+
+    def selected_node_ids(self) -> list[str]:
+        """按树的先序顺序返回选择，移动后仍与文档层级一致。"""
+        selected = {item.node.id for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
+        return [key for key in self._document.descendants(self._document.root_id) if key in selected]
+
+    def current_node_id(self) -> str:
+        ids = self.selected_node_ids()
+        return ids[0] if ids else self.focus_id or self.engine.root_id
+
+    def select_nodes(self, node_ids) -> None:
+        """替换节点选择；折叠或聚焦之外的节点不会强制展开。"""
+        self.scene.blockSignals(True)
+        try:
+            self.scene.clearSelection()
+            for key in node_ids:
+                if key in self.node_items:
+                    self.node_items[key].setSelected(True)
+        finally:
+            self.scene.blockSignals(False)
+        self._selection_changed()
+
+    def _selection_changed(self):
+        if self._refreshing or self._disposed:
+            return
+        self._cancel_branch_menu()
+        self._update_actions()
+        self.view.update_cursor()
+        self.selection_changed.emit(self.selected_node_ids())
+
+    def _engine_changed(self, event):
+        if self._disposed:
+            return
+        # 在画布刷新引发选择信号之前通知宿主，防止旧侧栏输入被提交到新文档或撤销状态。
+        self.document_changing.emit(event)
+        self._cancel_branch_menu()
+        if event.kind != "saved":
+            before = self.selected_node_ids()
+            old_document = self._document
+            if self.editor is not None:
+                self.finish_edit(commit=False)
+            self._document = self.engine.document
+            after = [key for key in before if key in self._document.nodes]
+            new_ids = set(self._document.nodes) - set(old_document.nodes)
+            parents = self._document.parents()
+            if new_ids:
+                after = [
+                    key for key in self._document.nodes if key in new_ids and parents.get(key) not in new_ids
+                ]
+            if not after:
+                old_parents = old_document.parents()
+                after = [old_parents[key] for key in before if old_parents.get(key) in self._document.nodes]
+                after = after or [self.engine.root_id]
+            if event.kind == "reset":
+                self.focus_id = None
+                self._selection_undo.clear()
+                self._selection_redo.clear()
+                after = [self.engine.root_id]
+            elif event.kind == "undo" and self._selection_undo:
+                selection = self._selection_undo.pop()
+                self._selection_redo.append(selection)
+                after = selection[0]
+            elif event.kind == "redo" and self._selection_redo:
+                selection = self._selection_redo.pop()
+                self._selection_undo.append(selection)
+                after = selection[1]
+            elif event.kind == "change":
+                self._selection_undo.append((before, after))
+                del self._selection_undo[: -self.engine.history_limit]
+                self._selection_redo.clear()
+            if self.focus_id not in self._document.nodes:
+                self.focus_id = None
+            self.refresh()
+            self.select_nodes(after)
+        self._update_actions()
+        self.history_changed.emit(self.engine.can_undo, self.engine.can_redo, self.engine.is_dirty)
+        self.document_changed.emit(event)
+
+    def refresh(self) -> None:
+        """刷新几何并复用按 ID 索引的图元；平移、缩放不会调用此方法。"""
+        self._cancel_branch_menu(restore=False)
+        # 在更新场景前记录中心，内容扩展时保持视图位置，删除或折叠导致范围缩小
+        # 时再由视图限制到最近边界；不要为了容纳内容而自动修改用户的缩放比例。
+        center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
+        document = self._document = self.engine.document
+        visuals, sizes = self.factory.measure(document)
+        self._measurements = sizes
+        self.layout_result = self.layout_registry.layout(document, sizes, focus_id=self.focus_id)
+        result = self.layout_result
+        self._refreshing = True
+        self.scene.blockSignals(True)
+        try:
+            for key in list(self.node_items):
+                if key not in result.nodes:
+                    self.scene.removeItem(self.node_items.pop(key))
+            for key, rect in result.nodes.items():
+                item = self.node_items.get(key)
+                if item is None:
+                    item = NodeItem(document.nodes[key], visuals[key], document.theme, self)
+                    self.scene.addItem(item)
+                    self.node_items[key] = item
+                else:
+                    item.update_content(document.nodes[key], visuals[key], document.theme)
+                item.setPos(rect.x, rect.y)
+            self._set_branch_items(result)
+            bounds = result.bounds
+            # 布局边界已覆盖可见节点、节点内图片及普通父子分支线。场景
+            # 只记录内容范围，一屏操作余量由视图按当前窗口大小与倍率单独计算。
+            self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
+            self.scene.setBackgroundBrush(QColor(document.theme.background))
+            self._view_card.set_background(document.theme.background)
+            self._apply_ui_theme()
+        finally:
+            self.scene.blockSignals(False)
+            self._refreshing = False
+        self.view.update_navigation_rect(center=center)
+        self.view.update_cursor()
+
+    def set_ui_colors(self, colors: UiColors | None) -> None:
+        """覆盖本组件的界面色板，不修改导图主题、场景、选择和撤销历史。
+
+        None 恢复原有跟随导图主题的行为。只刷新控件外观，保留原地编辑器、
+        属性弹层、鼠标位置和画布倍率；错误类型抛出 TypeError。
+        """
+        if colors is not None and not isinstance(colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
+        self._ui_colors_override = colors
+        self._apply_ui_theme()
+
+    def _apply_ui_theme(self):
+        theme = self._ui_colors_override or self._document.theme
+        colors = ui_colors(theme)
+        if colors != self._ui_colors:
+            self._ui_colors = colors
+            # 仅在当前组件内提供菜单、网址输入等样式，不修改宿主的应用样式。
+            self.setStyleSheet(
+                f"QWidget#mindmap_canvas {{ background: {colors.shell}; }}" + dialog_styles(colors)
+            )
+            # QSS 重设会恢复旧调色板，因此在重设之后再写入新调色板，避免换成
+            # 深色后透明圆角仍露出首次显示时的浅色底。
+            apply_ui_palette(self, colors, window=colors.shell)
+        apply_toolbar_theme(self.toolbar, theme)
+        # 菜单选项复用组件动作，并非工具栏的直接子动作，主题刷新时单独同步其图标。
+        # 属性按钮移出工具栏后，编辑菜单和右键菜单仍沿用当前主题的属性图标。
+        set_action_icon(self._actions["properties"], "properties", theme)
+        self._sync_wheel_actions()
+        self._sync_branch_actions()
+
+    def _branch_selection(self) -> list[str]:
+        return self.selected_node_ids() or [self.current_node_id()]
+
+    def _sync_branch_actions(self) -> None:
+        """按当前范围统计正式状态；同一主题下后代不同样式也显示为混合。"""
+        ids = branch_style_targets(self._document, self._branch_selection(), scope=self._branch_scope)
+        kinds = {get_branch_style(self._document.nodes[key].style) for key in ids}
+        self.branch_menu.sync(kinds, self._branch_scope, (self._ui_colors_override or self._document.theme))
+        current = next(iter(kinds)) if len(kinds) == 1 else None
+        label = "多种样式" if len(kinds) != 1 else current.label if current else "默认曲线"
+        action = self._actions["branch_style"]
+        action.setText(f"分支连接线：{label}")
+        action.setToolTip(f"分支连接线：{label}；可设置整个子树或仅本级")
+        icon = branch_style_icon(current, (self._ui_colors_override or self._document.theme))
+        if action.icon().cacheKey() != icon.cacheKey():
+            action.setIcon(icon)
+
+    def _set_branch_scope(self, scope: str) -> None:
+        """作用范围是组件偏好，不进入导图文件和撤销历史。"""
+        if scope not in ("level", "subtree"):
+            raise MindMapError("分支样式作用范围必须为 level 或 subtree")
+        self.clear_branch_preview()
+        changed = self._branch_scope != scope
+        self._branch_scope = scope
+        self._sync_branch_actions()
+        if changed:
+            self.branch_scope_changed.emit(scope)
+
+    def _prepare_branch_menu(self) -> None:
+        self.clear_branch_preview()
+        self._sync_branch_actions()
+
+    def _commit_branch_menu_style(self, kind) -> None:
+        """成功、无变化和被钩子拒绝的操作都恢复正式勾选，避免按钮自行翻转残留。"""
+        try:
+            self.set_branch_style(kind, scope=self._branch_scope)
+        finally:
+            self._cancel_branch_menu()
+            self._sync_branch_actions()
+
+    def _set_branch_items(self, result) -> None:
+        """只更新分支图元，不触碰节点、编辑器或选择，预览与提交共用此入口。"""
+        for key in list(self.branch_items):
+            if key not in result.branches:
+                self.scene.removeItem(self.branch_items.pop(key))
+        for key, branch in result.branches.items():
+            if key not in self.branch_items:
+                self.branch_items[key] = BranchItem(branch)
+                self.scene.addItem(self.branch_items[key])
+            else:
+                self.branch_items[key].set_branch(branch)
+
+    def _show_branch_layout(self, result) -> None:
+        center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
+        self._set_branch_items(result)
+        bounds = result.bounds
+        self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
+        self.view.update_navigation_rect(center=center)
+
+    def clear_branch_preview(self) -> None:
+        """恢复最后一次提交的几何；重复调用安全，不写文档也不发送历史事件。"""
+        if self._preview_layout is not None:
+            self._preview_layout = None
+            if not self._disposed:
+                self._show_branch_layout(self.layout_result)
+
+    def _cancel_branch_menu(self, *, restore=True) -> None:
+        if restore:
+            self.clear_branch_preview()
+        else:
+            self._preview_layout = None
+        if hasattr(self, "branch_menu"):
+            self.branch_menu.close()
+
+    def _ensure_branch_editable(self) -> None:
+        self._ensure_editable()
+        if self.editor is not None:
+            raise MindMapError("请先结束文字编辑再设置分支样式")
+        if not self.layout_registry.info(self.engine.document.layout.algorithm_id).supports_branch_styles:
+            raise MindMapError("当前布局算法不支持分支连接线样式")
+
+    def preview_branch_style(self, kind: BranchStyle | str | None, *, scope="subtree") -> None:
+        """在独立候选文档上预览，只借用节点尺寸，不修改正式文档和历史。
+
+        已关闭/禁用组件可能仍收到离开或聚焦事件；这些迟到事件直接丢弃。
+        导出始终读取引擎快照，因此预览不会泄漏到 PNG、SVG、PDF 或保存文件。
+        """
+        if self._disposed or not self._actions["branch_style"].isEnabled():
+            return
+        candidate = self.engine.document
+        apply_branch_style(candidate, self._branch_selection(), kind, scope=scope)
+        result = self.layout_registry.layout(candidate, self._measurements, focus_id=self.focus_id)
+        self._preview_layout = result
+        self._show_branch_layout(result)
+
+    def set_branch_style(self, kind: BranchStyle | str | None, *, scope: str = "subtree") -> None:
+        """先试算再一次提交发出的连接线设置，失败不改变文档、历史与选择。
+
+        kind 接受枚举、语义名称或 None（恢复旧默认曲线）。默认 subtree 显式更新
+        全部后代，level 仅改所选主题；不使用跨层隐式继承。优先采用当前多选，
+        没有选择时采用聚焦主题，否则采用根主题；文字编辑、只读与不支持的布局拒绝操作。
+        """
+        self._ensure_branch_editable()
+        ids = self._branch_selection()
+        candidate = self.engine.document
+        apply_branch_style(candidate, ids, kind, scope=scope)
+        self.layout_registry.layout(candidate, self._measurements, focus_id=self.focus_id)
+        self._cancel_branch_menu()
+        self.engine.set_branch_style(ids, kind, scope=scope)
+        self._sync_branch_actions()
+
+    def center_root(self):
+        """将根节点或当前聚焦节点置于视口中央，保持用户的缩放比例。"""
+        key = self.focus_id or self.engine.root_id
+        if not self._disposed and key in self.node_items:
+            self.view.update_navigation_rect(center=self.node_items[key].sceneBoundingRect().center())
+
+    def fit_to_view(self):
+        """按可见内容适应窗口，不把导航余量计入缩放；最高放大到原来的两倍。"""
+        self.finish_edit(commit=True)
+        rect = self.layout_result.bounds
+        content = QRectF(rect.x, rect.y, rect.width, rect.height)
+        self.view.fitInView(content, Qt.AspectRatioMode.KeepAspectRatio)
+        if self.view.transform().m11() > 2:
+            self.view.resetTransform()
+            self.view.scale(2, 2)
+        # fitInView 已改变倍率，需以新倍率重新换算一屏余量。达到放大上限时
+        # 同样居中完整内容，不能改为居中根节点，否则单向布局的远端可能被裁掉。
+        self.view.update_navigation_rect(center=content.center())
+
+    def focus_node(self, node_id: str | None):
+        """临时聚焦分支，恢复时不会改动原文档的折叠状态。"""
+        self.finish_edit(commit=True)
+        if node_id is not None:
+            self.engine.get_node(node_id)
+        self.focus_id = node_id
+        self.refresh()
+        self.select_nodes([node_id or self.engine.root_id])
+        self.fit_to_view()
+
+    def begin_edit(self, node_id: str):
+        """开始原地编辑；一个编辑会话在提交时只生成一次引擎操作。"""
+        if not self.editable or node_id not in self.node_items:
+            return
+        self.finish_edit(commit=True)
+        self.select_nodes([node_id])
+        item = self.node_items[node_id]
+        item.editing = True
+        item.update()
+        self.editor = NodeEditor(self, self.engine.get_node(node_id), item.visual)
+        self.editor.setPos(item.pos() + item.visual.text_position)
+        self.scene.addItem(self.editor)
+        self.editing_changed.emit(True)
+        self.view.setFocus()
+        self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._update_actions()
+        self.view.update_cursor()
+
+    def finish_edit(self, *, commit=True):
+        """提交或取消当前编辑。删除临时编辑器后再通知引擎，避免刷新重入。"""
+        editor = self.editor
+        if editor is None:
+            return
+        editor.finishing = True
+        node_id, text = editor.node_id, editor.toPlainText()
+        self.editor = None
+        self.scene.removeItem(editor)
+        editor.deleteLater()
+        if node_id in self.node_items:
+            self.node_items[node_id].editing = False
+            self.node_items[node_id].update()
+        if commit and self.editable:
+            self.call(lambda: self.engine.update_node(node_id, text=text))
+        self._update_actions()
+        self.view.setFocus()
+        self.view.update_cursor()
+        self.editing_changed.emit(False)
+
+    def edit_selected(self):
+        """编辑当前节点的正文；具体只读与输入法处理由节点编辑器负责。"""
+        self.begin_edit(self.current_node_id())
+
+    def add_child(self):
+        self._ensure_editable()
+        key = self.engine.add_child(self.current_node_id())
+        self.begin_edit(key)
+        return key
+
+    def add_sibling(self):
+        self._ensure_editable()
+        key = self.engine.add_sibling(self.current_node_id())
+        self.begin_edit(key)
+        return key
+
+    def insert_parent(self):
+        self._ensure_editable()
+        key = self.engine.insert_parent(self.current_node_id())
+        self.begin_edit(key)
+        return key
+
+    def delete_selected(self):
+        """一次删除选择的节点子树，节点和图片资源共用一条撤销记录。"""
+        self._ensure_editable()
+        ids = self.selected_node_ids()
+        if ids:
+            self.engine.remove_nodes(ids)
+
+    def toggle_expanded(self):
+        self._ensure_editable()
+        node = self.engine.get_node(self.current_node_id())
+        self.engine.set_expanded(node.id, not node.expanded)
+
+    def copy(self):
+        """使用注入的 JSON 与 Markdown 格式导出片段，文件与剪贴板共享解析协议。"""
+        fragment = self.engine.copy_fragment(self.selected_node_ids())
+        mime = QMimeData()
+        mime.setData(
+            CLIPBOARD_MIME, encode_document(fragment, registry=self.format_registry, format_id="json")
+        )
+        mime.setText(
+            encode_document(fragment, registry=self.format_registry, format_id="markdown").decode("utf-8")
+        )
+        QApplication.clipboard().setMimeData(mime)
+
+    def cut(self):
+        self._ensure_editable()
+        if self.engine.root_id in self.selected_node_ids():
+            raise MindMapError("不能剪切根节点")
+        self.copy()
+        self.engine.remove_nodes(self.selected_node_ids())
+
+    def paste(self):
+        """通过注入格式完整解析剪贴板，失败时不改变选择、文档或撤销历史。"""
+        self._ensure_editable()
+        mime = QApplication.clipboard().mimeData()
+        if mime.hasFormat(CLIPBOARD_MIME):
+            fragment = decode_document(bytes(mime.data(CLIPBOARD_MIME)), registry=self.format_registry)
+        elif mime.hasText():
+            text = mime.text()
+            first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+            document = decode_document(
+                text.encode("utf-8"),
+                registry=self.format_registry,
+                format_id="markdown" if first.startswith(("#", "- ", "* ")) else "text",
+            )
+            fragment = MindMapDocument.new("剪贴板")
+            fragment.root.children = [document.root_id]
+            fragment.nodes.update(document.nodes)
+        else:
+            return []
+        ids = self.engine.paste_fragment(self.current_node_id(), fragment)
+        self.select_nodes(ids)
+        return ids
+
+    def edit_properties(self):
+        if self._properties_handler is not None:
+            self._properties_handler()
+            return
+        self._ensure_editable()
+        key = self.current_node_id()
+        result = node_properties(
+            self,
+            self.engine.get_node(key),
+            branch_styles=self.layout_registry.info(
+                self._document.layout.algorithm_id
+            ).supports_branch_styles,
+            branch_scope=self._branch_scope,
+            theme=self._document.theme,
+            root_id=self._document.root_id,
+            parents=self._document.parents(),
+        )
+        if result is not None:
+            candidate = self.engine.document
+            for name, value in result.patch.items():
+                setattr(candidate.nodes[key], name, deepcopy(value))
+            if result.branch_changed:
+                apply_branch_style(candidate, [key], result.branch_kind, scope=result.branch_scope)
+            self.validate_document(candidate)
+            # 属性和子树样式在同一事务中提交；只改字体时不会重设后代已有的连线。
+            with self.engine.transaction("修改节点属性"):
+                self.engine.update_node(key, **result.patch)
+                if result.branch_changed:
+                    self.engine.set_branch_style([key], result.branch_kind, scope=result.branch_scope)
+            self._branch_scope = result.branch_scope
+            self._sync_branch_actions()
+
+    def import_image(self, node_id: str, path: str | Path):
+        """导入本地图片，先验证可解码再修改文档。"""
+        self._ensure_editable()
+        data = Path(path).read_bytes()
+        _, media_type = decode_image(data)
+        self.engine.attach_image(node_id, data, media_type)
+        self.image_imported.emit(node_id)
+
+    def import_image_url(self, node_id: str, url: str) -> QNetworkReply:
+        """异步下载图片；文档切换、节点删除或进入只读后丢弃过期结果。"""
+        self._ensure_editable()
+        self.engine.get_node(node_id)
+        address = QUrl(url)
+        if address.scheme() not in ("http", "https") or not address.host():
+            raise MindMapError("图片网址必须是有效的 HTTP 或 HTTPS 地址")
+        generation = self.engine.document_generation
+        request = QNetworkRequest(address)
+        request.setTransferTimeout(30_000)
+        reply = self.network.get(request)
+        self._downloads.add(reply)
+        reply.downloadProgress.connect(
+            lambda received, total: (
+                reply.abort() if received > 25 * 1024 * 1024 or total > 25 * 1024 * 1024 else None
+            )
+        )
+
+        def finished():
+            self._downloads.discard(reply)
+            try:
+                if self._disposed or not self.editable or generation != self.engine.document_generation:
+                    return
+                if reply.error() != QNetworkReply.NetworkError.NoError:
+                    raise MindMapError(f"图片下载失败：{reply.errorString()}")
+                data = bytes(reply.readAll())
+                _, media_type = decode_image(data)
+                self.engine.attach_image(node_id, data, media_type)
+                self.image_imported.emit(node_id)
+            except (MindMapError, OSError) as exc:
+                self.error_occurred.emit(str(exc))
+            finally:
+                reply.deleteLater()
+
+        reply.finished.connect(finished)
+        return reply
+
+    def choose_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择图片", "", "图片 (*.png *.jpg *.jpeg *.webp *.gif *.svg)"
+        )
+        if path:
+            self.import_image(self.current_node_id(), path)
+
+    def choose_image_url(self):
+        url, accepted = QInputDialog.getText(self, "导入网络图片", "图片网址")
+        if accepted and url:
+            self.import_image_url(self.current_node_id(), url)
+
+    def open_hyperlink(self):
+        address = QUrl(self.engine.get_node(self.current_node_id()).hyperlink)
+        if address.scheme() not in ("http", "https", "mailto"):
+            raise MindMapError("超链接支持 http、https 和 mailto 协议")
+        if not QDesktopServices.openUrl(address):
+            raise MindMapError("无法打开超链接")
+
+    def export(self, path: str | Path, *, expand_all=False, scale=1.0):
+        """导出正式文档；允许宿主提交侧栏输入，不触碰画布原地编辑器中的临时文字。"""
+        # 导出读取正式文档；宿主可在快照建立前提交侧栏内已完成的有效输入。
+        self.edits_flush_requested.emit()
+        export_document(
+            self.engine.document,
+            path,
+            layout_registry=self.layout_registry,
+            expand_all=expand_all,
+            scale=scale,
+        )
+
+    def set_layout(self, config: LayoutConfig) -> None:
+        """在提交前试算新布局，缺失算法、非法参数或计算失败均不产生部分修改。"""
+        self._ensure_editable()
+        candidate = self.engine.document
+        candidate.layout = config
+        self.validate_document(candidate)
+        self.engine.set_layout(config)
+
+    def validate_document(self, document: MindMapDocument) -> None:
+        """替换前验证算法、图片、测量与布局结果，失败时当前引擎和画布不变。"""
+        document.validate()
+        self.layout_registry.validate_config(document.layout)
+        _, sizes = self.factory.measure(document)
+        self.layout_registry.layout(document, sizes)
+
+    def context_menu(self, global_position):
+        menu = QMenu(self)
+        groups = [
+            ("add_child", "add_sibling", "insert_parent", "edit", "properties", "delete"),
+            ("copy", "cut", "paste", "undo", "redo"),
+            ("move_up", "move_down", "fold", "expand_all", "collapse_all"),
+            ("image", "image_url", "remove_image", "hyperlink"),
+            ("focus", "unfocus", "fit", "center"),
+        ]
+        for group in groups:
+            if menu.actions():
+                menu.addSeparator()
+            for key in group:
+                menu.addAction(self._actions[key])
+        if self._custom_actions:
+            menu.addSeparator()
+            for key in self._custom_actions:
+                menu.addAction(self._actions[key])
+        menu.exec(global_position)

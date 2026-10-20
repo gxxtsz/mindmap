@@ -1,0 +1,16 @@
+[project]
+name = "mindmap-qt"
+version = "0.1.0"
+description = "可嵌入 PySide6 窗口的原生思维导图组件"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["mindmap-engine>=0.1.0,<0.2", "PySide6>=6.9,<7"]
+license = "MIT"
+license-files = ["LICENSE"]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mindmap_qt"]
