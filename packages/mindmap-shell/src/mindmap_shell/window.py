@@ -3,8 +3,8 @@
 import sys
 
 from mindmap_docking import DockHost, DockManager
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, QTimer, Slot
-from PySide6.QtGui import QCursor, QPainter, QPen
+from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Slot
+from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -37,6 +37,61 @@ class _WindowOutline(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         # 画笔中心内缩半个逻辑像素，保证四边等粗且不挤占内部控件的空间。
         painter.drawRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
+
+
+class _WindowControlButton(QToolButton):
+    """窗口控制按钮：独立设置留白、主题前景色及关闭操作的悬停反馈。"""
+
+    def __init__(self, title_bar, role):
+        super().__init__(title_bar)
+        self.title_bar = title_bar
+        self.role = role
+        self._hovered = False
+        # 通用按钮的水平内边距会压缩图标；窗口按钮改用固定命中区域和独立样式。
+        self.setFixedSize(32, 32)
+        self.setIconSize(QSize(20, 20))
+
+    def refresh_theme(self):
+        """同步深浅主题及最大化状态；切换主题时保留当前悬停反馈。"""
+        theme = self.title_bar.window.manager.theme
+        background = theme.color("main-window-titlebar-bg")
+        hover = background.lighter(165) if theme.dark else background.darker(110)
+        pressed = hover.lighter(115) if theme.dark else hover.darker(110)
+        if self.role == "close":
+            hover, pressed = QColor("#C42B1C"), QColor("#A82318")
+        self.setStyleSheet(f"""
+            QToolButton {{ background:transparent; border:1px solid transparent;
+                border-radius:4px; padding:0; }}
+            QToolButton:hover {{ background:{hover.name()}; }}
+            QToolButton:pressed {{ background:{pressed.name()}; }}
+            QToolButton:focus {{ border-color:{theme.css('control-brand-border')}; }}
+        """)
+        if self.role == "maximize":
+            label = "还原窗口" if self.title_bar.window.isMaximized() else "最大化窗口"
+            self.setToolTip(label)
+            self.setAccessibleName(label)
+        self._refresh_icon()
+
+    def _refresh_icon(self):
+        """复用主题图标供应器，关闭按钮悬停时使用白色，正常状态使用正文色。"""
+        theme = self.title_bar.window.manager.theme
+        name = self.role
+        if name == "minimize":
+            name = "minus"
+        elif name == "maximize" and self.title_bar.window.isMaximized():
+            name = "restore"
+        color = "#FFFFFF" if self.role == "close" and self._hovered else theme.color("text-default").name()
+        self.setIcon(theme.icons.get_icon(name, color=color, size=self.iconSize().width()))
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._hovered = True
+        self._refresh_icon()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._hovered = False
+        self._refresh_icon()
 
 
 class _TitleBar(QWidget):
@@ -79,9 +134,14 @@ class _TitleBar(QWidget):
         self.options.setAccessibleName("外观与布局")
         self.options.clicked.connect(lambda: window.appearance_menu().exec(self.options.mapToGlobal(QPoint(0, self.options.height()))))
         self.box.addWidget(self.options)
-        self.minimize = QToolButton(self)
-        self.maximize = QToolButton(self)
-        self.close = QToolButton(self)
+        # 顶部纯图标入口统一为正方形，清除通用水平留白，避免按钮变窄后再次挤压图标。
+        for button in (self.menu, self.theme, self.options):
+            button.setFixedSize(32, 32)
+            button.setIconSize(QSize(20, 20))
+            button.setStyleSheet("QToolButton { padding:0; }")
+        self.minimize = _WindowControlButton(self, "minimize")
+        self.maximize = _WindowControlButton(self, "maximize")
+        self.close = _WindowControlButton(self, "close")
         for button, label, callback in [
             (self.minimize, "最小化", window.showMinimized),
             (self.maximize, "最大化或还原", window.toggle_maximize),
@@ -90,7 +150,6 @@ class _TitleBar(QWidget):
             button.setToolTip(label)
             button.setAccessibleName(label)
             button.clicked.connect(callback)
-            button.setFixedSize(32, 30)
             button.setVisible(not window.spec.native_title_bar)
             self.box.addWidget(button)
 
@@ -111,10 +170,10 @@ class _TitleBar(QWidget):
         self.setFixedHeight(42 if theme.compact else 52)
         self.logo.setPixmap(theme.icon(self.window.spec.icon, 24).pixmap(26, 26))
         for button, name in [(self.menu, "menu"), (self.theme, "sun" if theme.dark else "moon"),
-                             (self.options, "settings"), (self.minimize, "minus"),
-                             (self.maximize, "restore" if self.window.isMaximized() else "maximize"),
-                             (self.close, "close")]:
+                             (self.options, "settings")]:
             button.setIcon(theme.icon(name))
+        for button in (self.minimize, self.maximize, self.close):
+            button.refresh_theme()
         self.subtitle.setStyleSheet(f"color:{theme.css('text-muted')};")
 
     def show_menu(self):
