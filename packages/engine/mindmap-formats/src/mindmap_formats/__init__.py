@@ -6,6 +6,7 @@ from .json_codec import JsonCodec, dumps, loads
 from .limits import MAX_ARCHIVE_BYTES
 from .mindmap import MindmapCodec
 from .outline import export_outline, import_outline
+from .processing import can_process_snapshot, supports_process_save
 from .registry import OutlineCodec, create_default_format_registry
 from .schema import SCHEMA_VERSION, from_dict, to_dict
 
@@ -15,6 +16,7 @@ __all__ = [
     "JsonCodec",
     "MindmapCodec",
     "OutlineCodec",
+    "can_process_snapshot",
     "create_default_format_registry",
     "decode_document",
     "dumps",
@@ -26,5 +28,6 @@ __all__ = [
     "load_document",
     "loads",
     "save_document",
+    "supports_process_save",
     "to_dict",
 ]

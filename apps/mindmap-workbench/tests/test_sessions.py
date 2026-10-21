@@ -127,6 +127,27 @@ def test_background_save_uses_stable_version_without_marking_later_edit_saved(
         session._finish_background_save(wait=True)
 
 
+@pytest.mark.parametrize("changed", ["registry", "codec"])
+def test_background_request_preserves_custom_format_dispatch(empty_window, tmp_path, monkeypatch, changed):
+    """覆写注册表或编码器时使用原同步入口，不能在后台重建默认编码器绕过扩展。"""
+    session = create_large_session(empty_window, tmp_path / "扩展同步保存.mindmap")
+    registry = session.canvas.format_registry
+    provider = registry if changed == "registry" else registry.get("mindmap").exporter
+    original, calls = provider.write, []
+
+    def track(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(provider, "write", track)
+    monkeypatch.setattr("mindmap_workbench.sessions._save_pool", lambda: pytest.fail("扩展保存不能建立后台进程"))
+    session.engine.update_node(session.engine.root_id, text="保留自定义保存入口")
+    session.timer.stop()
+    assert session.autosave(background=True)
+    assert calls and session._background_save is None and not session.engine.is_dirty
+    assert load_document(session.files.path).root.text == "保留自定义保存入口"
+
+
 def test_background_failure_keeps_old_file_and_explicit_retry_succeeds(
     empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
 ):

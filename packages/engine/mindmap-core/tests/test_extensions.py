@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
+from types import MappingProxyType
 
 import pytest
 from mindmap_core import (
@@ -83,6 +84,26 @@ def test_invalid_geometry_rejected_before_rendering():
     document.layout = SampleLayout.info.default_config
     with pytest.raises(MindMapError, match="矩形"):
         registry.layout(document)
+
+
+def test_layout_registry_accepts_read_only_result_mappings():
+    """扩展可返回只读几何映射，核心校验和消费者复制均不依赖具体字典实现。"""
+    class ReadOnlyLayout(SampleLayout):
+        def layout(self, document, measurements=None, **kwargs):
+            result = super().layout(document, measurements, **kwargs)
+            return LayoutResult(nodes=MappingProxyType(dict(result.nodes)),
+                                branches=MappingProxyType(dict(result.branches)), bounds=result.bounds)
+
+    registry = LayoutRegistry()
+    registry.register(ReadOnlyLayout())
+    document = MindMapDocument.new()
+    document.layout = registry.info("sample").default_config
+    result = registry.layout(document)
+    copied = dict(result.nodes)
+    copied.clear()
+    assert document.root_id in result.nodes
+    with pytest.raises(TypeError):
+        result.nodes[document.root_id] = result.nodes[document.root_id]
 
 
 def test_one_way_formats_resolution_and_failures():

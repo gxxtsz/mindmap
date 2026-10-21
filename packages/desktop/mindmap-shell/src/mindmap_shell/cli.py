@@ -63,6 +63,10 @@ def run_desktop(builder: Callable[[argparse.Namespace], WorkbenchWindow], argv=N
     finally:
         window.manager.shutdown()
         window.close()
+        # 离屏平台没有外部剪贴板服务；必须在 QApplication 和 Python 绑定仍有效时
+        # 释放自定义 MIME，避免退出时的原生访问冲突。原生平台保留系统剪贴板内容。
+        if app.platformName() == "offscreen":
+            app.clipboard().clear()
     if failed:
         print(failed[0], file=sys.stderr)
         return 1

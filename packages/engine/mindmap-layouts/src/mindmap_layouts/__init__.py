@@ -3,6 +3,7 @@
 from mindmap_core import LayoutRegistry
 
 from .connectors import route_branch, route_branches
+from .services import create_incremental_layout, supports_incremental_layout
 from .tree import TreeLayout
 
 
@@ -14,4 +15,5 @@ def create_default_layout_registry() -> LayoutRegistry:
     return registry
 
 
-__all__ = ["TreeLayout", "create_default_layout_registry", "route_branch", "route_branches"]
+__all__ = ["TreeLayout", "create_default_layout_registry", "create_incremental_layout",
+           "supports_incremental_layout", "route_branch", "route_branches"]

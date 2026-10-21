@@ -303,7 +303,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         session = self.active_session
         if not session:
             return False
-        if session.panels.properties.composing or (session.canvas.editor and session.canvas.editor.composing):
+        if session.is_composing:
             session._failed("请先完成输入法候选，再保存导图")
             return False
         # 另存为取消时仍沿用原路径的防抖保存；成功或写入失败由文件状态通知
@@ -388,7 +388,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def hideEvent(self, event):
         if hasattr(self, "sessions"):
             for session in self.sessions.values():
-                session.panels.settings.close_popups()
+                session.panels.close_popups()
         super().hideEvent(event)
 
     def closeEvent(self, event):

@@ -37,6 +37,13 @@ result = registry.layout(document)
 正式画布只为未被覆写的内置树布局启用增量服务，第三方算法保留隔离与完整校验。
 首次加载、全局配置变化及完整输出仍需处理整图。
 
+宿主通过公开的 `supports_incremental_layout(registry, algorithm_id)` 查询优化能力，
+再调用 `create_incremental_layout(registry, document, measurements)` 创建独立增量服务。
+文档须为已校验的引擎快照，测量表须包含全部节点尺寸；不支持的实现返回 `None`，
+调用方继续使用注入的 `registry.layout()`。注册表子类、算法子类和被替换的方法入口
+均保留完整调度，因此显示、编辑校验与导出会一致地经过宿主扩展。Qt 层不自行检查
+具体类型或实例私有状态；聚焦模式继续使用完整布局。
+
 `query_with_sibling_neighbors(viewport, skipped_ids=())` 查询世界坐标视口及相邻同级节点，
 四方向的坐标变换与索引查询由服务封装。skipped_ids 只影响寻找邻居，不过滤视口命中节点；
 仅要求成员判断协议，可使用惰性移动子树集合，不会为了查询展开整个集合。

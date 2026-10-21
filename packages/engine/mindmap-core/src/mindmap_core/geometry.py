@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -90,8 +91,14 @@ class BranchPath:
 
 @dataclass
 class LayoutResult:
-    """可见节点、普通父子分支及内容边界；不包含视图平移所需的操作余量。"""
+    """可见节点、普通父子分支及内容边界；不包含视图平移所需的操作余量。
 
-    nodes: dict[str, Rect] = field(default_factory=dict)
-    branches: dict[str, Curve | BranchPath] = field(default_factory=dict)
+    nodes 和 branches 的公共契约为只读映射，允许完整字典或按需计算的增量映射。
+    消费者只能查询、遍历，不能假定存在 dict.copy() 或条目赋值能力；需要独立、
+    可修改的完整结果时使用 dict(result.nodes) 和 dict(result.branches)，这会显式
+    枚举全部几何。算法内部仍可使用字典构建结果，具体存储方式不属于跨包契约。
+    """
+
+    nodes: Mapping[str, Rect] = field(default_factory=dict)
+    branches: Mapping[str, Curve | BranchPath] = field(default_factory=dict)
     bounds: Rect = Rect(0, 0, 1, 1)

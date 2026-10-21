@@ -25,7 +25,15 @@ from PySide6.QtWidgets import (
 from .branch_styles import populate_branch_combo
 from .icons import toolbar_icon
 from .property_controls import MIXED, BranchPicker, ColorButton, FlowLayout, FontPicker, ToggleButton
-from .ui_style import ComboBox, apply_ui_palette, control_styles, menu_styles, scrollbar_styles, ui_colors
+from .ui_style import (
+    ComboBox,
+    UiColors,
+    apply_ui_palette,
+    control_styles,
+    menu_styles,
+    scrollbar_styles,
+    ui_colors,
+)
 
 STYLE_DEFAULTS = {
     "font_family": "",
@@ -152,6 +160,7 @@ class NodePropertiesForm(QWidget):
         self._loading = False
         self._editable = False
         self._composing = set()
+        self._ui_colors_override = None
         self._theme_signature = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -452,6 +461,43 @@ class NodePropertiesForm(QWidget):
         """输入法候选未确认时，控制器不能提交当前输入会话中的缓存值。"""
         return bool(self._composing)
 
+    def close_popups(self) -> None:
+        """关闭表单拥有的分支、字体及补全弹层，供切换会话或销毁前调用。
+
+        具体字段与弹层归本表单管理；宿主无需依赖字段键名、控件类型或补全器。
+        可重复调用，不修改字段值、不强制确认输入法候选，提交仍沿用原信号边界。
+        """
+        # 收束弹层产生的同步失焦不应被当成一次新的输入提交；正常输入和已有
+        # 防抖草稿继续由控制器管理，永久释放时控制器会先取消这些待提交状态。
+        with QSignalBlocker(self):
+            self.fields["branch.kind"].hidePopup()
+            font = self.fields["style.font_family"]
+            font.hidePopup()
+            font.completer().popup().hide()
+
+    def set_branch_scope(self, scope: str) -> None:
+        """只同步分支范围展示，不发送编辑信号，也不干扰其他字段的待提交输入。
+
+        scope 仅接受 subtree 或 level；非法值抛出 ValueError 且保留原显示。
+        控制器通过本接口同步宿主状态，无需读写表单内部的加载标记。
+        """
+        index = self.scope.findData(scope)
+        if index < 0:
+            raise ValueError("分支范围必须为 subtree 或 level")
+        with QSignalBlocker(self.scope):
+            self.scope.setCurrentIndex(index)
+
+    def set_ui_colors(self, colors: UiColors | None) -> None:
+        """设置独立界面色板；None 恢复最近一次 set_theme() 传入的主题。
+
+        非 UiColors 参数抛出 TypeError。更新只调整外观，保留字段、输入法状态和
+        待提交草稿，不修改节点或发出编辑信号；色板的存储细节由表单自己维护。
+        """
+        if colors is not None and not isinstance(colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
+        self._ui_colors_override = colors
+        self.set_theme(self._document_theme)
+
     def set_error(self, key, message):
         """只标记失败字段；文档和历史的回滚由提交控制器负责。"""
         field, label = self.fields[key], self.errors[key]
@@ -611,7 +657,8 @@ class NodePropertiesForm(QWidget):
 
     def set_theme(self, theme):
         """主题更新只调整资源和配色，不能改动当前字段值或触发编辑提交。"""
-        theme = getattr(self, "_ui_colors_override", None) or theme
+        self._document_theme = theme
+        theme = self._ui_colors_override or theme
         colors = ui_colors(theme)
         surface = self._surface_color(theme)
         signature = (colors, surface)

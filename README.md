@@ -114,6 +114,9 @@ tests/
 调用方直接导入能力提供者：模型及编辑来自 `mindmap_core`，默认布局来自 `mindmap_layouts`，文件读写来自 `mindmap_formats`。
 每个成员的单元与组件测试位于自身 `tests/`；跨包组合、依赖边界和发行回归位于 `tests/integration/`。
 根 pytest 按成员目录收集，新增测试无需逐项修改根配置。
+依赖边界检查递归扫描运行子目录，同时拒绝跨包私有模块和私有符号导入；独立项目
+模板按其自身元数据验收。增量布局、后台编码的能力判断分别由布局包、格式包提供，
+工作台通过组件公开接口管理输入法状态、弹层和界面色板。
 
 ## 检查与构建
 
@@ -130,6 +133,8 @@ uv run --locked --all-packages python scripts/verify_workbench.py
 安装报告与固定版本约束写入 `.artifacts/`，视觉验收结果写入 `.artifacts/workbench-visual/`。
 视觉验收检查 100%、150%、200% 三档缩放；Windows 默认使用原生 `windows` 平台，
 其他系统默认使用 `offscreen`。Windows 也可传入 `--platform offscreen` 执行离屏检查。
+离屏 Qt 测试在每个用例结束时释放剪贴板载荷，避免 `QMimeData` 晚于 Qt 应用销毁。
+退出回归使用真实子进程检查返回码，同时覆盖 pytest 和正式桌面启动器的清理流程。
 
 独立画布与文件接口见[画布说明](packages/qt/mindmap-qt-canvas/README.md)，
 业务面板与宿主协议见[面板说明](packages/qt/mindmap-qt-panels/README.md)。

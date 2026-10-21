@@ -103,7 +103,7 @@ class TreeLayout:
         cached = getattr(self, "_last_layout", None)
         if cached is not None and request == cached[0]:
             result = cached[1]
-            return LayoutResult(nodes=result.nodes.copy(), branches=result.branches.copy(), bounds=result.bounds)
+            return LayoutResult(nodes=dict(result.nodes), branches=dict(result.branches), bounds=result.bounds)
         heights = {}
         for node_id in reversed(visible):
             branch_height = sum(heights[child] for child in children[node_id])
@@ -153,6 +153,6 @@ class TreeLayout:
         result.bounds = bounds.padded(40)
         # 键与值作为一个缓存项发布，避免并发的只读布局调用观察到不同请求的配对。
         self._last_layout = (
-            request, LayoutResult(nodes=result.nodes.copy(), branches=result.branches.copy(), bounds=result.bounds)
+            request, LayoutResult(nodes=dict(result.nodes), branches=dict(result.branches), bounds=result.bounds)
         )
         return result

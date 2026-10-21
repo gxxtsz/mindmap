@@ -22,8 +22,11 @@ from mindmap_core import (
     get_branch_style,
 )
 from mindmap_formats import create_default_format_registry, decode_document, encode_document
-from mindmap_layouts import TreeLayout, create_default_layout_registry
-from mindmap_layouts.incremental_result import IncrementalTreeLayout
+from mindmap_layouts import (
+    create_default_layout_registry,
+    create_incremental_layout,
+    supports_incremental_layout,
+)
 from mindmap_qt_render.exporting import export_document
 from mindmap_qt_render.rendering import BranchItem, VisualFactory, decode_image
 from mindmap_qt_ui.branch_styles import BranchStyleMenu, branch_style_icon
@@ -211,6 +214,15 @@ class MindMapWidget(QWidget):
     def is_editing(self) -> bool:
         """返回是否有原地文字草稿，宿主无需取得或操作内部 NodeEditor。"""
         return self.editor is not None
+
+    @property
+    def is_composing(self) -> bool:
+        """只读查询原地编辑器是否还有输入法候选；没有编辑器时返回 False。
+
+        宿主在保存、另存或关闭前查询，不需要持有内部 NodeEditor。查询不提交
+        候选、不结束草稿、不改变焦点；候选完成后再调用正常的输入提交接口。
+        """
+        return self.editor is not None and self.editor.composing
 
     @property
     def branch_scope(self) -> str:
@@ -695,8 +707,7 @@ class MindMapWidget(QWidget):
             key = (id(self.layout_registry.get(document.layout.algorithm_id)),
                    document.root_id, repr(document.layout))
             if self._incremental_layout is None or key != self._incremental_key or dirty is None:
-                self.layout_registry.validate_config(document.layout)
-                self._incremental_layout = IncrementalTreeLayout(document, sizes)
+                self._incremental_layout = create_incremental_layout(self.layout_registry, document, sizes)
                 self._incremental_key = key
             else:
                 self._incremental_layout.update(document, sizes, dirty)
@@ -728,10 +739,9 @@ class MindMapWidget(QWidget):
         self._schedule_view_reset()
 
     def _can_incremental(self):
-        """仅启用受控内置树算法；自定义算法、聚焦及宿主替换的布局入口继续完整校验。"""
-        algorithm = self.layout_registry.get(self._document.layout.algorithm_id)
-        return (self.focus_id is None and type(algorithm) is TreeLayout
-                and "layout" not in self.layout_registry.__dict__ and "layout" not in algorithm.__dict__)
+        """由布局提供者判断优化能力；聚焦仍沿用完整布局，不绕过宿主注入入口。"""
+        return (self.focus_id is None
+                and supports_incremental_layout(self.layout_registry, self._document.layout.algorithm_id))
 
     def _ensure_node_item(self, key):
         """为程序选择或编辑按需实例化一个可见节点，不改变文档折叠或视口位置。"""

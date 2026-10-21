@@ -11,6 +11,7 @@ from mindmap_qt_ui.property_controls import MIXED, BranchPicker
 from mindmap_qt_ui.settings_menu import SettingsMenu
 from mindmap_qt_ui.ui_style import (
     ComboBox,
+    UiColors,
     apply_ui_palette,
     control_styles,
     menu_styles,
@@ -47,6 +48,7 @@ class GlobalSettingsPanel(QWidget):
         self._loading = False
         self._disposed = False
         self._theme_signature = None
+        self._ui_colors_override = None
         self._menus = {}
         self.sections = {}
         self.setObjectName("global_settings_panel")
@@ -193,7 +195,7 @@ class GlobalSettingsPanel(QWidget):
 
     def _sync_menu(self, menu, record):
         """只同步动作展示，避免 setChecked 反向提交；禁用原因与表单保持一致。"""
-        colors = ui_colors(getattr(self, "_ui_colors_override", None) or self.canvas.document_view.theme)
+        colors = ui_colors(self._ui_colors_override or self.canvas.document_view.theme)
         menu.set_colors(colors)
         for key, actions in record["actions"].items():
             field = getattr(self, key)
@@ -380,9 +382,19 @@ class GlobalSettingsPanel(QWidget):
         for menu, record in self._menus.items():
             self._sync_menu(menu, record)
 
+    def set_ui_colors(self, colors: UiColors | None) -> None:
+        """设置独立界面色板；None 恢复宿主文档主题，不提交任何设置或历史。
+
+        非 UiColors 参数抛出 TypeError；菜单及兼容表单共用这一个公开外观入口。
+        """
+        if colors is not None and not isinstance(colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
+        self._ui_colors_override = colors
+        self.set_theme(self.canvas.document_view.theme)
+
     def set_theme(self, theme):
         """只更新本面板及弹层配色，保留文档中的自定义主题及宿主应用的全局样式。"""
-        theme = getattr(self, "_ui_colors_override", None) or theme
+        theme = self._ui_colors_override or theme
         colors = ui_colors(theme)
         surface = sidebar_surface(theme)
         signature = (colors, surface)

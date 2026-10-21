@@ -39,21 +39,41 @@ class MindMapPanels(QObject):
         if not self._disposed:
             self.properties.flush()
 
+    @property
+    def is_composing(self) -> bool:
+        """返回面板内是否存在尚未确认的输入法候选；已释放的组合返回 False。
+
+        宿主在保存或关闭前查询，不需要了解属性表单的具体字段和输入控件。
+        查询不会提交草稿、关闭弹层或改变焦点，画布输入状态由画布另行提供。
+        """
+        return not self._disposed and self.properties.composing
+
+    def close_popups(self) -> None:
+        """统一关闭本组合拥有的临时弹层；不强制提交候选，也不修改导图。
+
+        会话切换及永久释放前调用，具体菜单、字段和补全器由各面板自行管理。
+        可重复调用，已释放的组合不再访问控件。
+        """
+        if not self._disposed:
+            for panel in (self.outline, self.properties, self.settings):
+                panel.close_popups()
+
     def set_ui_colors(self, colors: UiColors | None) -> None:
         """指定独立界面色板；None 恢复随文档主题，更新不触发文档编辑。"""
         if colors is not None and not isinstance(colors, UiColors):
             raise TypeError("界面色板必须为 UiColors 或 None")
         for panel in (self.outline, self.properties, self.settings):
-            panel._ui_colors_override = colors
-            panel.set_theme(colors or self.canvas.document_view.theme)
+            panel.set_ui_colors(colors)
 
     def dispose(self):
         """幂等停止提交和弹层；关闭停靠面板时不应调用，退出宿主时才释放。"""
         if self._disposed:
             return
         self._disposed = True
+        # 属性控制器先取消草稿，再关闭自己的弹层，避免销毁时的失焦提交旧输入。
         self.properties.dispose()
         self.settings.dispose()
+        self.outline.close_popups()
         self.outline.nodes_selected.disconnect(self._outline_selected)
         self.canvas.edits_flush_requested.disconnect(self.flush_pending_edits)
 

@@ -62,7 +62,7 @@ class NodePropertiesPanel(NodePropertiesForm):
         self._disposed = True
         self.discard_pending()
         # 弹层属于字段，但可能是独立顶层窗口；宿主释放工作区时立即结束其交互。
-        self.fields["branch.kind"].hidePopup()
+        self.close_popups()
 
     def _mode_changed(self, value):
         self.discard_pending()
@@ -116,11 +116,7 @@ class NodePropertiesPanel(NodePropertiesForm):
         self.canvas.set_branch_scope(scope)
 
     def _sync_scope(self, scope):
-        loading, self._loading = self._loading, True
-        try:
-            self.scope.setCurrentIndex(self.scope.findData(scope))
-        finally:
-            self._loading = loading
+        self.set_branch_scope(scope)
         self.set_branch_kinds(self.canvas.branch_kinds(self._ids, scope))
 
     def _edited(self, key, value, immediate):

@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 import pytest
-from mindmap_core import LayoutConfig, LayoutInfo, MindMapEngine, MindMapError
+from mindmap_core import LayoutConfig, LayoutInfo, LayoutRegistry, MindMapEngine, MindMapError
 from mindmap_formats import JsonCodec, create_default_format_registry
 from mindmap_layouts import TreeLayout, create_default_layout_registry
 from mindmap_qt_canvas import MindMapWidget
@@ -33,6 +33,35 @@ class TrackingLayout(TreeLayout):
         copy = deepcopy(document)
         copy.layout = LayoutConfig()
         return TreeLayout().layout(copy, measurements, expand_all=expand_all, focus_id=focus_id)
+
+
+def test_registry_subclass_dispatch_is_used_for_display_edit_validation_and_export(qtbot, tmp_path):
+    """同一个注入入口覆盖画布显示、编辑、候选校验和导出，不能被增量优化跳过。"""
+    class TrackingRegistry(LayoutRegistry):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def layout(self, *args, **kwargs):
+            self.calls += 1
+            return super().layout(*args, **kwargs)
+
+    registry = TrackingRegistry()
+    registry.register(TreeLayout(), copy_inputs=False)
+    widget = MindMapWidget(layout_registry=registry)
+    qtbot.addWidget(widget)
+    try:
+        assert registry.calls > 0
+        previous = registry.calls
+        widget.engine.add_child(widget.engine.root_id, "必须经过注入入口")
+        assert registry.calls > previous
+        previous = registry.calls
+        widget.validate_document(widget.engine.document)
+        assert registry.calls == previous + 1
+        widget.export(tmp_path / "注册表覆写.svg")
+        assert registry.calls == previous + 2
+    finally:
+        widget.dispose()
 
 
 def test_widget_export_shares_registry_and_preserves_state(qtbot, tmp_path):

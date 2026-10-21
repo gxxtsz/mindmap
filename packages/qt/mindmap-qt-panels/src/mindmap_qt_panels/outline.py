@@ -6,7 +6,7 @@ from copy import copy
 from math import ceil, floor
 
 from mindmap_qt_ui.icons import toolbar_icon
-from mindmap_qt_ui.ui_style import apply_ui_palette, menu_styles, outline_colors, scrollbar_styles
+from mindmap_qt_ui.ui_style import UiColors, apply_ui_palette, menu_styles, outline_colors, scrollbar_styles
 from PySide6.QtCore import (
     QAbstractItemModel,
     QEvent,
@@ -185,6 +185,7 @@ class OutlinePanel(QTreeView):
         self.canvas = canvas
         self._syncing = False
         self._theme_signature = None
+        self._ui_colors_override = None
         self._branch_hover_position = None
         self._display_depth = 2
         # 菜单和标题栏共用动作；动作由面板持有，宿主只创建按钮，不接管生命周期。
@@ -377,13 +378,27 @@ class OutlinePanel(QTreeView):
         self.set_theme(self.canvas.document_view.theme)
         self.sync_selection(self.canvas.selected_node_ids())
 
+    def close_popups(self) -> None:
+        """关闭本大纲拥有的层级菜单；可重复调用，不改变展开状态、选择或文档。"""
+        self.depth_menu.close()
+
+    def set_ui_colors(self, colors: UiColors | None) -> None:
+        """设置独立界面色板；None 恢复当前宿主文档主题，不修改模型或选择。
+
+        非 UiColors 参数抛出 TypeError；宿主通过此接口刷新外观，无需写入私有字段。
+        """
+        if colors is not None and not isinstance(colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
+        self._ui_colors_override = colors
+        self.set_theme(self.canvas.document_view.theme)
+
     def set_theme(self, theme):
         """同步整张大纲卡片共用的色板，不修改宿主、画布主题或树模型。
 
         标题、视口和底部圆角留白使用同一底色；文字和柔和蓝灰选中态跟随
         工作区主题，三角及叶节点使用次要文字色，保留原有层级几何和交互。
         """
-        theme = getattr(self, "_ui_colors_override", None) or theme
+        theme = self._ui_colors_override or theme
         colors = outline_colors(theme)
         if self._theme_signature == colors:
             return

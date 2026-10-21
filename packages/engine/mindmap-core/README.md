@@ -39,6 +39,11 @@ engine.undo()
 读取旧文档时不回填该配置；没有分支配置的节点继续使用原始曲线。
 核心提供不可变的 `PathCommand`、`BranchPath`，布局结果同时兼容原有四点 `Curve`。
 
+`LayoutResult.nodes` 和 `LayoutResult.branches` 的公共类型为只读 `Mapping`，
+同时兼容完整布局字典和增量布局的惰性映射。调用方只查询、遍历，不依赖 `.copy()`
+或条目赋值；需要独立可修改的全量结果时使用 `dict(result.nodes)` 和
+`dict(result.branches)`，转换会显式枚举全部几何。
+
 ## 受控试算与后台保存
 
 `preview_operation()` 为同步上下文接口，返回借用的候选文档和只读变化节点集合。

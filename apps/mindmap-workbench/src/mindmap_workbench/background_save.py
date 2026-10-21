@@ -1,25 +1,8 @@
 """后台保存进程入口，不导入 Qt、不创建窗口，也不访问活跃编辑引擎。"""
 
 import os
-from dataclasses import fields
 
-from mindmap_core import Asset, LayoutConfig, MindMapDocument, Node, Theme
 from mindmap_formats import save_document
-
-_NODE_FIELDS = frozenset(item.name for item in fields(Node))
-
-
-def can_process_snapshot(document):
-    """仅把标准数据模型交给进程，扩展实体及额外挂载属性保留原同步保存契约。
-
-    原生格式不保存节点动态属性，直接 pickle 扩展对象却可能触及 GUI 对象或
-    本地类。这里明确拒绝这类后台载荷，不改变公共文档或丢弃扩展的数据。
-    """
-    return (type(document) is MindMapDocument and type(document.layout) is LayoutConfig
-            and type(document.theme) is Theme
-            and all(type(node) is Node and node.__dict__.keys() == _NODE_FIELDS
-                    for node in document.nodes.values())
-            and all(type(asset) is Asset for asset in document.assets.values()))
 
 
 def save_snapshot(document, path):

@@ -40,7 +40,7 @@ def test_public_popup_close_invalidates_late_action(panel_host_factory):
                    if action.menu() and action.menu().objectName() == "settings_direction")
         stale = next(action for action in sub.actions() if action.data() == "down")
         before = host.engine.document
-        panels.settings.close_popups()
+        panels.close_popups()
         stale.trigger()
         assert not menu.isVisible() and host.engine.document == before
     finally:

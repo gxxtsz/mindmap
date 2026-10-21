@@ -10,15 +10,15 @@ from multiprocessing import get_context
 from pathlib import Path
 from uuid import uuid4
 
-from mindmap_core import FormatRegistry, MindMapEngine, MindMapError
+from mindmap_core import MindMapEngine, MindMapError
 from mindmap_docking import DocumentSpec
-from mindmap_formats import MindmapCodec, save_document
+from mindmap_formats import can_process_snapshot, save_document, supports_process_save
 from mindmap_qt_canvas import MindMapFileController, MindMapWidget
 from mindmap_qt_panels import MindMapPanels
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from .background_save import can_process_snapshot, save_snapshot
+from .background_save import save_snapshot
 
 # 延迟启动一个独立进程，避免编码、深拷贝及垃圾回收持有 GUI 的解释器锁。
 _SAVE_POOL = None
@@ -130,11 +130,9 @@ class MindMapSession(QObject):
         if (background and self.engine.node_count > BACKGROUND_SAVE_NODE_LIMIT
                 and self.engine.is_dirty and self.files.writer == self._write):
             try:
-                entry = self.files.require_native_save_format()
+                self.files.require_native_save_format()
                 registry = self.canvas.format_registry
-                if (type(entry.exporter) is MindmapCodec and "write" not in entry.exporter.__dict__
-                        and type(registry) is FormatRegistry
-                        and not {"get", "resolve", "write"}.intersection(registry.__dict__)):
+                if supports_process_save(registry):
                     if self._background_save is not None:
                         return True
                     if self.files.path is None:
@@ -196,7 +194,7 @@ class MindMapSession(QObject):
 
     def flush(self):
         """显式保存和关闭先完成已确认输入；输入法仍在合成时保留页面等待用户完成。"""
-        if self.panels.properties.composing or (self.canvas.editor is not None and self.canvas.editor.composing):
+        if self.is_composing:
             self._failed("请先完成输入法候选，再保存或关闭导图")
             return False
         self.commit_input()
@@ -205,6 +203,14 @@ class MindMapSession(QObject):
         if saved:
             self._saved()
         return saved
+
+    @property
+    def is_composing(self) -> bool:
+        """通过组件公开接口汇总输入法状态；查询不访问具体编辑器或表单字段。
+
+        保存和关闭共用该边界，任一组件仍有候选时等待用户确认，不强制提交草稿。
+        """
+        return self.canvas.is_composing or self.panels.is_composing
 
     def commit_input(self):
         """提交本会话的有效输入并保留调用前焦点，批量保存不得激活后台分屏。
@@ -228,12 +234,7 @@ class MindMapSession(QObject):
     def close_popups(self):
         """离开会话时关闭旧菜单、候选预览和字段下拉框，拒绝迟到的选择回调。"""
         self.canvas.cancel_transient_ui()
-        self.panels.settings.close_popups()
-        self.panels.outline.depth_menu.close()
-        fields = self.panels.properties.fields
-        fields["branch.kind"].hidePopup()
-        fields["style.font_family"].hidePopup()
-        fields["style.font_family"].completer().popup().hide()
+        self.panels.close_popups()
 
     def dispose(self):
         """停止计时器和订阅并延迟销毁组件；关闭标签和退出窗口均不缓存旧画布。
