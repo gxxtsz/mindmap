@@ -204,10 +204,12 @@ def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
         assert set(restored.manager.hosts) == {"main"}
         assert restored.manager.states["properties"].visible
         assert restored.active_session is None
-        assert restored._properties_stack.isVisible()
+        assert not restored._properties_stack.isVisible()
+        assert restored.host.right.isHidden()
         restored.manager.restore_layout(snapshot)
         assert "settings" not in restored.manager.states
         assert restored.manager.states["properties"].visible
+        assert restored.host.right.isHidden()
         restored.manager.save_session()
         assert set(restored.manager.layout_store.load()) == {"schema_version", "session"}
     finally:

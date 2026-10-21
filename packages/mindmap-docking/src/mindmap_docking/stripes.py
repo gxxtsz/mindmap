@@ -143,7 +143,7 @@ class StripeColumn(QWidget):
         """
         layout = _StripeLayout()
         states = sorted((state for state in self.manager.states.values()
-                         if state.host_id == self.host.host_id and state.available
+                         if state.host_id == self.host.host_id and self.manager.is_tool_available(state.id)
                          and self._position(state) in self.groups), key=lambda state: state.order)
         layout.members = {position: tuple(s.id for s in states if self._position(s) == position)
                           for position in self.groups}
@@ -258,7 +258,7 @@ class StripeColumn(QWidget):
                 menu.addSection(POSITION_LABELS[position])
                 for tool_id in overflow:
                     add_tool(tool_id)
-        others = [s.id for s in self.manager.states.values() if s.available and s.id not in added]
+        others = [s.id for s in self.manager.states.values() if self.manager.is_tool_available(s.id) and s.id not in added]
         if added and others:
             menu.addSection("其他工具窗口")
         for tool_id in others:
@@ -333,7 +333,7 @@ class StripeColumn(QWidget):
 
     def _tool_drag(self, mime):
         data = self.manager.decode_drag(mime)
-        if data and data["kind"] == "tool" and self.manager.states[data["id"]].available:
+        if data and data["kind"] == "tool" and self.manager.is_tool_available(data["id"]):
             return data
         return None
 

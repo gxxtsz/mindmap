@@ -69,6 +69,8 @@ class DockManager(QObject):
         self.shortcut_context = shortcut_context
         self.specs = {}
         self.states = {}
+        # 上下文暂停仅影响本次运行的呈现与入口，不写入用户的面板布局偏好。
+        self._suspended_tools = set()
         self.panels = {}
         self.hosts = {}
         self.documents = {}
@@ -173,6 +175,7 @@ class DockManager(QObject):
                     widget.removeAction(action)
             action.deleteLater()
         del self.specs[tool_id], self.states[tool_id]
+        self._suspended_tools.discard(tool_id)
         if self.active_id == tool_id:
             self.active_id = ""
         # 临时展开容器也属于工具注册生命周期；先移除再刷新，防止延迟布局回调
@@ -249,14 +252,14 @@ class DockManager(QObject):
         """显示并激活工具窗；同一停靠格仅有一个占位面板，覆盖窗可以叠在其上。"""
         self._require_tool(tool_id)
         state = self.states[tool_id]
-        if not state.available:
+        if not self.is_tool_available(tool_id):
             return False
         # 先验证并构造内容，再改变任何布局状态。工厂抛出异常时原布局和活动项保持不变。
         self.panel(tool_id)
         if state.host_id not in self.hosts:
             state.host_id = "main"
         for other in self.states.values():
-            if other.id == tool_id or not other.visible:
+            if other.id == tool_id or not other.visible or not self.is_tool_available(other.id):
                 continue
             if other.mode in (ViewMode.DOCK_UNPINNED, ViewMode.UNDOCK):
                 other.visible = False
@@ -293,6 +296,8 @@ class DockManager(QObject):
 
     def toggle(self, tool_id):
         """活动窗口再次点击会隐藏；已显示但不活动的窗口先取得焦点。"""
+        if not self.is_tool_available(tool_id):
+            return
         state = self.states[tool_id]
         if state.visible and self.active_id == tool_id:
             self.hide(tool_id)
@@ -321,12 +326,36 @@ class DockManager(QObject):
                 self.active_id = ""
         self.refresh()
 
+    def is_tool_available(self, tool_id):
+        """查询工具当前是否可交互，同时考虑注册可用性与临时业务上下文。"""
+        self._require_tool(tool_id)
+        return self.states[tool_id].available and tool_id not in self._suspended_tools
+
+    def set_tools_suspended(self, tool_ids, suspended):
+        """批量暂停或恢复工具，保留其显隐、位置、模式及尺寸等布局偏好。
+
+        无文档等临时状态可暂停相关工具；暂停期间不显示面板，也不接受侧栏、菜单
+        或快捷键激活。恢复后按原布局呈现。此状态不进入快照，恢复布局也不会解除
+        暂停；所有标识验证成功后才更新，未知工具不会造成部分修改。
+        """
+        tool_ids = tuple(tool_ids)
+        for tool_id in tool_ids:
+            self._require_tool(tool_id)
+        updated = self._suspended_tools.union(tool_ids) if suspended else self._suspended_tools.difference(tool_ids)
+        if updated == self._suspended_tools:
+            return
+        self._suspended_tools = updated
+        for tool_id in tool_ids:
+            if action := self.actions.get("tool:" + tool_id):
+                action.setEnabled(self.is_tool_available(tool_id))
+        self.refresh()
+
     def move(self, tool_id, target: DockTarget):
         """原子移动：所有目标验证成功后才更改状态和 QWidget 所属容器。"""
         self._require_tool(tool_id)
         if target.host_id not in self.hosts:
             raise ValueError(f"目标框架不存在：{target.host_id}")
-        if self.states[tool_id].available:
+        if self.is_tool_available(tool_id):
             self.panel(tool_id)
         state = self.states[tool_id]
         if state.position != "editor":
@@ -408,7 +437,7 @@ class DockManager(QObject):
             # 旧配置合并时可能出现同一格多个可见占位窗，统一消解。
             slots = {}
             for state in self.states.values():
-                if state.visible and state.available and state.position != "editor" and state.mode in (ViewMode.DOCK_PINNED, ViewMode.DOCK_UNPINNED):
+                if state.visible and self.is_tool_available(state.id) and state.position != "editor" and state.mode in (ViewMode.DOCK_PINNED, ViewMode.DOCK_UNPINNED):
                     key = (state.host_id, state.position)
                     old = slots.get(key)
                     if old:
@@ -424,6 +453,9 @@ class DockManager(QObject):
                     selection[(host.host_id, group.group_id)] = group.tabBar().tabData(group.currentIndex()) if group.currentIndex() >= 0 else ""
                     orders[(host.host_id, group.group_id)] = [group.tabBar().tabData(n) for n in range(group.count())]
             self._detach_panels()
+            for tool_id in self.specs:
+                if action := self.actions.get("tool:" + tool_id):
+                    action.setEnabled(self.is_tool_available(tool_id))
             for action in self.actions.values():
                 if name := action.property("mindmap_icon"):
                     action.setIcon(self.theme.icon(name))
@@ -493,7 +525,7 @@ class DockManager(QObject):
             widget = widget.parentWidget()
         changed = False
         for state in self.states.values():
-            if not state.visible or state.id == owner_id:
+            if not state.visible or state.id == owner_id or not self.is_tool_available(state.id):
                 continue
             if state.mode == ViewMode.DOCK_UNPINNED:
                 state.visible = False
@@ -1136,7 +1168,7 @@ class DockManager(QObject):
                     group["current"] = group["tokens"].index(self.active_document_id)
         # 恢复前先创建即将显示的已注册工具；业务工厂失败时尚未拆卸任何现有容器。
         for item in data["tools"]:
-            if item["id"] in self.specs and item.get("visible") and item.get("available", True):
+            if item["id"] in self.specs and item["id"] not in self._suspended_tools and item.get("visible") and item.get("available", True):
                 self.panel(item["id"])
         self.refreshing = True
         try:

@@ -186,7 +186,7 @@ class DockHost(QWidget):
         theme = manager.theme
         active_positions = set()
         for state in manager.states.values():
-            if state.host_id != self.host_id or not state.visible or not state.available:
+            if state.host_id != self.host_id or not state.visible or not manager.is_tool_available(state.id):
                 continue
             panel = manager.panel(state.id)
             panel.refresh_theme()

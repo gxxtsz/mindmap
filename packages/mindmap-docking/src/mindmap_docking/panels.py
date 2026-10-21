@@ -120,18 +120,10 @@ class ToolPanel(QFrame):
             button.setAutoRaise(True)
             button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             button.setDefaultAction(action)
-            # 有图标时沿用标题栏28像素工具按钮，只保留图形；无图标的业务动作保留文字。
-            icon_only = not action.icon().isNull()
-            button.setProperty("mindmap_header_icon", icon_only)
-            button.setToolButtonStyle(
-                Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only
-                else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-            )
-            if icon_only:
-                button.setFixedSize(28, 28)
-            if action.menu() is not None:
-                button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-            button.setAccessibleName(action.toolTip() or action.text())
+            # 多会话外壳可能先创建空动作，再绑定活动导图的图标和菜单。
+            # QAction 自动同步内容，但不会重算按钮样式与弹出模式，需随动作变化更新。
+            action.changed.connect(lambda button=button: self._sync_header_action(button))
+            self._sync_header_action(button)
             self.action_buttons.append(button)
             self.header_layout.addWidget(button)
         self.more = IconButton(manager, symbol="more", tooltip="选项", parent=self.header)
@@ -156,6 +148,32 @@ class ToolPanel(QFrame):
             self.tabs.hide()
         self._corners = _CardCorners(self, manager)
         self.refresh_theme()
+
+    def _sync_header_action(self, button):
+        """同步标题动作的呈现与交互，支持延迟绑定、切换会话和清空动作内容。"""
+        action = button.defaultAction()
+        icon_only = not action.icon().isNull()
+        button.setProperty("mindmap_header_icon", icon_only)
+        button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only
+            else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        # 图标入口保持28像素命中区；回到文字动作时解除固定尺寸，避免文字被裁剪。
+        if icon_only:
+            button.setFixedSize(28, 28)
+        else:
+            button.setMinimumSize(0, 0)
+            button.setMaximumSize(16777215, 16777215)
+        button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup if action.menu() is not None
+            else QToolButton.ToolButtonPopupMode.DelayedPopup
+        )
+        button.setAccessibleName(action.toolTip() or action.text())
+        # 动态属性影响按钮留白与菜单箭头，必须重新匹配样式表才能隐藏原生箭头。
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.updateGeometry()
+        button.update()
 
     def refresh_theme(self):
         theme = self.manager.theme

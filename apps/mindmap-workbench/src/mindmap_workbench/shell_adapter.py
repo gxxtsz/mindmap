@@ -219,8 +219,10 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._sync_depth_action()
 
     def _sync_depth_action(self):
+        """只在有活动导图时显示层级入口，空白页不提供无效的文字占位。"""
         source = self.panels.outline.depth_action if self.panels else None
         self._depth_action.setEnabled(source is not None)
+        self._depth_action.setVisible(source is not None)
         self._depth_action.setMenu(source.menu() if source else None)
         self._depth_action.setIcon(source.icon() if source else QIcon())
         self._depth_action.setText(source.text() if source else "显示层级")
@@ -232,6 +234,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
         self._sync_depth_action()
         self._sync_document()
+        # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
+        # 关闭活动标签到下一标签的短暂空绑定不暂停，只有关闭全部导图才回欢迎页。
+        self.manager.set_tools_suspended(("outline", "properties"), not bool(len(self.sessions)))
 
     def _set_read_only(self, checked):
         if self.canvas:

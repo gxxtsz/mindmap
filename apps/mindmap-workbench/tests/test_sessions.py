@@ -9,9 +9,9 @@ from copy import deepcopy
 import pytest
 from mindmap_engine import LayoutConfig, MindMapDocument, MindMapError, Theme, load_document, save_document
 from mindmap_workbench.shell_adapter import build_window
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QSize, Qt
 from PySide6.QtGui import QInputMethodEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton, QToolButton
 from shiboken6 import isValid
 
 
@@ -40,6 +40,35 @@ def create(window, path):
     return window.active_session
 
 
+def test_outline_header_stays_icon_only_after_empty_start_and_session_switch(empty_window, tmp_path):
+    """空白页先创建大纲标题，再打开和切换导图时，延迟绑定的动作仍只显示图标。"""
+    window = empty_window
+    button, = window.manager.panel("outline").action_buttons
+
+    def check(session):
+        """验证实际按钮的显示、菜单交互和层级提示均绑定当前会话。"""
+        assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert not button.icon().isNull() and button.size() == QSize(28, 28)
+        assert button.popupMode() == QToolButton.ToolButtonPopupMode.InstantPopup
+        assert button.defaultAction().menu() is session.panels.outline.depth_menu
+        assert button.toolTip() == session.panels.outline.depth_action.toolTip()
+
+    first = create(window, tmp_path / "第一份.mindmap")
+    window.manager.activate("outline", focus=False)
+    check(first)
+    first.panels.outline.set_display_depth(4)
+    check(first)
+    second = create(window, tmp_path / "第二份.mindmap")
+    check(second)
+    window.manager.activate_document(first.id)
+    check(first)
+    assert window.manager.close_document(first.id)
+    assert window.manager.close_document(second.id)
+    assert not button.isEnabled()
+    third = create(window, tmp_path / "重新打开.mindmap")
+    check(third)
+
+
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     window = empty_window
@@ -52,6 +81,12 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     assert {button.text() for button in group._empty_widget.findChildren(QPushButton)} == {"新建导图", "打开文件"}
     assert not any(window.action("app." + key).isEnabled() for key in ("save", "save_all", "save_as"))
     assert not window.settings_action.isEnabled()
+    assert window.host.left.isHidden() and window.host.right.isHidden()
+    assert not window._depth_action.isVisible()
+    for tool_id in ("outline", "properties"):
+        assert not window.manager.is_tool_available(tool_id)
+        assert not window.manager.activate(tool_id)
+        assert not window.manager.actions["tool:" + tool_id].isEnabled()
     menu = window.main_menu()
     files = menu.actions()[0].menu()
     assert [action.text() for action in files.actions()] == [
@@ -62,11 +97,48 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     menu.deleteLater()
     session = create(window, tmp_path / "第一份.mindmap")
     assert not group._empty_widget.isVisible() and group.count() == 1
+    assert window.host.right.isVisible() and session.panels.properties.isVisible()
     session.engine.update_node(session.engine.root_id, text="关闭时立即保存")
     assert window.manager.close_document(session.id)
     assert load_document(session.files.path).root.text == "关闭时立即保存"
     assert window.active_session is None and not window.manager.documents
     assert group._empty_widget.isVisible() and session.disposed and session.canvas._disposed
+    assert window.host.left.isHidden() and window.host.right.isHidden()
+    assert not window._depth_action.isVisible()
+
+
+def test_empty_start_preserves_sidebar_layout_across_restart(empty_window, tmp_path, qtbot):
+    """有导图时保存的侧栏布局在空启动时暂停，重新打开导图后恢复原位置与宽度。"""
+    window = empty_window
+    first = create(window, tmp_path / "布局.mindmap")
+    window.manager.activate("outline", focus=False)
+    window.host.region_sizes["dock"].update(left=310, right=390)
+    window.manager.refresh()
+    original = window.manager.capture_layout()
+    assert window.manager.close_document(first.id)
+    assert window.host.left.isHidden() and window.host.right.isHidden()
+    assert window.manager.capture_layout()["tools"] == original["tools"]
+    window.manager.save_session()
+    assert window.close()
+
+    restarted = build_window(storage_dir=window.manager.storage_dir)
+    qtbot.addWidget(restarted)
+    try:
+        restarted.show()
+        QApplication.processEvents()
+        assert restarted.host.left.isHidden() and restarted.host.right.isHidden()
+        assert restarted.host.editor.groups[0]._empty_widget.isVisible()
+        # 切换主题和恢复布局也不能在没有导图时显示空侧栏。
+        restarted.manager.set_theme("dark")
+        restarted.manager.restore_layout(original)
+        assert restarted.host.left.isHidden() and restarted.host.right.isHidden()
+        assert restarted.manager.capture_layout()["tools"] == original["tools"]
+        assert restarted.open_path(first.files.path)
+        assert restarted.host.left.isVisible() and restarted.host.right.isVisible()
+        assert restarted.host.region_sizes["dock"] == original["hosts"]["main"]["region_sizes"]["dock"]
+        assert restarted.panels.outline.isVisible() and restarted.panels.properties.isVisible()
+    finally:
+        restarted.close()
 
 
 def test_new_cancel_failure_and_path_collision_leave_sessions_unchanged(empty_window, tmp_path, monkeypatch):

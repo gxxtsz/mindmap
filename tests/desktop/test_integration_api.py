@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 import pytest
-from mindmap_docking import DocumentSpec, ToolWindowSpec, ViewMode
+from mindmap_docking import DockTarget, DocumentSpec, ToolWindowSpec, ViewMode
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QMenu
@@ -45,6 +45,46 @@ def test_tool_header_actions_share_state_and_ownership(docking, qtbot):
         assert first.isVisible() and second.isVisible()
     with pytest.raises(TypeError):
         ToolWindowSpec("invalid", "错误动作", lambda: QLabel(), header_actions=("错误",))
+
+
+@pytest.mark.parametrize("position", ["left_top", "editor"])
+def test_suspended_tools_preserve_layout_and_reject_activation(docking, position):
+    """临时暂停覆盖停靠与编辑器标签，恢复快照不能绕过暂停，也不破坏原布局。"""
+    manager, host = docking.manager, docking.host
+    manager.activate("alpha", focus=False)
+    if position == "editor":
+        manager.move("alpha", DockTarget(position="editor", group_id=host.editor.groups[0].group_id))
+        # 快照恢复会按实际标签索引规范化工具顺序，先建立同样的比较基线。
+        manager.restore_layout(manager.capture_layout())
+        manager.activate("alpha", focus=False)
+        group, index = host.editor.find_token("tool:alpha")
+        group.setCurrentIndex(index)
+        QApplication.processEvents()
+    panel = manager.panel("alpha")
+    original = manager.capture_layout()
+    with pytest.raises(KeyError):
+        manager.set_tools_suspended(("alpha", "不存在"), True)
+    assert manager.is_tool_available("alpha") and panel.isVisible()
+    manager.set_tools_suspended(("alpha",), True)
+    assert not manager.is_tool_available("alpha") and not panel.isVisible()
+    assert not manager.actions["tool:alpha"].isEnabled()
+    assert not manager.activate("alpha")
+    manager.toggle("alpha")
+    assert manager.capture_layout()["tools"] == original["tools"]
+    menu = host.left_rail._build_more_menu()
+    assert "alpha" not in {action.data() for action in menu.actions()}
+    menu.deleteLater()
+    manager.restore_layout(original)
+    manager.set_theme("dark")
+    assert not panel.isVisible() and not manager.is_tool_available("alpha")
+    manager.set_tools_suspended(("alpha",), False)
+    assert manager.actions["tool:alpha"].isEnabled()
+    assert manager.capture_layout()["tools"] == original["tools"]
+    if position == "editor":
+        group, index = host.editor.find_token("tool:alpha")
+        group.setCurrentIndex(index)
+        QApplication.processEvents()
+    assert panel.isVisible()
 
 
 def test_document_title_survives_modified_close_and_reopen(docking):
