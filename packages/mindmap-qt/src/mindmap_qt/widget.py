@@ -164,10 +164,10 @@ class MindMapWidget(QWidget):
         if self._disposed:
             return
         self._cancel_branch_menu(restore=False)
+        self.view.cancel_interaction()
         self._disposed = True
         self._view_reset_pending = False
         self._view_reset_timer.stop()
-        self.view.cancel_interaction()
         self._unsubscribe()
         for reply in tuple(self._downloads):
             reply.abort()
@@ -444,6 +444,7 @@ class MindMapWidget(QWidget):
 
     def select_nodes(self, node_ids) -> None:
         """替换节点选择；折叠或聚焦之外的节点不会强制展开。"""
+        self.view.cancel_interaction()
         self.scene.blockSignals(True)
         try:
             self.scene.clearSelection()
@@ -467,6 +468,7 @@ class MindMapWidget(QWidget):
             return
         # 在画布刷新引发选择信号之前通知宿主，防止旧侧栏输入被提交到新文档或撤销状态。
         if event.kind != "saved":
+            self.view.node_drag.document_changed()
             # 自动保存只更新保存标记，不触发文档替换通知，不打断菜单或未完成输入。
             self.document_changing.emit(event)
             self._cancel_branch_menu()
@@ -513,6 +515,7 @@ class MindMapWidget(QWidget):
 
     def refresh(self) -> None:
         """刷新几何并复用按 ID 索引的图元；平移、缩放不会调用此方法。"""
+        self.view.cancel_interaction()
         self._cancel_branch_menu(restore=False)
         # 在更新场景前记录中心，内容扩展时保持视图位置，删除或折叠导致范围缩小
         # 时再由视图限制到最近边界；不要为了容纳内容而自动修改用户的缩放比例。
@@ -525,18 +528,7 @@ class MindMapWidget(QWidget):
         self._refreshing = True
         self.scene.blockSignals(True)
         try:
-            for key in list(self.node_items):
-                if key not in result.nodes:
-                    self.scene.removeItem(self.node_items.pop(key))
-            for key, rect in result.nodes.items():
-                item = self.node_items.get(key)
-                if item is None:
-                    item = NodeItem(document.nodes[key], visuals[key], document.theme, self)
-                    self.scene.addItem(item)
-                    self.node_items[key] = item
-                else:
-                    item.update_content(document.nodes[key], visuals[key], document.theme)
-                item.setPos(rect.x, rect.y)
+            self._set_node_items(document, visuals, result)
             self._set_branch_items(result)
             bounds = result.bounds
             # 布局边界已覆盖可见节点、节点内图片及普通父子分支线。场景
@@ -549,6 +541,30 @@ class MindMapWidget(QWidget):
         self.view.update_navigation_rect(center=center)
         self.view.update_cursor()
         self._schedule_view_reset()
+
+    def _set_node_items(self, document, visuals, result) -> None:
+        """按给定快照展示节点，不改写正式文档和布局结果。
+
+        调用方在批量更新期间屏蔽场景选择信号；复用现有图元以保留选择和鼠标捕获。
+        相同快照节点和视觉跳过几何重建，动画位置由拖动控制器在正式刷新后设置。
+        拖动期间不调用此方法，折叠主题仅在放下后的正式刷新中展开。
+        """
+        for key in list(self.node_items):
+            if key not in result.nodes:
+                self.scene.removeItem(self.node_items.pop(key))
+        for key, rect in result.nodes.items():
+            item = self.node_items.get(key)
+            if item is None:
+                item = NodeItem(document.nodes[key], visuals[key], document.theme, self)
+                self.scene.addItem(item)
+                self.node_items[key] = item
+            elif (
+                item.node is not document.nodes[key]
+                or item.visual is not visuals[key]
+                or (item.theme is not document.theme)
+            ):
+                item.update_content(document.nodes[key], visuals[key], document.theme)
+            item.setPos(rect.x, rect.y)
 
     def set_ui_colors(self, colors: UiColors | None) -> None:
         """覆盖本组件的界面色板，不修改导图主题、场景内容、选择和撤销历史。

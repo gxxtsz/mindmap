@@ -27,6 +27,10 @@ uv run --locked --package mindmap-workbench mindmap-workbench 我的导图.mindm
 ## 当前功能
 
 支持节点编辑、11 种分支连接线、四方向树布局、图片、复制粘贴、撤销重做和 PNG/SVG/PDF 导出。
+节点可整条分支拖动，支持同级排序、改挂父节点及吸附、插入提示；双向布局还支持一级分支左右换边。
+拖到节点正文可接为子主题，拖到节点外的间隙可插入同级，文字提示会明确显示松手后的操作。
+拖动时其他节点保持原位，松手后以 140 毫秒动画重排，折叠目标也在放下后展开；一次拖动只提交一条撤销记录。
+靠近画布边缘时自动滚动，Esc 取消；拖动提示不影响自动保存和导出。
 新建导图默认使用圆角正交连接线，新增主题沿用父主题样式；打开已有文件保留其原有外观。
 支持从亿图脑图复制主题或分支后通过 Ctrl+V 粘贴，仅导入文字、层级与同级顺序，外观沿用本项目配置。
 粘贴时可选择追加或替换目标节点，替换时可保留原后代；多个并列来源主题仅支持追加。
@@ -127,3 +131,5 @@ uv run --locked --all-packages python scripts/verify_workbench.py
 代码与资源许可见[资源与许可](docs/资源与许可.md)。
 `scripts/branch_style_lab.py` 直接调用正式路由及绘制代码，输出四种布局方向的样式验收图；
 `scripts/benchmark.py` 用于千节点性能验收。
+`scripts/verify_node_drag.py` 验收千节点吸附性能及四方向明暗主题截图；分别传入
+`--scale-factor 1`、`--scale-factor 1.5`、`--scale-factor 2` 检查三档显示缩放，结果写入 `.artifacts/node-drag/`。
