@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from mindmap_core import Theme, get_branch_style
-from PySide6.QtCore import QEvent, QPointF, QSignalBlocker, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPalette, QPolygonF
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSignalBlocker, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -103,6 +103,34 @@ class _Number(QDoubleSpinBox):
             self.lineEdit().clear()
 
 
+class _NodeSelectionIcon(QWidget):
+    """空状态专用的节点连接示意；使用逻辑坐标绘制，适配高 DPI 和宿主色板。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(48, 48)
+
+    def paintEvent(self, event):
+        """用当前弱提示色绘制三枚节点；图形仅作说明，不接收焦点或修改文档。"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(
+            QPen(
+                self.palette().color(QPalette.ColorRole.PlaceholderText),
+                1.5,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+                Qt.PenJoinStyle.RoundJoin,
+            )
+        )
+        painter.drawLine(QPointF(18, 24), QPointF(25, 24))
+        painter.drawLine(QPointF(25, 12), QPointF(25, 36))
+        painter.drawLine(QPointF(25, 12), QPointF(30, 12))
+        painter.drawLine(QPointF(25, 36), QPointF(30, 36))
+        for rect in (QRectF(4, 18, 14, 12), QRectF(30, 6, 14, 12), QRectF(30, 30, 14, 12)):
+            painter.drawRoundedRect(rect, 3, 3)
+
+
 class NodePropertiesForm(QWidget):
     """共享的单页样式表单，不访问引擎、不修改节点内容。
 
@@ -128,7 +156,9 @@ class NodePropertiesForm(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        self.summary = QLabel("请选择节点", self)
+        self.empty_state = self._build_empty_state()
+        outer.addWidget(self.empty_state, 1)
+        self.summary = QLabel(self)
         self.summary.setObjectName("property_summary")
         self.summary.setWordWrap(True)
         self.summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -153,6 +183,37 @@ class NodePropertiesForm(QWidget):
         self._build_branches()
         self.body.addStretch(1)
         self.set_theme(Theme())
+        self.load_nodes([])
+
+    def _build_empty_state(self):
+        """独立构建无选择时的说明区，避免居中布局影响选中后的节点标题和表单。
+
+        上下弹性留白采用 1:2 的比例，让图标与文案整体位于内容区约三分之一处。
+        说明文字允许自动换行，并忽略横向首选宽度，避免窄侧栏被长文案撑宽。
+        """
+        state = QWidget(self)
+        state.setObjectName("properties_empty_state")
+        layout = QVBoxLayout(state)
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(0)
+        layout.addStretch(1)
+        layout.addWidget(_NodeSelectionIcon(state), 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(16)
+        title = QLabel("选择一个节点", state)
+        title.setObjectName("properties_empty_title")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setWordWrap(True)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(title)
+        layout.addSpacing(8)
+        description = QLabel("点击画布中的节点，查看和编辑属性", state)
+        description.setObjectName("properties_empty_description")
+        description.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        description.setWordWrap(True)
+        description.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(description)
+        layout.addStretch(2)
+        return state
 
     def _section(self, name):
         """分组只提供标题和分隔线，始终展开，所有字段共用外层滚动位置。"""
@@ -451,18 +512,24 @@ class NodePropertiesForm(QWidget):
         branch_nodes=None,
         branch_kinds=None,
     ):
-        """以正式快照填充单选或多选，不将默认值、混合值及未配置状态转换成修改请求。"""
+        """以正式快照填充单选或多选，无选择时只展示独立空状态。
+
+        节点标题与属性滚动区同步显隐，空状态不占用选中后的布局空间；加载过程
+        不将默认值、混合值及未配置状态转换成修改请求，也不触发任何文档提交。
+        """
         self._loading = True
         self._editable = editable and bool(nodes)
         self._composing.clear()
         try:
             self.summary.setText(
-                "请选择节点"
+                ""
                 if not nodes
                 else f"已选择 {len(nodes)} 个节点"
                 if len(nodes) > 1
                 else (nodes[0].text.splitlines() or ["未命名节点"])[0]
             )
+            self.empty_state.setVisible(not nodes)
+            self.summary.setVisible(bool(nodes))
             self.scroll.setVisible(bool(nodes))
             self.width_enabled.setEnabled(self._editable)
             self.scope.setEnabled(self._editable and branch_styles)
@@ -555,6 +622,8 @@ class NodePropertiesForm(QWidget):
             f"QWidget#node_properties_form, QWidget#properties_page {{ background: {surface}; }}"
             f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {surface}; }}"
             f"QLabel#property_summary {{ color: {colors.muted}; }}"
+            f"QLabel#properties_empty_title {{ color: {colors.text}; font-size: 14px; font-weight: 500; }}"
+            f"QLabel#properties_empty_description {{ color: {colors.muted}; font-size: 12px; }}"
             'QLabel[property_heading="true"] { font-size: 15px; font-weight: bold; }'
             f"QFrame#property_separator {{ background: {colors.border}; }}"
             + control_styles(colors)

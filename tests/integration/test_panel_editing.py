@@ -56,7 +56,8 @@ def test_no_selection_and_unmodified_form_do_not_write(workspace):
     workspace.flush_pending_edits()
     assert engine.document == before and not engine.can_undo
     workspace.canvas.select_nodes([])
-    assert workspace.properties.summary.text() == "请选择节点"
+    assert workspace.properties.empty_state.isVisible()
+    assert not workspace.properties.summary.isVisible()
     assert not workspace.properties.scroll.isVisible()
 
 
