@@ -233,7 +233,6 @@ class MindMapSessionManager(QObject):
                 candidate.canvas.deleteLater()
                 return False
             self._install(candidate)
-            QTimer.singleShot(0, lambda: None if candidate.disposed else candidate.canvas.fit_to_view())
             return True
         except Exception:
             candidate.dispose()

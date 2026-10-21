@@ -16,6 +16,7 @@ class MindMapView(QGraphicsView):
         self._pan_origin = None
         self._pointer_position = None
         self._wheel_scroll_remainder = 0.0
+        self._hidden_center = None
         self.press_node = None
         self.drag_ghost = None
         self.drag_origin = QPointF()
@@ -99,15 +100,32 @@ class MindMapView(QGraphicsView):
         self.setSceneRect(self.scene().sceneRect().adjusted(-width, -height, width, height))
         self.centerOn(center)
 
+    def showEvent(self, event):
+        """首次显示或隐藏标签重新可见时，唤醒画布尚未完成的初始定位请求。"""
+        super().showEvent(event)
+        # Qt 重新显示视图时会重算滚动范围；显式恢复隐藏前的中心，避免标签或
+        # 窗口隐藏期间的布局变化把用户位置换成新视口的左上角附近。
+        if self._hidden_center is not None:
+            self.update_navigation_rect(center=self._hidden_center)
+            self._hidden_center = None
+        self.owner._schedule_view_reset()
+
+    def hideEvent(self, event):
+        """在 Qt 重建隐藏视图的布局前记住实际中心，供下一次显示或延迟调整尺寸使用。"""
+        self._hidden_center = self.mapToScene(self.viewport().rect()).boundingRect().center()
+        super().hideEvent(event)
+
     def resizeEvent(self, event):
         # Qt 派发该事件时视口已具有新尺寸。用事件中的旧尺寸恢复原中心，避免窗口
         # 放大或缩小时把旧左上角当作锚点；首次显示没有旧尺寸，交给初始化居中处理。
-        center = None
-        if event.oldSize().isValid():
+        center = self._hidden_center
+        if center is None and event.oldSize().isValid():
             old_rect = QRect(0, 0, event.oldSize().width(), event.oldSize().height())
             center = self.mapToScene(old_rect).boundingRect().center()
         super().resizeEvent(event)
         self.update_navigation_rect(center=center)
+        # 仅待初始化的画布会排程；正常窗口及侧栏调整继续保持原有中心和倍率。
+        self.owner._schedule_view_reset()
 
     def update_cursor(self, position=None):
         """按手势优先级更新视口光标，防止图元的悬停光标覆盖正在进行的平移。

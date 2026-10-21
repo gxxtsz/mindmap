@@ -83,7 +83,7 @@ class MindMapFileController(QObject):
         if self.confirm_replace():
             self.path = None
             self.engine.replace_document(MindMapDocument.new())
-            self.canvas.center_root()
+            self.canvas.reset_view()
             self.state_changed.emit()
             return True
         return False
@@ -124,7 +124,9 @@ class MindMapFileController(QObject):
         self.engine.replace_document(document)
         self.path = source
         self.state_changed.emit()
-        self.canvas.fit_to_view()
+        # 初始视图使用正常倍率；由画布等待实际显示后居中，避免大型导图被整图
+        # 适应压缩到无法阅读，也避免在会话安装前使用隐藏视口的占位尺寸。
+        self.canvas.reset_view()
         return True
 
     @staticmethod

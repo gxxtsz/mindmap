@@ -7,9 +7,17 @@ import sys
 from copy import deepcopy
 
 import pytest
-from mindmap_engine import LayoutConfig, MindMapDocument, MindMapError, Theme, load_document, save_document
+from mindmap_engine import (
+    LayoutConfig,
+    MindMapDocument,
+    MindMapError,
+    Node,
+    Theme,
+    load_document,
+    save_document,
+)
 from mindmap_workbench.shell_adapter import build_window
-from PySide6.QtCore import QCoreApplication, QEvent, QSize, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QInputMethodEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton, QToolButton
 from shiboken6 import isValid
@@ -38,6 +46,94 @@ def create(window, path):
     """显式路径的新建不需要对话框，返回具有独立组件的已保存会话。"""
     assert window.new_document(path)
     return window.active_session
+
+
+def assert_initial_canvas(canvas):
+    """用实际视口映射检查 100% 与根节点居中，不用整个场景的中心替代根节点。"""
+    assert canvas.view.transform().isIdentity()
+    root = canvas.node_items[canvas.engine.root_id].sceneBoundingRect().center()
+    offset = canvas.view.viewportTransform().map(root) - QRectF(canvas.view.viewport().rect()).center()
+    assert abs(offset.x()) <= 2 and abs(offset.y()) <= 2
+
+
+@pytest.mark.parametrize("before_show", [False, True])
+def test_open_initializes_after_session_and_sidebar_layout(empty_window, tmp_path, qtbot, before_show):
+    """普通打开和命令行的先加载后显示顺序，都在真实侧栏布局下恢复 100% 并居中。"""
+    window = empty_window
+    if before_show:
+        window.hide()
+    document = MindMapDocument.new("大型导图根节点")
+    document.layout = LayoutConfig(direction="down")
+    for index in range(100):
+        child = Node(f"向下展开的分支 {index}")
+        document.nodes[child.id] = child
+        document.root.children.append(child.id)
+    source = tmp_path / "大导图.mindmap"
+    save_document(document, source)
+    original = source.read_bytes()
+    assert window.open_path(source)
+    canvas = window.canvas
+    window.manager.activate("outline", focus=False)
+    window.resize(1500, 900)
+    window.show()
+    qtbot.waitUntil(lambda: assert_initial_canvas(canvas))
+    assert canvas.engine.document == document
+    assert not canvas.engine.is_dirty and not canvas.engine.can_undo
+    assert source.read_bytes() == original
+
+
+def test_rapid_open_initializes_hidden_tab_once_and_duplicate_open_keeps_view(empty_window, tmp_path, qtbot):
+    """快速打开后被遮挡的标签延迟初始化；已打开文件再次激活时保留用户视图。"""
+    window = empty_window
+    sources = [tmp_path / f"标签 {index}.mindmap" for index in range(2)]
+    for index, source in enumerate(sources):
+        save_document(MindMapDocument.new(f"根主题 {index}"), source)
+    assert window.open_path(sources[0])
+    first = window.active_session
+    first.canvas.view.scale(0.4, 0.4)
+    assert window.open_path(sources[1])
+    second = window.active_session
+    qtbot.waitUntil(lambda: assert_initial_canvas(second.canvas))
+    assert first.canvas.view.transform().m11() == pytest.approx(0.4)
+    window.manager.activate_document(first.id)
+    qtbot.waitUntil(lambda: assert_initial_canvas(first.canvas))
+    view = first.canvas.view
+    view.zoom(0.7)
+    root = first.canvas.node_items[first.engine.root_id].sceneBoundingRect().center()
+    view.centerOn(root + QPointF(90, -60))
+    center = view.mapToScene(view.viewport().rect()).boundingRect().center()
+    transform = view.transform()
+    window.manager.activate_document(second.id)
+    assert window.open_path(sources[0])
+    QApplication.processEvents()
+    assert window.active_session is first and len(window.sessions) == 2
+    assert view.transform() == transform
+    assert view.mapToScene(view.viewport().rect()).boundingRect().center() == center
+    # 改变侧栏和窗口后继续以原用户中心导航，不再次消费首次打开的定位请求。
+    window.manager.activate("outline", focus=False)
+    window.resize(1400, 950)
+    QApplication.processEvents()
+    assert view.transform() == transform
+    actual = view.mapToScene(view.viewport().rect()).boundingRect().center()
+    assert (actual - center).manhattanLength() < 2 / transform.m11()
+
+
+@pytest.mark.parametrize("operation", ["new", "open"])
+def test_close_before_initialization_releases_canvas(empty_window, tmp_path, operation):
+    """会话尚有排队初始化就关闭时，不访问已经删除的 Qt 对象。"""
+    source = tmp_path / "立即关闭.mindmap"
+    if operation == "open":
+        save_document(MindMapDocument.new("立即关闭的根"), source)
+        assert empty_window.open_path(source)
+    else:
+        assert empty_window.new_document(source)
+    session = empty_window.active_session
+    canvas = session.canvas
+    assert empty_window.manager.close_document(session.id)
+    assert session.disposed
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QApplication.processEvents()
+    assert not isValid(canvas)
 
 
 def test_outline_header_stays_icon_only_after_empty_start_and_session_switch(empty_window, tmp_path):
@@ -393,6 +489,9 @@ def test_cli_explicit_file_creates_session_with_empty_startup(tmp_path):
 def test_tab_and_split_focus_route_independent_panels_history_and_views(empty_window, tmp_path, qtbot):
     window = empty_window
     first = create(window, tmp_path / "甲.mindmap")
+    # 初始定位在显示布局完成后执行，先完成首次显示再模拟用户的聚焦及缩放操作。
+    first.canvas.view.scale(0.4, 0.4)
+    qtbot.waitUntil(lambda: assert_initial_canvas(first.canvas))
     first.engine.add_child(first.engine.root_id, "甲的分支")
     first.canvas.focus_node(first.engine.root_id)
     first.canvas.view.scale(1.3, 1.3)

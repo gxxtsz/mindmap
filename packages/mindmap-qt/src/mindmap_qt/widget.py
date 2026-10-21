@@ -112,6 +112,13 @@ class MindMapWidget(QWidget):
         self.format_registry = (
             format_registry if format_registry is not None else create_default_format_registry()
         )
+        self._disposed = False
+        self._view_reset_pending = False
+        # 初始化属于画布自身的生命周期；复用一个单次定时器，让打开文件、首次
+        # 显示和连续布局事件合并为一次定位，并在组件销毁时由 Qt 自动取消回调。
+        self._view_reset_timer = QTimer(self)
+        self._view_reset_timer.setSingleShot(True)
+        self._view_reset_timer.timeout.connect(self._apply_view_reset)
         self.scene = QGraphicsScene(self)
         self.view = MindMapView(self, self.scene)
         self.toolbar = QToolBar("思维导图工具栏", self)
@@ -128,7 +135,6 @@ class MindMapWidget(QWidget):
         self.editor = None
         self.focus_id = None
         self._refreshing = False
-        self._disposed = False
         self._branch_scope = "subtree"
         self._preview_layout = None
         self._measurements = {}
@@ -151,7 +157,7 @@ class MindMapWidget(QWidget):
         self.destroyed.connect(lambda: unsubscribe())
         self.refresh()
         self.select_nodes([self.engine.root_id])
-        QTimer.singleShot(0, self.center_root)
+        self.reset_view()
 
     def dispose(self):
         """主动释放订阅与下载；多次调用安全，通常用于宿主移除标签页。"""
@@ -159,6 +165,8 @@ class MindMapWidget(QWidget):
             return
         self._cancel_branch_menu(restore=False)
         self._disposed = True
+        self._view_reset_pending = False
+        self._view_reset_timer.stop()
         self.view.cancel_interaction()
         self._unsubscribe()
         for reply in tuple(self._downloads):
@@ -540,6 +548,7 @@ class MindMapWidget(QWidget):
             self._refreshing = False
         self.view.update_navigation_rect(center=center)
         self.view.update_cursor()
+        self._schedule_view_reset()
 
     def set_ui_colors(self, colors: UiColors | None) -> None:
         """覆盖本组件的界面色板，不修改导图主题、场景内容、选择和撤销历史。
@@ -688,6 +697,45 @@ class MindMapWidget(QWidget):
         self._cancel_branch_menu()
         self.engine.set_branch_style(ids, kind, scope=scope)
         self._sync_branch_actions()
+
+    def reset_view(self) -> None:
+        """请求以 100% 原始大小显示，并将文档根节点放在可见画布中央。
+
+        构造画布、新建和成功打开文档后调用；实际定位延迟到 Qt 完成显示与布局。
+        隐藏标签保留请求，首次显示时执行；连续请求只处理最新文档，不使用隐藏
+        画布的占位尺寸。定位完成后，窗口调整和标签切换不再重置用户视图。
+        此接口仅调整视图，不提交输入，不修改文档、选择、折叠状态或撤销历史。
+        已释放的画布忽略请求；手动居中且保留倍率时使用 center_root()。
+        """
+        if self._disposed:
+            return
+        self._view_reset_pending = True
+        self._schedule_view_reset()
+
+    def _schedule_view_reset(self) -> None:
+        """仅在可见视口有待处理请求时排程；显示和尺寸事件可安全重复调用。
+
+        重启同一个零间隔定时器，使本轮 Qt 布局先完成；隐藏时不循环排程，等待
+        后续显示事件再次唤醒。已初始化的视图不会因正常重排或刷新重新定位。
+        """
+        if (not self._disposed and self._view_reset_pending and self.view.isVisible()
+                and not self.view.viewport().size().isEmpty()):
+            self._view_reset_timer.start(0)
+
+    def _apply_view_reset(self) -> None:
+        """在有效布局上消费一次初始化请求；隐藏或释放后的迟到回调不触碰视图。"""
+        if (self._disposed or not self._view_reset_pending or not self.view.isVisible()
+                or self.view.viewport().size().isEmpty() or self._refreshing):
+            return
+        root = self.node_items.get(self.engine.root_id)
+        if root is None or root.sceneBoundingRect().isEmpty():
+            return
+        # 先消费请求，再恢复倍率，防止变换引发的尺寸事件重复排程。导航余量必须
+        # 按恢复后的 100% 倍率计算，定位目标使用根节点中心而非整张导图的中心。
+        self._view_reset_pending = False
+        self.view.resetTransform()
+        self.view.update_navigation_rect(center=root.sceneBoundingRect().center())
+        self.view.update_cursor()
 
     def center_root(self):
         """将根节点或当前聚焦节点置于视口中央，保持用户的缩放比例。"""
