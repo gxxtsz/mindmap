@@ -29,7 +29,8 @@ class ActionSpec:
 class AppSpec:
     """工作台外壳配置；所有品牌、动作和默认外观均由业务应用声明。
 
-    application_id 用于隔离持久化目录，title/subtitle 仅负责显示。
+    application_id 用于隔离持久化目录，title 用于系统窗口标题和图标提示。
+    subtitle 保留为应用描述元数据，集成标题栏只显示图标，不重复绘制主副标题。
     native_title_bar=True 使用平台系统标题栏；默认集成标题栏支持 Windows 缩放。
     全局主题默认关闭，嵌入应用可以与独立工作台同时使用不同的局部主题。
     """

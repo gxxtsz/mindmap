@@ -94,7 +94,7 @@ class _WindowControlButton(QToolButton):
 
 
 class _TitleBar(QWidget):
-    """只显示业务配置的品牌与动作，标题空白处交由系统开始移动窗口。"""
+    """只显示应用图标与配置动作，标题空白处交由系统开始移动窗口。"""
 
     def __init__(self, window):
         super().__init__(window)
@@ -104,20 +104,17 @@ class _TitleBar(QWidget):
         self.box = QHBoxLayout(self)
         self.box.setContentsMargins(12, 5, 6, 5)
         self.box.setSpacing(9)
+        # 应用名称由系统窗口标题和图标提示提供；顶栏左侧仅保留图标与菜单，
+        # 不再重复绘制主副标题，同时为辅助技术保留可读的应用名称。
         self.logo = QLabel(self)
+        self.logo.setToolTip(window.spec.title)
+        self.logo.setAccessibleName(window.spec.title)
         self.box.addWidget(self.logo)
         self.menu = QToolButton(self)
         self.menu.setToolTip("主菜单")
         self.menu.setAccessibleName("主菜单")
         self.menu.clicked.connect(self.show_menu)
         self.box.addWidget(self.menu)
-        self.title = QLabel(window.spec.title)
-        font = self.title.font()
-        font.setBold(True)
-        self.title.setFont(font)
-        self.box.addWidget(self.title)
-        self.subtitle = QLabel(" / " + window.spec.subtitle)
-        self.box.addWidget(self.subtitle)
         self.box.addStretch(1)
         self.action_buttons = []
         for spec in window._action_specs:
@@ -191,7 +188,6 @@ class _TitleBar(QWidget):
             button.setIcon(theme.icon(name))
         for button in (self.minimize, self.maximize, self.close):
             button.refresh_theme()
-        self.subtitle.setStyleSheet(f"color:{theme.css('text-muted')};")
 
     def show_menu(self):
         self.window.main_menu().exec(self.menu.mapToGlobal(QPoint(0, self.menu.height())))
