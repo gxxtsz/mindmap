@@ -188,28 +188,25 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             f"{self.canvas.action('wheel_' + self.canvas.wheel_mode).text()}"
         )
 
-    def show_document(self):
-        """显示关闭后保留的中央页；始终复用原来的画布及撤销历史。"""
-        self.manager.open_document(DOCUMENT_ID)
-
     def new_document(self):
-        """用户允许替换后重用中央页创建空白导图，取消时返回 False。"""
+        """用户允许替换后重用画布创建空白导图，成功才显示标签；取消保持原状态。"""
         if self.files.new_document():
-            self.show_document()
+            # 显示标签属于新建成功后的内部处理，不提供单独找回旧导图的入口。
+            self.manager.open_document(DOCUMENT_ID)
             return True
         return False
 
     def open_path(self, path, *, format_id=None):
-        """校验成功且用户允许替换后显示同一中央页；失败保持当前会话。"""
+        """校验成功且用户允许替换后显示同一画布；取消或失败保持原标签状态。"""
         if self.files.open_path(path, format_id=format_id):
-            self.show_document()
+            self.manager.open_document(DOCUMENT_ID)
             return True
         return False
 
     def open_dialog(self):
-        """调用共享文件选择和校验，成功后恢复关闭的中央标签。"""
+        """完成文件选择、校验和替换后显示画布；取消选择或替换时不打开标签。"""
         if self.files.open_dialog():
-            self.show_document()
+            self.manager.open_document(DOCUMENT_ID)
 
     def main_menu(self):
         """按文件、编辑、视图、设置组织菜单，复用画布动作及其启用状态。
@@ -238,7 +235,6 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             edit.addAction(self.canvas.action(key))
         menu.insertMenu(anchor, edit)
         view = QMenu("视图", menu)
-        view.addAction("显示导图", self.show_document)
         for key in ("zoom_in", "zoom_out", "fit", "center", "focus", "unfocus", "expand_all", "collapse_all"):
             view.addAction(self.canvas.action(key))
         self.read_only_action.setChecked(not self.canvas.editable)

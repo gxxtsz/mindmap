@@ -20,7 +20,7 @@ from mindmap_engine import (
 from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QImage
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QToolButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QTabBar, QToolButton
 
 
 @pytest.fixture
@@ -101,7 +101,10 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [action.text() for action in exports.actions()] == ["PNG 图片…", "SVG 矢量图…", "PDF 文档…"]
     assert all(action.isEnabled() for action in exports.actions())
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
-    assert all("滚轮" not in action.text() and "布局算法" != action.text() for action in view.actions())
+    assert view.actions() == [window.canvas.action(key) for key in (
+        "zoom_in", "zoom_out", "fit", "center", "focus", "unfocus", "expand_all", "collapse_all",
+    )] + [window.read_only_action]
+    assert not hasattr(window, "show_document")
     assert window.manager.states["properties"].visible
     main.deleteLater()
 
@@ -387,7 +390,7 @@ def test_panel_and_file_icons_stay_distinct_and_available_after_theme_changes(wi
 
 
 def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, qtbot):
-    """按钮和键盘共享真实历史动作，原地编辑、只读及重开标签不产生额外入口。"""
+    """按钮和键盘共享真实历史动作；标签关闭后新建仍复用画布和动作实例。"""
     canvas, engine = window.canvas, window.engine
     group, _ = window.host.editor.find_token(DOCUMENT_ID)
     toolbar = group.cornerWidget()
@@ -411,7 +414,7 @@ def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, 
     assert canvas.action("fit").isEnabled() and canvas.action("center").isEnabled()
     engine.mark_saved()
     assert window.manager.close_document(DOCUMENT_ID)
-    window.show_document()
+    assert window.new_document()
     group, _ = window.host.editor.find_token(DOCUMENT_ID)
     assert group.cornerWidget().actions() == [canvas.action("undo"), canvas.action("redo")]
     assert canvas._view_controls.isVisible() and canvas.toolbar.isHidden()
@@ -531,6 +534,58 @@ def test_file_save_flushes_properties_and_inline_text(window, tmp_path):
     assert window.engine.undo()
     assert window.engine.document.root.text != "原地文字"
     assert files.is_dirty
+
+
+@pytest.mark.parametrize("operation", ["new", "open_path", "open_dialog"])
+def test_closed_tab_reappears_only_after_successful_new_or_open(window, qtbot, tmp_path, monkeypatch, operation):
+    """关闭可取消；新建或打开失败、取消均不显示标签，成功后复用原画布替换内容。"""
+    manager, canvas, engine = window.manager, window.canvas, window.engine
+    source = tmp_path / "待打开.mindmap"
+    save_document(MindMapDocument.new("文件主题"), source)
+    engine.update_node(engine.root_id, text="关闭前的修改")
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Cancel)
+    group, index = window.host.editor.find_token(DOCUMENT_ID)
+    close = group.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+    qtbot.mouseClick(close, Qt.MouseButton.LeftButton)
+    assert not manager.documents[DOCUMENT_ID]["closed"]
+    assert group.currentWidget() is canvas
+    engine.mark_saved()
+    qtbot.mouseClick(close, Qt.MouseButton.LeftButton)
+    assert manager.documents[DOCUMENT_ID]["closed"] and not canvas._disposed
+
+    # 即使关闭后的原会话还有修改，取消替换也不能提前显示标签或替换内容。
+    engine.update_node(engine.root_id, text="关闭后仍保留的修改")
+    before, revision = engine.document, engine.revision
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
+    window.open_dialog()
+    assert window.host.editor.find_token(DOCUMENT_ID) is None
+    bad = tmp_path / "损坏.mindmap"
+    bad.write_bytes(b"broken")
+    with pytest.raises(MindMapError):
+        window.open_path(bad)
+    assert window.host.editor.find_token(DOCUMENT_ID) is None
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(source), ""))
+
+    def perform():
+        """通过实际文件控制流程替换内容，不直接调用共用停靠组件的打开接口。"""
+        if operation == "new":
+            return window.new_document()
+        if operation == "open_path":
+            return window.open_path(source)
+        return window.open_dialog()
+
+    perform()
+    assert manager.documents[DOCUMENT_ID]["closed"]
+    assert window.host.editor.find_token(DOCUMENT_ID) is None
+    assert engine.document == before and engine.revision == revision
+    assert window.files.path is None and window.files.is_dirty
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Discard)
+    perform()
+    group, index = window.host.editor.find_token(DOCUMENT_ID)
+    assert group.widget(index) is canvas and canvas.isVisible()
+    assert not manager.documents[DOCUMENT_ID]["closed"] and not canvas._disposed
+    assert engine.document.root.text == ("中心主题" if operation == "new" else "文件主题")
+    assert window.files.path == (None if operation == "new" else source)
 
 
 def test_invalid_open_failed_save_and_cancel_keep_session(window, tmp_path, monkeypatch):
@@ -741,7 +796,7 @@ def test_panel_modes_and_closed_document_keep_instances(window, mode):
     assert manager.panel("properties").content is panel
     assert manager.close_document(DOCUMENT_ID)
     assert not window.canvas._disposed
-    window.show_document()
+    assert window.new_document()
     assert manager.documents[DOCUMENT_ID]["widget"] is window.canvas
     window.dispose()
     window.dispose()
