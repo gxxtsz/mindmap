@@ -3,22 +3,24 @@
   "license": "MIT",
   "author": "mindmap contributors",
   "colors": {
-    "main-window-bg": "#17202D",
-    "main-window-titlebar-bg": "#17202D",
+    "main-window-bg": "#1E1F22",
+    "main-window-titlebar-bg": "#1E1F22",
     "main-window-outline": "#4D617A",
-    "tool-window-bg": "#202D3D",
-    "editor-bg": "#202D3D",
-    "text-default": "#E3EBF6",
-    "text-muted": "#97A8BD",
-    "toolbar-bg-hovered": "#2C3B4F",
-    "toolbar-selected-bg-active": "#24685F",
-    "control-brand-border": "#52CDBA",
-    "tool-window-border": "#35465C",
-    "ToolWindow.Header.borderColor": "#35465C",
+    "tool-window-bg": "#2B2D30",
+    "editor-bg": "#232529",
+    "text-default": "#DFE1E5",
+    "text-muted": "#9DA0A8",
+    "toolbar-bg-hovered": "#393B40",
+    "toolbar-selected-bg-active": "#33415C",
+    "control-brand-border": "#7AA2F7",
+    "tool-window-border": "#393B40",
+    "ToolWindow.Header.borderColor": "#393B40",
     "ToolWindow.Button.selectedForeground": "#FFFFFF",
     "success": "#63D6A6",
     "warning": "#F3BD69",
-    "danger": "#F28F99"
+    "danger": "#F28F99",
+    "editor-header-bg": "#2B2D30",
+    "editor-border": "#393B40"
   },
   "metrics": {
     "rail_width": 40,
@@ -29,6 +31,8 @@
     "compact_gap": 5,
     "radius": 8,
     "header_height": 36,
-    "compact_header_height": 30
+    "compact_header_height": 30,
+    "editor_header_height": 32,
+    "compact_editor_header_height": 28
   }
 }

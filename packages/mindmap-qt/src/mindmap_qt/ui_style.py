@@ -280,18 +280,21 @@ class ComboBox(QComboBox):
 
 
 class CardFrame(QWidget):
-    """圆角画布承载层；内部留出圆角半径，矩形视口不会覆盖圆角。
+    """画布承载层；独立使用时留出圆角半径，嵌入编辑器时由宿主管理外轮廓。
 
     不对 QGraphicsScene 使用遮罩、特效或样式表。卡片仅在普通 QWidget 中绘制，
     因而不改变节点测量、图形边界和导出；内边距由 Qt 统一处理高 DPI 缩放。
     """
 
-    def __init__(self, content: QWidget, parent=None):
+    def __init__(self, content: QWidget, parent=None, *, rounded=True):
+        """rounded=False 时使用直角和零内边距，让视口与宿主标签栏直接衔接。"""
         super().__init__(parent)
         self.setObjectName("mindmap_canvas_card")
         self.background = "#ffffff"
+        self.rounded = rounded
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(CARD_INSET, CARD_INSET, CARD_INSET, CARD_INSET)
+        inset = CARD_INSET if rounded else 0
+        layout.setContentsMargins(inset, inset, inset, inset)
         layout.setSpacing(0)
         layout.addWidget(content)
 
@@ -306,4 +309,5 @@ class CardFrame(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(self.background))
-        painter.drawRoundedRect(QRectF(self.rect()), CARD_RADIUS, CARD_RADIUS)
+        radius = CARD_RADIUS if self.rounded else 0
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)

@@ -1,0 +1,2 @@
+# 主题资源按原始字节校验摘要，统一换行符，避免 Windows 检出时改变校验结果。
+packages/mindmap-docking/src/mindmap_docking/resources/*.json text eol=lf

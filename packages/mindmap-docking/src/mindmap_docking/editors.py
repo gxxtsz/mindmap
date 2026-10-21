@@ -67,27 +67,30 @@ class EditorTabBar(QTabBar):
         self.setExpanding(False)
         self.setDrawBase(False)
         self.setElideMode(Qt.TextElideMode.ElideRight)
-        self.setIconSize(QSize(16, 16))
+        self.setIconSize(QSize(14, 14))
         self.currentChanged.connect(lambda *_: self._update_close_buttons())
         self.tabMoved.connect(self._tabs_moved)
 
     def refresh_theme(self):
-        """应用仅作用于本栏的页签样式；工具窗内业务 QTabWidget 不受影响。"""
+        """应用满高扁平标签；活动页与正文同色，仅底线强调选中，不影响业务标签控件。"""
         theme = self.group.manager.theme
-        if self.minimumHeight() != theme.header_height or self.maximumHeight() != theme.header_height:
-            self.setFixedHeight(theme.header_height)
+        if self.minimumHeight() != theme.editor_header_height or self.maximumHeight() != theme.editor_header_height:
+            self.setFixedHeight(theme.editor_header_height)
         font = self.font()
         size = 12 if theme.compact else 13
-        if font.pixelSize() != size:
+        if font.pixelSize() != size or font.bold():
             font.setPixelSize(size)
+            font.setBold(False)
             self.setFont(font)
         selector = f"QTabBar#{self.objectName()}"
         stylesheet = f"""
             {selector} {{ background:transparent; border:0; }}
             {selector}::tab {{ background:transparent; color:{theme.css('text-muted')};
-                margin:0; padding:0 10px; border:0; border-radius:0; }}
-            {selector}::tab:selected {{ background:transparent; color:{theme.css('text-default')}; }}
+                margin:0; padding:0 12px; border:0; border-radius:0;
+                border-bottom:2px solid transparent; }}
             {selector}::tab:hover {{ background:{theme.css('toolbar-bg-hovered')}; }}
+            {selector}::tab:selected {{ background:{theme.css('editor-bg')};
+                color:{theme.css('text-default')}; border-bottom-color:{theme.css('control-brand-border')}; }}
         """
         # 普通工具切换也会刷新宿主，相同样式无需再次触发 Qt 样式重排。
         if self.styleSheet() != stylesheet:
@@ -98,18 +101,8 @@ class EditorTabBar(QTabBar):
 
     def tabSizeHint(self, index):
         size = super().tabSizeHint(index)
-        # 固定整行高度，使页签标题与工具窗标题对齐；宽度仍由 Qt 按图标、文字及关闭占位计算。
-        return QSize(size.width(), self.group.manager.theme.header_height)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        index = self.currentIndex()
-        if index >= 0:
-            rect = self.tabRect(index)
-            painter = QPainter(self)
-            # 使用逻辑坐标的 2 像素短线强调当前文档，不恢复胶囊底色或额外抬高页签。
-            painter.fillRect(rect.left() + 10, rect.bottom() - 1, max(0, rect.width() - 20), 2,
-                             self.group.manager.theme.color("control-brand-border"))
+        # 标签撑满整行；所有状态预留相同的两像素底线，切换和悬停时文字不会上下跳动。
+        return QSize(size.width(), self.group.manager.theme.editor_header_height)
 
     def _update_close_buttons(self):
         """选中、鼠标悬停或键盘聚焦时绘制关闭图形；所有按钮始终保留固定占位。"""
@@ -208,7 +201,7 @@ class EditorGroup(QTabWidget):
         """刷新本组的圆角、页签与语义图标，保留选择、顺序和业务 QWidget 实例。"""
         self.tabBar().refresh_theme()
         theme = self.manager.theme
-        self._document_actions.setFixedHeight(theme.header_height)
+        self._document_actions.setFixedHeight(theme.editor_header_height)
         selector = f"QToolBar#{self._document_actions.objectName()}"
         stylesheet = f"""
             {selector} {{ background:transparent; border:0; spacing:3px; padding:0 6px; }}
@@ -227,7 +220,7 @@ class EditorGroup(QTabWidget):
             spec = self.manager.specs.get(token[5:]) if isinstance(token, str) and token.startswith("tool:") else None
             document = self.manager.documents.get(token)
             if spec is not None or document is not None:
-                self.setTabIcon(index, self.manager.theme.icon(spec.icon if spec else document["icon"], 16))
+                self.setTabIcon(index, self.manager.theme.icon(spec.icon if spec else document["icon"], 14))
         self._corners.refresh()
         self.update()
 
@@ -251,10 +244,10 @@ class EditorGroup(QTabWidget):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.fillRect(self.rect(), self.manager.theme.color("editor-bg"))
-        # 标题和正文位于同一张卡片，分隔线与工具窗标题采用相同的低对比颜色及边距。
+        # 只在整张编辑器卡片外侧绘制圆角；标签栏与正文平直相接，细线延伸到左右边缘。
         theme = self.manager.theme
-        color = theme.color("ToolWindow.Header.borderColor", theme.color("tool-window-border").name())
-        painter.fillRect(10, self.tabBar().height() - 1, max(0, self.width() - 20), 1, color)
+        painter.fillRect(0, 0, self.width(), self.tabBar().height(), theme.color("editor-header-bg"))
+        painter.fillRect(0, self.tabBar().height() - 1, self.width(), 1, theme.color("editor-border"))
 
     def add_token(self, token, widget, title, icon=None, index=-1):
         """迁移时先从旧标签容器移除，再添加同一个 QWidget，绝不复制业务内容。"""
@@ -266,7 +259,7 @@ class EditorGroup(QTabWidget):
                 return
             old_group.removeTab(old_index)
         index = self.count() if index < 0 else min(index, self.count())
-        inserted = self.insertTab(index, widget, icon or self.manager.theme.icon("document", 16), title)
+        inserted = self.insertTab(index, widget, icon or self.manager.theme.icon("document", 14), title)
         self.tabBar().setTabData(inserted, token)
         close = _EditorCloseButton(self.tabBar(), title)
         close.clicked.connect(lambda: self.close_token(token))
@@ -451,7 +444,7 @@ class EditorArea(QWidget):
             for token in getattr(group, "_restore_tokens", []):
                 if token in self.manager.documents:
                     doc = self.manager.documents[token]
-                    group.add_token(token, doc["widget"], doc["title"], self.manager.theme.icon(doc["icon"], 16))
+                    group.add_token(token, doc["widget"], doc["title"], self.manager.theme.icon(doc["icon"], 14))
             current = getattr(group, "_restore_current", 0)
             if group.count():
                 group.setCurrentIndex(min(current, group.count() - 1))

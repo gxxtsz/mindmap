@@ -20,6 +20,11 @@ uv build --package mindmap-docking
 ```
 
 构建后的 wheel 可以独立安装。主题 JSON、SVG 图标及资源摘要随包交付，运行时从本包读取。
+编辑器卡片只在外层保留圆角，标签撑满栏高并与正文平直衔接；不绘制标签圆角和整圈描边。
+`editor-bg`、`editor-header-bg`、`editor-border` 分别控制正文及当前标签、标签栏、分隔线；
+当前标签底部使用2逻辑像素的 `control-brand-border` 蓝线，文件图标为14逻辑像素，标题使用常规字重。
+`editor_header_height`／`compact_editor_header_height` 控制标签行高度，默认32／28逻辑像素。
+业务文档控件应自行铺满正文；需要跟随外壳底色时由宿主显式传递，框架不改写业务数据。
 
 ## 接入现有 Qt 窗口
 

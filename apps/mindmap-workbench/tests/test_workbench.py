@@ -637,6 +637,10 @@ def test_shell_theme_preserves_pending_input_document_and_export(window, tmp_pat
     assert field.hasFocus()
     assert engine.document == before and engine.revision == revision
     assert panel.palette().color(panel.backgroundRole()).name() == window.manager.theme.color("tool-window-bg").name()
+    # 工作台只覆盖视图底色并交出卡片轮廓；切换主题和后续文档刷新都不能改写导出背景。
+    canvas = window.canvas
+    assert canvas.view.mapTo(canvas._view_card, QPoint()) == QPoint()
+    assert canvas.scene.backgroundBrush().color() == window.manager.theme.color("editor-bg")
     panel.discard_pending()
     second = tmp_path / "换外壳.png"
     window.canvas.export(second)
@@ -644,6 +648,7 @@ def test_shell_theme_preserves_pending_input_document_and_export(window, tmp_pat
     engine.set_theme(Theme.dark())
     window.manager.set_theme("light")
     assert engine.document.theme == Theme.dark()
+    assert canvas.scene.backgroundBrush().color() == window.manager.theme.color("editor-bg")
     assert window.panels.outline.palette().color(window.panels.outline.backgroundRole()).name() == "#ffffff"
     for suffix in ("svg", "pdf"):
         target = tmp_path / ("原图." + suffix)

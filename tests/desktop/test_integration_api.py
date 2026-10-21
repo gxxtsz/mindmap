@@ -123,7 +123,7 @@ def test_document_actions_survive_split_restore_migration_and_reopen(docking, co
     for identifier, action in (("doc", first), ("peer_doc", second)):
         group, _ = area.find_token(identifier)
         assert group.cornerWidget().actions() == [action]
-        assert group.cornerWidget().height() == manager.theme.header_height
+        assert group.cornerWidget().height() == manager.theme.editor_header_height
 
     manager.move_document("peer_doc", "main", area.find_token("doc")[0].group_id)
     group, _ = area.find_token("peer_doc")

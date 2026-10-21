@@ -47,7 +47,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.engine = MindMapEngine()
         self.canvas = MindMapWidget(
             self.engine, layout_registry=layout_registry, format_registry=format_registry,
-            toolbar=False, view_controls=True,
+            toolbar=False, view_controls=True, embedded=True,
         )
         # 外壳对中央内容调用 QWidget.setFocus，组合画布把焦点交给真实视图。
         self.canvas.setFocusProxy(self.canvas.view)

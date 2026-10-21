@@ -113,12 +113,16 @@ def test_card_corners_are_antialiased_after_resize_and_theme_changes(docking, th
         docking.window.resize(width, 760)
         QApplication.processEvents()
         outside = manager.theme.color("main-window-bg").rgb()
-        inside = manager.theme.color("tool-window-bg").rgb()
         for card in cards:
             image = card.grab().toImage()
             radius = round(manager.theme.radius * image.devicePixelRatio())
             assert card.mask().isEmpty()
             for right, bottom in ((False, False), (True, False), (False, True), (True, True)):
+                # 满高活动标签覆盖左上角，右上角保留标签栏底色；正文是普通文本控件。
+                key = "tool-window-bg"
+                if not bottom and hasattr(card, "currentWidget"):
+                    key = "editor-header-bg" if right else "editor-bg"
+                inside = manager.theme.color(key).rgb()
                 colors = {
                     image.pixelColor(image.width() - 1 - x if right else x,
                                      image.height() - 1 - y if bottom else y).rgb()

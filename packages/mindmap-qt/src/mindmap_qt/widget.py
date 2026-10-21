@@ -80,6 +80,7 @@ class MindMapWidget(QWidget):
         editable=True,
         toolbar=True,
         view_controls=False,
+        embedded=False,
         layout_registry: LayoutRegistry | None = None,
         format_registry: FormatRegistry | None = None,
     ):
@@ -89,12 +90,16 @@ class MindMapWidget(QWidget):
         提供适应窗口和回到中心，适合由宿主接管历史动作的布局。两项可以独立
         配置，默认保持独立组件原有布局。浮条复用已有动作，由画布随 Qt 父子
         关系销毁，不创建场景元素，不改变导图内容、快捷键或图形导出。
+
+        embedded=True 表示宿主提供编辑器外层圆角：移除内部卡片圆角和留白，
+        并用界面色板的 field 作为显示背景。仅影响视图，文档主题和导出保持原值。
         """
         super().__init__(parent)
         self.setObjectName("mindmap_canvas")
         self.setAutoFillBackground(True)
         self._ui_colors = None
         self._ui_colors_override = None
+        self._embedded = embedded
         self.engine = engine or MindMapEngine()
         self.editable = editable
         self._properties_handler = None
@@ -116,7 +121,7 @@ class MindMapWidget(QWidget):
         layout.setSpacing(0)
         layout.addWidget(self.toolbar)
         # 圆角只属于界面承载层；视口与场景仍是原生矩形，导出不读取卡片外观。
-        self._view_card = CardFrame(self.view, self)
+        self._view_card = CardFrame(self.view, self, rounded=not embedded)
         layout.addWidget(self._view_card)
         self.toolbar.setVisible(toolbar)
         self.node_items, self.branch_items = {}, {}
@@ -528,8 +533,6 @@ class MindMapWidget(QWidget):
             # 布局边界已覆盖可见节点、节点内图片及普通父子分支线。场景
             # 只记录内容范围，一屏操作余量由视图按当前窗口大小与倍率单独计算。
             self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
-            self.scene.setBackgroundBrush(QColor(document.theme.background))
-            self._view_card.set_background(document.theme.background)
             self._apply_ui_theme()
         finally:
             self.scene.blockSignals(False)
@@ -538,7 +541,7 @@ class MindMapWidget(QWidget):
         self.view.update_cursor()
 
     def set_ui_colors(self, colors: UiColors | None) -> None:
-        """覆盖本组件的界面色板，不修改导图主题、场景、选择和撤销历史。
+        """覆盖本组件的界面色板，不修改导图主题、场景内容、选择和撤销历史。
 
         None 恢复原有跟随导图主题的行为。只刷新控件外观，保留原地编辑器、
         属性弹层、鼠标位置和画布倍率；错误类型抛出 TypeError。
@@ -551,6 +554,11 @@ class MindMapWidget(QWidget):
     def _apply_ui_theme(self):
         theme = self._ui_colors_override or self._document.theme
         colors = ui_colors(theme)
+        # 嵌入模式只覆盖屏幕底色；导出重新从文档构建场景，仍使用文档背景。
+        # 每次文档刷新也同步此处，避免打开文件或撤销后闪回旧的内部卡片背景。
+        background = colors.field if self._embedded else self._document.theme.background
+        self.scene.setBackgroundBrush(QColor(background))
+        self._view_card.set_background(background)
         if colors != self._ui_colors:
             self._ui_colors = colors
             # 仅在当前组件内提供菜单、网址输入等样式，不修改宿主的应用样式。

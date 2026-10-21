@@ -88,6 +88,12 @@ class Theme:
     def header_height(self):
         return self.metrics["compact_header_height" if self.compact else "header_height"]
 
+    @property
+    def editor_header_height(self):
+        """编辑器标签栏单独收紧高度；工具标题尺寸和自定义主题既有度量保持独立。"""
+        key = "compact_editor_header_height" if self.compact else "editor_header_height"
+        return self.metrics.get(key, self.header_height)
+
     def icon(self, name: str | QIcon, size=20):
         """同时接受业务的 QIcon 和语义图标名，不要求引用组件包内部路径。"""
         if isinstance(name, QIcon):

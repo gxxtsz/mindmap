@@ -43,6 +43,9 @@ def child(scale, platform):
             app.processEvents()
             group, _ = window.host.editor.find_token(DOCUMENT_ID)
             controls = window.canvas._view_controls
+            # 从实际视口像素检查左右顶部接缝；嵌入画布应填满矩形，不再露出内层圆角。
+            viewport_image = window.canvas.view.viewport().grab().toImage()
+            canvas_color = window.manager.theme.color("editor-bg")
             checks = {
                 "平台": app.platformName() == platform,
                 "缩放": abs(window.devicePixelRatioF() - scale) < 0.01,
@@ -54,6 +57,11 @@ def child(scale, platform):
                     window.canvas.action("undo"), window.canvas.action("redo"),
                 ],
                 "无第二行工具栏": window.canvas.toolbar.isHidden(),
+                "画布顶部直角衔接": all(
+                    viewport_image.pixelColor(x, 0) == canvas_color
+                    for x in (0, viewport_image.width() - 1)
+                ),
+                "画布与外壳有层次": canvas_color != window.manager.theme.color("main-window-bg"),
                 "画布导航浮条": controls.isVisible()
                 and window.canvas.view.viewport().geometry().contains(controls.geometry()),
             }

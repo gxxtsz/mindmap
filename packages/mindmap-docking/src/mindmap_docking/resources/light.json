@@ -3,21 +3,23 @@
   "license": "MIT",
   "author": "mindmap contributors",
   "colors": {
-    "main-window-bg": "#EEF2F6",
-    "main-window-titlebar-bg": "#EEF2F6",
+    "main-window-bg": "#E9EDF2",
+    "main-window-titlebar-bg": "#E9EDF2",
     "main-window-outline": "#ADB9C8",
     "tool-window-bg": "#FFFFFF",
     "editor-bg": "#FFFFFF",
     "text-default": "#233044",
     "text-muted": "#68778D",
     "toolbar-bg-hovered": "#E5EBF2",
-    "toolbar-selected-bg-active": "#D8F1ED",
-    "control-brand-border": "#087F75",
-    "tool-window-border": "#D8E0EA",
-    "ToolWindow.Button.selectedForeground": "#075E56",
+    "toolbar-selected-bg-active": "#EAF1FF",
+    "control-brand-border": "#3574D4",
+    "tool-window-border": "#DDE2E8",
+    "ToolWindow.Button.selectedForeground": "#285BA5",
     "success": "#15885C",
     "warning": "#A66312",
-    "danger": "#BE4053"
+    "danger": "#BE4053",
+    "editor-header-bg": "#F7F8FA",
+    "editor-border": "#DDE2E8"
   },
   "metrics": {
     "rail_width": 40,
@@ -28,6 +30,8 @@
     "compact_gap": 5,
     "radius": 8,
     "header_height": 36,
-    "compact_header_height": 30
+    "compact_header_height": 30,
+    "editor_header_height": 32,
+    "compact_editor_header_height": 28
   }
 }
