@@ -542,7 +542,7 @@ def test_file_save_flushes_properties_and_inline_text(window, tmp_path):
     assert files.save()
     assert load_document(files.path).root.style["font_size"] == 22
     assert not files.is_dirty
-    assert window.manager.documents[window.active_session.id]["title"] == "文档.mindmap"
+    assert window.manager.documents[window.active_session.id]["title"] == "文档"
     canvas.begin_edit(window.engine.root_id)
     canvas.editor.setPlainText("原地文字")
     assert files.save()

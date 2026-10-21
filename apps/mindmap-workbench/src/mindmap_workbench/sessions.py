@@ -190,8 +190,10 @@ class MindMapSessionManager(QObject):
         self._sessions[session.id] = session
         self.window._outline_stack.addWidget(session.panels.outline)
         self.window._properties_stack.addWidget(session.panels.properties)
+        # 标签只显示不含末尾扩展名的文件名，完整路径仍由文件控制器保留。
+        # 图标沿用应用配置的语义名称，由停靠层在主题切换时统一刷新。
         self.window.manager.register_document(DocumentSpec(
-            session.id, session.files.path.name, lambda: session.canvas,
+            session.id, session.files.path.stem, lambda: session.canvas, icon=self.window.spec.icon,
             can_close=session.can_close, on_closed=lambda: self._closed(session), dispose_on_close=True,
         ))
         self.window.manager.set_document_actions(session.id, [session.canvas.action("undo"), session.canvas.action("redo")])
@@ -286,12 +288,14 @@ class MindMapSessionManager(QObject):
         return True
 
     def sync(self, session):
+        """同步标签显示和文件状态；保存或另存为后使用当前路径，悬停提示保留完整路径。"""
         if session.id not in self._sessions or session.disposed:
             return
         manager = self.window.manager
         if session.id in manager.documents:
+            # 仅隐藏最后一个扩展名，保留文件名中的其他点号；每次刷新都使用同一规则。
             # 失败文字与修改星号分别展示，即使错误发生在后台标签也能直接定位。
-            title = session.files.path.name + ("（保存失败）" if session.last_error else "")
+            title = session.files.path.stem + ("（保存失败）" if session.last_error else "")
             manager.set_document_title(session.id, title)
             manager.set_document_modified(session.id, session.files.is_dirty)
             location = self.window.host.editor.find_token(session.id)
