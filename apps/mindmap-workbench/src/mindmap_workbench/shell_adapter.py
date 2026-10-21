@@ -61,6 +61,16 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         mode = self.preferences.value("view/wheel_mode", "scroll")
         self.canvas.set_wheel_mode(mode if mode in ("scroll", "zoom") else "scroll")
         self.canvas.wheel_mode_changed.connect(self._save_wheel_mode)
+        # 粘贴偏好与滚轮一样只保存在宿主；Qt 组件不读取 QSettings，也不写入导图文件。
+        edraw_mode = self.preferences.value("clipboard/edraw_mode", "append")
+        keep_children = self.preferences.value("clipboard/edraw_keep_children", True)
+        if isinstance(keep_children, str) and keep_children in ("true", "false"):
+            keep_children = keep_children == "true"
+        self.canvas.set_edraw_paste_options(
+            edraw_mode if edraw_mode in ("append", "replace") else "append",
+            keep_children if isinstance(keep_children, bool) else True,
+        )
+        self.canvas.edraw_paste_options_changed.connect(self._save_edraw_paste_options)
         self.canvas.error_occurred.connect(self.show_status_message)
         self.files.error_occurred.connect(self.show_status_message)
         self.files.message.connect(self.show_status_message)
@@ -122,6 +132,12 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.preferences.setValue("view/wheel_mode", mode)
         self.preferences.sync()
         self._sync_document()
+
+    def _save_edraw_paste_options(self, mode, keep_children):
+        """成功粘贴后的选择立即写回本机偏好，下一次弹窗和重启工作台均恢复该值。"""
+        self.preferences.setValue("clipboard/edraw_mode", mode)
+        self.preferences.setValue("clipboard/edraw_keep_children", keep_children)
+        self.preferences.sync()
 
     def _show_properties(self):
         self.canvas.finish_edit(commit=True)

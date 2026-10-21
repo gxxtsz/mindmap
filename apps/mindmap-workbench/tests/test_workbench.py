@@ -53,6 +53,64 @@ def test_default_single_document_and_editable_framework(window):
     assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.options) for button in bar.action_buttons)
 
 
+def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatch, qtbot):
+    """真实粘贴保存两项偏好；取消不覆盖，重建工作台从相同配置目录恢复。"""
+    from mindmap_qt.clipboard import EDRAW_CLIPBOARD_MIME
+    from mindmap_qt.dialogs import EdrawPasteOptions
+    from PySide6.QtCore import QMimeData
+
+    original = QMimeData()
+    current = QApplication.clipboard().mimeData()
+    if current is not None:
+        for fmt in current.formats():
+            original.setData(fmt, current.data(fmt))
+    mime = QMimeData()
+    mime.setData(EDRAW_CLIPBOARD_MIME, b'<Clipboard><Shapes><Shape Type="MainIdea" ID="1">'
+                 b'<Text><HtmlText>&lt;p&gt;Edraw&lt;/p&gt;</HtmlText></Text></Shape></Shapes></Clipboard>')
+    QApplication.clipboard().setMimeData(mime)
+    try:
+        assert window.canvas.edraw_paste_options == ("append", True)
+        monkeypatch.setattr("mindmap_qt.widget.edraw_paste_options",
+                            lambda *args, **kwargs: EdrawPasteOptions("replace", False))
+        window.canvas.paste()
+        assert window.preferences.value("clipboard/edraw_mode") == "replace"
+        assert window.preferences.value("clipboard/edraw_keep_children", type=bool) is False
+        monkeypatch.setattr("mindmap_qt.widget.edraw_paste_options", lambda *args, **kwargs: None)
+        assert window.canvas.paste() == []
+        restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
+        qtbot.addWidget(restored)
+        try:
+            assert restored.canvas.edraw_paste_options == ("replace", False)
+            assert not restored.engine.is_dirty and not restored.engine.can_undo
+            assert not restored.engine.document.metadata
+        finally:
+            restored.close()
+    finally:
+        if QApplication.platformName() == "offscreen":
+            QApplication.clipboard().clear()
+        else:
+            QApplication.clipboard().setMimeData(original)
+
+
+@pytest.mark.parametrize(("mode", "keep", "expected"), [
+    ("invalid", "invalid", ("append", True)),
+    (None, 17, ("append", True)),
+    ("replace", "false", ("replace", False)),
+    ("append", "true", ("append", True)),
+])
+def test_edraw_paste_preferences_validate_saved_values(window, qtbot, mode, keep, expected):
+    """兼容 INI 布尔值，损坏的方式和开关各自恢复默认，不影响导图或启动。"""
+    window.preferences.setValue("clipboard/edraw_mode", mode)
+    window.preferences.setValue("clipboard/edraw_keep_children", keep)
+    window.preferences.sync()
+    restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
+    qtbot.addWidget(restored)
+    try:
+        assert restored.canvas.edraw_paste_options == expected
+    finally:
+        restored.close()
+
+
 def test_panel_and_file_icons_stay_distinct_and_available_after_theme_changes(window):
     """核对真实菜单与侧栏的图标，避免资源删除、主题切换后空白或不同操作混用图形。"""
     manager = window.manager

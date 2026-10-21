@@ -21,3 +21,16 @@ save_document(restored, "大纲.md", registry=registry)
 后缀有多个匹配时要求明确指定。所有导出复用原子文件写入，失败保持已有目标不变。
 `encode_document` 和 `decode_document` 提供内存流入口；`dumps`、`loads` 提供 JSON 文本入口。
 文件服务不修改任何引擎保存标记，宿主应在主文档保存成功后调用 `mark_saved()`。
+
+## 亿图脑图剪贴板
+
+`import_edraw_xml(data: bytes) -> MindMapDocument` 解析亿图普通脑图的
+`application/edraw-mind-xml` XML 载荷，返回带合成根的多树片段。
+来源节点的 `LevelData/SubLevel` 决定子节点顺序，`Super` 补充父引用；未复制的父节点不会凭空补出。
+普通主题、子主题与浮动主题只保留纯文本和层级，支持 `pp/tp` 段落及 `HtmlText` 的换行；
+连接线、概要、图片、字体、颜色、备注、链接及源节点标识均不导入。
+
+本接口不注册到文件格式列表，不读取本机文件，也不依赖 Qt。
+亿图批量复制产生的绝对 `copy.xml` 路径由 Qt 层限量读取后传入。
+公开的 `MAX_ARCHIVE_BYTES` 为所有文档与剪贴板读取共用的容量上限。
+结构损坏、循环、多父节点或重复标识抛出中文 `MindMapError`，不修补或猜测损坏的树。

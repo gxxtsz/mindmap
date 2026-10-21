@@ -32,6 +32,7 @@ from mindmap_core import (
     get_branch_style,
 )
 from mindmap_formats import (
+    MAX_ARCHIVE_BYTES,
     SCHEMA_VERSION,
     create_default_format_registry,
     decode_document,
@@ -39,6 +40,7 @@ from mindmap_formats import (
     encode_document,
     export_outline,
     from_dict,
+    import_edraw_xml,
     import_outline,
     load_document,
     loads,
@@ -53,6 +55,7 @@ from mindmap_layouts import (
 )
 
 __all__ = [
+    "MAX_ARCHIVE_BYTES",
     "Asset",
     "BranchPath",
     "BranchStyle",
@@ -94,6 +97,7 @@ __all__ = [
     "export_outline",
     "from_dict",
     "import_outline",
+    "import_edraw_xml",
     "load_document",
     "loads",
     "save_document",

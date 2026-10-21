@@ -38,7 +38,8 @@ from PySide6.QtWidgets import (
 )
 
 from .branch_styles import BranchStyleMenu, branch_style_icon
-from .dialogs import node_properties
+from .clipboard import EDRAW_CLIPBOARD_MIME, read_edraw_clipboard
+from .dialogs import edraw_paste_options, node_properties
 from .exporting import export_document
 from .icons import IconMenuOptionButton, IconOptionMenu, add_icon_action, apply_toolbar_theme, set_action_icon
 from .items import NodeEditor, NodeItem
@@ -64,6 +65,7 @@ class MindMapWidget(QWidget):
     error_occurred = Signal(str)
     image_imported = Signal(str)
     wheel_mode_changed = Signal(str)
+    edraw_paste_options_changed = Signal(str, bool)
     editable_changed = Signal(bool)
     editing_changed = Signal(bool)
     document_changing = Signal(object)
@@ -97,6 +99,7 @@ class MindMapWidget(QWidget):
         self.editable = editable
         self._properties_handler = None
         self._wheel_mode = "scroll"
+        self._edraw_paste_options = ("append", True)
         self.factory = VisualFactory()
         self.layout_registry = (
             layout_registry if layout_registry is not None else create_default_layout_registry()
@@ -248,6 +251,29 @@ class MindMapWidget(QWidget):
         action.setText(f"滚轮行为：{label}")
         action.setToolTip(f"{label}；点击切换滚轮行为，Ctrl＋滚轮始终缩放")
         set_action_icon(action, f"wheel_{self._wheel_mode}", (self._ui_colors_override or self._document.theme))
+
+    @property
+    def edraw_paste_options(self) -> tuple[str, bool]:
+        """返回亿图单树粘贴的默认方式及保留原后代开关，初始值为 (append, True)。
+
+        此值只属于当前组件，不进入导图文件或撤销历史。宿主可监听
+        edraw_paste_options_changed(str, bool) 保存，再通过 setter 恢复跨重启偏好。
+        每次亿图粘贴仍会询问用户，多根来源被限制为追加时不会覆盖单树偏好。
+        """
+        return self._edraw_paste_options
+
+    def set_edraw_paste_options(self, mode: str, keep_children: bool) -> None:
+        """设置亿图粘贴默认选项；非法值抛出 MindMapError，且不产生任何文档变化。
+
+        mode 仅允许 append、replace，keep_children 必须是布尔值。实际改变时才
+        发送信号，适合宿主 QSettings 持久化；恢复偏好不受只读或编辑状态限制。
+        """
+        if mode not in ("append", "replace") or not isinstance(keep_children, bool):
+            raise MindMapError("亿图粘贴方式必须为 append 或 replace，保留后代选项必须为布尔值")
+        options = (mode, keep_children)
+        if options != self._edraw_paste_options:
+            self._edraw_paste_options = options
+            self.edraw_paste_options_changed.emit(*options)
 
     def _create_actions(self):
         definitions = [
@@ -778,8 +804,14 @@ class MindMapWidget(QWidget):
         """通过注入格式完整解析剪贴板，失败时不改变选择、文档或撤销历史。"""
         self._ensure_editable()
         mime = QApplication.clipboard().mimeData()
+        if mime is None:
+            return []
         if mime.hasFormat(CLIPBOARD_MIME):
             fragment = decode_document(bytes(mime.data(CLIPBOARD_MIME)), registry=self.format_registry)
+        elif mime.hasFormat(EDRAW_CLIPBOARD_MIME):
+            # 先读完并验证结构，再询问放置方式；亿图解析失败时不能降级为纯文本。
+            fragment = read_edraw_clipboard(bytes(mime.data(EDRAW_CLIPBOARD_MIME)))
+            return self._paste_edraw(fragment)
         elif mime.hasText():
             text = mime.text()
             first = next((line.strip() for line in text.splitlines() if line.strip()), "")
@@ -795,6 +827,60 @@ class MindMapWidget(QWidget):
             return []
         ids = self.engine.paste_fragment(self.current_node_id(), fragment)
         self.select_nodes(ids)
+        return ids
+
+    def _paste_edraw(self, fragment: MindMapDocument) -> list[str]:
+        """询问亿图片段的放置方式，并原子地更新树、选择和成功后的默认偏好。"""
+        target_id = self.current_node_id()
+        target = self.engine.get_node(target_id)
+        generation, revision = self.engine.document_generation, self.engine.revision
+        roots = fragment.root.children
+        mode, keep_children = self.edraw_paste_options
+        choice = edraw_paste_options(
+            self, target_text=target.text, root_count=len(roots), node_count=len(fragment.nodes) - 1,
+            mode=mode, keep_children=keep_children,
+            theme=self._ui_colors_override or self._document.theme,
+        )
+        if choice is None:
+            return []
+        self._ensure_editable()
+        # 模态弹窗仍会处理定时器和宿主事件，禁止将确认前的目标套用到已替换的文档。
+        if self._disposed or (generation, revision) != (
+            self.engine.document_generation, self.engine.revision
+        ):
+            raise MindMapError("粘贴期间导图已发生变化，请重新粘贴")
+        if choice.mode not in ("append", "replace") or not isinstance(choice.keep_children, bool):
+            raise MindMapError("亿图粘贴选项无效")
+        if choice.mode == "replace" and len(roots) != 1:
+            raise MindMapError("多个并列主题只能追加到选中节点下")
+
+        # 新主题沿用正常 add_child 的分支继承规则，字体、颜色、方向等保持项目默认值。
+        # 每个节点分别深拷贝，避免之后编辑某条分支时连带改变其他新主题。
+        if "branch" in target.style:
+            for node in fragment.nodes.values():
+                if node.id != fragment.root_id:
+                    node.style["branch"] = deepcopy(target.style["branch"])
+        with self.engine.transaction("粘贴亿图脑图"):
+            if choice.mode == "replace":
+                source = fragment.nodes[roots[0]]
+                if not choice.keep_children:
+                    self.engine.remove_nodes(target.children)
+                self.engine.update_node(target_id, text=source.text, text_format="plain")
+                # paste_fragment 忽略片段根；把来源根作为合成根即可只插入它的后代。
+                # 目标 ID、同级位置和本项目属性始终保留；保留的旧后代排在新后代之前。
+                replacement = deepcopy(fragment)
+                del replacement.nodes[replacement.root_id]
+                replacement.root_id = source.id
+                self.engine.paste_fragment(target_id, replacement)
+                ids = [target_id]
+            else:
+                ids = self.engine.paste_fragment(target_id, fragment)
+        self.select_nodes(ids)
+        # 引擎通知默认选中新插入的后代；替换后应选中目标，重做时也必须恢复同一选择。
+        if self.engine.revision != revision and self._selection_undo:
+            before, _ = self._selection_undo[-1]
+            self._selection_undo[-1] = (before, list(ids))
+        self.set_edraw_paste_options(choice.mode if len(roots) == 1 else mode, choice.keep_children)
         return ids
 
     def edit_properties(self):

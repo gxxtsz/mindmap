@@ -136,8 +136,8 @@ def menu_styles(colors: UiColors) -> str:
 def control_styles(colors: UiColors) -> str:
     """表单和应用自有弹窗共用的控件样式；保持原生输入、混合值及校验行为。"""
     return (
-        f"QLabel, QCheckBox {{ color: {colors.text}; background: transparent; }}"
-        "QCheckBox { spacing: 6px; }"
+        f"QLabel, QCheckBox, QRadioButton {{ color: {colors.text}; background: transparent; }}"
+        "QCheckBox, QRadioButton { spacing: 6px; }"
         f"QLineEdit, QDoubleSpinBox, QComboBox {{ background: {colors.field}; color: {colors.text}; "
         f"border: 1px solid {colors.border}; border-radius: {CONTROL_RADIUS}px; padding: 3px 5px; }}"
         f"QLineEdit:hover, QDoubleSpinBox:hover, QComboBox:hover {{ border-color: {colors.muted}; }}"
@@ -166,7 +166,7 @@ def control_styles(colors: UiColors) -> str:
         f"QPushButton:default, QPushButton:focus {{ border-color: {colors.accent}; }}"
         f"QPushButton:pressed {{ background: {colors.selected}; }}"
         f"QLineEdit:disabled, QDoubleSpinBox:disabled, QComboBox:disabled, QToolButton:disabled, "
-        f"QPushButton:disabled, QCheckBox:disabled {{ color: {colors.muted}; }}"
+        f"QPushButton:disabled, QCheckBox:disabled, QRadioButton:disabled {{ color: {colors.muted}; }}"
         f"QToolButton:disabled {{ background: transparent; border-color: transparent; }}"
         f'QWidget[invalid="true"] {{ border: 1px solid {colors.error}; }}'
         f"QLabel#property_error {{ color: {colors.error}; }}"
