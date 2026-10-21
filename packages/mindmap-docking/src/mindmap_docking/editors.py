@@ -154,23 +154,17 @@ class EditorTabBar(QTabBar):
                 return
         super().mouseMoveEvent(event)
 
-    def mouseDoubleClickEvent(self, event):
-        if self.tabAt(event.position().toPoint()) >= 0:
-            self.group.manager.hide_restore_all()
-
     def contextMenuEvent(self, event):
         index = self.tabAt(event.pos())
         if index < 0:
             return
         token = self.tabData(index)
-        manager = self.group.manager
         menu = QMenu(self)
         menu.addAction("关闭", lambda: self.group.close_token(token))
         menu.addAction("关闭其他标签", lambda: self.group.close_others(token))
         menu.addSeparator()
         menu.addAction("向右拆分", lambda: self.group.area.split_token(token, Qt.Orientation.Horizontal))
         menu.addAction("向下拆分", lambda: self.group.area.split_token(token, Qt.Orientation.Vertical))
-        menu.addAction("移至新框架", lambda: manager.detach_token(token))
         menu.exec(event.globalPos())
 
 
@@ -339,7 +333,6 @@ class EditorGroup(QTabWidget):
             self.manager.move(data["id"], target)
         else:
             self.manager.move_document(data["id"], self.area.host.host_id, self.group_id, index)
-        self.manager.drag_committed = True
         self.area.host.preview.hide()
         event.acceptProposedAction()
 

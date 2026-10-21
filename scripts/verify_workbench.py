@@ -100,10 +100,10 @@ def child(scale, platform):
             window.manager.activate("properties")
             app.processEvents()
             original = window.panels.properties
-            window.manager.set_view_mode("properties", ViewMode.WINDOW)
+            window.manager.set_view_mode("properties", ViewMode.UNDOCK)
             app.processEvents()
-            checks["浮窗保留实例"] = window.manager.panel("properties").content is original
-            assert window.manager.floating["properties"].grab().save(str(output / (name + "-floating.png")))
+            checks["临时展开保留实例"] = window.manager.panel("properties").content is original
+            assert window.grab().save(str(output / (name + "-overlay.png")))
             window.manager.set_view_mode("properties", ViewMode.DOCK_PINNED)
             app.processEvents()
             field = window.panels.properties.fields["style.font_size"]
@@ -116,8 +116,8 @@ def child(scale, platform):
             checks["外观切换保留输入"] = field.hasFocus() and field.value() == 24
             checks["外观不提交文档"] = window.engine.document == before and window.engine.revision == revision
             window.panels.properties.discard_pending()
-            QTest.keyClick(field.lineEdit(), Qt.Key.Key_F6)
-            checks["返回画布焦点"] = window.canvas.view.hasFocus()
+            window.manager.hide("properties")
+            checks["隐藏面板交还焦点"] = window.canvas.view.hasFocus()
             window.engine.set_theme(Theme.dark())
             before = window.engine.document
             window.manager.set_theme("light")

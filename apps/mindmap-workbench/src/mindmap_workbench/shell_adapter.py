@@ -43,9 +43,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             "mindmap-workbench", "原生思维导图", subtitle="思维导图工作台",
             storage_dir=storage_dir, theme=Theme(theme or "light"),
         ))
-        # Escape 属于导图的取消文字编辑和退出分支聚焦，框架返回中央区改用
-        # F6，避免 WindowShortcut 抢走画布的按键或造成歧义快捷键。
-        self.manager.set_shortcut("editor_focus", "F6")
+        # 框架不再注册工作区导航快捷键；Escape 留给画布取消编辑和退出聚焦。
         self.engine = MindMapEngine()
         self.canvas = MindMapWidget(
             self.engine, layout_registry=layout_registry, format_registry=format_registry,
@@ -217,7 +215,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def main_menu(self):
         """在标准外壳菜单中复用画布动作，每次打开重新枚举扩展能力。"""
         menu = super().main_menu()
-        anchor = menu.actions()[1] if len(menu.actions()) > 1 else None
+        # 使用设置菜单作为稳定锚点，避免删除工作区后依赖菜单数字下标。
+        anchor = next(action for action in menu.actions() if action.text() == "设置")
         edit = QMenu("编辑", menu)
         for key in ("undo", "redo", "add_child", "add_sibling", "insert_parent", "edit",
                     "properties", "delete", "copy", "cut", "paste", "image", "image_url"):
@@ -227,18 +226,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         view.addAction("显示导图", self.show_document)
         for key in ("zoom_in", "zoom_out", "fit", "center", "focus", "unfocus", "expand_all", "collapse_all"):
             view.addAction(self.canvas.action(key))
-        view.addAction(self.canvas.action("wheel_mode"))
         self.read_only_action.setChecked(not self.canvas.editable)
         view.addAction(self.read_only_action)
-        algorithms = view.addMenu("布局算法")
-        for info in self.canvas.layout_registry.list():
-            action = algorithms.addAction(info.name)
-            action.setData(info.id)
-            action.setCheckable(True)
-            action.setChecked(info.id == self.engine.document.layout.algorithm_id)
-            action.setEnabled(self.canvas.editable)
-            action.triggered.connect(lambda checked=False, config=info.default_config:
-                                     self.canvas.call(lambda: self.canvas.set_layout(config)))
         menu.insertMenu(anchor, view)
         exports = QMenu("导出文档", menu)
         for entry in self.canvas.format_registry.list():

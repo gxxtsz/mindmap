@@ -94,9 +94,9 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
     assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected
-    workspace = next(action.menu() for action in main.actions() if action.text() == "工作区")
-    tools = next(action.menu() for action in workspace.actions() if action.text() == "工具窗口")
-    assert [action.text() for action in tools.actions()] == ["大纲", "节点属性"]
+    assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "导出文档", "设置"]
+    view = next(action.menu() for action in main.actions() if action.text() == "视图")
+    assert all("滚轮" not in action.text() and "布局算法" != action.text() for action in view.actions())
     assert window.manager.states["properties"].visible
     main.deleteLater()
 
@@ -189,7 +189,7 @@ def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
         restored.show()
         QApplication.processEvents()
         assert "settings" not in restored.manager.states
-        assert "settings" not in restored.manager.floating
+        assert set(restored.manager.hosts) == {"main"}
         assert restored.manager.states["properties"].visible
         assert restored.panels.properties.isVisible()
         restored.manager.restore_layout(snapshot)
@@ -202,7 +202,7 @@ def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
 
 
 def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
-    """真实标题按钮弹出共用菜单；浮动、重停靠和主题切换不替换按钮或动作。"""
+    """真实标题按钮弹出共用菜单；临时展开、重停靠和主题切换不替换按钮或动作。"""
     manager, tree = window.manager, window.panels.outline
     manager.activate("outline", focus=False)
     panel = manager.panel("outline")
@@ -229,7 +229,7 @@ def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
     before, revision = window.engine.document, window.engine.revision
     for theme in ("dark", "light"):
         manager.set_theme(theme)
-        for mode in (ViewMode.FLOAT, ViewMode.DOCK_PINNED):
+        for mode in (ViewMode.UNDOCK, ViewMode.DOCK_PINNED):
             manager.set_view_mode("outline", mode)
             QApplication.processEvents()
             assert manager.panel("outline").action_buttons == [button]
@@ -552,26 +552,20 @@ class MenuLayout(TreeLayout):
         return TreeLayout().layout(document, measurements, **kwargs)
 
 
-def test_dynamic_layout_menu_capabilities_readonly_and_history(window):
-    """算法菜单读取实时注册表；不支持的设置及只读操作应正确禁用。"""
+def test_layout_extension_still_works_without_algorithm_menu(window):
+    """工作台移除算法入口，底层注册、布局调用、能力限制和撤销仍然有效。"""
     window.canvas.layout_registry.register(MenuLayout())
     menu = window.main_menu()
     view = next(action.menu() for action in menu.actions() if action.text() == "视图")
-    algorithms = next(action.menu() for action in view.actions() if action.text() == "布局算法")
-    action = next(action for action in algorithms.actions() if action.data() == "menu-test")
-    assert action.text() == "自定义菜单布局"
-    action.trigger()
+    assert all(action.text() != "布局算法" for action in view.actions())
+    window.canvas.set_layout(MenuLayout.info.default_config)
     assert window.engine.document.layout.algorithm_id == "menu-test"
     assert not window.panels.settings.direction.isEnabled()
     assert not window.panels.settings.compact.isEnabled()
     assert window.engine.undo()
     assert window.engine.document.layout.algorithm_id == "tree"
     assert window.panels.settings.direction.isEnabled() and window.panels.settings.compact.isEnabled()
-    window.canvas.set_editable(False)
-    readonly_menu = window.main_menu()
-    view = next(action.menu() for action in readonly_menu.actions() if action.text() == "视图")
-    algorithms = next(action.menu() for action in view.actions() if action.text() == "布局算法")
-    assert all(not action.isEnabled() for action in algorithms.actions())
+    menu.deleteLater()
 
 
 class RootCodec:
@@ -708,15 +702,13 @@ def test_preferences_restore_and_local_input_shortcuts(window, qtbot):
         restored.close()
 
 
-def test_save_shortcut_from_floating_input_flushes_once(window, qtbot, tmp_path):
-    """独立浮窗中的文件快捷键交给工作台；输入框仍拥有自己的文本快捷键。"""
-    target = tmp_path / "浮窗保存.mindmap"
+def test_save_shortcut_from_docked_input_flushes_once(window, qtbot, tmp_path):
+    """停靠面板中的文件快捷键交给工作台；输入框仍拥有自己的文本快捷键。"""
+    target = tmp_path / "面板保存.mindmap"
     window.files.path = target
-    window.manager.set_view_mode("properties", ViewMode.WINDOW)
     window.manager.activate("properties")
     field = window.panels.properties.fields["style.font_size"]
-    floating = window.manager.floating["properties"]
-    floating.activateWindow()
+    window.activateWindow()
     field.lineEdit().setFocus()
     QApplication.processEvents()
     field.setValue(21)
@@ -757,4 +749,6 @@ def test_escape_keeps_canvas_cancel_and_unfocus_semantics(window, qtbot):
     field = window.panels.properties.fields["style.font_family"].lineEdit()
     field.setFocus()
     qtbot.keyClick(field, Qt.Key.Key_F6)
+    assert field.hasFocus()
+    window.manager.hide("properties")
     assert canvas.view.hasFocus()

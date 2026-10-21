@@ -1,4 +1,4 @@
-"""工具窗面板、浮动窗口与覆盖容器，所有业务控件始终复用同一个实例。"""
+"""工具窗面板与主窗口内覆盖容器，所有业务控件始终复用同一个实例。"""
 
 from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QMouseEvent, QPainter
@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
-    QMainWindow,
     QMenu,
     QSizePolicy,
     QTabBar,
@@ -69,10 +68,6 @@ class PanelHeader(QWidget):
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.MouseButton.LeftButton and (event.position().toPoint() - self.press).manhattanLength() >= QApplication.startDragDistance():
             self.manager.start_tool_drag(self.panel.tool_id, self, self.press)
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.manager.toggle_maximize(self.panel.tool_id)
 
     def contextMenuEvent(self, event):
         self.manager.tool_menu(self.panel.tool_id, self).exec(event.globalPos())
@@ -142,7 +137,7 @@ class ToolPanel(QFrame):
         self.more = IconButton(manager, symbol="more", tooltip="选项", parent=self.header)
         self.more.setObjectName(f"options_{spec.id}")
         self.more.clicked.connect(lambda: manager.tool_menu(spec.id, self.more).exec(self.more.mapToGlobal(QPoint(0, self.more.height()))))
-        self.hide_button = IconButton(manager, symbol="minus", tooltip="隐藏  Shift+Esc", parent=self.header)
+        self.hide_button = IconButton(manager, symbol="minus", tooltip="隐藏", parent=self.header)
         self.hide_button.clicked.connect(lambda: manager.hide(spec.id))
         self.header_layout.addWidget(self.more)
         self.header_layout.addWidget(self.hide_button)
@@ -234,48 +229,6 @@ class ToolPanel(QFrame):
 
     def contextMenuEvent(self, event):
         self.manager.tool_menu(self.tool_id, self).exec(event.globalPos())
-
-
-class FloatingToolWindow(QMainWindow):
-    """Float 使用 Qt.Tool 所有者窗口；Window 使用无所有者 Qt.Window。
-
-    两者不可只通过置顶开关模拟：所有者关系决定任务栏、主窗最小化和关闭行为。
-    关闭事件转为隐藏，持有的业务 QWidget 交还管理器后才能销毁窗口外壳。
-    """
-
-    def __init__(self, manager, tool_id, independent=False):
-        state = manager.states[tool_id]
-        owner = None if independent else manager.hosts[state.host_id].window()
-        super().__init__(owner, Qt.WindowType.Window if independent else Qt.WindowType.Tool)
-        self.manager = manager
-        self.tool_id = tool_id
-        self.independent = independent
-        self._retiring = False
-        self.setObjectName(f"floating_{tool_id}")
-        self.setWindowTitle(manager.specs[tool_id].title)
-        self.setMinimumSize(240, 160)
-        self.setAcceptDrops(True)
-
-    def closeEvent(self, event):
-        if self._retiring or self.manager.closing:
-            event.accept()
-            return
-        event.ignore()
-        self.manager.hide(self.tool_id)
-
-    def moveEvent(self, event):
-        self._store_geometry()
-        super().moveEvent(event)
-
-    def resizeEvent(self, event):
-        self._store_geometry()
-        super().resizeEvent(event)
-
-    def _store_geometry(self):
-        if self.isVisible() and not self.manager.refreshing and not self.isMinimized():
-            rect = self.geometry()
-            self.manager.states[self.tool_id].geometry = [rect.x(), rect.y(), rect.width(), rect.height()]
-
 
 class OverlayContainer(QFrame):
     """Undock 覆盖容器；边缘命中区位于内容外，避免吞掉编辑器/终端鼠标事件。"""

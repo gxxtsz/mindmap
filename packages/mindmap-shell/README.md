@@ -43,7 +43,9 @@ raise SystemExit(run_desktop(build_window))
 `run_desktop(builder, argv, ...)` 处理主题、紧凑布局、窗口尺寸、独立配置目录和截图退出等通用启动参数，
 调用方通过 `configure_parser` 添加业务参数，通过窗口的关闭决策管理数据保存。
 
-外壳拥有窗口控件，业务拥有数据和动作回调；辅助窗口复用同一规格与动作，不重复注册业务操作。
+外壳仅承载一个主窗口，业务拥有数据和动作回调；同一管理器不再支持辅助窗口。
+共用菜单不再内置工作区菜单、工具搜索和重复关闭入口；工作台在业务文件菜单中提供退出操作。
+`WorkbenchWindow` 的宿主标识仅允许 `main`，窗口控制按钮仍由系统窗口状态管理。
 所有界面操作在 Qt GUI 线程调用。公共参数与生命周期见[外壳配置](src/mindmap_shell/specs.py)、
 [主窗口](src/mindmap_shell/window.py)、[启动器](src/mindmap_shell/cli.py)。
 实际导图应用的接入方式见[桌面适配层](../../apps/mindmap-workbench/src/mindmap_workbench/shell_adapter.py)。

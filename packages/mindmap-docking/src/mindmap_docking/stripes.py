@@ -406,7 +406,6 @@ class StripeColumn(QWidget):
                 if old_index < target.index:
                     target = DockTarget(target.position, target.host_id, target.index - 1)
             self.manager.move(data["id"], target)
-            self.manager.drag_committed = True
             event.acceptProposedAction()
         finally:
             self.reset_drag()

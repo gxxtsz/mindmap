@@ -1,4 +1,4 @@
-"""状态协调器：原子迁移、焦点语义、跨框架拖放与版本化布局持久化。"""
+"""状态协调器：原子迁移、焦点语义、主窗口内拖放与版本化布局持久化。"""
 
 import copy
 import json
@@ -8,8 +8,8 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QPoint, QRect, QStandardPaths, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QCursor, QDrag, QKeySequence
+from PySide6.QtCore import QEvent, QMimeData, QObject, QStandardPaths, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QDrag, QKeySequence
 from PySide6.QtWidgets import QApplication, QMenu, QTabWidget, QWidget
 
 from .models import (
@@ -24,7 +24,7 @@ from .models import (
     ViewMode,
     default_region_sizes,
 )
-from .panels import FloatingToolWindow, ToolPanel
+from .panels import ToolPanel
 from .storage import JsonLayoutStore
 from .theme import Theme
 
@@ -48,13 +48,12 @@ class DockManager(QObject):
     document_closed = Signal(str)
 
     def __init__(self, storage_dir=None, parent=None, *, application_id="mindmap-app",
-                 theme=None, layout_store=None, frame_factory=None,
+                 theme=None, layout_store=None,
                  shortcut_context=Qt.ShortcutContext.WidgetWithChildrenShortcut):
-        """创建独立会话，可注入主题、存储和框架工厂；不会修改应用全局样式。
+        """创建独立会话，可注入主题和存储；不会修改应用全局样式。
 
         application_id 是配置目录的稳定标识，不能包含路径分隔符。默认快捷键仅在
-        本组件及浮窗内部生效；完整工作台可以显式选择 WindowShortcut。
-        frame_factory(manager, host_id) 必须返回含 host 属性的 QMainWindow。
+        本组件内部生效；完整工作台可以显式选择 WindowShortcut。
         """
         super().__init__(parent)
         if QApplication.instance() is None:
@@ -62,14 +61,11 @@ class DockManager(QObject):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", application_id):
             raise ValueError("应用标识只能包含字母、数字、点、连字符和下划线")
         self.application_id = application_id
-        self.frame_factory = frame_factory
         self.shortcut_context = shortcut_context
         self.specs = {}
         self.states = {}
         self.panels = {}
         self.hosts = {}
-        self.frames = {}
-        self.floating = {}
         self.documents = {}
         self._last_editor = {}
         self.actions = {}
@@ -80,15 +76,10 @@ class DockManager(QObject):
         self.parking.setObjectName("dock_content_parking")
         self.parking.hide()
         self.active_id = ""
-        self.last_active_id = ""
-        self.maximized_id = ""
         self.refreshing = False
         self.closing = False
         self._dragging = False
-        self._drag_cancelled = False
-        self.drag_committed = False
         self.session_token = uuid4().hex
-        self._hidden_snapshot = None
         self._default_snapshot = None
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -158,12 +149,6 @@ class DockManager(QObject):
                 snapshot = self._default_snapshot
                 snapshot["tools"] = [item for item in snapshot["tools"] if item["id"] != tool_id]
         panel = self.panels.pop(tool_id, None)
-        floating = self.floating.pop(tool_id, None)
-        if floating:
-            floating.takeCentralWidget()
-            floating._retiring = True
-            floating.close()
-            floating.deleteLater()
         content = None
         if panel:
             panel.hide()
@@ -182,10 +167,13 @@ class DockManager(QObject):
         del self.specs[tool_id], self.states[tool_id]
         if self.active_id == tool_id:
             self.active_id = ""
-        if self.last_active_id == tool_id:
-            self.last_active_id = ""
-        if self.maximized_id == tool_id:
-            self.maximized_id = ""
+        # 临时展开容器也属于工具注册生命周期；先移除再刷新，防止延迟布局回调
+        # 用已经注销的标识访问 states。内容已在上方交还或安排销毁，不会重复释放。
+        for host in self.hosts.values():
+            overlay = host.overlays.pop(tool_id, None)
+            if overlay is not None:
+                overlay.hide()
+                overlay.deleteLater()
         self.refresh()
         self.tool_unregistered.emit(tool_id)
         return content
@@ -231,19 +219,12 @@ class DockManager(QObject):
         self.actions[key] = action
         for host in self.hosts.values():
             host.addAction(action)
-        for floating in self.floating.values():
-            floating.addAction(action)
         return action
 
     def install_window_actions(self, host):
-        """给宿主关联共享 QAction；多个框架复用同一动作，避免快捷键重复注册。"""
+        """给唯一主宿主关联动作；仅保留默认恢复、区域尺寸和内容页切换快捷键。"""
         definitions = [
-            ("hide_active", "隐藏活动工具窗口", "Shift+Escape", self.hide_active),
-            ("hide_all", "隐藏全部工具窗口 / 恢复", "Ctrl+Shift+F12", self.hide_restore_all),
-            ("editor_focus", "返回中央工作区", "Escape", self.focus_editor),
-            ("last_tool", "跳转到最后工具窗口", "F12", self.focus_last_tool),
             ("default", "恢复默认布局", "Shift+F12", self.restore_default_layout),
-            ("maximize", "最大化工具窗口 / 恢复", "Ctrl+Shift+'", lambda: self.toggle_maximize(self.active_id)),
             ("resize_left", "向左拉伸", "Ctrl+Alt+Shift+Left", lambda: self.resize_active(-36, 0)),
             ("resize_right", "向右拉伸", "Ctrl+Alt+Shift+Right", lambda: self.resize_active(36, 0)),
             ("resize_up", "向上拉伸", "Ctrl+Alt+Shift+Up", lambda: self.resize_active(0, -36)),
@@ -266,8 +247,6 @@ class DockManager(QObject):
         self.panel(tool_id)
         if state.host_id not in self.hosts:
             state.host_id = "main"
-        if self.maximized_id and self.maximized_id != tool_id:
-            self.maximized_id = ""
         for other in self.states.values():
             if other.id == tool_id or not other.visible:
                 continue
@@ -285,9 +264,7 @@ class DockManager(QObject):
 
     def _focus_panel(self, tool_id):
         panel = self.panel(tool_id)
-        state = self.states[tool_id]
-        floating = self.floating.get(tool_id) if state.position != "editor" and state.mode in (ViewMode.FLOAT, ViewMode.WINDOW) else None
-        window = floating or self.hosts[self.states[tool_id].host_id].window()
+        window = self.hosts["main"].window()
         if window.isMinimized():
             window.showNormal()
         window.raise_()
@@ -300,7 +277,7 @@ class DockManager(QObject):
         if tool_id not in self.states:
             return
         changed = self.active_id != tool_id
-        self.active_id = self.last_active_id = tool_id
+        self.active_id = tool_id
         for panel in self.panels.values():
             panel.update_header()
         if changed:
@@ -315,25 +292,25 @@ class DockManager(QObject):
             self.activate(tool_id)
 
     def hide(self, tool_id):
-        """隐藏并清除当前最大化状态，保留模式、内容、浮窗几何和返回位置。"""
+        """隐藏单个面板并交还焦点；保留模式、内容和主窗口内返回位置。"""
         self._require_tool(tool_id)
+        was_active = self.active_id == tool_id
         self.states[tool_id].visible = False
-        if self.active_id == tool_id:
+        if was_active:
             self.active_id = ""
-        if self.maximized_id == tool_id:
-            self.maximized_id = ""
         self.refresh()
+        # 隐藏活动面板后还给最后使用的文档，不提供额外导航动作或快捷键。
+        if was_active:
+            self._focus_editor()
 
     def set_available(self, tool_id, available):
-        """控制插件式工具的可用性；不可用时移除栏入口，且不能继续占据最大化布局。"""
+        """控制插件式工具的可用性；不可用时移除栏入口，且不继续占据停靠位置。"""
         self._require_tool(tool_id)
         self.states[tool_id].available = bool(available)
         if not available:
             self.states[tool_id].visible = False
             if self.active_id == tool_id:
                 self.active_id = ""
-            if self.maximized_id == tool_id:
-                self.maximized_id = ""
         self.refresh()
 
     def move(self, tool_id, target: DockTarget):
@@ -365,18 +342,16 @@ class DockManager(QObject):
             state.last_position = str(target.position)
         state.mode = ViewMode.DOCK_PINNED
         state.visible = False
-        self.maximized_id = ""
         self.activate(tool_id)
 
     def set_view_mode(self, tool_id, mode: ViewMode):
-        """转换五种模式；编辑器内工具先回到最后停靠位置，隐藏工具保持隐藏。"""
+        """转换三种主窗口内模式；编辑器内工具先回到最后停靠位置，隐藏工具保持隐藏。"""
         self._require_tool(tool_id)
         mode = ViewMode(mode)
         state = self.states[tool_id]
         if state.position == "editor":
             state.position = state.last_position
         state.mode = mode
-        self.maximized_id = ""
         if state.visible:
             state.visible = False
             self.activate(tool_id)
@@ -384,7 +359,7 @@ class DockManager(QObject):
             self.refresh()
 
     def set_option(self, key, value):
-        """设置已定义的布尔布局选项，并同步所有框架；未知键在变更前拒绝。"""
+        """设置已定义的布尔布局选项，并同步主窗口；未知键在变更前拒绝。"""
         if key not in {field.name for field in fields(LayoutSettings)}:
             raise KeyError(f"未知布局选项：{key}")
         setattr(self.settings, key, bool(value))
@@ -402,8 +377,6 @@ class DockManager(QObject):
             host.refresh_theme()
         for panel in self.panels.values():
             panel.refresh_theme()
-        for floating in self.floating.values():
-            self.theme.apply(floating)
         for action in self.actions.values():
             if icon := action.property("mindmap_icon"):
                 action.setIcon(self.theme.icon(icon))
@@ -411,10 +384,7 @@ class DockManager(QObject):
         self.schedule_save()
 
     def _detach_panels(self):
-        # QMainWindow 需要显式 takeCentralWidget，防止更换 centralWidget 时删除旧内容。
-        for floating in self.floating.values():
-            if floating.centralWidget():
-                floating.takeCentralWidget()
+        # 迁移前统一暂存面板，保持业务控件实例及输入内容。
         for panel in self.panels.values():
             panel.hide()
             panel.setParent(self.parking)
@@ -427,7 +397,7 @@ class DockManager(QObject):
             return
         self.refreshing = True
         try:
-            # 辅助框架关闭或旧配置合并时可能出现同一格多个可见占位窗，统一消解。
+            # 旧配置合并时可能出现同一格多个可见占位窗，统一消解。
             slots = {}
             for state in self.states.values():
                 if state.visible and state.available and state.position != "editor" and state.mode in (ViewMode.DOCK_PINNED, ViewMode.DOCK_UNPINNED):
@@ -449,19 +419,6 @@ class DockManager(QObject):
             for action in self.actions.values():
                 if name := action.property("mindmap_icon"):
                     action.setIcon(self.theme.icon(name))
-            for tool_id, floating in list(self.floating.items()):
-                state = self.states[tool_id]
-                if not floating.independent and state.host_id in self.hosts:
-                    owner = self.hosts[state.host_id].window()
-                    if floating.parentWidget() is not owner:
-                        floating.setParent(owner, Qt.WindowType.Tool)
-                if not state.visible or state.position == "editor" or state.mode not in (ViewMode.FLOAT, ViewMode.WINDOW):
-                    floating.hide()
-                if state.mode in (ViewMode.FLOAT, ViewMode.WINDOW) and floating.independent != (state.mode == ViewMode.WINDOW):
-                    floating._retiring = True
-                    floating.hide()
-                    floating.deleteLater()
-                    del self.floating[tool_id]
             for host in list(self.hosts.values()):
                 host.refresh()
                 for group in host.editor.groups:
@@ -493,37 +450,6 @@ class DockManager(QObject):
             self.refreshing = False
         self.layout_changed.emit()
         self.schedule_save()
-
-    def place_floating(self, tool_id):
-        state = self.states[tool_id]
-        floating = self.floating.get(tool_id)
-        if floating is None:
-            floating = self.floating[tool_id] = FloatingToolWindow(self, tool_id, state.mode == ViewMode.WINDOW)
-            for action in self.actions.values():
-                floating.addAction(action)
-        floating.setCentralWidget(self.panel(tool_id))
-        self.theme.apply(floating)
-        self.panel(tool_id).show()
-        rect = self.visible_geometry(state.geometry)
-        floating.setGeometry(rect)
-        # Qt.Tool 会自动跟随所有者；额外检查用于从已最小化主窗恢复会话的情况。
-        owner = self.hosts[state.host_id].window()
-        floating.setVisible(state.visible and (state.mode == ViewMode.WINDOW or not owner.isMinimized()))
-
-    @staticmethod
-    def visible_geometry(geometry):
-        """找不到原显示器时限制到最近可用屏幕，保证窗口标题仍能被鼠标访问。"""
-        x, y, width, height = [int(value) for value in geometry]
-        rect = QRect(x, y, max(240, width), max(160, height))
-        screens = QApplication.screens()
-        screen = next((screen for screen in screens if screen.availableGeometry().contains(rect.center())), QApplication.primaryScreen())
-        if screen:
-            available = screen.availableGeometry()
-            rect.setWidth(min(rect.width(), available.width()))
-            rect.setHeight(min(rect.height(), available.height()))
-            rect.moveLeft(max(available.left(), min(rect.left(), available.right() - rect.width() + 1)))
-            rect.moveTop(max(available.top(), min(rect.top(), available.bottom() - rect.height() + 1)))
-        return rect
 
     def _focus_changed(self, old, new):
         if self.closing or self.refreshing or self._dragging:
@@ -578,13 +504,6 @@ class DockManager(QObject):
     def eventFilter(self, watched, event):
         if self.closing:
             return False
-        if event.type() == QEvent.Type.KeyPress and self._dragging and event.key() == Qt.Key.Key_Escape:
-            self._drag_cancelled = True
-        if event.type() == QEvent.Type.WindowStateChange:
-            for host in list(self.hosts.values()):
-                if watched is host.window():
-                    QTimer.singleShot(0, self._sync_owned_windows)
-                    break
         if event.type() == QEvent.Type.MouseButtonPress and not self._dragging:
             widget = watched if isinstance(watched, QWidget) else None
             while widget:
@@ -594,20 +513,11 @@ class DockManager(QObject):
                 widget = widget.parentWidget()
         return False
 
-    def _sync_owned_windows(self):
-        if self.closing:
-            return
-        for tool_id, window in self.floating.items():
-            state = self.states[tool_id]
-            if state.mode == ViewMode.FLOAT:
-                owner = self.hosts.get(state.host_id)
-                window.setVisible(state.visible and owner is not None and not owner.window().isMinimized())
-
-    def focus_editor(self):
-        """返回所属框架最后获得焦点的文档，保留光标；不把编辑器内工具标签当作文档。"""
+    def _focus_editor(self):
+        """隐藏面板后返回主窗口最后获得焦点的文档，保留光标；不把编辑器内工具标签当作文档。"""
         if self._dragging:
             return
-        host = self.hosts.get(self.states[self.last_active_id].host_id) if self.last_active_id in self.states else self.hosts.get("main")
+        host = self.hosts.get("main")
         if host:
             document_id = self._last_editor.get(host.host_id)
             location = host.editor.find_token(document_id) if document_id else None
@@ -633,53 +543,12 @@ class DockManager(QObject):
         for panel in self.panels.values():
             panel.update_header()
 
-    def focus_last_tool(self):
-        if self.last_active_id:
-            self.activate(self.last_active_id)
-
-    def focus_workspace(self):
-        """返回中央工作区最后取得焦点的文档；保留 focus_editor 作为已有调用的别名。"""
-        self.focus_editor()
-
-    def hide_active(self):
-        if self.active_id:
-            self.hide(self.active_id)
-            self.focus_editor()
-
-    def hide_restore_all(self):
-        """交替隐藏及恢复先前打开集合；恢复时跳过已卸载或不可用的工具。"""
-        if self._hidden_snapshot is None:
-            self._hidden_snapshot = [state.id for state in self.states.values() if state.visible]
-            for state in self.states.values():
-                state.visible = False
-            self.maximized_id = ""
-        else:
-            for tool_id in self._hidden_snapshot:
-                if tool_id in self.states and self.states[tool_id].available:
-                    self.states[tool_id].visible = True
-            self._hidden_snapshot = None
-        self.refresh()
-
-    def toggle_maximize(self, tool_id):
-        """嵌入工具只在本宿主最大化；浮动/独立工具交给原生窗口管理器处理。"""
-        if tool_id not in self.states or not self.states[tool_id].visible:
-            return
-        if self.states[tool_id].mode in (ViewMode.FLOAT, ViewMode.WINDOW):
-            window = self.floating[tool_id]
-            window.showNormal() if window.isMaximized() else window.showMaximized()
-            return
-        self.maximized_id = "" if self.maximized_id == tool_id else tool_id
-        self.refresh()
-
     def resize_active(self, dx, dy):
         if self.active_id not in self.states:
             return
         state = self.states[self.active_id]
         host = self.hosts[state.host_id]
-        if state.mode in (ViewMode.FLOAT, ViewMode.WINDOW):
-            window = self.floating[state.id]
-            window.resize(max(240, window.width() + dx), max(160, window.height() + dy))
-        elif state.mode == ViewMode.UNDOCK:
+        if state.mode == ViewMode.UNDOCK:
             region = state.position.split("_")[0]
             change = -dy if region == "bottom" else -dx if region == "right" else dx
             if change:
@@ -707,7 +576,6 @@ class DockManager(QObject):
         state = self.states[tool_id]
         menu = QMenu(parent or self.hosts[state.host_id])
         menu.addAction("隐藏", lambda: self.hide(tool_id))
-        menu.addAction("最大化 / 恢复", lambda: self.toggle_maximize(tool_id))
         modes = menu.addMenu("视图模式")
         mode_group = QActionGroup(modes)
         mode_group.setExclusive(True)
@@ -723,11 +591,6 @@ class DockManager(QObject):
             action.triggered.connect(lambda checked=False, selected=position: self.move(tool_id, DockTarget(selected, state.host_id)))
         positions.addSeparator()
         positions.addAction("编辑器标签", lambda: self.move(tool_id, DockTarget("editor", state.host_id)))
-        positions.addAction("新框架", lambda: self.detach_token("tool:" + tool_id))
-        if len(self.hosts) > 1:
-            for host_id in self.hosts:
-                if host_id != state.host_id:
-                    positions.addAction("框架：" + host_id, lambda checked=False, selected=host_id: self.move(tool_id, DockTarget(state.last_position, selected)))
         menu.addSeparator()
         grouped = menu.addAction("分组标签")
         grouped.setCheckable(True)
@@ -774,28 +637,15 @@ class DockManager(QObject):
     def _start_drag(self, kind, item_id, source, hotspot):
         if self._dragging:
             return
-        self._dragging, self._drag_cancelled, self.drag_committed = True, False, False
+        self._dragging = True
         drag = QDrag(source)
         drag.setMimeData(self.encode_drag(kind, item_id))
         drag.setPixmap(source.grab())
         drag.setHotSpot(hotspot)
         try:
-            result = drag.exec(Qt.DropAction.MoveAction)
-            # Escape 和非法目标均不改变状态；释放到应用框架外才执行显式分离。
-            # Windows 原生拖放循环可能直接消费 Esc，应用事件过滤器不一定收到按键。
-            # 只有鼠标已释放的 IgnoreAction 才能解释成框架外分离；仍按住左键表示取消。
-            released = not bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
-            if result == Qt.DropAction.IgnoreAction and released and not self._drag_cancelled and not self.drag_committed:
-                cursor = QCursor.pos()
-                outside = not any(host.window().frameGeometry().contains(cursor) for host in self.hosts.values())
-                if outside:
-                    if kind == "tool":
-                        state = self.states[item_id]
-                        state.geometry[:2] = [cursor.x() - 80, cursor.y() - 15]
-                        self.set_view_mode(item_id, ViewMode.FLOAT)
-                        self.activate(item_id)
-                    else:
-                        self.detach_token(item_id, cursor)
+            # 只有主窗口内合法落点才提交移动；拖出窗口或按 Escape 均保持原状。
+            # 不再把 IgnoreAction 解释成创建浮窗或辅助工作区的请求。
+            drag.exec(Qt.DropAction.MoveAction)
         finally:
             self._dragging = False
             for host in self.hosts.values():
@@ -849,7 +699,7 @@ class DockManager(QObject):
         不改变其父对象、不复制动作，也不另外配置快捷键。
 
         按钮直接跟随原动作的图标、提示和启用状态。每个编辑组仅展示当前
-        文档的动作，切换标签、分屏、跨框架迁移、关闭后重开及布局恢复时
+        文档的动作，切换标签、分屏、组内迁移、关闭后重开及布局恢复时
         自动同步；隐藏文档的配置仍然保留。此接口仅限 Qt GUI 线程调用，
         不修改文档内容、修改标记或布局快照，也不取得动作的所有权。
         """
@@ -931,64 +781,8 @@ class DockManager(QObject):
         self.set_document_modified(document_id, doc["modified"])
         self.schedule_save()
 
-    def create_frame(self, host_id=None, geometry=None):
-        """新建共享管理器的编辑器框架，返回其 DockHost；省略标识时生成唯一值。"""
-        from .frame import DockFrame
-        host_id = host_id or "frame-" + uuid4().hex[:6]
-        if host_id in self.hosts:
-            raise ValueError("框架标识重复")
-        frame = self.frame_factory(self, host_id) if self.frame_factory else DockFrame(self, host_id)
-        if not hasattr(frame, "host") or self.hosts.get(host_id) is not frame.host:
-            raise TypeError("框架工厂必须创建并返回含正确 DockHost 的窗口")
-        self.frames[host_id] = frame
-        if geometry:
-            frame.setGeometry(self.visible_geometry(geometry))
-        frame.show()
-        self.refresh()
-        return frame.host
-
-    def detach_token(self, token, cursor=None):
-        host = self.create_frame()
-        if cursor:
-            host.window().move(cursor - QPoint(80, 20))
-        if token.startswith("tool:"):
-            self.move(token[5:], DockTarget("editor", host.host_id))
-        else:
-            self.move_document(token, host.host_id)
-        return host
-
-    def close_frame(self, host_id):
-        if host_id == "main" or host_id not in self.hosts:
-            return
-        host = self.hosts[host_id]
-        # 关闭辅助框架时将全部内容交还主框架，避免 Qt 父子销毁导致丢失页面。
-        for group in list(host.editor.groups):
-            for index in reversed(range(group.count())):
-                token = group.tabBar().tabData(index)
-                if token in self.documents:
-                    self.move_document(token, "main")
-        for state in self.states.values():
-            if state.host_id == host_id:
-                state.host_id = "main"
-                if state.position == "editor":
-                    state.editor_group = ""
-        for state in self._pending_tool_states.values():
-            if state["host_id"] == host_id:
-                state["host_id"] = "main"
-                state["editor_group"] = ""
-        self._retire_frame(host_id)
-        self.refresh()
-
-    def _retire_frame(self, host_id):
-        frame = self.frames.pop(host_id, None)
-        self.hosts.pop(host_id, None)
-        if frame:
-            frame._retiring = True
-            frame.hide()
-            frame.deleteLater()
-
     def capture_layout(self):
-        """生成纯数据快照，包含六区、编辑器完整标签顺序、辅助框架和浮窗状态。"""
+        """生成纯数据快照，仅包含主窗口六区、编辑器完整标签顺序和面板状态。"""
         return {
             "schema_version": 1,
             "theme": self.theme.name,
@@ -998,9 +792,18 @@ class DockManager(QObject):
             "hosts": {host_id: {"sizes": copy.deepcopy(host._sizes),
                                 "region_sizes": copy.deepcopy(host.region_sizes),
                                 "editor": host.editor.snapshot(),
+                                "current_group": self._current_editor_group(host),
                                 "geometry": [host.window().x(), host.window().y(), host.window().width(), host.window().height()]}
                       for host_id, host in self.hosts.items()},
         }
+
+    def _current_editor_group(self, host):
+        """记录最后使用文档所在组，供旧多窗口会话合并选择稳定的标签接收位置。"""
+        location = host.editor.find_token(self._last_editor.get("main", ""))
+        if location:
+            return location[0].group_id
+        state = self.states.get(self.active_id)
+        return state.editor_group if state and state.position == "editor" else host.editor.groups[0].group_id
 
     def set_default_layout(self):
         """由宿主在初始注册和排布完成后调用，独立保存内建默认快照。
@@ -1027,7 +830,6 @@ class DockManager(QObject):
         self._validate_snapshot(data)
         data = self._normalize_snapshot(data)
         self._restore_snapshot(data)
-        self._hidden_snapshot = None
         self.schedule_save()
 
     def _validate_snapshot(self, data):
@@ -1049,12 +851,15 @@ class DockManager(QObject):
             if item.get("position") != "editor":
                 DockPosition(item.get("position"))
             DockPosition(item.get("last_position", DockPosition.LEFT_TOP))
-            ViewMode(item.get("mode"))
+            # 仅持久化读取接受旧模式；公开接口继续通过 ViewMode 严格拒绝废弃值。
+            if item.get("mode") not in {mode.value for mode in ViewMode} | {"float", "window"}:
+                raise ValueError("工具窗口显示模式无效")
             if item.get("host_id") not in data["hosts"]:
                 raise ValueError("布局引用不存在的框架")
+            # 新快照不再保存面板几何；旧字段若存在仍先校验，避免坏数据部分恢复。
             geometry = item.get("geometry")
-            if not isinstance(geometry, list) or len(geometry) != 4 or not all(isinstance(value, int) and abs(value) <= 1000000 for value in geometry) or geometry[2] <= 0 or geometry[3] <= 0:
-                raise ValueError("浮窗尺寸无效")
+            if "geometry" in item and (not isinstance(geometry, list) or len(geometry) != 4 or not all(isinstance(value, int) and abs(value) <= 1000000 for value in geometry) or min(geometry[2:]) <= 0):
+                raise ValueError("旧浮窗尺寸无效")
             if not isinstance(item.get("order"), int) or not isinstance(item.get("extent", 300), int):
                 raise ValueError("窗口顺序或尺寸无效")
             if not all(isinstance(item.get(key, False), bool) for key in ("visible", "available", "grouped_tabs")) or not isinstance(item.get("editor_group", ""), str):
@@ -1096,6 +901,8 @@ class DockManager(QObject):
                     raise ValueError("区域尺寸位置无效")
                 if any(type(value) is not int or not 1 <= value <= 1000000 for value in values.values()):
                     raise ValueError("区域尺寸必须为有效的正整数")
+            if "current_group" in host and not isinstance(host["current_group"], str):
+                raise ValueError("编辑器当前组标识无效")
             validate_editor(host.get("editor"))
 
     def _normalize_snapshot(self, data):
@@ -1133,9 +940,100 @@ class DockManager(QObject):
         data.get("settings", {}).pop("remember_size", None)
         # 旧布局允许保留已移除的名称开关；迁移后不再应用或写回该字段。
         data.get("settings", {}).pop("show_names", None)
+        self._merge_legacy_hosts(data)
         for item in data["tools"]:
             item.pop("extent", None)
+            item.pop("geometry", None)
         return data
+
+    def _merge_legacy_hosts(self, data):
+        """将已校验的旧多宿主快照合并为单主窗口，不创建控件或修改运行时状态。
+
+        保留主分屏树及各组当前标签；辅助宿主按文件顺序追加到主窗口记录的当前组。
+        旧文件未记录当前组时，优先使用活动工具标签所属组，否则使用第一个标签组。
+        所有标签全局去重，未注册工具也在纯数据层完成模式和归属迁移。
+        """
+        main = data["hosts"]["main"]
+
+        def leaves(node):
+            if node["kind"] == "tabs":
+                yield node
+            else:
+                for child in node["children"]:
+                    yield from leaves(child)
+
+        groups = list(leaves(main["editor"]))
+        if not groups:
+            # 合法的空分屏树也必须有可接收标签的组；标识固定且只存在于本快照中。
+            group = {"kind": "tabs", "id": "main-restored", "tokens": [], "current": 0}
+            main["editor"] = group
+            groups = [group]
+        active = next((item for item in data["tools"] if item["id"] == data.get("active")
+                       and item["host_id"] == "main" and item["position"] == "editor"), None)
+        target_id = main.get("current_group", active.get("editor_group") if active else None)
+        target = next((group for group in groups if group["id"] == target_id), groups[0])
+        seen = set()
+        locations = {}
+
+        def append_tokens(group, tokens):
+            for token in tokens:
+                if token not in seen:
+                    seen.add(token)
+                    group["tokens"].append(token)
+                    locations[token] = group["id"]
+
+        # 去重后重新查找当前标签索引，避免前面的重复项移除导致选中项改变。
+        for group in groups:
+            tokens, current = group["tokens"], group.get("current", 0)
+            selected = tokens[current] if 0 <= current < len(tokens) else None
+            group["tokens"] = []
+            append_tokens(group, tokens)
+            group["current"] = group["tokens"].index(selected) if selected in group["tokens"] else 0
+        for host_id, host in data["hosts"].items():
+            if host_id != "main":
+                for group in leaves(host["editor"]):
+                    append_tokens(target, group["tokens"])
+
+        migrated = []
+        occupied = set()
+        for item in data["tools"]:
+            old_host, old_mode = item["host_id"], item["mode"]
+            item["host_id"] = "main"
+            if old_mode in ("float", "window"):
+                item["mode"] = ViewMode.DOCK_PINNED.value
+                if item["position"] != "editor":
+                    item["position"] = item.get("last_position", item["position"])
+            if item["position"] == "editor":
+                token = "tool:" + item["id"]
+                if token not in locations:
+                    append_tokens(target, [token])
+                item["editor_group"] = locations[token]
+                group = next(group for group in groups if group["id"] == item["editor_group"])
+                item["order"] = group["tokens"].index(token)
+            elif item.get("visible") and item.get("available", True):
+                if old_host != "main" or old_mode in ("float", "window"):
+                    migrated.append(item)
+                elif item["mode"] != ViewMode.UNDOCK:
+                    occupied.add(item["position"])
+        # 合并后同格不能同时显示多个停靠面板；优先原位置，再使用同边空位和其他空位。
+        # 原主窗口的位置优先，避免辅助窗口面板挤走用户原本正在使用的面板。
+        for item in migrated:
+            if item["mode"] == ViewMode.UNDOCK:
+                continue
+            position = item["position"]
+            candidates = sorted(DockPosition, key=lambda value: (value != position,
+                                value.split("_")[0] != position.split("_")[0]))
+            free = next((value.value for value in candidates if value not in occupied), None)
+            if free is None:
+                # 六个位置都已占用时追加为编辑器标签，不能通过隐藏来丢失原可见面板。
+                token = "tool:" + item["id"]
+                append_tokens(target, [token])
+                item.update(position="editor", mode=ViewMode.DOCK_PINNED.value,
+                            editor_group=target["id"], order=target["tokens"].index(token))
+            else:
+                item["position"] = item["last_position"] = free
+                occupied.add(free)
+        data["hosts"] = {"main": main}
 
     def _restore_snapshot(self, data):
         # 恢复前先创建即将显示的已注册工具；业务工厂失败时尚未拆卸任何现有容器。
@@ -1148,13 +1046,9 @@ class DockManager(QObject):
             for doc in self.documents.values():
                 doc["widget"].hide()
                 doc["widget"].setParent(self.parking)
-            for host_id in list(self.frames):
-                self._retire_frame(host_id)
             self.settings = LayoutSettings(**{key: bool(value) for key, value in data.get("settings", {}).items() if key in {field.name for field in fields(LayoutSettings)}})
             self.theme = self.theme.with_options(name=data["theme"], compact=self.settings.compact)
             for host_id, host_data in data["hosts"].items():
-                if host_id != "main":
-                    self.create_frame(host_id, host_data.get("geometry"))
                 host = self.hosts[host_id]
                 host.region_sizes = copy.deepcopy(host_data["region_sizes"])
                 sizes = host_data.get("sizes", {})
@@ -1175,11 +1069,10 @@ class DockManager(QObject):
             for host in self.hosts.values():
                 host.editor.restore_documents()
             for document_id, doc in self.documents.items():
+                doc["host_id"] = "main"
                 doc["closed"] = not any(host.editor.find_token(document_id) for host in self.hosts.values())
                 self.set_document_modified(document_id, doc["modified"])
             self.active_id = data.get("active", "") if data.get("active") in self.states else ""
-            self.last_active_id = self.active_id
-            self.maximized_id = ""
         finally:
             self.refreshing = False
         self.refresh()
@@ -1232,10 +1125,4 @@ class DockManager(QObject):
         app = QApplication.instance()
         app.removeEventFilter(self)
         app.focusChanged.disconnect(self._focus_changed)
-        for floating in self.floating.values():
-            floating._retiring = True
-            floating.close()
-        for frame in self.frames.values():
-            frame._retiring = True
-            frame.close()
         self.parking.deleteLater()

@@ -13,12 +13,14 @@ from .stripes import StripeColumn
 class DockHost(QWidget):
     """可嵌入宿主窗口的公共控件。
 
-    每个管理器至少需要一个 host_id='main' 的宿主；额外框架注册唯一标识，
-    所有宿主共享同一套工具窗实例、动作和主题。
+    每个管理器只允许一个 host_id='main' 的宿主；非法标识在注册前拒绝，
+    面板和编辑器分屏始终归属同一主窗口。
     """
 
     def __init__(self, manager, host_id="main", parent=None):
         super().__init__(parent)
+        if host_id != "main":
+            raise ValueError("仅支持 main 主宿主")
         if host_id in manager.hosts:
             raise ValueError(f"宿主标识重复：{host_id}")
         self.manager = manager
@@ -105,11 +107,9 @@ class DockHost(QWidget):
         """只记录用户实际拖动的区域或内部比例，不采集隐藏区的零尺寸。
 
         name/index 由对应 QSplitter 信号提供；省略参数时测量所有可见区域，
-        供测试及宿主内部显式调整后的同步使用。程序布置和最大化过程不记忆尺寸。
+        供测试及宿主内部显式调整后的同步使用。程序布置期间不记忆尺寸。
         """
-        maximized = self.manager.states.get(self.manager.maximized_id)
-        if (self.manager.refreshing or self._applying_sizes
-                or maximized is not None and maximized.host_id == self.host_id):
+        if self.manager.refreshing or self._applying_sizes:
             return
         if name in (None, "horizontal"):
             for region, handle in [("left", 1), ("right", 2)]:
@@ -185,17 +185,11 @@ class DockHost(QWidget):
         manager = self.manager
         theme = manager.theme
         active_positions = set()
-        maximized = manager.maximized_id if manager.maximized_id and manager.states[manager.maximized_id].host_id == self.host_id else ""
         for state in manager.states.values():
             if state.host_id != self.host_id or not state.visible or not state.available:
                 continue
             panel = manager.panel(state.id)
             panel.refresh_theme()
-            if state.mode in (ViewMode.FLOAT, ViewMode.WINDOW) and state.position != "editor":
-                manager.place_floating(state.id)
-                continue
-            if maximized and maximized != state.id:
-                continue
             if state.position == "editor":
                 spec = manager.specs[state.id]
                 group = self.editor.group(state.editor_group)
@@ -219,7 +213,7 @@ class DockHost(QWidget):
         self.left.setVisible(any(position.startswith("left") for position in active_positions))
         self.right.setVisible(any(position.startswith("right") for position in active_positions))
         self.bottom.setVisible(any(position.startswith("bottom") for position in active_positions))
-        self.editor.setVisible(not maximized or manager.states[maximized].position == "editor")
+        self.editor.setVisible(True)
         # 构造时 QSplitter 尚未取得尺寸，延迟一帧再恢复比例，避免初次显示宽度为零。
         self.left_rail.refresh()
         self.right_rail.refresh()
@@ -369,5 +363,4 @@ class DockHost(QWidget):
             self.manager.move(data["id"], target)
         else:
             self.manager.move_document(data["id"], self.host_id)
-        self.manager.drag_committed = True
         event.acceptProposedAction()

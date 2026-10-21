@@ -1,6 +1,6 @@
 """纯状态模型：稳定标识、位置、显示模式与可序列化布局。"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Callable
 
@@ -37,16 +37,12 @@ class ViewMode(StrEnum):
     DOCK_PINNED = "dock_pinned"
     DOCK_UNPINNED = "dock_unpinned"
     UNDOCK = "undock"
-    FLOAT = "float"
-    WINDOW = "window"
 
 
 MODE_LABELS = {
     ViewMode.DOCK_PINNED: "停靠固定",
     ViewMode.DOCK_UNPINNED: "停靠取消固定",
     ViewMode.UNDOCK: "取消停靠",
-    ViewMode.FLOAT: "浮动",
-    ViewMode.WINDOW: "窗口",
 }
 
 
@@ -54,7 +50,7 @@ MODE_LABELS = {
 class DockTarget:
     """移动目标；editor 表示编辑器标签区，index=-1 表示追加到末尾。
 
-    host_id 必须属于同一个 DockManager；拖放时只在确认合法目标后提交状态，
+    host_id 仅允许 main；拖放时只在确认合法目标后提交状态，
     避免取消拖动造成面板从原容器消失。
     """
 
@@ -64,6 +60,9 @@ class DockTarget:
     group_id: str = ""
 
     def __post_init__(self):
+        # 运行时只接受主宿主；历史多窗口数据由快照迁移层合并。
+        if self.host_id != "main":
+            raise ValueError("仅支持 main 主宿主")
         if self.position != "editor":
             object.__setattr__(self, "position", DockPosition(self.position))
 
@@ -132,7 +131,6 @@ class ToolState:
     visible: bool = False
     available: bool = True
     order: int = 0
-    geometry: list[int] = field(default_factory=lambda: [180, 160, 620, 420])
     last_position: str = DockPosition.LEFT_TOP
     grouped_tabs: bool = False
     editor_group: str = ""
@@ -140,7 +138,7 @@ class ToolState:
 
 @dataclass
 class LayoutSettings:
-    """全局外观和布局选项；每个独立编辑器框架使用相同设置。"""
+    """全局外观和布局选项；仅作用于唯一主窗口。"""
 
     show_bars: bool = True
     compact: bool = False

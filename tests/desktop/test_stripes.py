@@ -369,7 +369,6 @@ def test_leave_resize_and_native_cancel_clear_hints_without_committing(docking, 
         def exec(self, action):
             rail.dragEnterEvent(QDragEnterEvent(QPoint(10, 10), action, mime,
                                                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
-            docking.manager._drag_cancelled = True
             return Qt.DropAction.IgnoreAction
 
         def deleteLater(self):
@@ -383,7 +382,7 @@ def test_leave_resize_and_native_cancel_clear_hints_without_committing(docking, 
     assert docking.manager.capture_layout() == original
 
 
-def test_editor_return_frame_migration_and_restore_keep_content_and_group(docking):
+def test_editor_return_region_move_and_restore_keep_content_and_group(docking):
     manager = docking.manager
     manager.activate("beta", focus=False)
     content = manager.panel("beta").content
@@ -392,11 +391,10 @@ def test_editor_return_frame_migration_and_restore_keep_content_and_group(dockin
     assert rail._buttons["beta"].isVisible()
     assert not rail._layout_data.separator.isEmpty()
     snapshot = manager.capture_layout()
-    frame = manager.create_frame("分组辅助框架")
-    manager.move("beta", DockTarget(DockPosition.RIGHT_BOTTOM, frame.host_id))
+    manager.move("beta", DockTarget(DockPosition.RIGHT_BOTTOM))
     assert not rail._buttons["beta"].isVisible()
     assert rail._layout_data.separator.isEmpty()
-    assert frame.right_rail._layout_data.members[DockPosition.RIGHT_BOTTOM] == ("beta",)
+    assert docking.host.right_rail._layout_data.members[DockPosition.RIGHT_BOTTOM] == ("beta",)
     manager.restore_layout(snapshot)
     assert rail._buttons["beta"].isVisible()
     assert not rail._layout_data.separator.isEmpty()

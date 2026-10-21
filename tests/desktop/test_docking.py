@@ -11,8 +11,8 @@ from PySide6.QtWidgets import QApplication, QPlainTextEdit, QTabWidget
 
 @pytest.mark.parametrize("position", list(DockPosition))
 @pytest.mark.parametrize("mode", list(ViewMode))
-def test_six_positions_and_five_modes_keep_content(docking, qtbot, position, mode):
-    """六个目标与五种模式的组合必须可达，迁移不能替换业务内容。"""
+def test_six_positions_and_three_modes_keep_content(docking, qtbot, position, mode):
+    """六个目标与三种模式的组合必须可达，迁移不能替换业务内容。"""
     manager, host = docking.manager, docking.host
     assert docking.calls == {}
     manager.move("alpha", DockTarget(position))
@@ -32,11 +32,6 @@ def test_six_positions_and_five_modes_keep_content(docking, qtbot, position, mod
     elif mode == ViewMode.UNDOCK:
         assert host.overlays["alpha"].isVisible()
         assert not host.zones[position].isVisible()
-    else:
-        floating = manager.floating["alpha"]
-        assert floating.centralWidget() is panel
-        assert floating.windowType() == (Qt.WindowType.Window if mode == ViewMode.WINDOW
-                                         else Qt.WindowType.Tool)
 
 
 def test_same_zone_is_exclusive_but_two_groups_coexist(docking):
@@ -106,37 +101,8 @@ def test_widescreen_and_side_by_side_change_geometry(docking, qtbot):
     assert abs(top.y() - bottom.y()) <= 1
 
 
-def test_float_follows_minimize_window_remains_independent(docking, qtbot):
-    manager = docking.manager
-    manager.set_view_mode("alpha", ViewMode.FLOAT)
-    manager.activate("alpha")
-    manager.set_view_mode("gamma", ViewMode.WINDOW)
-    manager.activate("gamma")
-    floating, independent = manager.floating["alpha"], manager.floating["gamma"]
-    assert floating.parentWidget() is docking.window
-    assert independent.parentWidget() is None
-    assert floating.windowType() == Qt.WindowType.Tool
-    assert independent.windowType() == Qt.WindowType.Window
-    docking.window.showMinimized()
-    qtbot.waitUntil(docking.window.isMinimized)
-    qtbot.waitUntil(lambda: not floating.isVisible())
-    assert independent.isVisible()
-    assert manager.states["alpha"].visible
-    docking.window.showNormal()
-    qtbot.waitUntil(floating.isVisible)
 
 
-def test_closing_floating_window_hides_without_deleting_content(docking, qtbot):
-    manager = docking.manager
-    manager.set_view_mode("alpha", ViewMode.WINDOW)
-    manager.activate("alpha")
-    content = manager.panel("alpha").content
-    content.setPlainText("窗口关闭后仍在")
-    manager.floating["alpha"].close()
-    qtbot.waitUntil(lambda: not manager.states["alpha"].visible)
-    manager.activate("alpha")
-    assert manager.panel("alpha").content is content
-    assert content.toPlainText() == "窗口关闭后仍在"
 
 
 def test_unpinned_owns_popup_until_editor_receives_focus(docking, qtbot):
@@ -159,38 +125,8 @@ def test_unpinned_owns_popup_until_editor_receives_focus(docking, qtbot):
     menu.deleteLater()
 
 
-def test_escape_changes_focus_shift_escape_hides(docking, qtbot):
-    manager = docking.manager
-    manager.activate("alpha")
-    content = manager.panel("alpha").content
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is content)
-    qtbot.keyClick(content, Qt.Key.Key_Escape)
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is docking.document)
-    assert manager.states["alpha"].visible
-    qtbot.keyClick(docking.document, Qt.Key.Key_F12)
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is content)
-    qtbot.keyClick(content, Qt.Key.Key_Escape, Qt.KeyboardModifier.ShiftModifier)
-    qtbot.waitUntil(lambda: not manager.states["alpha"].visible)
 
 
-def test_hide_restore_and_maximize_preserve_open_set(docking):
-    manager = docking.manager
-    manager.activate("alpha", focus=False)
-    manager.activate("beta", focus=False)
-    manager.toggle_maximize("alpha")
-    assert manager.maximized_id == "alpha"
-    manager.toggle_maximize("alpha")
-    assert not manager.maximized_id
-    assert manager.states["beta"].visible
-    manager.hide_restore_all()
-    assert not any(state.visible for state in manager.states.values())
-    manager.set_available("beta", False)
-    manager.hide_restore_all()
-    assert manager.states["alpha"].visible
-    assert not manager.states["beta"].visible
-    assert manager.activate("beta") is False
-    manager.set_available("beta", True)
-    assert manager.activate("beta") is True
 
 
 def test_group_tabs_switches_header_and_cycles_existing_pages(docking):
@@ -301,7 +237,6 @@ def test_cancelled_native_drag_rolls_back_without_detaching(docking, monkeypatch
             pass
 
         def exec(self, action):
-            manager._drag_cancelled = True
             return Qt.DropAction.IgnoreAction
 
         def deleteLater(self):

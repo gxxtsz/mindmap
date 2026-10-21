@@ -120,7 +120,7 @@ def test_modified_document_without_decision_prevents_close(docking):
 def test_unregister_releases_content_and_restores_plugin_position(docking):
     manager = docking.manager
     manager.move("alpha", DockTarget(DockPosition.RIGHT_BOTTOM))
-    manager.set_view_mode("alpha", ViewMode.WINDOW)
+    manager.set_view_mode("alpha", ViewMode.UNDOCK)
     content = manager.panel("alpha").content
     released = manager.unregister_tool_window("alpha", dispose=False)
     assert released is content and released.parentWidget() is None
@@ -128,7 +128,7 @@ def test_unregister_releases_content_and_restores_plugin_position(docking):
     assert "tool:alpha" not in manager.actions
     manager.register_tool_window(ToolWindowSpec("alpha", "重新加载", lambda: released, shortcut="Alt+1"))
     assert manager.states["alpha"].position == DockPosition.RIGHT_BOTTOM
-    assert manager.states["alpha"].mode == ViewMode.WINDOW
+    assert manager.states["alpha"].mode == ViewMode.UNDOCK
     assert manager.panel("alpha").content is content
 
 
@@ -144,16 +144,6 @@ def test_missing_plugin_layout_is_preserved_until_registered(docking):
     assert manager.states["later"].position == DockPosition.RIGHT_BOTTOM
 
 
-def test_unloaded_plugin_returns_from_closed_auxiliary_frame(docking):
-    manager = docking.manager
-    manager.create_frame("aux")
-    manager.move("alpha", DockTarget(DockPosition.LEFT_TOP, "aux"))
-    manager.unregister_tool_window("alpha")
-    manager.close_frame("aux")
-    snapshot = manager.capture_layout()
-    manager.restore_layout(snapshot)
-    manager.register_tool_window(ToolWindowSpec("alpha", "工具", lambda: QLabel("重新创建")))
-    assert manager.states["alpha"].host_id == "main"
 
 
 def test_shortcut_conflict_is_rejected_before_registration(docking):
@@ -186,25 +176,20 @@ def test_layout_store_can_be_replaced(docking):
     assert manager.states["alpha"].visible
 
 
-def test_workbench_auxiliary_frame_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path):
+def test_workbench_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path):
     calls = []
     window = WorkbenchWindow(AppSpec("custom-app", "定制业务软件", storage_dir=tmp_path,
                                     actions=(ActionSpec("business.add", "新增", lambda: calls.append(1),
                                                         icon="document", toolbar=True),)))
     qtbot.addWidget(window)
     window.show()
-    host = window.manager.create_frame("aux")
-    auxiliary = host.window()
-    assert isinstance(auxiliary, WorkbenchWindow)
-    assert auxiliary.spec.title == "定制业务软件"
-    assert auxiliary.action("business.add") is window.action("business.add")
+    assert window.spec.title == "定制业务软件"
     window.add_action(ActionSpec("business.late", "稍后加入", lambda: calls.append(2), toolbar=True))
-    assert any(item.text() == "稍后加入" for item in auxiliary.title_bar.action_buttons)
-    # 初始动作和运行期间追加的动作都必须位于窗口控制按钮之前，不能占据已删除的齿轮位置。
-    for item in (window, auxiliary):
-        bar = item.title_bar
-        assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.minimize) for button in bar.action_buttons)
-    auxiliary.action("business.add").trigger()
+    assert any(item.text() == "稍后加入" for item in window.title_bar.action_buttons)
+    # 动态业务动作仍在窗口控制按钮之前，且复用菜单中的同一 QAction。
+    bar = window.title_bar
+    assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.minimize) for button in bar.action_buttons)
+    window.action("business.add").trigger()
     assert calls == [1]
     window.manager.shutdown()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)

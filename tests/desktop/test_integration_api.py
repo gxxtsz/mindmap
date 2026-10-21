@@ -38,7 +38,7 @@ def test_tool_header_actions_share_state_and_ownership(docking, qtbot):
     qtbot.mouseClick(first, Qt.MouseButton.LeftButton)
     assert calls == [True] and first.text() == "更新文字"
     assert manager.capture_layout() == before
-    for mode in (ViewMode.FLOAT, ViewMode.DOCK_PINNED):
+    for mode in (ViewMode.UNDOCK, ViewMode.DOCK_PINNED):
         manager.set_view_mode(spec.id, mode)
         manager.set_theme("dark")
         assert panel.action_buttons == [first, second]
@@ -107,7 +107,7 @@ def test_document_actions_follow_current_tab_without_taking_ownership(docking, q
 
 @pytest.mark.parametrize("compact", [False, True])
 def test_document_actions_survive_split_restore_migration_and_reopen(docking, compact):
-    """重建编辑容器或迁移框架仍使用业务原动作，Qt 删除旧组不会销毁动作。"""
+    """重建编辑容器或移动标签仍使用业务原动作，Qt 删除旧组不会销毁动作。"""
     manager, area = docking.manager, docking.host.editor
     peer = manager.register_document(DocumentSpec("peer_doc", "其他文档", lambda: QLabel("内容")))
     first, second = QAction("第一个操作", docking.document), QAction("第二个操作", peer)
@@ -125,13 +125,13 @@ def test_document_actions_survive_split_restore_migration_and_reopen(docking, co
         assert group.cornerWidget().actions() == [action]
         assert group.cornerWidget().height() == manager.theme.header_height
 
-    target = manager.create_frame()
-    manager.move_document("peer_doc", target.host_id)
+    manager.move_document("peer_doc", "main", area.find_token("doc")[0].group_id)
     group, _ = area.find_token("peer_doc")
     assert group.cornerWidget().actions() == [second]
     assert second.parent() is peer
     assert manager.close_document("peer_doc")
-    assert not group.cornerWidget().isVisible() and not group.cornerWidget().actions()
+    # 同一主窗口内合并标签后，关闭当前页应显示剩余文档自己的动作。
+    assert group.cornerWidget().isVisible() and group.cornerWidget().actions() == [first]
     manager.open_document("peer_doc")
     group, _ = area.find_token("peer_doc")
     assert group.currentWidget() is peer and group.cornerWidget().actions() == [second]

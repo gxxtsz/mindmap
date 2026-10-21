@@ -1,10 +1,10 @@
-"""布局回归：会话迁移、默认恢复、原子验证与多框架内容迁移。"""
+"""布局回归：会话迁移、默认恢复、原子验证与单主窗口内容保留。"""
 
 import copy
 import json
 
 import pytest
-from mindmap_docking import DockManager, DockPosition, DockTarget, ViewMode
+from mindmap_docking import DockPosition, DockTarget, ViewMode
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
@@ -15,7 +15,7 @@ def test_snapshot_restores_mode_location_theme_and_content(docking):
     content = manager.panel("alpha").content
     content.setPlainText("恢复布局时不得替换")
     manager.move("alpha", DockTarget(DockPosition.RIGHT_BOTTOM))
-    manager.set_view_mode("alpha", ViewMode.WINDOW)
+    manager.set_view_mode("alpha", ViewMode.UNDOCK)
     manager.set_option("compact", True)
     manager.set_theme("dark")
     snapshot = manager.capture_layout()
@@ -26,7 +26,7 @@ def test_snapshot_restores_mode_location_theme_and_content(docking):
     manager.restore_layout(snapshot)
     state = manager.states["alpha"]
     assert state.position == DockPosition.RIGHT_BOTTOM
-    assert state.mode == ViewMode.WINDOW
+    assert state.mode == ViewMode.UNDOCK
     assert state.visible
     assert manager.theme.name == "dark"
     assert manager.settings.compact
@@ -176,7 +176,7 @@ def test_session_round_trip_uses_fresh_factories(system_factory, tmp_path):
     first = system_factory(tmp_path / "共享存储")
     first.manager.activate("alpha", focus=False)
     first.manager.move("alpha", DockTarget(DockPosition.BOTTOM_RIGHT))
-    first.manager.set_view_mode("alpha", ViewMode.WINDOW)
+    first.manager.set_view_mode("alpha", ViewMode.UNDOCK)
     first.manager.set_theme("dark")
     first.manager.save_session()
     first.manager.shutdown()
@@ -184,35 +184,12 @@ def test_session_round_trip_uses_fresh_factories(system_factory, tmp_path):
     assert second.manager.load_session() is True
     assert second.manager.theme.name == "dark"
     assert second.manager.states["alpha"].position == DockPosition.BOTTOM_RIGHT
-    assert second.manager.states["alpha"].mode == ViewMode.WINDOW
+    assert second.manager.states["alpha"].mode == ViewMode.UNDOCK
     assert set(second.manager.layout_store.load()) == {"schema_version", "session"}
     assert second.calls["alpha"] == 1
     assert second.manager.panel("alpha").content is not first.manager.panel("alpha").content
 
 
-def test_multiframe_tools_documents_and_editor_docking_keep_instances(docking):
-    manager = docking.manager
-    manager.activate("alpha", focus=False)
-    content = manager.panel("alpha").content
-    content.setPlainText("跨框架保留")
-    frame = manager.create_frame("辅助框架")
-    manager.move_document("doc", frame.host_id)
-    manager.move("alpha", DockTarget("editor", frame.host_id))
-    assert frame.editor.find_token("doc")[0].area.host is frame
-    assert frame.editor.find_token("tool:alpha")[0].area.host is frame
-    snapshot = manager.capture_layout()
-    manager.close_frame(frame.host_id)
-    assert set(manager.hosts) == {"main"}
-    assert manager.states["alpha"].host_id == "main"
-    assert docking.host.editor.find_token("doc")[0].area.host is docking.host
-    manager.restore_layout(snapshot)
-    restored = manager.hosts["辅助框架"]
-    assert restored.editor.find_token("doc")[0].area.host is restored
-    assert restored.editor.find_token("tool:alpha")[0].area.host is restored
-    assert manager.panel("alpha").content is content
-    assert content.toPlainText() == "跨框架保留"
-    assert manager.documents["doc"]["widget"] is docking.document
-    assert docking.calls["alpha"] == 1
 
 
 def test_nested_editor_split_restores_same_documents(docking):
@@ -229,11 +206,3 @@ def test_nested_editor_split_restores_same_documents(docking):
     assert host.editor.find_token("doc")[0] is not host.editor.find_token("second")[0]
     assert manager.documents["second"]["widget"] is second
     assert second.toPlainText() == "第二份文档"
-
-
-def test_offscreen_floating_geometry_is_repaired_to_visible_screen(qapp):
-    rect = DockManager.visible_geometry([999999, -999999, 30000, 30000])
-    screen = QApplication.primaryScreen().availableGeometry()
-    assert screen.contains(rect)
-    assert rect.width() > 0
-    assert rect.height() > 0

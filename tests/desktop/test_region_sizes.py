@@ -100,7 +100,7 @@ def test_resizing_one_region_does_not_overwrite_other_or_hidden_regions(docking)
     assert dimension(host, "bottom") == 190
 
 
-def test_window_compression_and_maximize_do_not_change_remembered_targets(docking):
+def test_window_compression_does_not_change_remembered_targets(docking):
     manager, host = docking.manager, docking.host
     docking.window.resize(1450, 950)
     for region, amount in [("left", 380), ("right", 350), ("bottom", 300)]:
@@ -114,10 +114,6 @@ def test_window_compression_and_maximize_do_not_change_remembered_targets(dockin
     assert host.region_sizes == before
     manager.activate("left", focus=False)
     assert host.region_sizes == before
-    manager.toggle_maximize("left")
-    settle()
-    assert host.region_sizes == before
-    manager.toggle_maximize("left")
     docking.window.resize(1450, 950)
     settle()
     assert [dimension(host, p) for p in REGIONS] == [380, 350, 300]
@@ -190,24 +186,22 @@ def test_overlay_tools_share_separate_region_size_for_keyboard_and_edge_drag(doc
     assert host.region_sizes["dock"][region] == 220
 
 
-def test_cross_workspace_move_uses_destination_size_and_preserves_content(docking):
+def test_cross_region_move_uses_destination_size_and_preserves_content(docking):
     manager, host = docking.manager, docking.host
     manager.activate("alpha", focus=False)
     drag_region(host, "left", 380)
     content = manager.panel("alpha").content
-    frame = manager.create_frame("独立尺寸")
-    frame.window().resize(1120, 760)
-    manager.move("alpha", DockTarget(DockPosition.LEFT_TOP, frame.host_id))
+    manager.move("alpha", DockTarget(DockPosition.RIGHT_TOP))
     settle()
-    assert frame.left.width() == 285
-    drag_region(frame, "left", 250)
-    manager.move("peer", DockTarget(DockPosition.LEFT_TOP, frame.host_id))
+    assert host.right.width() == 285
+    drag_region(host, "right", 250)
+    manager.move("peer", DockTarget(DockPosition.RIGHT_TOP))
     settle()
-    assert frame.left.width() == 250
+    assert host.right.width() == 250
     manager.move("alpha", DockTarget(DockPosition.LEFT_TOP))
     settle()
     assert host.left.width() == 380
-    assert frame.region_sizes["dock"]["left"] == 250
+    assert host.region_sizes["dock"]["right"] == 250
     assert manager.panel("alpha").content is content
     assert docking.calls["alpha"] == 1
 
@@ -227,20 +221,6 @@ def test_overlay_shortcut_resizes_from_actual_geometry_after_compression(docking
     assert (overlay.height() if region == "bottom" else overlay.width()) == actual - 36
 
 
-@pytest.mark.parametrize("mode", [ViewMode.FLOAT, ViewMode.WINDOW])
-def test_floating_geometry_stays_independent_of_shared_dock_sizes(docking, mode):
-    manager = docking.manager
-    manager.set_view_mode("alpha", mode)
-    manager.activate("alpha", focus=False)
-    shell = manager.floating["alpha"]
-    shell.resize(510, 350)
-    settle()
-    before = shell.geometry()
-    manager.activate("peer", focus=False)
-    drag_region(docking.host, "left", 380)
-    manager.activate("alpha", focus=False)
-    settle()
-    assert shell.geometry() == before
 
 
 @pytest.mark.parametrize("old_option", [False, True])

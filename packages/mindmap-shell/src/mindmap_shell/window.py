@@ -8,7 +8,6 @@ from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -198,7 +197,7 @@ class _TitleBar(QWidget):
 class WorkbenchWindow(QMainWindow):
     """可直接使用或继承的公开主窗口；停靠管理器通过 manager 属性访问。
 
-    辅助框架复用同一个 AppSpec 与 QAction，避免业务回调重复注册。
+    一个管理器仅承载一个主窗口，业务菜单与顶栏共享 QAction。
     传入 manager 时由调用方配置存储与主题；外壳不导入任何业务包。
     """
 
@@ -207,28 +206,24 @@ class WorkbenchWindow(QMainWindow):
         if not spec.native_title_bar:
             flags |= Qt.WindowType.FramelessWindowHint
         super().__init__(None, flags)
+        if host_id != "main":
+            raise ValueError("仅支持 main 主窗口")
         self.spec = spec
         self._native_frame = None
         self.host_id = host_id
-        self._retiring = False
         self.manager = manager or DockManager(
             application_id=spec.application_id, storage_dir=spec.storage_dir, theme=spec.theme,
             shortcut_context=Qt.ShortcutContext.WindowShortcut,
         )
-        if self.manager.frame_factory is None:
-            self.manager.frame_factory = lambda item, identifier: WorkbenchWindow(spec, manager=item, host_id=identifier)
         self.setObjectName("mindmap_shell_" + host_id)
-        self.setWindowTitle(spec.title + ("" if host_id == "main" else " · " + host_id))
-        self.resize(1440 if host_id == "main" else 1100, 900 if host_id == "main" else 760)
+        self.setWindowTitle(spec.title)
+        self.resize(1440, 900)
         self.setMinimumSize(860, 540)
         self.host = DockHost(self.manager, host_id, self)
-        if host_id == "main":
-            self._action_specs = list(spec.actions)
-            self.manager._business_action_specs = self._action_specs
-            for action_spec in spec.actions:
-                self._register_action(action_spec)
-        else:
-            self._action_specs = self.manager._business_action_specs
+        # 单窗口只注册一份业务动作，菜单和顶栏继续共享 QAction。
+        self._action_specs = list(spec.actions)
+        for action_spec in spec.actions:
+            self._register_action(action_spec)
         body = QWidget(self)
         self.box = QVBoxLayout(body)
         self.box.setContentsMargins(0, 0, 0, 0)
@@ -359,27 +354,8 @@ class WorkbenchWindow(QMainWindow):
             if spec.menu not in groups:
                 groups[spec.menu] = menu.addMenu(spec.menu)
             groups[spec.menu].addAction(self.manager.actions[spec.id])
-        workspace = menu.addMenu("工作区")
-        workspace.addAction("新建工作区窗口", lambda: self.manager.create_frame())
-        workspace.addAction("搜索工具窗口…", self.search_tools)
-        tools = workspace.addMenu("工具窗口")
-        for tool_id, spec in self.manager.specs.items():
-            if self.manager.states[tool_id].available:
-                action = tools.addAction(self.manager.theme.icon(spec.icon), spec.title)
-                action.triggered.connect(lambda checked=False, item=tool_id: self.activate_tool(item))
-        workspace.addSeparator()
-        for key in ["hide_active", "hide_all", "editor_focus", "last_tool", "maximize"]:
-            workspace.addAction(self.manager.actions[key])
         menu.addMenu(self.appearance_menu())
-        menu.addSeparator()
-        menu.addAction("关闭窗口", self.close)
         return menu
-
-    def activate_tool(self, tool_id):
-        try:
-            self.manager.activate(tool_id)
-        except Exception as error:
-            self.show_status_message(str(error))
 
     def appearance_menu(self):
         """构建平铺设置菜单；外观、界面显示、布局三组仅用分隔线区分。
@@ -409,15 +385,6 @@ class WorkbenchWindow(QMainWindow):
                 action.setChecked(getattr(self.manager.settings, key))
                 action.triggered.connect(lambda checked, value=key: self.manager.set_option(value, checked))
         return menu
-
-    def search_tools(self):
-        titles = [spec.title for key, spec in self.manager.specs.items() if self.manager.states[key].available]
-        value, accepted = QInputDialog.getItem(self, "查找工具窗口", "窗口名称：", titles, editable=False)
-        if accepted:
-            for key, spec in self.manager.specs.items():
-                if spec.title == value:
-                    self.activate_tool(key)
-                    break
 
     def nativeEvent(self, event_type, message):
         if sys.platform == "win32" and not self.spec.native_title_bar:
@@ -452,10 +419,7 @@ class WorkbenchWindow(QMainWindow):
         return super().nativeEvent(event_type, message)
 
     def closeEvent(self, event):
-        if self._retiring or self.manager.closing:
-            event.accept()
-        elif self.host_id != "main":
-            self.manager.close_frame(self.host_id)
+        if self.manager.closing:
             event.accept()
         elif self.manager.can_close_documents():
             self.manager.shutdown()
