@@ -101,7 +101,7 @@ class _TitleBar(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self.window = window
         self.box = QHBoxLayout(self)
-        self.box.setContentsMargins(12, 5, 6, 5)
+        self.box.setContentsMargins(12, 3, 6, 3)
         self.box.setSpacing(9)
         # 应用名称由系统窗口标题和图标提示提供；顶栏左侧仅保留图标与菜单，
         # 不再重复绘制主副标题，同时为辅助技术保留可读的应用名称。
@@ -154,13 +154,14 @@ class _TitleBar(QWidget):
             self.box.addWidget(button)
 
     def refresh_theme(self):
-        """同步顶栏底色和按钮交互状态，局部样式不影响菜单及设置页面的控件。"""
+        """同步顶栏尺寸、底色和按钮状态；文档标签继续由各自的编辑分屏持有。"""
         theme = self.window.manager.theme
         # 仅匹配显式标记的顶栏按钮；窗口控制按钮保留独立的关闭警示色和绘制规则。
         # 默认透明使图标融入外围背景，预留透明边框避免键盘聚焦时发生尺寸变化。
         self.setStyleSheet(f"""
             QToolButton[titleBarAction="true"] {{
                 background:transparent; border:1px solid transparent; border-radius:5px;
+                padding:4px 12px;
             }}
             QToolButton[titleBarAction="true"]:hover {{
                 background:{theme.css('toolbar-bg-hovered')};
@@ -176,7 +177,12 @@ class _TitleBar(QWidget):
                 background:transparent; border-color:transparent; color:{theme.css('text-muted')};
             }}
         """)
-        self.setFixedHeight(42 if theme.compact else 52)
+        # 双层布局保留独立标签栏，仅收紧上方标题栏；菜单和窗口按钮仍为 32×32。
+        # 普通模式上下各留 3px，紧凑模式各留 2px，避免固定高度挤压按钮。
+        # 业务动作使用上方的局部内边距，保证带文字的工具按钮也能完整放入这一行。
+        vertical = 2 if theme.compact else 3
+        self.box.setContentsMargins(12, vertical, 6, vertical)
+        self.setFixedHeight(32 + vertical * 2)
         self.logo.setPixmap(theme.icon(self.window.spec.icon, 20).pixmap(20, 20))
         self.menu.setIcon(theme.icon("menu"))
         for button in (self.minimize, self.maximize, self.close):

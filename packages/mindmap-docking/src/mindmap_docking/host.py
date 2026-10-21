@@ -169,9 +169,10 @@ class DockHost(QWidget):
     def refresh_theme(self):
         """只刷新外观和尺寸，不移除业务控件，允许宿主保留正在输入的草稿。"""
         theme = self.manager.theme
-        # 外边距与分割间距统一由当前主题计算；缩放时始终使用逻辑像素。
+        # 两侧与底部边距继续跟随主题，顶部单独收至 2 个逻辑像素，
+        # 让工具面板和文档标签紧接标题栏；不改变分屏内部间距及标签的归属。
         outer = max(2, theme.gap - 2)
-        self.canvas_layout.setContentsMargins(outer, outer, outer, theme.gap)
+        self.canvas_layout.setContentsMargins(outer, 2, outer, theme.gap)
         theme.apply(self, f"QWidget#{self.objectName()} {{background:{theme.css('main-window-bg')};}} QWidget#editor_{self.host_id} {{background:{theme.css('main-window-bg')};}}")
         self.editor.refresh_theme()
         for splitter in [self.horizontal, self.vertical, self.left, self.right, self.bottom]:

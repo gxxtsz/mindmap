@@ -25,17 +25,30 @@ def frame_window(qtbot, tmp_path):
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme):
-    """覆盖层显示在四边，标题底色生效；内容坐标和真实按钮点击保持原行为。"""
+@pytest.mark.parametrize("compact", [False, True])
+def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme, compact):
+    """两种密度下顶栏、标签与按钮均完整可用，覆盖层仍透传真实输入。"""
     window = frame_window
     window.manager.set_theme(theme)
+    window.manager.set_option("compact", compact)
     window.resize(1200, 800)
     window.show()
     QApplication.processEvents()
-    assert window.centralWidget().geometry() == QRect(0, 0, 1200, 772)
-    assert window.title_bar.geometry() == QRect(0, 0, 1200, 52)
-    assert window.host.geometry() == QRect(0, 52, 1200, 720)
-    assert window.status.geometry() == QRect(0, 772, 1200, 28)
+    title_height, status_height = (36, 24) if compact else (38, 28)
+    body_height = 800 - status_height
+    assert window.centralWidget().geometry() == QRect(0, 0, 1200, body_height)
+    assert window.title_bar.geometry() == QRect(0, 0, 1200, title_height)
+    assert window.host.geometry() == QRect(0, title_height, 1200, body_height - title_height)
+    assert window.status.geometry() == QRect(0, body_height, 1200, status_height)
+    assert window.host.canvas_layout.contentsMargins().top() == 2
+    # 收紧留白后，独立标签栏仍保持既有高度，32×32 的主菜单和窗控没有被裁切。
+    group = window.host.editor.groups[0]
+    assert group.tabBar().height() == (28 if compact else 32)
+    bar = window.title_bar
+    for control in (bar.menu, bar.minimize, bar.maximize, bar.close):
+        assert control.width() == control.height() == 32
+        assert bar.rect().contains(control.geometry())
+    assert all(bar.rect().contains(button.geometry()) for button in bar.action_buttons)
     assert window._frame_outline.geometry() == window.rect()
     image = window.grab().toImage()
     if window._native_frame is not None and window._native_frame.native_border:
