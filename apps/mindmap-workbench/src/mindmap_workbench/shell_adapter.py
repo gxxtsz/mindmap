@@ -213,7 +213,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.show_document()
 
     def main_menu(self):
-        """在标准外壳菜单中复用画布动作，每次打开重新枚举扩展能力。"""
+        """按文件、编辑、视图、设置组织菜单，复用画布动作及其启用状态。
+
+        格式注册表继续服务于打开、保存和剪贴板，不再据此创建文档导出入口；
+        图形导出仍由文件菜单中的共用动作提供。
+        """
         menu = super().main_menu()
         # 使用设置菜单作为稳定锚点，避免删除工作区后依赖菜单数字下标。
         anchor = next(action for action in menu.actions() if action.text() == "设置")
@@ -229,14 +233,6 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.read_only_action.setChecked(not self.canvas.editable)
         view.addAction(self.read_only_action)
         menu.insertMenu(anchor, view)
-        exports = QMenu("导出文档", menu)
-        for entry in self.canvas.format_registry.list():
-            if entry.exporter is not None:
-                action = exports.addAction(entry.info.name)
-                action.setData(entry.info.id)
-                action.triggered.connect(lambda checked=False, identifier=entry.info.id:
-                                         self.canvas.call(lambda: self.files.export_document_dialog(identifier)))
-        menu.insertMenu(anchor, exports)
         return menu
 
     def refresh_theme(self):

@@ -94,7 +94,9 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
     assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected
-    assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "导出文档", "设置"]
+    assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "设置"]
+    files = next(action.menu() for action in main.actions() if action.text() == "文件")
+    assert any(action.text() == "导出图形…" and action.isEnabled() for action in files.actions())
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
     assert all("滚轮" not in action.text() and "布局算法" != action.text() for action in view.actions())
     assert window.manager.states["properties"].visible
@@ -450,6 +452,7 @@ def test_canvas_controls_follow_viewport_theme_and_stay_out_of_export(window, qt
 
 
 def test_file_save_flushes_properties_and_inline_text(window, tmp_path):
+    """正常保存提交属性和原地文字，更新保存标记且保留撤销能力。"""
     canvas, files = window.canvas, window.files
     window.panels.properties.fields["style.font_size"].setValue(22)
     files.path = tmp_path / "文档.mindmap"
@@ -459,12 +462,12 @@ def test_file_save_flushes_properties_and_inline_text(window, tmp_path):
     assert window.manager.documents[DOCUMENT_ID]["title"] == "文档.mindmap"
     canvas.begin_edit(window.engine.root_id)
     canvas.editor.setPlainText("原地文字")
-    target = tmp_path / "导出.json"
-    files.export_path(target, format_id="json")
-    assert load_document(target).root.text == "原地文字"
-    assert files.is_dirty
+    assert files.save()
+    assert load_document(files.path).root.text == "原地文字"
+    assert not files.is_dirty
     assert window.engine.undo()
     assert window.engine.document.root.text != "原地文字"
+    assert files.is_dirty
 
 
 def test_invalid_open_failed_save_and_cancel_keep_session(window, tmp_path, monkeypatch):
@@ -569,7 +572,7 @@ def test_layout_extension_still_works_without_algorithm_menu(window):
 
 
 class RootCodec:
-    """仅用于验证有损导入与单向导出能力的独立格式。"""
+    """用于验证有损导入，以及仅写格式不能作为主文档保存的独立格式。"""
 
     def read(self, stream, *, options):
         return MindMapDocument.new(stream.read().decode("utf-8"))
@@ -579,23 +582,30 @@ class RootCodec:
 
 
 def test_dynamic_formats_lossy_import_and_save_as(window, tmp_path, monkeypatch):
+    """动态格式不再创建导出入口；有损导入必须另存为完整格式，拒绝仅写目标。"""
     registry = window.canvas.format_registry
     registry.register(FormatInfo("root-read", "根节点导入", (".read",)), importer=RootCodec())
     registry.register(FormatInfo("root-write", "根节点导出", (".write",)), exporter=RootCodec())
     assert "*.read" in window.files.format_filters("open") and "*.write" not in window.files.format_filters("open")
     assert "*.read" not in window.files.format_filters("save") and "*.write" not in window.files.format_filters("save")
     menu = window.main_menu()
-    exports = next(action.menu() for action in menu.actions() if action.text() == "导出文档")
-    assert "root-write" in [action.data() for action in exports.actions()]
-    assert "root-read" not in [action.data() for action in exports.actions()]
+    assert [action.text() for action in menu.actions()] == ["文件", "编辑", "视图", "设置"]
+    menu.deleteLater()
+    assert not hasattr(window.files, "export_document_dialog")
+    assert not hasattr(window.files, "export_path")
+    for purpose in ("export", "unknown"):
+        with pytest.raises(MindMapError, match="未知文件对话框用途"):
+            window.files.format_filters(purpose)
     source = tmp_path / "有损.read"
     source.write_text("导入内容", "utf-8")
     assert window.open_path(source)
     assert window.files.path is None and window.files.is_dirty
     before, revision = window.engine.document, window.engine.revision
-    output = tmp_path / "导出.write"
-    window.files.export_path(output)
-    assert output.read_text("utf-8") == "导入内容" and window.files.is_dirty
+    output = tmp_path / "不能完整保存.write"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(output), ""))
+    assert not window.files.save()
+    assert not output.exists() and window.files.path is None and window.files.is_dirty
+    assert "请选择可完整保存导图的格式" in window.statusBar().currentMessage()
     assert window.engine.document == before and window.engine.revision == revision
     monkeypatch.setattr(QFileDialog, "getSaveFileName",
                         lambda *args: (str(tmp_path / "另存"), "JSON 文档 (*.json)"))

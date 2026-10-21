@@ -119,7 +119,7 @@ finally:
 
 `show_tool_window("outline" / "properties", focus=True)` 展开面板，`hide_tool_window(...)` 隐藏，
 `restore_state(None)` 恢复默认布局。`save_state()` 返回普通字典，宿主监听 `state_changed`
-并自行保存本机偏好；组件不访问 QSettings。保存或导出文档前调用 `flush_pending_edits()`。
+并自行保存本机偏好；组件不访问 QSettings。保存或导出图形前调用 `flush_pending_edits()`。
 直接调用 `workspace.canvas.export(...)` 也会先通知侧栏提交有效输入。
 该画布接口导出正式文档，不提交原地文字草稿；需要包含草稿时，宿主应先调用
 `workspace.canvas.finish_edit(commit=True)`。文件控制器会统一完成这一步。
@@ -172,10 +172,13 @@ finally:
 `path` 表示当前保存位置，`is_dirty` 同时包含引擎修改状态与有损导入待保存状态。
 `new_document()`、`open_path()`、`save()` 返回是否完成操作，
 `confirm_replace()` 统一处理保存确认；主文档只使用可完整往返的格式。
-保存、导出和确认替换前，控制器会提交有效属性输入与原地文字。
+保存、图形导出和确认替换前，控制器会提交有效属性输入与原地文字。
 文件解析和画布验证成功后才询问是否替换；写入成功后才更新路径与保存标记。
-`export_path()` 导出文档快照，不更新当前保存位置，也不清除未保存标记。
-`open_path()`、`export_path()` 的异常交给宿主处理；
+`export_dialog()` 提供 PNG、SVG、PDF 图形导出及折叠范围选择，不更新保存位置，也不清除未保存标记。
+文档导出专用的 `export_document_dialog()`、`export_path()` 已删除，不保留兼容接口。
+`format_filters()` 仅接受 `open`、`save`；`export` 及其他值抛出 `MindMapError`。
+格式注册表、编解码器与原子写入继续用于正常保存和剪贴板，JSON 保存保持可用。
+`open_path()` 的异常交给宿主处理；
 `save()` 写入失败返回 False，并通过 `error_occurred(str)` 报告。
 `state_changed` 通知文件状态变化，`message(str)` 提供导出结果提示。
 

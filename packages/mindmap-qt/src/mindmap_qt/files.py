@@ -1,4 +1,4 @@
-"""宿主无关的文件生命周期：格式筛选、保存决策及图形与文档导出。"""
+"""宿主无关的文件生命周期：打开与保存格式筛选、保存决策及图形导出。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ class MindMapFileController(QObject):
 
     dialog_parent 是文件和保存对话框的 QWidget 父对象；panels 提供
     flush_pending_edits()。writer 默认为引擎原子写入方法，可注入兼容的
-    写入器。open_path/export_path 的校验异常交给宿主处理，save 写入失败
+    写入器。open_path 的校验异常交给宿主处理，save 写入失败
     通过 error_occurred 报告并返回 False；取消操作保持原文档和保存状态。
     """
 
@@ -44,7 +44,11 @@ class MindMapFileController(QObject):
         self.state_changed.emit()
 
     def format_filters(self, purpose: str) -> str:
-        """根据导入、主文档保存或导出能力生成文件筛选项，不通过后缀猜测是否有损。"""
+        """按 open 或 save 生成当前格式筛选项，其他用途抛出 MindMapError。
+
+        打开允许所有具备读取能力的格式，主文档保存只允许完整往返的格式；
+        通用写入器仍由保存和剪贴板复用，不再提供文档导出专用筛选。
+        """
         return ";;".join(self._format_label(entry) for entry in self._format_entries(purpose))
 
     def _format_entries(self, purpose):
@@ -53,8 +57,6 @@ class MindMapFileController(QObject):
             return tuple(entry for entry in entries if entry.importer is not None)
         if purpose == "save":
             return tuple(entry for entry in entries if entry.can_save)
-        if purpose == "export":
-            return tuple(entry for entry in entries if entry.exporter is not None)
         raise MindMapError("未知文件对话框用途")
 
     @staticmethod
@@ -157,7 +159,8 @@ class MindMapFileController(QObject):
         try:
             entry = self.canvas.format_registry.resolve(target, format_id=format_id, writing=True)
             if not entry.can_save:
-                raise MindMapError("当前格式不能完整往返文档，请通过导出保存")
+                # 仅写格式仍可由底层注册表处理，但不能绕过主文档的完整保存约束。
+                raise MindMapError("当前格式不能完整往返文档，请选择可完整保存导图的格式")
             self.writer(
                 self.engine.document, target, registry=self.canvas.format_registry, format_id=entry.info.id
             )
@@ -193,35 +196,4 @@ class MindMapFileController(QObject):
         )
         self.canvas.export(target, expand_all=expand == QMessageBox.StandardButton.Yes)
         self.message.emit(f"已导出：{target}")
-
-    def export_document_dialog(self, format_id=None):
-        """按选中扩展生成文件对话框；文档导出复用原子写入且不改变保存位置。"""
-        self.panels.flush_pending_edits()
-        self.canvas.finish_edit(commit=True)
-        entry = self.canvas.format_registry.get(format_id) if format_id is not None else None
-        path, selected = QFileDialog.getSaveFileName(
-            self.dialog_parent,
-            "导出文档",
-            "思维导图" + (entry.info.extensions[0] if entry else ""),
-            self._format_label(entry) if entry else self.format_filters("export"),
-        )
-        if path:
-            target = Path(path)
-            format_id = format_id or self._selected_format(selected, "export")
-            if not target.suffix:
-                entry = (
-                    self.canvas.format_registry.get(format_id)
-                    if format_id is not None
-                    else self._format_entries("export")[0]
-                )
-                format_id = entry.info.id
-                target = target.with_suffix(entry.info.extensions[0])
-            self.export_path(target, format_id=format_id)
-
-    def export_path(self, path: str | Path, *, format_id=None):
-        """向任意已注册导出器输出快照，失败不改写既有目标文件或文档保存标记。"""
-        self.panels.flush_pending_edits()
-        self.canvas.finish_edit(commit=True)
-        self.writer(self.engine.document, path, registry=self.canvas.format_registry, format_id=format_id)
-        self.message.emit(f"已导出：{path}")
 
