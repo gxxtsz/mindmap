@@ -6,6 +6,8 @@
     "main-window-bg": "#E9EDF2",
     "main-window-titlebar-bg": "#E9EDF2",
     "main-window-outline": "#ADB9C8",
+    "window-control-bg-hovered": "#D5DEE9",
+    "window-control-bg-pressed": "#BFCBDD",
     "tool-window-bg": "#FFFFFF",
     "editor-bg": "#FFFFFF",
     "text-default": "#233044",

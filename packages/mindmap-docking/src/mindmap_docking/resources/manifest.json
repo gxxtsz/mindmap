@@ -4,7 +4,7 @@
   "files": [
     {
       "path": "dark.json",
-      "sha256": "df3a0a7c1dcb3619f17618eccc4026537b889b1cd9ce1092b4419287ed9816b4"
+      "sha256": "adeb1f7c5fdeff167faccd342cb5dbb139630eb9f0a411341ecdf6d5001b990a"
     },
     {
       "path": "icons/chevron-down.svg",
@@ -92,7 +92,7 @@
     },
     {
       "path": "light.json",
-      "sha256": "1114d8a1b1f71b8a0022d93aa3330099f73eb2fe788f563701a48b44e7ef244e"
+      "sha256": "44e1ac2dadba6a45bac517d0d2b44eac77362183038ea028c9e7136c5f94b370"
     }
   ]
 }

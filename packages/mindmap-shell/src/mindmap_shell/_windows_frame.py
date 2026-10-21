@@ -27,6 +27,32 @@ class _MonitorInfo(ctypes.Structure):
     ]
 
 
+class _TrackMouseEvent(ctypes.Structure):
+    """跟踪非客户区离开通知；HWND 使用指针宽度，避免 64 位系统句柄被截断。"""
+
+    _fields_ = [
+        ("size", wintypes.DWORD), ("flags", wintypes.DWORD),
+        ("hwnd", wintypes.HWND), ("hover_time", wintypes.DWORD),
+    ]
+
+
+def _track_nonclient_mouse_leave(hwnd: int) -> bool:
+    """订阅一次 WM_NCMOUSELEAVE，鼠标进入非客户区后由调用方重新订阅。
+
+    鼠标消息不依赖 DWM 是否支持系统边框，因此跟踪与合成适配分别初始化。
+    这里只监听离开，不截获悬停消息，保留 Windows 最大化按钮的贴靠菜单。
+    离屏平台没有有效 HWND，不调用系统接口；失败时由后续移动消息再次尝试。
+    """
+    if sys.platform != "win32" or QApplication.platformName() != "windows":
+        return False
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.TrackMouseEvent.argtypes = [ctypes.POINTER(_TrackMouseEvent)]
+    user32.TrackMouseEvent.restype = wintypes.BOOL
+    # TME_LEAVE | TME_NONCLIENT：直接移出整个窗口也必须撤销按钮悬浮底色。
+    tracking = _TrackMouseEvent(ctypes.sizeof(_TrackMouseEvent), 0x00000012, hwnd, 0)
+    return bool(user32.TrackMouseEvent(ctypes.byref(tracking)))
+
+
 class _WindowsFrame:
     """绑定单个 HWND 的系统边框能力；句柄重建后必须重新创建此对象。
 

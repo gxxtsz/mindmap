@@ -188,7 +188,8 @@ def test_workbench_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path
     assert any(item.text() == "稍后加入" for item in window.title_bar.action_buttons)
     # 动态业务动作仍在窗口控制按钮之前，且复用菜单中的同一 QAction。
     bar = window.title_bar
-    assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.minimize) for button in bar.action_buttons)
+    assert bar.box.itemAt(bar.box.count() - 1).layout() is bar.window_controls
+    assert all(bar.box.indexOf(button) < bar.box.count() - 1 for button in bar.action_buttons)
     window.action("business.add").trigger()
     assert calls == [1]
     window.manager.shutdown()

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ._windows_frame import _create_windows_frame
+from ._windows_frame import _create_windows_frame, _track_nonclient_mouse_leave
 from .specs import ActionSpec, AppSpec
 
 
@@ -39,28 +39,34 @@ class _WindowOutline(QWidget):
 
 
 class _WindowControlButton(QToolButton):
-    """窗口控制按钮：独立设置留白、主题前景色及关闭操作的悬停反馈。"""
+    """轻量窗口按钮；Qt 与 Windows 原生鼠标消息共用同一套悬浮、按下反馈。"""
 
     def __init__(self, title_bar, role):
         super().__init__(title_bar)
         self.title_bar = title_bar
         self.role = role
         self._hovered = False
-        # 通用按钮的水平内边距会压缩图标；窗口按钮改用固定命中区域和独立样式。
-        self.setFixedSize(32, 32)
-        self.setIconSize(QSize(20, 20))
+        self._native_hovered = False
+        self._native_pressed = False
+        self._tracking_native_leave = False
+        self.setProperty("windowControlHovered", False)
+        # 图标缩为 16 逻辑像素，保留更宽的点击区域；SVG 的实际线宽约为 1.13px。
+        # 尺寸固定使悬浮和按下只改变颜色，不移动图形或挤压相邻按钮。
+        self.setFixedSize(40, 32)
+        self.setIconSize(QSize(16, 16))
+        self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def refresh_theme(self):
         """同步深浅主题及最大化状态；切换主题时保留当前悬停反馈。"""
         theme = self.title_bar.window.manager.theme
-        hover = theme.color("toolbar-bg-hovered")
-        pressed = theme.color("toolbar-selected-bg-active")
+        hover = theme.color("window-control-bg-hovered")
+        pressed = theme.color("window-control-bg-pressed")
         if self.role == "close":
             hover, pressed = QColor("#C42B1C"), QColor("#A82318")
         self.setStyleSheet(f"""
             QToolButton {{ background:transparent; border:1px solid transparent;
                 border-radius:4px; padding:0; }}
-            QToolButton:hover {{ background:{hover.name()}; }}
+            QToolButton[windowControlHovered="true"] {{ background:{hover.name()}; }}
             QToolButton:pressed {{ background:{pressed.name()}; }}
             QToolButton:focus {{ border-color:{theme.css('control-brand-border')}; }}
         """)
@@ -69,6 +75,54 @@ class _WindowControlButton(QToolButton):
             self.setToolTip(label)
             self.setAccessibleName(label)
         self._refresh_icon()
+
+    def _set_hovered(self, hovered: bool) -> None:
+        """更新共同的悬浮属性；只在状态改变时重算 QSS，避免移动过程中重复刷新。"""
+        hovered = hovered and self.isEnabled()
+        if hovered == self._hovered:
+            return
+        self._hovered = hovered
+        self.setProperty("windowControlHovered", hovered)
+        # HTMAXBUTTON 属于非客户区，Qt 的 :hover 不一定更新；显式属性驱动两条输入路径。
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self._refresh_icon()
+        self.update()
+
+    def set_native_hovered(self, hovered: bool) -> None:
+        """接收原生命中状态，并监听移出窗口；主题切换不会覆盖当前输入状态。"""
+        self._native_hovered = hovered and self.isEnabled() and self.isVisible()
+        self._set_hovered(self._native_hovered)
+        if self._native_hovered and not self._native_pressed and not self._tracking_native_leave:
+            self._tracking_native_leave = _track_nonclient_mouse_leave(int(self.window().winId()))
+
+    def begin_native_press(self) -> None:
+        """接管最大化按钮的原生左键按下，抓取鼠标以接收按钮外部的移动和松开。"""
+        if self._native_pressed or not self.isEnabled() or not self.isVisible():
+            return
+        self._native_pressed = True
+        self.set_native_hovered(True)
+        self.setDown(True)
+        self.grabMouse()
+        self.pressed.emit()
+
+    def finish_native_press(self, *, activate: bool = False) -> None:
+        """结束原生按压；只有在按钮内松开才激活，取消、失焦及失去抓取均不触发动作。
+
+        先清除按压标记再释放抓取，避免同步到来的 UngrabMouse／WM_CAPTURECHANGED
+        重入结束流程。激活后重新命中光标，防止最大化改变按钮位置而留下旧底色。
+        """
+        was_pressed = self._native_pressed
+        self._native_pressed = False
+        self.setDown(False)
+        if was_pressed and QWidget.mouseGrabber() is self:
+            self.releaseMouse()
+        if was_pressed:
+            self.released.emit()
+            if activate and self.isEnabled() and self.isVisible():
+                self.clicked.emit()
+        hovered = activate and self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+        self.set_native_hovered(hovered)
 
     def _refresh_icon(self):
         """复用主题图标供应器，关闭按钮悬停时使用白色，正常状态使用正文色。"""
@@ -83,13 +137,20 @@ class _WindowControlButton(QToolButton):
 
     def enterEvent(self, event):
         super().enterEvent(event)
-        self._hovered = True
-        self._refresh_icon()
+        self._set_hovered(True)
 
     def leaveEvent(self, event):
         super().leaveEvent(event)
-        self._hovered = False
-        self._refresh_icon()
+        # Qt 可能在进入原生最大化区域时发送 Leave，原生悬浮状态由系统离开消息撤销。
+        self._set_hovered(self._native_hovered)
+
+    def event(self, event):
+        """控件隐藏、被禁用或鼠标抓取被接管时撤销原生按压，避免出现卡住的背景。"""
+        if event.type() in (QEvent.Type.Hide, QEvent.Type.UngrabMouse) and self._native_pressed:
+            self.finish_native_press()
+        elif event.type() == QEvent.Type.EnabledChange and not self.isEnabled():
+            self.finish_native_press()
+        return super().event(event)
 
 
 class _TitleBar(QWidget):
@@ -128,6 +189,12 @@ class _TitleBar(QWidget):
         self.minimize = _WindowControlButton(self, "minimize")
         self.maximize = _WindowControlButton(self, "maximize")
         self.close = _WindowControlButton(self, "close")
+        # 窗口按钮独立成组，组内间距为 2px；菜单和业务动作继续沿用标题栏原有间距。
+        # 只增加子布局，按钮仍以标题栏为父控件，原生命中坐标和控件所有权不变。
+        self.window_controls = QHBoxLayout()
+        self.window_controls.setContentsMargins(0, 0, 0, 0)
+        self.window_controls.setSpacing(2)
+        self.box.addLayout(self.window_controls)
         for button, label, callback in [
             (self.minimize, "最小化", window.showMinimized),
             (self.maximize, "最大化或还原", window.toggle_maximize),
@@ -137,7 +204,7 @@ class _TitleBar(QWidget):
             button.setAccessibleName(label)
             button.clicked.connect(callback)
             button.setVisible(not window.spec.native_title_bar)
-            self.box.addWidget(button)
+            self.window_controls.addWidget(button)
 
     def add_action(self, action):
         """将业务动作加入顶栏，并标记为透明工具按钮；动态追加时沿用当前主题。"""
@@ -146,10 +213,10 @@ class _TitleBar(QWidget):
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setDefaultAction(action)
         self.action_buttons.append(button)
-        # 删除齿轮后以最小化按钮作为稳定插入点，动态动作仍在窗口控制按钮之前。
+        # 窗口按钮组始终是主布局的最后一项，动态业务动作稳定插入到该组之前。
         # 初始构造阶段窗口按钮尚未创建，此时按声明顺序正常追加。
-        if hasattr(self, "minimize"):
-            self.box.insertWidget(self.box.indexOf(self.minimize), button)
+        if hasattr(self, "window_controls"):
+            self.box.insertWidget(self.box.count() - 1, button)
         else:
             self.box.addWidget(button)
 
@@ -177,7 +244,7 @@ class _TitleBar(QWidget):
                 background:transparent; border-color:transparent; color:{theme.css('text-muted')};
             }}
         """)
-        # 双层布局保留独立标签栏，仅收紧上方标题栏；菜单和窗口按钮仍为 32×32。
+        # 双层布局保留独立标签栏；菜单仍为 32×32，窗口按钮为 40×32，不增加顶栏高度。
         # 普通模式上下各留 3px，紧凑模式各留 2px，避免固定高度挤压按钮。
         # 业务动作使用上方的局部内边距，保证带文字的工具按钮也能完整放入这一行。
         vertical = 2 if theme.compact else 3
@@ -339,6 +406,9 @@ class WorkbenchWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "_frame_outline"):
             self.title_bar.refresh_theme()
             self._refresh_window_frame()
+        elif event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            if hasattr(self, "title_bar"):
+                self.title_bar.maximize.finish_native_press()
 
     @Slot(str)
     def show_status_message(self, text):
@@ -392,10 +462,53 @@ class WorkbenchWindow(QMainWindow):
                 action.triggered.connect(lambda checked, value=key: self.manager.set_option(value, checked))
         return menu
 
+    def _handle_native_maximize_mouse(self, msg) -> bool:
+        """将最大化按钮的 Windows 鼠标消息同步到 Qt；返回是否已消费该条消息。
+
+        悬浮移动和离开消息继续交给系统，使 HTMAXBUTTON 的贴靠菜单正常出现。
+        原生按压期间由 Qt 抓取鼠标，后续消息可能变成客户区 WM_MOUSEMOVE／
+        WM_LBUTTONUP，因此同时处理两条路径，并只允许一次按钮内松开触发动作。
+        """
+        button = self.title_bar.maximize
+        if msg.message not in (0x00A0, 0x00A1, 0x00A2, 0x0200, 0x0202, 0x02A2, 0x0215, 0x001F):
+            return False
+        # QCursor 提供 Qt 的逻辑坐标，避免与 Win32 的物理像素混用，支持分数缩放和负坐标副屏。
+        inside = (button.isVisible() and button.isEnabled()
+                  and button.rect().contains(button.mapFromGlobal(QCursor.pos())))
+        if msg.message in (0x00A0, 0x0200):  # WM_NCMOUSEMOVE / WM_MOUSEMOVE
+            button.set_native_hovered(inside and (msg.message == 0x0200 or msg.wParam == 9))
+            if button._native_pressed:
+                button.setDown(inside)
+                return True
+        elif msg.message == 0x00A1 and msg.wParam == 9:  # WM_NCLBUTTONDOWN / HTMAXBUTTON
+            if inside:
+                button.begin_native_press()
+            return True
+        elif msg.message == 0x0202 and button._native_pressed:
+            button.finish_native_press(activate=inside)
+            return True
+        elif msg.message == 0x00A2 and msg.wParam == 9:  # WM_NCLBUTTONUP
+            # 没有从当前按钮开始的按压也消费松开，防止系统或旧消息误触发最大化。
+            if button._native_pressed:
+                button.finish_native_press(activate=inside)
+            return True
+        elif msg.message == 0x02A2:  # WM_NCMOUSELEAVE；每次离开后需要重新订阅。
+            button._tracking_native_leave = False
+            if not button._native_pressed:
+                button.set_native_hovered(False)
+        elif msg.message == 0x001F or (msg.message == 0x0215 and msg.lParam != msg.hWnd):
+            # WM_CANCELMODE / WM_CAPTURECHANGED：允许 Qt 继续清理抓取，只撤销本按钮的输入状态。
+            if button._native_pressed:
+                button.finish_native_press()
+        return False
+
     def nativeEvent(self, event_type, message):
+        """处理自绘边框与原生窗口按钮消息，保留系统缩放及最大化贴靠菜单。"""
         if sys.platform == "win32" and not self.spec.native_title_bar:
             from ctypes import wintypes
             msg = wintypes.MSG.from_address(int(message))
+            if hasattr(self, "title_bar") and self._handle_native_maximize_mouse(msg):
+                return True, 0
             if msg.message == 0x0083 and msg.wParam and self._native_frame is not None:
                 # WM_NCCALCSIZE：恢复系统阴影所需的样式后仍保留完整客户区；
                 # 最大化时额外限制到工作区，防止标题栏和状态栏被屏幕边界裁掉。
@@ -409,7 +522,8 @@ class WorkbenchWindow(QMainWindow):
                 # 集成标题栏仍将边框与最大化按钮的命中结果交给 Windows，保留系统缩放和贴靠。
                 point = self.mapFromGlobal(QCursor.pos())
                 button = self.title_bar.maximize
-                if button.geometry().contains(button.parentWidget().mapFrom(self, point)):
+                if (button.isVisible() and button.isEnabled()
+                        and button.geometry().contains(button.parentWidget().mapFrom(self, point))):
                     return True, 9
                 if not self.isMaximized():
                     x, y, edge = point.x(), point.y(), 5
@@ -417,11 +531,6 @@ class WorkbenchWindow(QMainWindow):
                     hit = (13 if left else 14 if right else 12) if top else (16 if left else 17 if right else 15) if bottom else 10 if left else 11 if right else 0
                     if hit:
                         return True, hit
-            elif msg.message == 0x00A1 and msg.wParam == 9:
-                return True, 0
-            elif msg.message == 0x00A2 and msg.wParam == 9:
-                self.toggle_maximize()
-                return True, 0
         return super().nativeEvent(event_type, message)
 
     def closeEvent(self, event):

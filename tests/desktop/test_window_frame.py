@@ -5,7 +5,7 @@ from ctypes import wintypes
 
 import pytest
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow
-from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 
@@ -41,13 +41,17 @@ def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme
     assert window.host.geometry() == QRect(0, title_height, 1200, body_height - title_height)
     assert window.status.geometry() == QRect(0, body_height, 1200, status_height)
     assert window.host.canvas_layout.contentsMargins().top() == 2
-    # 收紧留白后，独立标签栏仍保持既有高度，32×32 的主菜单和窗控没有被裁切。
+    # 独立标签栏仍保持既有高度；窗控仅增加点击宽度，不挤压菜单或改变标题栏高度。
     group = window.host.editor.groups[0]
     assert group.tabBar().height() == (28 if compact else 32)
     bar = window.title_bar
-    for control in (bar.menu, bar.minimize, bar.maximize, bar.close):
-        assert control.width() == control.height() == 32
+    assert bar.menu.size() == QSize(32, 32)
+    for control in (bar.minimize, bar.maximize, bar.close):
+        assert control.size() == QSize(40, 32)
+        assert control.iconSize() == QSize(16, 16)
         assert bar.rect().contains(control.geometry())
+    assert bar.maximize.x() - bar.minimize.geometry().right() - 1 == 2
+    assert bar.close.x() - bar.maximize.geometry().right() - 1 == 2
     assert all(bar.rect().contains(button.geometry()) for button in bar.action_buttons)
     assert window._frame_outline.geometry() == window.rect()
     image = window.grab().toImage()
@@ -75,7 +79,11 @@ def test_windows_shadow_preserves_geometry_and_maximized_work_area(frame_window,
     if QApplication.platformName() != "windows":
         pytest.skip("系统阴影需要真实 Windows 平台窗口")
     window = frame_window
-    original = QRect(100, 130, 1120, 760)
+    # 高 DPI 下工作区可能小于固定的 1120×760；验收窗口先放入屏内，避免系统
+    # 主动约束越界位置与尺寸，被误判为最大化／还原改变了应用的正常窗口几何。
+    available = window.screen().availableGeometry()
+    original = QRect(available.topLeft() + QPoint(20, 20),
+                     QSize(min(1120, available.width() - 40), min(760, available.height() - 40)))
     window.setGeometry(original)
     if initial_maximized:
         window.showMaximized()
