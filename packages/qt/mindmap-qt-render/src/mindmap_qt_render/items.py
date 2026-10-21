@@ -27,14 +27,23 @@ class NodeItem(QGraphicsObject):
         正式快照，并在 GUI 线程调用，以保留图元选择及场景中的对象身份。
         """
         # 文本、折叠状态或颜色变化不一定改变尺寸；仅在边界变化时使场景空间索引失效。
-        if (self.visual.width, self.visual.height) != (visual.width, visual.height):
+        size_changed = (self.visual.width, self.visual.height) != (visual.width, visual.height)
+        control_changed = self.controls and (
+            (len(self.node.children), self.node.expanded) != (len(node.children), node.expanded)
+        )
+        if size_changed or control_changed:
             self.prepareGeometryChange()
         self.node, self.visual, self.theme = node, visual, theme
         self.setToolTip(node.note or node.hyperlink)
         self.update()
 
     def boundingRect(self):
-        return QRectF(-2, -2, self.visual.width + 4, self.visual.height + 4)
+        """静态控件调用覆盖外侧标记；无控件时只返回节点正文边界。"""
+        bounds = QRectF(-2, -2, self.visual.width + 4, self.visual.height + 4)
+        if self.controls and self.node.children:
+            control = self.visual.fold_rect(child_count=0 if self.node.expanded else len(self.node.children))
+            bounds = bounds.united(control.adjusted(-1, -1, 1, 1))
+        return bounds
 
     def shape(self):
         path = QPainterPath()

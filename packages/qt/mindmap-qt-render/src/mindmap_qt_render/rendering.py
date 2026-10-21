@@ -127,7 +127,12 @@ class NodeVisual:
     def paint(
         self, painter: QPainter, node: Node, *, selected=False, editing=False, controls=True, accent="#3478d5"
     ):
-        """绘制节点内容；导出时关闭折叠按钮等控件，同时保留内容的测量尺寸。"""
+        """绘制节点正文及可选的外侧折叠标记，不改变节点或文档。
+
+        controls 保留既有绘制接口；交互画布用独立子图元承载按钮，因此与导出、
+        拖动影像一样传入 False。直接绘制时默认在右侧显示标记，调用方须将外侧
+        标记计入自己的绘图范围；正文测量尺寸不再包含旧按钮的额外留白。
+        """
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(
             QPen(QColor(accent) if selected else self.border, 2.5 if selected else self.border_width)
@@ -152,18 +157,48 @@ class NodeVisual:
                 Qt.AlignmentFlag.AlignLeft,
                 ("≡ " if node.note else "") + ("↗" if node.hyperlink else ""),
             )
-        if self.has_children and controls:
-            rect = self.fold_rect()
-            painter.setPen(QPen(self.border, 1))
-            painter.setBrush(self.background)
-            painter.drawEllipse(rect)
-            painter.setPen(self.text_color)
-            painter.drawLine(rect.left() + 3, rect.center().y(), rect.right() - 3, rect.center().y())
-            if not node.expanded:
-                painter.drawLine(rect.center().x(), rect.top() + 3, rect.center().x(), rect.bottom() - 3)
+        if node.children and controls:
+            self.paint_fold_control(painter, node)
 
-    def fold_rect(self) -> QRectF:
-        return QRectF(self.width - 20, self.height / 2 - 7, 14, 14)
+    def fold_rect(self, direction: str = "right", *, child_count: int = 0) -> QRectF:
+        """返回节点局部坐标中的外侧按钮矩形，不扩大正文的测量尺寸。
+
+        direction 使用 right、left 或 down，双向根节点由宿主映射到 right。
+        child_count 为收起时的直接子节点数；零表示展开按钮，保留无参数调用。
+        基础直径为 20 个逻辑像素，与正文间隔 4 像素；多位计数按真实字体宽度
+        扩展为圆角徽标，不截断、不缩写数字，所有尺寸随画布正常缩放。
+        """
+        width = 20.0
+        if child_count:
+            width = max(width, QFontMetricsF(self.tag_font).horizontalAdvance(str(child_count)) + 8)
+        if direction == "left":
+            return QRectF(-width - 4, self.height / 2 - 10, width, 20)
+        if direction == "down":
+            return QRectF((self.width - width) / 2, self.height + 4, width, 20)
+        return QRectF(self.width + 4, self.height / 2 - 10, width, 20)
+
+    def paint_fold_control(
+        self, painter: QPainter, node: Node, *, rect: QRectF | None = None, background: QColor | None = None
+    ) -> None:
+        """按当前节点状态绘制减号或直接子节点数，供独立按钮与静态调用共用。
+
+        rect 必须来自同一视觉的 fold_rect；省略时按右侧计算。background 由画布
+        传入当前场景底色，静态调用默认使用节点背景。圆框、符号和数字均采用节点
+        边框颜色；计数实时读取 node.children，不依赖可跨节点共享的视觉缓存。
+        """
+        if rect is None:
+            rect = self.fold_rect(child_count=0 if node.expanded else len(node.children))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(self.border, 1))
+        painter.setBrush(self.background if background is None else background)
+        painter.drawRoundedRect(rect, 10, 10)
+        if node.expanded:
+            painter.drawLine(rect.left() + 5, rect.center().y(), rect.right() - 5, rect.center().y())
+        else:
+            painter.setFont(self.tag_font)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(len(node.children)))
+        painter.restore()
 
 
 class VisualFactory:
@@ -222,7 +257,7 @@ class VisualFactory:
         text_document = make_text(text, font, text_width, markdown=node.text_format == "markdown")
         image, image_rect = None, QRectF()
         y = 12.0
-        width = text_width + 28 + (20 if node.children else 0)
+        width = text_width + 28
         if node.image_id:
             if node.image_id not in self.pixmaps:
                 image, _ = decode_image(document.assets[node.image_id].data)
@@ -236,7 +271,7 @@ class VisualFactory:
                 iw *= 260 / ih
                 ih = 260
             image_rect = QRectF(14, y, iw, ih)
-            width = max(width, iw + 28 + (20 if node.children else 0))
+            width = max(width, iw + 28)
             y += ih + 10
         text_position = QPointF(14, y)
         y += max(metrics.height(), text_document.size().height())
@@ -253,7 +288,7 @@ class VisualFactory:
                     x, y = 14, y + 26
                 tags.append((tag, QRectF(x, y, tag_width, 22)))
                 x += tag_width + 6
-                width = max(width, x + 8 + (20 if node.children else 0))
+                width = max(width, x + 8)
             y += 22
         if node.note or node.hyperlink:
             y += 20

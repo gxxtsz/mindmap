@@ -674,10 +674,12 @@ class _DragLayer(QGraphicsItem):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(control._connection_hint())
         # 影像可能正好盖住落点正文。把固定目标绘制在影像与提示线之上，使名称和
-        # 折叠按钮始终清晰；这里只重绘相同视觉，不移动或改写实际节点图元。
+        # 正文始终清晰；预览不绘制交互按钮，也不移动或改写实际节点图元。
         painter.save()
         painter.translate(rect.x, rect.y)
-        control._base.visuals[target.reference].paint(painter, control._base.document.nodes[target.reference])
+        control._base.visuals[target.reference].paint(
+            painter, control._base.document.nodes[target.reference], controls=False
+        )
         painter.restore()
         if target.position == "inside":
             # 接为子节点强调接收主题，整圈淡色高亮与预连接共同表达父子关系。

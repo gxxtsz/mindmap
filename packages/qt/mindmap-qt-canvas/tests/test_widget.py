@@ -214,13 +214,13 @@ def test_export_contents_and_no_document_changes(canvas, png_bytes, tmp_path, su
     if suffix == "png":
         image = QImage(str(target))
         assert not image.isNull()
-        # 根节点折叠按钮的中心在画布中有一条横线，导出后应只剩节点背景。
+        # 节点内部不再预留或绘制折叠按钮，正文右侧留白保持节点背景。
         root = widget.engine.root_id
         bounds = widget.layout_result.bounds
         rect = widget.layout_result.nodes[root]
         visual = widget.node_items[root].visual
-        fold = visual.fold_rect().center()
-        x, y = round(rect.x - bounds.x + fold.x()), round(rect.y - bounds.y + fold.y())
+        x = round(rect.x - bounds.x + visual.width - 7)
+        y = round(rect.y - bounds.y + visual.height / 2)
         assert image.pixelColor(x, y).name() == visual.background.name()
         # 找到红色图片像素，避免只生成了空背景却被当成成功导出。
         assert any(

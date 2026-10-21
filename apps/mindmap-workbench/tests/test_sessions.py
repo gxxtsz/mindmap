@@ -760,6 +760,29 @@ def test_document_changes_schedule_committed_save(empty_window, tmp_path, operat
     assert load_document(session.files.path) == engine.document
 
 
+def test_external_fold_button_autosaves_and_undo_redo_restore_saved_state(empty_window, tmp_path, qtbot):
+    """真实按钮点击经既有防抖保存落盘，撤销重做也保存各自的折叠状态。"""
+    session = create(empty_window, tmp_path / "按钮折叠.mindmap")
+    engine, canvas = session.engine, session.canvas
+    engine.add_child(engine.root_id, "子主题")
+    qtbot.waitUntil(lambda: not session.files.is_dirty)
+    canvas.select_nodes([engine.root_id])
+    canvas.center_root()
+    QApplication.processEvents()
+    control = canvas.node_items[engine.root_id].fold_control
+    position = canvas.view.mapFromScene(control.mapToScene(control.button_rect().center()))
+    qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=position)
+    assert not engine.get_node(engine.root_id).expanded and session.timer.isActive()
+    qtbot.waitUntil(lambda: not session.files.is_dirty)
+    assert not load_document(session.files.path).root.expanded
+    assert engine.undo()
+    qtbot.waitUntil(lambda: not session.files.is_dirty)
+    assert load_document(session.files.path).root.expanded
+    assert engine.redo()
+    qtbot.waitUntil(lambda: not session.files.is_dirty)
+    assert not load_document(session.files.path).root.expanded
+
+
 def test_autosave_keeps_inline_ime_and_property_draft(empty_window, tmp_path):
     session = create(empty_window, tmp_path / "不打断输入.mindmap")
     session.engine.update_node(session.engine.root_id, text="已提交")

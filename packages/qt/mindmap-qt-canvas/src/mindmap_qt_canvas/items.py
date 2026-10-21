@@ -3,22 +3,180 @@
 from __future__ import annotations
 
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QTextCursor
-from PySide6.QtWidgets import QGraphicsTextItem
+from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtGui import QPainterPath, QTextCursor
+from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject, QGraphicsTextItem
+
+FOLD_HOVER_PADDING = 10.0
+FOLD_HIDE_DELAY = 200
+
+
+class FoldControlItem(QGraphicsObject):
+    """节点外侧的折叠按钮；不参与正文选择、拖动、文字测量或图形导出。
+
+    图元是节点的子项，自动跟随位置、缩放和拖动后的重排动画。鼠标由画布视图
+    统一路由，图元自身不抢焦点、不抓取鼠标，连接正文的透明通道仅维持悬停。
+    """
+
+    def __init__(self, node_item):
+        super().__init__(node_item)
+        self.node_item = node_item
+        self.direction = "right"
+        self._rect = QRectF()
+        self._bounds = QRectF()
+        self._hit_path = QPainterPath()
+        self.setZValue(1)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.sync()
+
+    def sync(self) -> None:
+        """同步当前节点的数量、方向及可见性，不读取或复制整份引擎文档。
+
+        正文视觉可在不同节点之间共享，且同为非叶子时增加子节点未必更换视觉；
+        因此宿主每次同步节点实体后均调用本接口，计数只取当前 children 的长度。
+        """
+        item = self.node_item
+        self.direction = item.owner._fold_direction(item.node.id) if item.owner is not None else "right"
+        rect = item.visual.fold_rect(
+            self.direction, child_count=0 if item.node.expanded else len(item.node.children)
+        )
+        if rect != self._rect:
+            self.prepareGeometryChange()
+            self._rect = rect
+            if self.direction == "left":
+                bridge = QRectF(-4, 0, 4, item.visual.height)
+            elif self.direction == "down":
+                bridge = QRectF(0, item.visual.height, item.visual.width, 4)
+            else:
+                bridge = QRectF(item.visual.width, 0, 4, item.visual.height)
+            self._hit_path = QPainterPath()
+            # 通道覆盖正文整条外缘，徽标四角也只维持悬停，使斜向移入圆圈时
+            # 不会经过命中空洞；实际点击仍由 contains_button 检查圆角轮廓。
+            self._hit_path.addRect(rect)
+            self._hit_path.addRect(bridge)
+            self._bounds = self._hit_path.boundingRect().adjusted(-1, -1, 1, 1)
+        self.setToolTip("收起子节点" if item.node.expanded else f"展开 {len(item.node.children)} 个子节点")
+        self.sync_visibility()
+        self.update()
+
+    def sync_visibility(self) -> None:
+        """同步绘制状态；悬停移出后的 200 毫秒内保留按钮，收起计数始终显示。"""
+        item = self.node_item
+        self.setVisible(bool(item.owner is not None and not item.owner._disposed and item.node.children and (
+            not item.node.expanded or item.hovered or item.isSelected() or item._fold_hide_pending
+        )))
+
+    def hover_distance(self, scene_position, scale: float) -> float | None:
+        """返回指针到按钮或出线短段的屏幕距离，不依赖按钮是否显示。
+
+        本接口只负责悬停识别，不改变文档，也不把连线变成折叠点击区域。内置树的
+        分叉位于父子间隔前半段，热区覆盖节点出口到半间距及分叉附近；向左、向下
+        使用相同几何镜像。线两侧与按钮周围额外保留 10 个视口像素，缩放只换算
+        检测尺寸，不重新测量节点或建立整图索引。透明连接通道仍维持斜向移动。
+        """
+        item = self.node_item
+        if item.owner is None or item.owner._disposed or not item.node.children:
+            return None
+        local = self.mapFromScene(scene_position)
+        if self._hit_path.contains(local):
+            return 0.0
+
+        def distance(rect):
+            dx = max(rect.left() - local.x(), 0.0, local.x() - rect.right())
+            dy = max(rect.top() - local.y(), 0.0, local.y() - rect.bottom())
+            return (dx * dx + dy * dy) ** 0.5
+
+        closest = distance(self._rect)
+        if item.node.expanded:
+            reach = 16.0 if item.owner.document_view.layout.compact else 32.0
+            if self.direction == "left":
+                stem = QRectF(-reach, item.visual.height / 2, reach, 0)
+            elif self.direction == "down":
+                stem = QRectF(item.visual.width / 2, item.visual.height, 0, reach)
+            else:
+                stem = QRectF(item.visual.width, item.visual.height / 2, reach, 0)
+            closest = min(closest, distance(stem))
+            document = item.owner.document_view
+            if document.layout.direction == "both" and item.node.id == document.root_id:
+                # 根按钮保持原来的右侧位置，左侧实际分支附近也能唤出同一个按钮。
+                closest = min(closest, distance(QRectF(-reach, item.visual.height / 2, reach, 0)))
+        pixels = closest * scale
+        return pixels if pixels <= FOLD_HOVER_PADDING else None
+
+    def can_activate(self) -> bool:
+        """实时检查修改权限；编辑、拖动或释放组件后不得提交折叠命令。"""
+        owner = self.node_item.owner
+        return bool(owner is not None and not owner._disposed and owner.editable
+                    and owner.editor is None and not owner.view.node_drag.active
+                    and self.node_item.node.children)
+
+    def button_rect(self) -> QRectF:
+        """返回与绘制一致的按钮矩形；坐标相对于所属节点，透明连接通道不在其中。"""
+        return QRectF(self._rect)
+
+    def contains_button(self, scene_position) -> bool:
+        """以场景坐标检查实际圆角按钮，防止透明悬停通道被当成点击或拖动入口。"""
+        path = QPainterPath()
+        path.addRoundedRect(self._rect, 10, 10)
+        return self.isVisible() and path.contains(self.mapFromScene(scene_position))
+
+    def boundingRect(self):
+        """边界覆盖圆角按钮描边及透明悬停通道，不改变父节点正文边界。"""
+        return QRectF(self._bounds)
+
+    def shape(self):
+        """返回按钮与连接通道的联合轮廓；实际点击仍由 contains_button 单独判定。"""
+        return self._hit_path
+
+    def paint(self, painter, option, widget=None):
+        """借用统一描画入口及场景当前底色，仅绘制按钮，不修改任何文档状态。"""
+        item = self.node_item
+        item.visual.paint_fold_control(
+            painter, item.node, rect=self._rect, background=self.scene().backgroundBrush().color()
+        )
 
 
 class NodeItem(StaticNodeItem):
     """保持原节点构造接口；有宿主时转发双击编辑，导出图元无需创建该交互对象。"""
 
     def __init__(self, node, visual, theme, owner=None):
-        super().__init__(node, visual, theme, controls=owner is not None)
+        super().__init__(node, visual, theme, controls=False)
         self.owner = owner
+        self.hovered = False
+        self._fold_hide_pending = False
+        self.fold_control = FoldControlItem(self) if owner is not None else None
 
-    def paint(self, painter, option, widget=None):
-        """保留原 owner 切换语义；展示仍委托静态图元，不在绘制期间修改文档。"""
-        self.controls = self.owner is not None
-        super().paint(painter, option, widget)
+    def set_hovered(self, hovered: bool, *, immediate: bool = False) -> None:
+        """进入立即显示，离开延迟 200 毫秒隐藏；再次进入取消待执行的隐藏。
+
+        immediate 用于手势中断或文档刷新，立即清除旧悬停状态。定时器由视图统一
+        管理，节点只保存临时标记；重复的鼠标移动不会不断重启隐藏倒计时。
+        """
+        changed = self.hovered != hovered
+        self.hovered = hovered
+        if hovered or immediate:
+            if self.owner is not None:
+                self.owner.view._cancel_fold_hide(self)
+        elif changed and self.fold_control is not None and self.fold_control.isVisible():
+            if self.node.expanded and not self.isSelected():
+                self.owner.view._defer_fold_hide(self)
+        if self.fold_control is not None and (changed or immediate):
+            self.fold_control.sync_visibility()
+
+    def sync_fold_control(self) -> None:
+        """宿主同步实体及布局后更新外侧控件，保持正文边界与拖动几何独立。"""
+        if self.owner is not None and self._fold_hide_pending and (not self.node.children or not self.node.expanded):
+            self.owner.view._cancel_fold_hide(self)
+        if self.fold_control is not None:
+            self.fold_control.sync()
+
+    def itemChange(self, change, value):
+        result = super().itemChange(change, value)
+        if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            control = getattr(self, "fold_control", None)
+            if control is not None:
+                control.sync_visibility()
+        return result
 
     def mouseDoubleClickEvent(self, event):
         if self.owner:

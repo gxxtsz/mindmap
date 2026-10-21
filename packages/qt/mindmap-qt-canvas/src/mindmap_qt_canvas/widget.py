@@ -155,6 +155,7 @@ class MindMapWidget(QWidget):
         self._visuals = {}
         self._incremental_layout = None
         self._incremental_key = None
+        self._fold_sides = {}
         self._virtualized = False
         self._viewport_signature = None
         self._selection_undo, self._selection_redo = [], []
@@ -715,6 +716,11 @@ class MindMapWidget(QWidget):
         else:
             self._incremental_layout = None
             self.layout_result = self.layout_registry.layout(document, sizes, focus_id=self.focus_id)
+        # 完整布局只推导一次方向；增量路径直接复用几何索引，避免每个按钮遍历整图。
+        self._fold_sides = (
+            document.branch_sides() if self._incremental_layout is None and document.layout.direction == "both"
+            else {}
+        )
         result = self.layout_result
         self._virtualized = self._incremental_layout is not None and len(result.nodes) > VIRTUALIZATION_NODE_LIMIT
         self._viewport_signature = None
@@ -742,6 +748,21 @@ class MindMapWidget(QWidget):
         """由布局提供者判断优化能力；聚焦仍沿用完整布局，不绕过宿主注入入口。"""
         return (self.focus_id is None
                 and supports_incremental_layout(self.layout_registry, self._document.layout.algorithm_id))
+
+    def _fold_direction(self, node_id: str) -> str:
+        """返回按钮伸出的方向；双向根节点固定向右，其他节点跟随所属一级分支。
+
+        普通三种方向直接读取配置。双向增量画布沿用几何的祖先索引查询，聚焦或
+        自定义布局复用 refresh 中一次生成的方向映射；悬停不重建方向或布局。
+        """
+        direction = self._document.layout.direction
+        if direction != "both":
+            return direction
+        if node_id == self._document.root_id:
+            return "right"
+        if self._incremental_layout is not None:
+            return self._incremental_layout.geometry.side(node_id)
+        return self._fold_sides.get(node_id, "right")
 
     def _ensure_node_item(self, key):
         """为程序选择或编辑按需实例化一个可见节点，不改变文档折叠或视口位置。"""
@@ -831,6 +852,7 @@ class MindMapWidget(QWidget):
             else:
                 # 视觉未变也同步实体引用，正文导航等读取当前快照，但不使 Qt 几何失效。
                 item.node, item.theme = document.nodes[key], document.theme
+            item.sync_fold_control()
             item.setPos(rect.x, rect.y)
 
     def set_ui_colors(self, colors: UiColors | None) -> None:

@@ -1,11 +1,16 @@
 """画布事件路由：平移、缩放、节点拖拽和键盘空间导航。"""
 
-from PySide6.QtCore import QEvent, QPointF, QRect, Qt
+from math import ceil
+from time import monotonic
+from weakref import ref
+
+from PySide6.QtCore import QEvent, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QGraphicsView
+from shiboken6 import isValid
 
 from .dragging import NodeDragController
-from .items import NodeEditor, NodeItem
+from .items import FOLD_HIDE_DELAY, FOLD_HOVER_PADDING, FoldControlItem, NodeEditor, NodeItem
 
 # 交互缩放与“适应窗口”共用 10% 下限，避免自动适配绕过交互入口的倍率限制。
 MIN_ZOOM = 0.1
@@ -19,6 +24,13 @@ class MindMapView(QGraphicsView):
         self._pan_button = Qt.MouseButton.NoButton
         self._pan_origin = None
         self._pointer_position = None
+        self._hovered_node = None
+        self._fold_hide_requests = {}
+        self._fold_hide_timer = QTimer(self)
+        self._fold_hide_timer.setSingleShot(True)
+        self._fold_hide_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._fold_hide_timer.timeout.connect(self._expire_fold_hovers)
+        self._fold_pressed = False
         self._wheel_scroll_remainder = 0.0
         self._hidden_center = None
         self.press_node = None
@@ -159,6 +171,74 @@ class MindMapView(QGraphicsView):
         # 仅待初始化的画布会排程；正常窗口及侧栏调整继续保持原有中心和倍率。
         self.owner._schedule_view_reset()
 
+    def _schedule_fold_hide(self) -> None:
+        """用一个视图定时器调度临近的隐藏请求，节点无需创建额外的 Qt 定时对象。"""
+        if not self._fold_hide_requests:
+            self._fold_hide_timer.stop()
+            return
+        deadline = min(value[1] for value in self._fold_hide_requests.values())
+        self._fold_hide_timer.start(max(1, ceil((deadline - monotonic()) * 1000)))
+
+    def _defer_fold_hide(self, item: NodeItem) -> None:
+        """为刚离开的节点登记 200 毫秒期限，弱引用不阻止屏外图元或旧画布释放。"""
+        item._fold_hide_pending = True
+        self._fold_hide_requests[item.node.id] = ref(item), monotonic() + FOLD_HIDE_DELAY / 1000
+        self._schedule_fold_hide()
+
+    def _cancel_fold_hide(self, item: NodeItem) -> None:
+        """重入或状态变化时撤回该图元的请求，避免同标识的新旧图元互相影响。"""
+        pending = self._fold_hide_requests.get(item.node.id)
+        if pending is not None and pending[0]() is item:
+            del self._fold_hide_requests[item.node.id]
+            self._schedule_fold_hide()
+        item._fold_hide_pending = False
+
+    def _expire_fold_hovers(self, *, clear=False) -> None:
+        """只刷新到期且仍存活的按钮；取消手势时清空请求，不访问已销毁的 Qt 对象。"""
+        now = monotonic()
+        for key, (reference, deadline) in list(self._fold_hide_requests.items()):
+            if clear or deadline <= now:
+                del self._fold_hide_requests[key]
+                item = reference()
+                if item is not None and isValid(item):
+                    item._fold_hide_pending = False
+                    item.fold_control.sync_visibility()
+        self._schedule_fold_hide()
+
+    def _fold_hover_at(self, position) -> NodeItem | None:
+        """借用 Qt 空间索引查找出线附近的节点，即使按钮隐藏也可唤出。
+
+        查询范围仅覆盖父子间距的前半段和 10 像素余量，不枚举 node_items 或完整
+        布局结果。候选再按各自方向精确检测；多个热区接近时选择距离最近者，避免
+        一次唤出多个层级。正文及已显示按钮在调用方优先命中，保留原有编辑与拖动。
+        """
+        scale = self.transform().m11()
+        radius = ceil(32 * scale + FOLD_HOVER_PADDING + 2)
+        area = QRect(position.x() - radius, position.y() - radius, radius * 2 + 1, radius * 2 + 1)
+        scene_position = self.mapToScene(position)
+        nearest, score = None, None
+        for item in self.items(area, Qt.ItemSelectionMode.IntersectsItemBoundingRect):
+            if not isinstance(item, NodeItem) or item.fold_control is None:
+                continue
+            control = item.fold_control
+            distance = control.hover_distance(scene_position, scale)
+            if distance is None:
+                continue
+            offset = control.mapToScene(control.button_rect().center()) - scene_position
+            candidate = distance, offset.x() ** 2 + offset.y() ** 2
+            if score is None or candidate < score:
+                nearest, score = item, candidate
+        return nearest
+
+    def _set_hovered_node(self, item: NodeItem | None, *, immediate: bool = False) -> None:
+        """进入新热区立即显示，移出旧热区延迟隐藏；只更新涉及的节点按钮。"""
+        if item is not self._hovered_node:
+            previous, self._hovered_node = self._hovered_node, item
+            if previous is not None and isValid(previous):
+                previous.set_hovered(False, immediate=immediate)
+            if item is not None:
+                item.set_hovered(True)
+
     def update_cursor(self, position=None):
         """按手势优先级更新视口光标，防止图元的悬停光标覆盖正在进行的平移。
 
@@ -168,6 +248,22 @@ class MindMapView(QGraphicsView):
         if position is not None:
             self._pointer_position = position
         position = self._pointer_position
+        hit = None
+        inside = position is not None and self.viewport().rect().contains(position)
+        if inside:
+            hit = self.itemAt(position)
+        hovered = hit.node_item if isinstance(hit, FoldControlItem) else hit
+        if inside:
+            if not isinstance(hovered, (NodeItem, NodeEditor)) and not self.panning and self.drag_ghost is None:
+                hovered = self._fold_hover_at(position)
+        self._set_hovered_node(
+            hovered if isinstance(hovered, NodeItem) and not self.panning and self.drag_ghost is None else None,
+            immediate=self.panning or self.drag_ghost is not None,
+        )
+        # 冷启动悬停可能刚刚唤出指针下的按钮，同一帧即使用按钮光标。
+        if isinstance(hovered, NodeItem) and hovered.fold_control is not None and position is not None:
+            if hovered.fold_control.contains_button(self.mapToScene(position)):
+                hit = hovered.fold_control
         if self.panning or self.drag_ghost is not None:
             shape = Qt.CursorShape.ClosedHandCursor
         elif self._pan_button != Qt.MouseButton.NoButton:
@@ -176,15 +272,15 @@ class MindMapView(QGraphicsView):
             self.viewport().unsetCursor()
             return
         else:
-            item = self.scene().mouseGrabberItem() or self.itemAt(position)
+            item = self.scene().mouseGrabberItem() or hit
             shape = Qt.CursorShape.ArrowCursor
             if isinstance(item, NodeEditor):
                 shape = Qt.CursorShape.IBeamCursor
-            elif isinstance(item, NodeItem) and self.owner.editable and self.owner.editor is None:
-                local = item.mapFromScene(self.mapToScene(position))
-                if item.visual.has_children and item.visual.fold_rect().contains(local):
+            elif isinstance(item, FoldControlItem):
+                if item.can_activate() and item.contains_button(self.mapToScene(position)):
                     shape = Qt.CursorShape.PointingHandCursor
-                elif item.node.id not in (self.owner.engine.root_id, self.owner.focus_id):
+            elif isinstance(item, NodeItem) and self.owner.editable and self.owner.editor is None:
+                if item.node.id not in (self.owner.engine.root_id, self.owner.focus_id):
                     shape = Qt.CursorShape.OpenHandCursor
         self.viewport().setCursor(shape)
 
@@ -194,6 +290,9 @@ class MindMapView(QGraphicsView):
         self._pan_button = Qt.MouseButton.NoButton
         self._pan_origin = None
         self.press_node = None
+        self._fold_pressed = False
+        self._set_hovered_node(None, immediate=True)
+        self._expire_fold_hovers(clear=True)
         self.node_drag.cancel()
         grabber = self.scene().mouseGrabberItem()
         if isinstance(grabber, NodeItem):
@@ -234,16 +333,17 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         item = self.itemAt(event.position().toPoint())
+        if isinstance(item, FoldControlItem) and event.button() == Qt.MouseButton.LeftButton:
+            if item.can_activate() and item.contains_button(self.mapToScene(event.position().toPoint())):
+                node = item.node_item.node
+                self.owner.call(lambda: self.owner.engine.set_expanded(node.id, not node.expanded))
+            # 引擎同步会调用 cancel_interaction，必须在提交返回后认领本次按钮手势。
+            # 后续移动和释放均不交给场景，避免产生框选、正文拖动或编辑器失焦提交。
+            self._fold_pressed = True
+            event.accept()
+            self.update_cursor(event.position().toPoint())
+            return
         if isinstance(item, NodeItem) and event.button() == Qt.MouseButton.LeftButton:
-            local = item.mapFromScene(self.mapToScene(event.position().toPoint()))
-            if item.visual.has_children and item.visual.fold_rect().contains(local):
-                if self.owner.editable:
-                    self.owner.call(
-                        lambda: self.owner.engine.set_expanded(item.node.id, not item.node.expanded)
-                    )
-                event.accept()
-                self.update_cursor(event.position().toPoint())
-                return
             # 多选节点中的一个被拖动时保持整组选择，普通点击仍采用 Qt 的选择规则。
             if item.isSelected() and len(self.owner.selected_node_ids()) > 1 and not event.modifiers():
                 event.accept()
@@ -263,6 +363,12 @@ class MindMapView(QGraphicsView):
         self.update_cursor(event.position().toPoint())
 
     def mouseMoveEvent(self, event):
+        if self._fold_pressed:
+            if not event.buttons() & Qt.MouseButton.LeftButton:
+                self._fold_pressed = False
+            self.update_cursor(event.position().toPoint())
+            event.accept()
+            return
         if self._pan_button != Qt.MouseButton.NoButton:
             if not event.buttons() & self._pan_button:
                 self.cancel_interaction()
@@ -305,6 +411,11 @@ class MindMapView(QGraphicsView):
         self.update_cursor(event.position().toPoint())
 
     def mouseReleaseEvent(self, event):
+        if self._fold_pressed and event.button() == Qt.MouseButton.LeftButton:
+            self._fold_pressed = False
+            self.update_cursor(event.position().toPoint())
+            event.accept()
+            return
         if self._pan_button != Qt.MouseButton.NoButton:
             if event.button() != self._pan_button:
                 event.accept()
@@ -334,6 +445,13 @@ class MindMapView(QGraphicsView):
         super().mouseReleaseEvent(event)
         self.update_cursor(event.position().toPoint())
 
+    def mouseDoubleClickEvent(self, event):
+        """按钮双击仍按独立点击处理，不把事件交给正文的双击编辑入口。"""
+        if isinstance(self.itemAt(event.position().toPoint()), FoldControlItem):
+            self.mousePressEvent(event)
+        else:
+            super().mouseDoubleClickEvent(event)
+
     def contextMenuEvent(self, event):
         """鼠标菜单统一由右键释放决定，避免不同平台在按下/释放时重复触发。
 
@@ -347,6 +465,8 @@ class MindMapView(QGraphicsView):
     def _show_context_menu(self, position, global_position):
         """仅在确定为点击后选择菜单目标，右键拖动始终保留原有选择。"""
         item = self.itemAt(position)
+        if isinstance(item, FoldControlItem):
+            item = item.node_item
         if item is not None and isinstance(item, NodeItem) and not item.isSelected():
             self.owner.select_nodes([item.node.id])
         self.owner.context_menu(global_position)
