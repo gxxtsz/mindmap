@@ -14,7 +14,7 @@ from mindmap_engine import (
     save_document,
 )
 from mindmap_qt import MindMapWidget, MindMapWorkspace
-from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, Qt
+from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QInputMethodEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionSpinBox,
     QTabWidget,
+    QToolButton,
 )
 
 
@@ -409,6 +410,35 @@ def test_outline_selection_and_view_expansion_are_independent(workspace):
     assert not tree.tree_model.index_for(leaf).isValid()
     engine.undo()
     assert tree.tree_model.index_for(leaf).data() == "大纲更新"
+
+
+def test_outline_title_depth_button_uses_shared_menu(workspace, qtbot):
+    """独立工作区标题栏也复用面板动作；隐藏、浮动和主题变化后保持设定。"""
+    tree = workspace.outline
+    workspace.show_tool_window("outline")
+    button = workspace.tools["outline"].dock.titleBarWidget().findChild(QToolButton, "outline_display_depth")
+    assert button.defaultAction() is tree.depth_action
+    assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+    assert not button.icon().isNull()
+    popped = []
+
+    def choose_depth():
+        popped.append(tree.depth_menu.isVisible())
+        action = tree.depth_menu.actions()[1]
+        qtbot.mouseClick(tree.depth_menu, Qt.MouseButton.LeftButton,
+                         pos=tree.depth_menu.actionGeometry(action).center())
+
+    QTimer.singleShot(0, choose_depth)
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    assert popped == [True] and tree.display_depth == 1
+    assert button.toolTip() == "显示层级数：1层"
+    assert not tree.isExpanded(tree.tree_model.index_for(workspace.canvas.engine.root_id))
+    workspace.hide_tool_window("outline")
+    workspace._move_tool("outline", "right", floating=True)
+    workspace.canvas.engine.set_theme(Theme.dark())
+    assert button.isVisible() and button.text() == "1层"
+    assert tree.display_depth == 1
 
 
 def test_readonly_outline_hidden_target_keeps_selection(workspace):

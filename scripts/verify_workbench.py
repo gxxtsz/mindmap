@@ -13,11 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def child(scale, platform):
     """每个缩放在新进程创建 QApplication，避免运行期间修改 Qt 缩放基线。"""
     from mindmap_docking import ViewMode
-    from mindmap_engine import Theme
+    from mindmap_engine import MindMapEngine, Theme
+    from mindmap_qt import MindMapWorkspace
     from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
     from PySide6.QtCore import QCoreApplication, QEvent, Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QToolButton
 
     app = QApplication([])
     output = ROOT / ".artifacts/workbench-visual" / platform / f"{scale:g}x"
@@ -56,6 +57,27 @@ def child(scale, platform):
                 "画布导航浮条": controls.isVisible()
                 and window.canvas.view.viewport().geometry().contains(controls.geometry()),
             }
+            # 层级按钮使用真实标题布局和菜单几何，逐档缩放核验，不能只检查动作存在。
+            outline = window.panels.outline
+            button, = window.manager.panel("outline").action_buttons
+            outline.set_display_depth(1)
+            window.canvas.select_nodes([first])
+            app.processEvents()
+            checks["大纲严格显示1层"] = not outline.isExpanded(outline.tree_model.index_for(root))
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            app.processEvents()
+            checks["大纲标题菜单"] = button.isVisible() and outline.depth_menu.isVisible()
+            checks["层级菜单无裁剪"] = all(
+                outline.depth_menu.rect().contains(outline.depth_menu.actionGeometry(action))
+                for action in outline.depth_menu.actions()
+            )
+            assert window.grab().save(str(output / (name + "-outline.png")))
+            assert outline.depth_menu.grab().save(str(output / (name + "-outline-menu.png")))
+            action = outline.depth_menu.actions()[0]
+            QTest.mouseClick(outline.depth_menu, Qt.MouseButton.LeftButton,
+                             pos=outline.depth_menu.actionGeometry(action).center())
+            checks["大纲所有层"] = outline.isExpanded(outline.tree_model.index_for(first))
+            outline.set_display_depth(2)
             assert window.grab().save(str(output / (name + ".png")))
             window.manager.activate("settings", focus=False)
             app.processEvents()
@@ -89,6 +111,27 @@ def child(scale, platform):
                 path = output / (name + "-export." + suffix)
                 window.canvas.export(path)
                 checks["导出" + suffix] = path.stat().st_size > 500
+            standalone = MindMapWorkspace(MindMapEngine(window.engine.document))
+            try:
+                standalone.resize(1100, 750)
+                standalone.show()
+                standalone.show_tool_window("outline")
+                app.processEvents()
+                depth_button = standalone.tools["outline"].dock.titleBarWidget().findChild(
+                    QToolButton, "outline_display_depth",
+                )
+                QTest.mouseClick(depth_button, Qt.MouseButton.LeftButton)
+                app.processEvents()
+                checks["独立工作区层级菜单"] = (
+                    depth_button.isVisible() and standalone.outline.depth_menu.isVisible()
+                    and standalone.tools["outline"].dock.titleBarWidget().rect().contains(depth_button.geometry())
+                )
+                standalone.outline.depth_menu.close()
+                assert standalone.grab().save(str(output / (name + "-standalone-outline.png")))
+            finally:
+                standalone.dispose()
+                standalone.close()
+                standalone.deleteLater()
             results.append({"主题": name, "实际倍率": window.devicePixelRatioF(),
                             "检查": checks, "通过": all(checks.values())})
         finally:

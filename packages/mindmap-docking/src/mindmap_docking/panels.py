@@ -1,6 +1,6 @@
 """工具窗面板、浮动窗口与覆盖容器，所有业务控件始终复用同一个实例。"""
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSize, Qt
 from PySide6.QtGui import QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QApplication,
@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTabBar,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -117,6 +118,27 @@ class ToolPanel(QFrame):
         self.tabs.currentChanged.connect(self._change_content_tab)
         self.header_layout.addWidget(self.tabs)
         self.header_layout.addStretch(1)
+        # 业务动作与选项、隐藏按钮共用标题栏显隐规则；重停靠时复用按钮。
+        self.action_buttons = []
+        for action in spec.header_actions:
+            button = QToolButton(self.header)
+            button.setAutoRaise(True)
+            button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            button.setDefaultAction(action)
+            # 有图标时沿用标题栏28像素工具按钮，只保留图形；无图标的业务动作保留文字。
+            icon_only = not action.icon().isNull()
+            button.setProperty("mindmap_header_icon", icon_only)
+            button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only
+                else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            )
+            if icon_only:
+                button.setFixedSize(28, 28)
+            if action.menu() is not None:
+                button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            button.setAccessibleName(action.toolTip() or action.text())
+            self.action_buttons.append(button)
+            self.header_layout.addWidget(button)
         self.more = IconButton(manager, symbol="more", tooltip="选项", parent=self.header)
         self.more.setObjectName(f"options_{spec.id}")
         self.more.clicked.connect(lambda: manager.tool_menu(spec.id, self.more).exec(self.more.mapToGlobal(QPoint(0, self.more.height()))))
@@ -146,6 +168,21 @@ class ToolPanel(QFrame):
         title_font = self.title_button.font()
         title_font.setPixelSize(12 if theme.compact else 13)
         self.title_button.setFont(title_font)
+        for button in self.action_buttons:
+            button.setFont(title_font)
+            # 邻近菜单和收起符号的实际笔画约10像素；14像素图标画布加上 SVG 留白
+            # 后与它们保持相同视觉体量，按钮仍保留28像素命中区域，不缩小点击目标。
+            button.setIconSize(QSize(14, 14))
+            button.setStyleSheet(
+                f"QToolButton {{ background:transparent; border:0; padding:3px 6px; "
+                f"color:{theme.css('text-default')}; border-radius:4px; }}"
+                f"QToolButton:hover, QToolButton:pressed {{background:{theme.css('toolbar-bg-hovered')};}}"
+                f"QToolButton:focus {{border:1px solid {theme.css('control-brand-border')};}}"
+                f"QToolButton:disabled {{color:{theme.css('text-muted')};}}"
+                # 图标按钮不绘制原生角落箭头，避免占用图形位置或产生文字基线错位。
+                'QToolButton[mindmap_header_icon="true"] { padding:0; }'
+                'QToolButton[mindmap_header_icon="true"]::menu-indicator { image:none; width:0; height:0; }'
+            )
         # 底层完整填色，四角由同一抗锯齿覆盖层绘制，避免双重圆角混色与子控件露角。
         self.setStyleSheet(f"QFrame#{self.objectName()} {{ background:{theme.css('tool-window-bg')}; border:0; }}")
         self.title_button.setStyleSheet(f"QToolButton {{background:transparent; border:0; color:{theme.css('text-default')}; padding:0 2px;}} QToolButton:hover {{background:{theme.css('toolbar-bg-hovered')};border-radius:4px;}}")
@@ -161,6 +198,8 @@ class ToolPanel(QFrame):
         self.title_button.updateGeometry()
         self.title_button.update()
         visible = self._hover or self.manager.active_id == self.tool_id or self.manager.settings.always_header_icons
+        for button in self.action_buttons:
+            button.setVisible(visible and button.defaultAction().isVisible())
         self.more.setVisible(visible)
         self.hide_button.setVisible(visible)
 

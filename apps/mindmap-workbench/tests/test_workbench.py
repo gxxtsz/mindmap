@@ -18,8 +18,8 @@ from mindmap_engine import (
     save_document,
 )
 from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
+from PySide6.QtGui import QEnterEvent, QImage
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QToolButton
 
 
@@ -51,6 +51,102 @@ def test_default_single_document_and_editable_framework(window):
     assert window.host.region_sizes["dock"]["right"] == 360
     bar = window.title_bar
     assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.options) for button in bar.action_buttons)
+
+
+def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
+    """真实标题按钮弹出共用菜单；浮动、重停靠和主题切换不替换按钮或动作。"""
+    manager, tree = window.manager, window.panels.outline
+    manager.activate("outline", focus=False)
+    panel = manager.panel("outline")
+    button, = panel.action_buttons
+    assert button.defaultAction() is tree.depth_action
+    assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+    assert not button.icon().isNull() and button.width() == 28
+    assert button.iconSize() == QSize(14, 14)
+    assert panel.header_layout.indexOf(button) < panel.header_layout.indexOf(panel.more)
+    popped = []
+
+    def choose_depth():
+        """在按钮进入原生菜单事件循环后点击真实菜单项。"""
+        popped.append(tree.depth_menu.isVisible())
+        action = tree.depth_menu.actions()[4]
+        qtbot.mouseClick(tree.depth_menu, Qt.MouseButton.LeftButton,
+                         pos=tree.depth_menu.actionGeometry(action).center())
+
+    QTimer.singleShot(0, choose_depth)
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    assert popped == [True] and tree.display_depth == 4 and button.text() == "4层"
+    assert button.toolTip() == "显示层级数：4层"
+    before, revision = window.engine.document, window.engine.revision
+    for theme in ("dark", "light"):
+        manager.set_theme(theme)
+        for mode in (ViewMode.FLOAT, ViewMode.DOCK_PINNED):
+            manager.set_view_mode("outline", mode)
+            QApplication.processEvents()
+            assert manager.panel("outline").action_buttons == [button]
+            assert button.isVisible() == panel.more.isVisible() == panel.hide_button.isVisible()
+            assert button.defaultAction().menu() is tree.depth_menu
+    assert window.engine.document == before and window.engine.revision == revision
+    # 非活动面板离开时三个入口同时消失，悬停、激活或全局常显设置又同时出现。
+    controls = (button, panel.more, panel.hide_button)
+    manager.mark_active("properties")
+    QApplication.sendEvent(panel, QEvent(QEvent.Type.Leave))
+    assert all(control.isHidden() for control in controls)
+    QApplication.sendEvent(panel, QEnterEvent(QPointF(), QPointF(), QPointF()))
+    assert all(not control.isHidden() for control in controls)
+    QApplication.sendEvent(panel, QEvent(QEvent.Type.Leave))
+    assert all(control.isHidden() for control in controls)
+    manager.mark_active("outline")
+    assert all(not control.isHidden() for control in controls)
+    manager.mark_active("properties")
+    manager.set_option("always_header_icons", True)
+    assert all(not control.isHidden() for control in controls)
+    manager.set_option("always_header_icons", False)
+    assert all(control.isHidden() for control in controls)
+
+
+@pytest.mark.parametrize("depth", [1, 9, None])
+def test_outline_depth_preferences_survive_new_open_and_restart(window, qtbot, tmp_path, depth):
+    """持久化的只是预设，新建、打开与同目录重建窗口均恢复它。"""
+    tree = window.panels.outline
+    tree.set_display_depth(depth)
+    assert int(window.preferences.value("outline/display_depth")) == (0 if depth is None else depth)
+    assert window.new_document() and tree.display_depth == depth
+    document = MindMapDocument.new("待打开的导图")
+    engine = MindMapEngine(document)
+    child = engine.add_child(engine.root_id, "直接子节点")
+    engine.add_child(child, "更深子节点")
+    path = tmp_path / "层级验收.mindmap"
+    save_document(engine.document, path)
+    assert window.open_path(path) and tree.display_depth == depth
+    assert tree.isExpanded(tree.tree_model.index_for(window.engine.root_id)) == (depth != 1)
+    window.engine.mark_saved()
+    window.close()
+    restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
+    qtbot.addWidget(restored)
+    try:
+        assert restored.panels.outline.display_depth == depth
+        assert restored.open_path(path)
+        assert restored.panels.outline.isExpanded(
+            restored.panels.outline.tree_model.index_for(restored.engine.root_id)
+        ) == (depth != 1)
+    finally:
+        restored.engine.mark_saved()
+        restored.close()
+
+
+@pytest.mark.parametrize("value", [None, -1, 10, "损坏配置", True, "2.0"])
+def test_outline_invalid_preferences_use_default(qtbot, tmp_path, value):
+    """缺失、越界和非整数配置都回退2层，不向组件传递非法参数。"""
+    preferences = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    if value is not None:
+        preferences.setValue("outline/display_depth", value)
+        preferences.sync()
+    restored = build_window(storage_dir=tmp_path, restore=False)
+    qtbot.addWidget(restored)
+    assert restored.panels.outline.display_depth == 2
+    restored.close()
 
 
 def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatch, qtbot):

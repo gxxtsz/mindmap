@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Callable
 
+from PySide6.QtGui import QAction
+
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
 
@@ -72,6 +74,8 @@ class ToolWindowSpec:
 
     factory 延迟创建实际 QWidget，整个注册生命周期只调用一次。
     id 用于布局持久化，应独立于显示标题且保持稳定；图标为语义名称或 QIcon。
+    header_actions 按顺序在标题栏展示，菜单动作单击即弹出；动作由调用方持有，
+    必须在工具窗口注销前保持有效。框架不复制、不持久化动作，也不改变其父对象。
     """
 
     id: str
@@ -83,10 +87,14 @@ class ToolWindowSpec:
     mode: ViewMode = ViewMode.DOCK_PINNED
     available: bool = True
     notification: bool = False
+    header_actions: tuple[QAction, ...] = ()
 
     def __post_init__(self):
         if not self.id or not self.title or self.id.startswith("tool:"):
             raise ValueError("工具窗口的标识和标题不能为空")
+        self.header_actions = tuple(self.header_actions)
+        if any(not isinstance(action, QAction) for action in self.header_actions):
+            raise TypeError("工具窗口标题栏操作必须全部为 QAction")
         self.position = DockPosition(self.position)
         self.mode = ViewMode(self.mode)
 

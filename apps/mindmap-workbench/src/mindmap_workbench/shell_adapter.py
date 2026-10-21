@@ -61,6 +61,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         mode = self.preferences.value("view/wheel_mode", "scroll")
         self.canvas.set_wheel_mode(mode if mode in ("scroll", "zoom") else "scroll")
         self.canvas.wheel_mode_changed.connect(self._save_wheel_mode)
+        # QSettings 的 INI 值可能是字符串；严格校验后恢复，损坏配置回退默认2层。
+        depth = str(self.preferences.value("outline/display_depth", 2))
+        depth = int(depth) if depth in {str(value) for value in range(10)} else 2
+        self.panels.outline.set_display_depth(None if depth == 0 else depth)
+        self.panels.outline.display_depth_changed.connect(self._save_outline_depth)
         # 粘贴偏好与滚轮一样只保存在宿主；Qt 组件不读取 QSettings，也不写入导图文件。
         edraw_mode = self.preferences.value("clipboard/edraw_mode", "append")
         keep_children = self.preferences.value("clipboard/edraw_keep_children", True)
@@ -94,6 +99,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         ):
             self.manager.register_tool_window(ToolWindowSpec(
                 identifier, title, lambda content=panel: content, icon, position, shortcut,
+                header_actions=(self.panels.outline.depth_action,) if identifier == "outline" else (),
             ))
         self.canvas.set_properties_handler(self._show_properties)
         self._register_file_actions()
@@ -132,6 +138,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.preferences.setValue("view/wheel_mode", mode)
         self.preferences.sync()
         self._sync_document()
+
+    def _save_outline_depth(self, depth):
+        """只保存大纲层级预设；0表示所有层，手动展开状态不写入配置或导图。"""
+        self.preferences.setValue("outline/display_depth", 0 if depth is None else depth)
+        self.preferences.sync()
 
     def _save_edraw_paste_options(self, mode, keep_children):
         """成功粘贴后的选择立即写回本机偏好，下一次弹窗和重启工作台均恢复该值。"""

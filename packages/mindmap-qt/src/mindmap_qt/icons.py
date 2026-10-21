@@ -54,6 +54,8 @@ class IconMenuOptionButton(QToolButton):
 _SVG_BODIES = {
     "panel_menu": '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
     "panel_hide": '<path d="M5 12h14"/>',
+    # 逐级缩进的横线配向下箭头表示展开层级，避免用数字和大下拉箭头挤占标题栏。
+    "outline_depth": '<path d="M4 4h16M9 12h11M13 20h7M4 9v11m-2-2 2 2 2-2"/>',
     # 属性按钮使用原创线条图形，避免依赖某台电脑的图标字体或外部位图资源。
     "font_bold": '<path d="M7 4h6a4 4 0 0 1 0 8H7m6 0a4 4 0 0 1 0 8H7V4"/>',
     "font_italic": '<path d="M10 4h9M5 20h9M15 4 9 20"/>',

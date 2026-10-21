@@ -6,10 +6,45 @@ import subprocess
 import sys
 
 import pytest
-from mindmap_docking import DocumentSpec
+from mindmap_docking import DocumentSpec, ToolWindowSpec, ViewMode
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QMenu
+
+
+def test_tool_header_actions_share_state_and_ownership(docking, qtbot):
+    """通用标题接口支持菜单和普通动作，空配置不占位，布局快照不序列化 QAction。"""
+    manager = docking.manager
+    plain = QAction("业务操作", docking.document)
+    plain.setEnabled(False)
+    menu_action = QAction("层级", docking.document)
+    menu = QMenu(docking.document)
+    menu.addAction("选项")
+    menu_action.setMenu(menu)
+    spec = ToolWindowSpec("header_test", "标题动作", lambda: QLabel("业务内容"),
+                          header_actions=(plain, menu_action))
+    manager.register_tool_window(spec)
+    manager.activate(spec.id)
+    panel = manager.panel(spec.id)
+    first, second = panel.action_buttons
+    assert not first.isEnabled() and second.defaultAction().menu() is menu
+    assert plain.parent() is docking.document and menu_action.parent() is docking.document
+    assert manager.panel("alpha").action_buttons == []
+    before = manager.capture_layout()
+    calls = []
+    plain.triggered.connect(lambda: calls.append(True))
+    plain.setEnabled(True)
+    plain.setText("更新文字")
+    qtbot.mouseClick(first, Qt.MouseButton.LeftButton)
+    assert calls == [True] and first.text() == "更新文字"
+    assert manager.capture_layout() == before
+    for mode in (ViewMode.FLOAT, ViewMode.DOCK_PINNED):
+        manager.set_view_mode(spec.id, mode)
+        manager.set_theme("dark")
+        assert panel.action_buttons == [first, second]
+        assert first.isVisible() and second.isVisible()
+    with pytest.raises(TypeError):
+        ToolWindowSpec("invalid", "错误动作", lambda: QLabel(), header_actions=("错误",))
 
 
 def test_document_title_survives_modified_close_and_reopen(docking):

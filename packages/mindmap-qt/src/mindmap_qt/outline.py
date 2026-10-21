@@ -14,10 +14,11 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QAbstractItemView, QTreeView
+from PySide6.QtGui import QAction, QActionGroup, QColor, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import QAbstractItemView, QMenu, QTreeView
 
-from .ui_style import apply_ui_palette, outline_colors, scrollbar_styles
+from .icons import _toolbar_icon
+from .ui_style import apply_ui_palette, menu_styles, outline_colors, scrollbar_styles
 
 # 所有几何尺寸均使用 Qt 逻辑像素。原生 setIndentation 和树项 sizeHint 分别
 # 使用 16 与 28；正文 drawRow 使用 12 像素字号。150% 下对应 24 像素缩进、
@@ -118,6 +119,7 @@ class OutlinePanel(QTreeView):
     """完整树的独立视图；展开按钮只影响本面板，不写入文档折叠状态。"""
 
     nodes_selected = Signal(list)
+    display_depth_changed = Signal(object)
 
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
@@ -125,6 +127,22 @@ class OutlinePanel(QTreeView):
         self._syncing = False
         self._theme_signature = None
         self._branch_hover_position = None
+        self._display_depth = 2
+        # 菜单和标题栏共用动作；动作由面板持有，宿主只创建按钮，不接管生命周期。
+        self.depth_menu = QMenu(self)
+        self.depth_action = QAction("2层", self)
+        self.depth_action.setToolTip("显示层级数：2层")
+        self.depth_action.setMenu(self.depth_menu)
+        self._depth_group = QActionGroup(self)
+        self._depth_actions = {}
+        for depth in (None, *range(1, 10)):
+            action = self.depth_menu.addAction("显示所有层" if depth is None else f"显示{depth}层")
+            action.setCheckable(True)
+            action.setData(depth)
+            self._depth_group.addAction(action)
+            self._depth_actions[depth] = action
+            action.triggered.connect(lambda checked=False, value=depth: self.set_display_depth(value))
+        self._depth_actions[2].setChecked(True)
         self.tree_model = OutlineModel(canvas.engine.document, self)
         self.setModel(self.tree_model)
         self.setHeaderHidden(True)
@@ -145,9 +163,83 @@ class OutlinePanel(QTreeView):
         self.selectionModel().selectionChanged.connect(self._selected)
         canvas.selection_changed.connect(self.sync_selection)
         canvas.document_changed.connect(self._document_changed)
-        self.expand(self.tree_model.index_for(canvas.engine.root_id))
+        self._apply_display_depth()
         self.sync_selection(canvas.selected_node_ids())
         self.set_theme(canvas.engine.document.theme)
+
+    @property
+    def display_depth(self) -> int | None:
+        """最后应用的层级预设：根主题为第1层，None 表示所有层。
+
+        手动展开、收起不会改变此值；它是宿主应保存的偏好，而非当前展开状态的推断。
+        """
+        return self._display_depth
+
+    def set_display_depth(self, depth: int | None) -> None:
+        """应用1～9层或所有层；重复设置也重新应用，但只在偏好变化时发出信号。
+
+        本接口仅改变大纲视图，不调用引擎、不导航画布；只读时也可使用。
+        非法值抛出 ValueError，且保持原有状态。宿主自行通过信号持久化本机偏好。
+        """
+        if depth is not None and (type(depth) is not int or not 1 <= depth <= 9):
+            raise ValueError("大纲显示层级必须为1～9的整数或 None")
+        changed = depth != self._display_depth
+        self._display_depth = depth
+        self.depth_action.setText("所有层" if depth is None else f"{depth}层")
+        self.depth_action.setToolTip(f"显示层级数：{self.depth_action.text()}")
+        self._depth_actions[depth].setChecked(True)
+        self._apply_display_depth()
+        if changed:
+            self.display_depth_changed.emit(depth)
+
+    def _nodes_with_depth(self):
+        """以显式栈迭代整棵树，避免深层导图触发 Python 递归上限。"""
+        document = self.tree_model.document
+        pending = [(document.root_id, 1)]
+        while pending:
+            key, depth = pending.pop()
+            yield key, depth
+            pending.extend((child, depth + 1) for child in reversed(document.nodes[key].children))
+
+    def _apply_display_depth(self, previous=None):
+        """已有分支恢复原状态，其余分支按深度初始化；省略 previous 时重套整个预设。
+
+        只记录曾经拥有孩子的节点，因此原叶节点首次添加孩子也能正确初始化。
+        显式设置隐藏分支的状态，避免手动展开父节点后残留上一次预设的深层展开。
+        """
+        syncing, updates = self._syncing, self.updatesEnabled()
+        self._syncing = True
+        self.setUpdatesEnabled(False)
+        try:
+            for key, depth in self._nodes_with_depth():
+                if self.tree_model.document.nodes[key].children:
+                    expanded = (
+                        previous[key] if previous is not None and key in previous
+                        else self._display_depth is None or depth < self._display_depth
+                    )
+                    self.setExpanded(self.tree_model.index_for(key), expanded)
+        finally:
+            self.setUpdatesEnabled(updates)
+            self._syncing = syncing
+
+    def _is_visible(self, key):
+        """检查祖先是否全部展开；不能用 scrollTo 探测可见性，因为 Qt 会主动展开祖先。"""
+        parent = self.tree_model.parents.get(key)
+        while parent is not None:
+            if not self.isExpanded(self.tree_model.index_for(parent)):
+                return False
+            parent = self.tree_model.parents.get(parent)
+        return True
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
+        """阻止 Qt 的内部自动滚动展开隐藏祖先。
+
+        即使同步逻辑不显式调用 scrollTo，currentChanged 或延迟布局仍可能调用
+        此虚函数；在统一入口拦截，确保画布选择和模型刷新都不能冲破层级预设。
+        """
+        key = self.tree_model.node_id(index)
+        if key is not None and self._is_visible(key):
+            super().scrollTo(index, hint)
 
     def _selected(self, selected, deselected):
         if self._syncing:
@@ -162,7 +254,7 @@ class OutlinePanel(QTreeView):
         )
 
     def sync_selection(self, ids):
-        """画布到大纲只展开大纲祖先，不反向请求导航，避免选择信号循环。"""
+        """同步包括隐藏节点在内的选择，严格保留当前展开状态，避免选择信号循环。"""
         if self._syncing:
             return
         self._syncing = True
@@ -171,10 +263,6 @@ class OutlinePanel(QTreeView):
             for key in ids:
                 if key not in self.tree_model.document.nodes:
                     continue
-                parent = self.tree_model.parents.get(key)
-                while parent is not None:
-                    self.expand(self.tree_model.index_for(parent))
-                    parent = self.tree_model.parents.get(parent)
                 index = self.tree_model.index_for(key)
                 self.selectionModel().select(
                     index, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
@@ -182,26 +270,27 @@ class OutlinePanel(QTreeView):
             if ids and ids[0] in self.tree_model.document.nodes:
                 index = self.tree_model.index_for(ids[0])
                 self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
-                self.scrollTo(index)
+                # 隐藏选择也保留 currentIndex，但只滚动第一个可见选中项。
+                visible = next((key for key in ids if key in self.tree_model.document.nodes
+                                and self._is_visible(key)), None)
+                if visible is not None:
+                    self.scrollTo(self.tree_model.index_for(visible))
         finally:
             self._syncing = False
 
     def _document_changed(self, event):
         self._syncing = True
         try:
-            expanded = {
-                key
-                for key in self.tree_model.document.nodes
-                if self.isExpanded(self.tree_model.index_for(key))
+            previous = {
+                key: self.isExpanded(self.tree_model.index_for(key))
+                for key, node in self.tree_model.document.nodes.items()
+                if node.children
             }
             scroll = self.verticalScrollBar().value()
             changed = self.tree_model.replace_document(self.canvas.engine.document)
-            if changed:
-                if event.kind == "reset":
-                    expanded = {self.canvas.engine.root_id}
-                for key in expanded:
-                    if key in self.tree_model.document.nodes:
-                        self.expand(self.tree_model.index_for(key))
+            # reset 即使结构完全相同，也代表整份导图替换，必须重新应用预设。
+            if changed or event.kind == "reset":
+                self._apply_display_depth(None if event.kind == "reset" else previous)
                 self.verticalScrollBar().setValue(scroll)
         finally:
             self._syncing = False
@@ -234,6 +323,11 @@ class OutlinePanel(QTreeView):
             + scrollbar_styles(colors)
         )
         apply_ui_palette(self, colors)
+        # 标题入口只呈现低对比度线条图标，当前层级由悬停提示和菜单勾选表达。
+        # 图标随界面色板刷新，不读取导图主题之外的全局样式，明暗宿主保持一致。
+        self.depth_action.setIcon(_toolbar_icon("outline_depth", colors.muted, colors.muted, colors.text))
+        self.depth_menu.setStyleSheet(menu_styles(colors))
+        apply_ui_palette(self.depth_menu, colors)
         self.viewport().update()
 
     def drawBranches(self, painter, rect, index):
