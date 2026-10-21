@@ -18,6 +18,8 @@ engine.undo()
 第三方扩展实现 `LayoutAlgorithm`、`DocumentImporter` 或 `DocumentExporter`，并由宿主显式注册。
 
 `engine.set_branch_style(node_ids, kind, scope="subtree")` 支持 `BranchStyle` 的 11 种语义样式，
-`kind=None` 恢复默认曲线，`scope="level"` 仅修改选中节点。整次操作去重并只记录一次历史。
+`kind=None` 恢复原始曲线，`scope="level"` 仅修改选中节点。整次操作去重并只记录一次历史。
 配置描述节点发出的分支，不隐式向祖先继承；新增主题复制其实际父主题的分支设置。
+`MindMapDocument.new()` 显式为根主题配置圆角正交，新建引擎不产生额外撤销记录或修改标记。
+读取旧文档时不回填该配置；没有分支配置的节点继续使用原始曲线。
 核心提供不可变的 `PathCommand`、`BranchPath`，布局结果同时兼容原有四点 `Curve`。

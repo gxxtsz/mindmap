@@ -1,16 +1,18 @@
-"""全局设置侧栏：视图偏好与当前导图配置共用界面，各自保留原有保存语义。"""
+"""共用导图设置：菜单与兼容表单共享提交、校验及状态同步逻辑。"""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
 from mindmap_engine import MindMapError, Theme, apply_branch_style, get_branch_style
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer
+from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
     QFrame,
     QLabel,
+    QMenu,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
 from .branch_styles import populate_branch_combo
 from .icons import _toolbar_icon
 from .property_controls import MIXED, BranchPicker
+from .settings_menu import SettingsMenu
 from .ui_style import (
     ComboBox,
     apply_ui_palette,
@@ -43,6 +46,7 @@ class GlobalSettingsPanel(QWidget):
         self._loading = False
         self._disposed = False
         self._theme_signature = None
+        self._menus = {}
         self.sections = {}
         self.setObjectName("global_settings_panel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
@@ -99,7 +103,127 @@ class GlobalSettingsPanel(QWidget):
         canvas.wheel_mode_changed.connect(self.sync)
         canvas.editable_changed.connect(self.sync)
         canvas.editing_changed.connect(self.sync)
+        canvas.editable_changed.connect(self._close_popups)
+        canvas.editing_changed.connect(self._close_popups)
         self.sync()
+
+    def create_menu(self, parent=None) -> QMenu:
+        """为宿主创建独立的“导图设置”菜单，不创建停靠窗口或第二份配置。
+
+        菜单由传入的 QWidget（缺省为本对象）拥有；宿主可将其加入齿轮菜单，
+        或调用 popup() 展开。保留原表单接口供已有集成访问，所有菜单动作仍走
+        同一提交边界。每次打开绑定当前文档代次，关闭或替换后拒绝迟到事件。
+        """
+        menu = SettingsMenu("导图设置", parent or self)
+        menu.setObjectName("mindmap_settings_menu")
+        menu.setToolTipsVisible(True)
+        record = {"actions": {}, "active": False, "epoch": 0, "generation": None}
+        self._menus[menu] = record
+        for key, title in (("wheel", "滚轮行为"), ("direction", "布局方向"),
+                           ("compact", "紧凑布局"), ("branch", "连接线样式"), ("theme", "导图主题")):
+            options = []
+            record["actions"][key] = options
+            if key == "compact":
+                action = menu.addAction(title)
+                action.setCheckable(True)
+                action.setObjectName("settings_compact")
+                options.append(action)
+                action.triggered.connect(lambda checked: self._menu_change(menu, "compact", checked))
+                continue
+            field = getattr(self, key)
+            sub = SettingsMenu(title, menu)
+            sub.setProperty("settings_label", title)
+            menu.addMenu(sub)
+            sub.setObjectName("settings_" + key)
+            sub.setToolTipsVisible(True)
+            group = QActionGroup(sub)
+            group.setExclusive(True)
+            # 混合状态只用于展示，不是可提交的连接线类型。
+            if key == "branch":
+                mixed = sub.addAction("多种样式")
+                mixed.setData("__mixed__")
+                options.append(mixed)
+            for index in range(field.count()):
+                value = field.itemData(index)
+                if value == "__mixed__":
+                    continue
+                action = sub.addAction(field.itemIcon(index), field.itemText(index))
+                action.setData(value)
+                action.setCheckable(True)
+                group.addAction(action)
+                options.append(action)
+                action.triggered.connect(
+                    lambda checked=False, name=key, selected=value: self._menu_change(menu, name, selected)
+                )
+        menu.aboutToShow.connect(lambda: self._open_menu(menu))
+        menu.aboutToHide.connect(lambda: self._defer_menu_close(menu))
+        menu.destroyed.connect(lambda: self._menus.pop(menu, None))
+        self._sync_menu(menu, record)
+        return menu
+
+    def _open_menu(self, menu):
+        """打开时重新读取正式状态；查看菜单不提交文字编辑或改变属性面板可见性。"""
+        if self._disposed:
+            return
+        record = self._menus[menu]
+        record.update(active=True, epoch=record["epoch"] + 1,
+                      generation=self.canvas.engine.document_generation)
+        self.sync()
+
+    def _defer_menu_close(self, menu):
+        """Qt 先隐藏菜单再发出 triggered，延至本轮事件结束才拒绝后续的迟到动作。"""
+        record = self._menus[menu]
+        epoch = record["epoch"]
+
+        def finish():
+            current = self._menus.get(menu)
+            if current is not None and current["epoch"] == epoch:
+                current["active"] = False
+
+        QTimer.singleShot(0, self, finish)
+
+    def _menu_change(self, menu, key, value):
+        """菜单提交复用原表单校验；显式失效、已销毁或来自旧文档的动作均忽略。"""
+        record = self._menus.get(menu)
+        if (record is None or not record["active"] or self._disposed
+                or record["generation"] != self.canvas.engine.document_generation):
+            return
+        self._change(key, value)
+
+    def _sync_menu(self, menu, record):
+        """只同步动作展示，避免 setChecked 反向提交；禁用原因与表单保持一致。"""
+        colors = ui_colors(getattr(self, "_ui_colors_override", None) or self.canvas.engine.document.theme)
+        menu.set_colors(colors)
+        for key, actions in record["actions"].items():
+            field = getattr(self, key)
+            tip = field.toolTip()
+            if key == "branch" and field.isEnabled():
+                tip += "；应用于整张导图，覆盖已有局部分支样式。"
+            if key == "compact":
+                actions[0].setChecked(field.isChecked())
+                actions[0].setText("紧凑布局：" + ("已启用" if field.isChecked() else "未启用"))
+                actions[0].setEnabled(field.isEnabled())
+                actions[0].setToolTip(tip)
+                continue
+            sub = actions[0].parent()
+            # 上级菜单直接展示正式值；混合分支、自定义主题也沿用表单中的中文摘要。
+            sub.setTitle(f"{sub.property('settings_label')}：{field.currentText()}")
+            sub.menuAction().setEnabled(field.isEnabled())
+            sub.menuAction().setToolTip(tip)
+            sub.set_colors(colors)
+            for action in actions:
+                value = action.data()
+                index = field.findData(value)
+                action.setChecked(value == field.currentData())
+                font = sub.font()
+                font.setBold(action.isChecked())
+                action.setFont(font)
+                action.setEnabled(field.isEnabled() and index >= 0 and field.model().item(index).isEnabled())
+                action.setToolTip(tip)
+                if value == "__mixed__":
+                    action.setVisible(field.currentData() == "__mixed__")
+                elif index >= 0:
+                    action.setIcon(field.itemIcon(index))
 
     @staticmethod
     def _combo(label, options):
@@ -155,7 +279,7 @@ class GlobalSettingsPanel(QWidget):
             return
         engine = self.canvas.engine
         generation = engine.document_generation
-        # 浮动设置与属性面板可以同时显示；先提交原节点有效草稿，避免全局修改的
+        # 设置菜单与属性面板可以同时显示；先提交原节点有效草稿，避免全局修改的
         # document_changing 通知将其丢弃。随后重新读取快照，保留刚提交的节点属性。
         self.canvas.edits_flush_requested.emit()
         if self._disposed or generation != engine.document_generation:
@@ -251,6 +375,8 @@ class GlobalSettingsPanel(QWidget):
                 )
         finally:
             self._loading = False
+        for menu, record in self._menus.items():
+            self._sync_menu(menu, record)
 
     def set_theme(self, theme):
         """只更新本面板及弹层配色，保留文档中的自定义主题及宿主应用的全局样式。"""
@@ -288,9 +414,16 @@ class GlobalSettingsPanel(QWidget):
             self.branch.clear()
             populate_branch_combo(self.branch, theme)
             self.branch.set_value(current)
+        for menu, record in self._menus.items():
+            self._sync_menu(menu, record)
 
     def _close_popups(self, *_):
         """文档替换和面板隐藏后取消旧弹层，阻止迟到的选项操作写入新的文档。"""
+        for menu, record in self._menus.items():
+            record["active"] = False
+            for sub in menu.findChildren(QMenu):
+                sub.close()
+            menu.close()
         for field in (self.wheel, self.direction, self.branch, self.theme):
             field.hidePopup()
 

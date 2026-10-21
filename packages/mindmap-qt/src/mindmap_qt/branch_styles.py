@@ -35,6 +35,8 @@ def _style_icon(kind, foreground, disabled, accent, border) -> QIcon:
         (accent, QIcon.Mode.Active, QIcon.State.Off),
     ):
         document = MindMapDocument.new()
+        # 图标必须按请求类型独立路由，None 表示原始曲线，不沿用新文档初始样式。
+        document.root.style.clear()
         document.theme.palette = [color]
         if kind is not None:
             document.root.style["branch"] = {"kind": kind}
@@ -63,14 +65,14 @@ def _style_icon(kind, foreground, disabled, accent, border) -> QIcon:
 
 
 def branch_style_icon(kind: BranchStyle | str | None, theme: Theme) -> QIcon:
-    """返回可复用于动作和属性下拉框的多分辨率图标，默认曲线也有独立预览。"""
+    """返回可复用于动作和属性下拉框的多分辨率图标，原始曲线也有独立预览。"""
     colors = ui_colors(theme)
     return _style_icon(kind, colors.text, colors.muted, colors.accent, colors.border)
 
 
 def populate_branch_combo(combo: QComboBox, theme: Theme) -> None:
     """填充中文样式选项；提交时机由属性弹窗或侧栏控制器决定。"""
-    combo.addItem(branch_style_icon(None, theme), "默认曲线", None)
+    combo.addItem(branch_style_icon(None, theme), "原始曲线", None)
     for kind in BranchStyle:
         combo.addItem(branch_style_icon(kind, theme), kind.label, kind.value)
 
@@ -99,7 +101,7 @@ class _StyleButton(QToolButton):
 class BranchStyleMenu(QMenu):
     """四列十一项网格；自己不访问引擎、不持有正式文档。
 
-    compact 用于已有外部范围控件的属性入口，只显示圆角图形网格和默认曲线；
+    compact 用于已有外部范围控件的属性入口，只显示圆角图形网格和原始曲线；
     工具栏保留完整标题、范围及候选预览信号。宿主分别决定自动提交或暂存至确定。
     """
 
@@ -121,7 +123,7 @@ class BranchStyleMenu(QMenu):
             # 四列按钮、三行网格和底部恢复入口合计约 268×230 逻辑像素。
             # 只收紧展开弹层，属性表单中入口按钮的尺寸和交互保持原样。
             outer.setSpacing(4)
-        self.summary = QLabel("默认曲线", content)
+        self.summary = QLabel("原始曲线", content)
         outer.addWidget(self.summary)
         self.scope = None
         if compact:
@@ -167,7 +169,7 @@ class BranchStyleMenu(QMenu):
             grid.addWidget(button, index // 4, index % 4)
             self.buttons[kind] = button
         self.reset = _StyleButton(content)
-        self.reset.setText("恢复默认曲线")
+        self.reset.setText("恢复原始曲线")
         self.reset.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.reset.installEventFilter(self)
         if compact:
@@ -208,7 +210,7 @@ class BranchStyleMenu(QMenu):
             self.setProperty("branch_theme", signature)
         mixed = len(kinds) != 1
         current = next(iter(kinds)) if not mixed else None
-        self.summary.setText("多种样式" if mixed else current.label if current else "默认曲线")
+        self.summary.setText("多种样式" if mixed else current.label if current else "原始曲线")
         self.setAccessibleDescription(self.summary.text())
         if self.scope is not None:
             with QSignalBlocker(self.scope):

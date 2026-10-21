@@ -20,7 +20,7 @@ from mindmap_engine import (
 from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QImage
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QToolButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QToolButton
 
 
 @pytest.fixture
@@ -41,16 +41,106 @@ def window(qtbot, tmp_path):
 
 def test_default_single_document_and_editable_framework(window):
     assert len(window.engine.document.nodes) == 1
+    assert window.engine.document.root.style["branch"] == {"kind": "round"}
+    assert not window.engine.can_undo and not window.files.is_dirty
+    assert window.panels.settings.branch.currentData() == "round"
     assert list(window.manager.documents) == [DOCUMENT_ID]
     assert window.manager.documents[DOCUMENT_ID]["widget"] is window.canvas
     assert window.manager.states["properties"].visible
     assert window.panels.properties.isVisible()
     assert window.panels.properties.fields["style.font_size"].isVisible()
     assert not window.manager.states["outline"].visible
-    assert not window.manager.states["settings"].visible
+    assert "settings" not in window.manager.states
     assert window.host.region_sizes["dock"]["right"] == 360
     bar = window.title_bar
     assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.options) for button in bar.action_buttons)
+
+
+def test_top_right_gear_contains_shared_settings_and_existing_options(window, qtbot):
+    """点击真实齿轮核对菜单，同时验证侧栏移除及原外观选项保留。"""
+    popped = []
+
+    def inspect_menu():
+        menu = QApplication.activePopupWidget()
+        assert isinstance(menu, QMenu)
+        popped.append([action.text() for action in menu.actions()])
+        assert menu.actions()[0].menu() is window.settings_menu
+        menu.close()
+
+    QTimer.singleShot(0, inspect_menu)
+    qtbot.mouseClick(window.title_bar.options, Qt.MouseButton.LeftButton)
+    assert popped and {"导图设置", "浅色", "深色", "命名布局"} <= set(popped[0])
+    assert set(window.manager.specs) == {"outline", "properties"}
+    main = window.main_menu()
+    workspace = next(action.menu() for action in main.actions() if action.text() == "工作区")
+    tools = next(action.menu() for action in workspace.actions() if action.text() == "工具窗口")
+    assert [action.text() for action in tools.actions()] == ["大纲", "节点属性"]
+    assert window.manager.states["properties"].visible
+    main.deleteLater()
+
+
+def test_settings_shortcut_and_real_menu_click_preserve_properties(window, qtbot):
+    """Alt+3 与真实子菜单点击沿用整图事务，且不隐藏节点属性。"""
+    window.activateWindow()
+    window.canvas.view.setFocus()
+    QApplication.processEvents()
+    qtbot.keyClick(window.canvas.view, Qt.Key.Key_3, Qt.KeyboardModifier.AltModifier)
+    menu = window.settings_menu
+    assert menu.isVisible() and window.panels.properties.isVisible()
+    directions = next(action.menu() for action in menu.actions() if action.menu() and action.menu().objectName() == "settings_direction")
+    directions.popup(menu.mapToGlobal(QPoint(menu.width(), 0)))
+    action = next(action for action in directions.actions() if action.data() == "left")
+    qtbot.mouseClick(directions, Qt.MouseButton.LeftButton, pos=directions.actionGeometry(action).center())
+    assert window.engine.document.layout.direction == "left"
+    assert window.manager.states["properties"].visible
+    assert window.engine.undo() and window.engine.document.layout.direction == "right"
+
+
+def test_menu_wheel_preference_survives_restart_without_document_changes(window, qtbot):
+    """通过菜单改变本机滚轮偏好，重启后恢复但不写入文档和撤销历史。"""
+    before, revision = window.engine.document, window.engine.revision
+    window.show_settings_menu()
+    wheel = next(action.menu() for action in window.settings_menu.actions() if action.menu() and action.menu().objectName() == "settings_wheel")
+    next(action for action in wheel.actions() if action.data() == "zoom").trigger()
+    window.settings_menu.close()
+    assert window.canvas.wheel_mode == "zoom"
+    assert window.engine.document == before and window.engine.revision == revision
+    assert not window.files.is_dirty
+    window.close()
+    restored = build_window(storage_dir=window.manager.storage_dir)
+    qtbot.addWidget(restored)
+    try:
+        assert restored.canvas.wheel_mode == "zoom" and not restored.files.is_dirty
+        assert "settings" not in restored.manager.specs
+    finally:
+        restored.close()
+
+
+def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
+    """旧会话与命名布局中可见的设置浮窗均不会恢复为侧栏或新增窗口。"""
+    snapshot = window.manager.capture_layout()
+    legacy = deepcopy(next(item for item in snapshot["tools"] if item["id"] == "properties"))
+    legacy.update(id="settings", visible=True, mode="float")
+    snapshot["tools"].append(legacy)
+    snapshot["active"] = "settings"
+    window.close()
+    window.manager.layout_store.save({
+        "schema_version": 1, "current_layout": "旧布局", "session": snapshot,
+        "layouts": {"旧布局": snapshot},
+    })
+    restored = build_window(storage_dir=window.manager.storage_dir)
+    qtbot.addWidget(restored)
+    try:
+        for layout in (snapshot, "旧布局"):
+            restored.manager.restore_layout(layout)
+            restored.show()
+            QApplication.processEvents()
+            assert "settings" not in restored.manager.states
+            assert "settings" not in restored.manager.floating
+            assert restored.manager.states["properties"].visible
+            assert restored.panels.properties.isVisible()
+    finally:
+        restored.close()
 
 
 def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
@@ -103,6 +193,8 @@ def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
     manager.set_option("always_header_icons", True)
     assert all(not control.isHidden() for control in controls)
     manager.set_option("always_header_icons", False)
+    # 外观刷新可能重新触发鼠标进入；明确模拟离开，保证本断言检查非悬停状态。
+    QApplication.sendEvent(panel, QEvent(QEvent.Type.Leave))
     assert all(control.isHidden() for control in controls)
 
 
@@ -221,7 +313,7 @@ def test_panel_and_file_icons_stay_distinct_and_available_after_theme_changes(wi
             expected = manager.theme.icon(action.property("mindmap_icon")).pixmap(20, 20).toImage()
             assert action.icon().pixmap(20, 20).toImage() == expected
         images = []
-        for tool_id in ("outline", "properties", "settings"):
+        for tool_id in ("outline", "properties"):
             spec = manager.specs[tool_id]
             assert spec.icon == tool_id
             icon = manager.theme.icon(spec.icon)

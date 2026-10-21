@@ -47,7 +47,7 @@ _BARS = {
     "bottom": Qt.ToolBarArea.BottomToolBarArea,
 }
 _LABELS = {"left": "左侧", "right": "右侧", "bottom": "底部"}
-_TOOL_ICONS = {"outline": "outline", "properties": "properties", "settings": "settings"}
+_TOOL_ICONS = {"outline": "outline", "properties": "properties"}
 
 
 @dataclass
@@ -172,7 +172,7 @@ class _DropOverlay(QWidget):
 
 
 class MindMapWorkspace(QMainWindow):
-    """包含画布、大纲、节点属性和全局设置的原生停靠工作区。
+    """包含画布、大纲、节点属性和右上角设置菜单的原生停靠工作区。
 
     可作为普通 QWidget 嵌入宿主；canvas 保留完整 MindMapWidget 接口。构造参数
     editable、toolbar 及两个注册表原样传给画布。组件不访问 QSettings 或导图文件，
@@ -244,7 +244,31 @@ class MindMapWorkspace(QMainWindow):
         )
         self._add_tool("outline", "大纲", "Alt+1", self.outline, "left")
         self._add_tool("properties", "节点属性", "Alt+2", self.properties, "right")
-        self._add_tool("settings", "全局设置", "Alt+3", self.settings, "right")
+        # 设置菜单独立于画布工具栏；toolbar=False 只隐藏画布动作，不隐藏右上角入口。
+        self.settings_bar = QToolBar("设置", self)
+        self.settings_bar.setObjectName("mindmap_settings_bar")
+        self.settings_bar.setMovable(False)
+        self.settings_bar.setFloatable(False)
+        self.settings_bar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
+        spacer = QWidget(self.settings_bar)
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.settings_bar.addWidget(spacer)
+        self.settings_button = QToolButton(self.settings_bar)
+        self.settings_button.setAccessibleName("设置")
+        self.settings_button.setToolTip("设置（Alt+3 打开导图设置）")
+        self.settings_button.setFixedSize(32, 32)
+        self.settings_button.setIconSize(QSize(20, 20))
+        self.settings_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        options = QMenu("设置", self.settings_button)
+        self.settings_menu = self.settings.create_menu(options)
+        options.addMenu(self.settings_menu)
+        self.settings_button.setMenu(options)
+        self.settings_bar.addWidget(self.settings_button)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.settings_bar)
+        self.settings_action = QAction("导图设置", self)
+        self.settings_action.setShortcut(QKeySequence("Alt+3"))
+        self.settings_action.triggered.connect(self.show_settings_menu)
+        self.addAction(self.settings_action)
         self.canvas.set_properties_handler(lambda: self.show_tool_window("properties"))
         self.canvas.document_changed.connect(lambda event: self._apply_theme())
         self.reset_layout_action = QAction("恢复默认布局", self)
@@ -257,6 +281,12 @@ class MindMapWorkspace(QMainWindow):
     def createPopupMenu(self):
         """只公开工具窗口菜单，避免 Qt 原生菜单额外隐藏常驻按钮栏。"""
         return None
+
+    def show_settings_menu(self):
+        """在右上角展开共用设置菜单；不结束文字编辑，也不切换当前工具窗口。"""
+        if not self._disposed:
+            button = self.settings_button
+            self.settings_menu.popup(button.mapToGlobal(QPoint(0, button.height())))
 
     def _tool(self, tool_id):
         if tool_id not in self.tools:
@@ -364,7 +394,7 @@ class MindMapWorkspace(QMainWindow):
         record = self._tool(tool_id)
         if self._disposed:
             return
-        if tool_id in ("properties", "settings"):
+        if tool_id == "properties":
             self.canvas.finish_edit(commit=True)
         self._hide_peers(tool_id)
         record.visible = True
@@ -377,7 +407,6 @@ class MindMapWorkspace(QMainWindow):
             targets = {
                 "properties": self.properties.fields["style.font_family"],
                 "outline": self.outline,
-                "settings": self.settings.wheel,
             }
             target = targets[tool_id]
             (target if target.isEnabled() else record.dock.widget()).setFocus()
@@ -623,13 +652,15 @@ class MindMapWorkspace(QMainWindow):
         if signature == self._theme_signature:
             return
         self._theme_signature = signature
-        # 外壳绘制标题和底部圆角留白，三个内容控件各自绘制滚动区；统一读取
+        # 外壳绘制标题和底部圆角留白，两个侧栏各自绘制滚动区；统一读取
         # 侧栏底色，避免停靠、浮动或反复切换主题后出现异色条带。仅更新样式，
         # 不重建控件或重载表单，保留输入焦点、光标、滚动位置与待提交内容。
         self.setStyleSheet(workspace_styles(signature, sidebar=sidebar_surface(theme)))
         apply_ui_palette(self, signature, window=signature.shell)
         for bar in self.rails.values():
             apply_toolbar_theme(bar, theme)
+        apply_toolbar_theme(self.settings_bar, theme)
+        self.settings_button.setIcon(_toolbar_icon("settings", signature.text, signature.muted, signature.accent))
         for tool_id, record in self.tools.items():
             set_action_icon(record.action, _TOOL_ICONS[tool_id], theme)
             header = record.dock.titleBarWidget()
@@ -775,12 +806,20 @@ class MindMapWorkspace(QMainWindow):
             return True
         return super().eventFilter(watched, event)
 
+    def hideEvent(self, event):
+        """宿主隐藏时同步关闭独立菜单，避免顶层弹层继续接收操作。"""
+        if hasattr(self, "settings"):
+            self.settings._close_popups()
+            self.settings_button.menu().close()
+        super().hideEvent(event)
+
     def dispose(self):
         """停止待提交输入、布局通知、拖动和网络请求；可重复调用。"""
         if self._disposed:
             return
         self._disposed = True
         self._state_timer.stop()
+        self.settings_button.menu().close()
         self._cancel_drag()
         self.panels.dispose()
         self.canvas.dispose()

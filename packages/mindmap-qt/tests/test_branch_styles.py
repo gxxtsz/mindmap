@@ -35,6 +35,8 @@ from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox
 @pytest.fixture
 def canvas(qtbot):
     engine = MindMapEngine()
+    # 以旧文档的原始曲线验证样式切换、预览取消和像素兼容。
+    engine.set_branch_style([engine.root_id], None)
     engine.set_layout(LayoutConfig(direction="right"))
     first = engine.add_child(engine.root_id, "分支甲")
     children = [engine.add_child(first, text) for text in ("上级", "中级", "下级")]
@@ -103,7 +105,7 @@ def test_scope_mixed_selection_and_new_node_style(canvas):
     widget.engine.set_branch_style([children[0]], "arc", scope="level")
     assert widget.branch_menu.summary.text() == "多种样式"
     widget.branch_menu.scope.setCurrentIndex(widget.branch_menu.scope.findData("level"))
-    assert widget.branch_menu.summary.text() == "默认曲线"
+    assert widget.branch_menu.summary.text() == "原始曲线"
     widget.set_branch_style("round", scope="level")
     assert widget.engine.get_node(first).style["branch"]["kind"] == "round"
     assert widget.engine.get_node(children[0]).style["branch"]["kind"] == "arc"
@@ -199,7 +201,7 @@ def test_invalid_style_and_guard_failure_preserve_state(canvas, qtbot):
     widget.branch_menu.popup(widget.mapToGlobal(QPoint(80, 80)))
     qtbot.mouseClick(widget.branch_menu.buttons[BranchStyle.ROUND], Qt.MouseButton.LeftButton)
     assert errors and not widget.branch_menu.isVisible()
-    assert widget.engine.document == before and widget.branch_menu.summary.text() == "默认曲线"
+    assert widget.engine.document == before and widget.branch_menu.summary.text() == "原始曲线"
 
 
 def test_custom_layout_capability_and_old_curves(qtbot):
@@ -299,8 +301,8 @@ def test_legacy_curve_export_keeps_original_pixels(canvas, tmp_path):
         painter, QRectF(0, 0, width, height), QRectF(bounds.x, bounds.y, bounds.width, bounds.height)
     )
     painter.end()
-    widget.export(tmp_path / "默认曲线.png")
-    actual = QImage(str(tmp_path / "默认曲线.png")).convertToFormat(expected.format())
+    widget.export(tmp_path / "原始曲线.png")
+    actual = QImage(str(tmp_path / "原始曲线.png")).convertToFormat(expected.format())
     assert actual == expected
 
 
@@ -445,6 +447,8 @@ def test_invalid_candidate_geometry_rejected_before_commit(qtbot):
     registry = LayoutRegistry()
     registry.register(BrokenLayout())
     engine = MindMapEngine()
+    # 从可布局的原始曲线开始，随后选择圆角正交才触发扩展的非法候选路径。
+    engine.set_branch_style([engine.root_id], None)
     child = engine.add_child(engine.root_id)
     widget = MindMapWidget(engine, layout_registry=registry)
     qtbot.addWidget(widget)

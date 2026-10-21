@@ -343,7 +343,7 @@ class MindMapWidget(QWidget):
             if key == "fit":
                 self.toolbar.addSeparator()
             add_icon_action(self.toolbar, self._actions[key], key)
-        # 滚轮设置移至工作区侧栏；保留动作和菜单，独立画布与宿主仍可直接复用。
+        # 滚轮设置移至工作区右上角菜单；保留动作和菜单，独立画布与宿主仍可直接复用。
         wheel_action = self._actions["wheel_mode"]
         self.wheel_menu = IconOptionMenu(self.toolbar)
         self.wheel_menu.setAccessibleName("滚轮行为选择")
@@ -578,7 +578,7 @@ class MindMapWidget(QWidget):
         kinds = {get_branch_style(self._document.nodes[key].style) for key in ids}
         self.branch_menu.sync(kinds, self._branch_scope, (self._ui_colors_override or self._document.theme))
         current = next(iter(kinds)) if len(kinds) == 1 else None
-        label = "多种样式" if len(kinds) != 1 else current.label if current else "默认曲线"
+        label = "多种样式" if len(kinds) != 1 else current.label if current else "原始曲线"
         action = self._actions["branch_style"]
         action.setText(f"分支连接线：{label}")
         action.setToolTip(f"分支连接线：{label}；可设置整个子树或仅本级")
@@ -667,7 +667,7 @@ class MindMapWidget(QWidget):
     def set_branch_style(self, kind: BranchStyle | str | None, *, scope: str = "subtree") -> None:
         """先试算再一次提交发出的连接线设置，失败不改变文档、历史与选择。
 
-        kind 接受枚举、语义名称或 None（恢复旧默认曲线）。默认 subtree 显式更新
+        kind 接受枚举、语义名称或 None（恢复旧原始曲线）。默认 subtree 显式更新
         全部后代，level 仅改所选主题；不使用跨层隐式继承。优先采用当前多选，
         没有选择时采用聚焦主题，否则采用根主题；文字编辑、只读与不支持的布局拒绝操作。
         """

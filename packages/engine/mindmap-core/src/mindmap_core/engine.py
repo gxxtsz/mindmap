@@ -174,7 +174,7 @@ class MindMapEngine:
         """批量设置主题发出的连接线，一次调用只产生一条可撤销记录。
 
         subtree 更新所有后代（含叶节点及折叠节点），level 只更新指定主题；
-        None 恢复默认曲线。与普通更新共用前置钩子、事务回滚和保存标记。
+        None 恢复原始曲线。与普通更新共用前置钩子、事务回滚和保存标记。
         """
         self._execute(
             "set_branch_style", self._editor.set_branch_style, node_ids=list(node_ids), kind=kind, scope=scope

@@ -6,7 +6,7 @@ from mindmap_docking import DockPosition, DocumentSpec, Theme, ToolWindowSpec
 from mindmap_engine import MindMapEngine
 from mindmap_qt import MindMapFileController, MindMapPanels, MindMapWidget, UiColors
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
-from PySide6.QtCore import QLibraryInfo, QSettings, QTimer, QTranslator
+from PySide6.QtCore import QLibraryInfo, QPoint, QSettings, QTimer, QTranslator
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu
 
@@ -95,7 +95,6 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         for identifier, title, panel, icon, position, shortcut in (
             ("outline", "大纲", self.panels.outline, "outline", DockPosition.LEFT_TOP, "Alt+1"),
             ("properties", "节点属性", self.panels.properties, "properties", DockPosition.RIGHT_TOP, "Alt+2"),
-            ("settings", "导图设置", self.panels.settings, "settings", DockPosition.RIGHT_TOP, "Alt+3"),
         ):
             self.manager.register_tool_window(ToolWindowSpec(
                 identifier, title, lambda content=panel: content, icon, position, shortcut,
@@ -103,6 +102,13 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ))
         self.canvas.set_properties_handler(self._show_properties)
         self._register_file_actions()
+        # 旧设置面板只保留兼容访问对象，不再注册工具窗口；快捷键改为右上角菜单。
+        self.settings_menu = self.panels.settings.create_menu(self)
+        self.title_bar.options.setToolTip("设置")
+        self.title_bar.options.setAccessibleName("设置")
+        self.settings_action = self.manager.register_action(
+            "app.settings", "导图设置", self.show_settings_menu, shortcut="Alt+3", icon="settings",
+        )
         self.read_only_action = QAction("只读模式", self, checkable=True)
         self.read_only_action.toggled.connect(lambda checked: self.canvas.set_editable(not checked))
         self.manager.activate("properties", focus=False)
@@ -133,6 +139,22 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.add_action(ActionSpec(
                 "app." + identifier, title, callback, icon, shortcut, "文件", toolbar,
             ))
+
+    def show_settings_menu(self):
+        """快捷键直接展开右上角的导图设置，保留当前侧栏和原地编辑状态。"""
+        if not self._disposed:
+            button = self.title_bar.options
+            self.settings_menu.popup(button.mapToGlobal(QPoint(0, button.height())))
+
+    def appearance_menu(self):
+        """扩展公开的齿轮菜单；导图设置与外壳外观沿用各自的状态和保存语义。"""
+        menu = super().appearance_menu()
+        menu.setTitle("设置")
+        if hasattr(self, "settings_menu"):
+            anchor = menu.actions()[0]
+            menu.insertMenu(anchor, self.settings_menu)
+            menu.insertSeparator(anchor)
+        return menu
 
     def _save_wheel_mode(self, mode):
         self.preferences.setValue("view/wheel_mode", mode)
@@ -254,6 +276,12 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self._disposed = True
             self.panels.dispose()
             self.canvas.dispose()
+
+    def hideEvent(self, event):
+        """主窗口隐藏或关闭时取消业务设置菜单，兼容基类构造期的显示事件。"""
+        if hasattr(self, "panels"):
+            self.panels.settings._close_popups()
+        super().hideEvent(event)
 
     def closeEvent(self, event):
         # 基类先完成保存确认；取消关闭时保留控制器、计时器和下载能力。

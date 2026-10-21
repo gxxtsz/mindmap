@@ -90,7 +90,7 @@ def test_buttons_toggle_and_same_side_switch(workspace, qtbot):
     qtbot.mouseClick(widget.tools["outline"].button, Qt.MouseButton.LeftButton)
     assert not widget.tools["outline"].visible
     widget._move_tool("outline", "right", 0)
-    assert widget._order["right"] == ["outline", "properties", "settings"]
+    assert widget._order["right"] == ["outline", "properties"]
     assert widget.tools["outline"].visible and not widget.tools["properties"].visible
     widget.tools["properties"].action.trigger()
     assert not widget.tools["outline"].visible and widget.tools["properties"].visible
@@ -834,7 +834,7 @@ def test_property_branch_grid_mixed_keyboard_and_cancel(workspace, qtbot):
     qtbot.keyClick(menu.buttons[BranchStyle.ARC], Qt.Key.Key_Return)
     assert not menu.isVisible()
     assert all(canvas.engine.get_node(key).style["branch"]["kind"] == "arc" for key in (a, b))
-    assert "branch" not in canvas.engine.get_node(leaf).style
+    assert canvas.engine.get_node(leaf).style["branch"]["kind"] == "round"
     assert canvas.engine.undo() and not canvas.engine.can_undo and canvas.engine.document == before
 
 

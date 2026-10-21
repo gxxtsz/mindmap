@@ -1,6 +1,7 @@
 """Markdown 与两空格缩进大纲；只交换层级和文字，属于有损格式。"""
 
 import re
+from copy import deepcopy
 
 from mindmap_core import MindMapDocument, MindMapError, Node
 
@@ -59,7 +60,9 @@ def import_outline(text: str, *, markdown: bool = True) -> MindMapDocument:
             depth = 1
         if depth < 1 or depth > len(parents):
             raise MindMapError("大纲层级跳跃或早于根标题")
-        node = Node(value)
+        # 大纲只携带结构和正文，导入时为每一层独立复制新导图的默认外观。
+        # 不能只给根主题设置圆角正交，否则更深层级仍会落回原始曲线。
+        node = Node(value, style=deepcopy(document.root.style))
         document.nodes[node.id] = node
         document.nodes[parents[depth - 1]].children.append(node.id)
         parents = parents[:depth] + [node.id]

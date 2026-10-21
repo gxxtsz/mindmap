@@ -17,7 +17,7 @@ def pixel(widget, point):
 
 
 def test_cards_switch_theme_repeatedly_and_preserve_document_background(qtbot):
-    """反复切换后采样三个侧栏的标题、内容、滚动空白与底部，并保留弹窗层次。"""
+    """反复切换后采样两个侧栏的标题、内容、滚动空白与底部，并保留弹窗层次。"""
     workspace = MindMapWorkspace()
     qtbot.addWidget(workspace)
     workspace.resize(1200, 800)
@@ -46,7 +46,7 @@ def test_cards_switch_theme_repeatedly_and_preserve_document_background(qtbot):
             assert dock.x() - (canvas.x() + canvas.width()) == 6
             assert canvas.scene.backgroundBrush().color() == QColor(theme.background)
             assert workspace.properties.fields["branch.kind"].count() == 12
-            for tool_id in ("outline", "properties", "settings"):
+            for tool_id in ("outline", "properties"):
                 workspace.show_tool_window(tool_id, focus=False)
                 QApplication.processEvents()
                 dock = workspace.tools[tool_id].dock
@@ -64,7 +64,7 @@ def test_cards_switch_theme_repeatedly_and_preserve_document_background(qtbot):
                 assert pixel(dock, QPoint(dock.width() // 2, dock.height() - 3)) == QColor(surface)
                 if tool_id != "outline":
                     assert pixel(panel, QPoint(1, 1)) == QColor(surface)
-                    control = panel.wheel if tool_id == "settings" else panel.fields["style.font_family"]
+                    control = panel.fields["style.font_family"]
                     assert pixel(control, QPoint(control.width() // 2, 2)) == QColor(field)
             # 共享表单的默认背景仍用于独立属性弹窗，不随侧栏变成浅灰。
             assert pixel(form, QPoint(1, 1)) == QColor(dialog)

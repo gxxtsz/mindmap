@@ -45,6 +45,29 @@ def test_roundtrip_assets_and_metadata(tmp_path, suffix):
     assert "relations" not in stored and "summaries" not in stored
 
 
+@pytest.mark.parametrize("kind", [None, "round", "line", "arrow"])
+def test_loading_saved_documents_preserves_original_branch_style(tmp_path, kind):
+    """新建默认值不回填已保存文档，包括未配置分支的旧曲线。"""
+    engine = MindMapEngine()
+    child = engine.add_child(engine.root_id)
+    engine.set_branch_style([engine.root_id], kind)
+    path = tmp_path / "保留原连接线.mindmap"
+    save_document(engine.document, path)
+    loaded = load_document(path)
+    assert loaded == engine.document
+    for node in (loaded.root, loaded.nodes[child]):
+        assert node.style.get("branch") == (None if kind is None else {"kind": kind})
+
+
+def test_imported_outline_uses_round_connections_at_every_depth():
+    """无外观信息的大纲导入按新导图默认值初始化所有层级，节点配置互相独立。"""
+    document = import_outline("根主题\n  一级\n    二级", markdown=False)
+    assert all(node.style["branch"] == {"kind": "round"} for node in document.nodes.values())
+    child = document.root.children[0]
+    document.nodes[child].style["branch"]["kind"] = "line"
+    assert document.root.style["branch"] == {"kind": "round"}
+
+
 @pytest.mark.parametrize("kind", list(BranchStyle))
 @pytest.mark.parametrize("suffix", [".mindmap", ".json"])
 def test_branch_styles_keep_version_two_and_roundtrip(tmp_path, kind, suffix):

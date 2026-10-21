@@ -99,6 +99,11 @@ class NodeEditor(QGraphicsTextItem):
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
+        # 弹出菜单只是临时借用键盘焦点，关闭后仍回到当前文字草稿。
+        # 尤其导图设置菜单需要在编辑期间保留禁用状态，不能因打开菜单而自动
+        # 提交正文并解锁文档设置；真正切换到其他控件时仍沿用失焦提交规则。
+        if event.reason() == Qt.FocusReason.PopupFocusReason:
+            return
         if not self.finishing:
             # 焦点事件返回后再移除图元，避免在 Qt 虚函数调用栈中销毁编辑器。
             QTimer.singleShot(

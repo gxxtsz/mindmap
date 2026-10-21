@@ -79,9 +79,24 @@ def child(scale, platform):
             checks["大纲所有层"] = outline.isExpanded(outline.tree_model.index_for(first))
             outline.set_display_depth(2)
             assert window.grab().save(str(output / (name + ".png")))
-            window.manager.activate("settings", focus=False)
+            window.show_settings_menu()
             app.processEvents()
+            checks["设置菜单入口"] = window.settings_menu.isVisible() and "settings" not in window.manager.specs
+            assert window.settings_menu.grab().save(str(output / (name + "-settings-menu.png")))
+            # 当前方向固定蓝底，悬停其他方向为灰底；两种状态须在不同缩放下同时可辨。
+            direction = next(action.menu() for action in window.settings_menu.actions()
+                             if action.menu() and action.menu().objectName() == "settings_direction")
+            direction.popup(window.settings_menu.mapToGlobal(window.settings_menu.rect().topRight()))
+            selected = next(action for action in direction.actions() if action.data() == "right")
+            hovered = next(action for action in direction.actions() if action.data() == "left")
+            direction.setActiveAction(hovered)
+            app.processEvents()
+            checks["设置选中与悬停"] = selected.isChecked() and not hovered.isChecked()
+            checks["设置当前值摘要"] = direction.title() == "布局方向：向右"
+            assert direction.grab().save(str(output / (name + "-settings-direction.png")))
+            direction.close()
             assert window.grab().save(str(output / (name + "-settings.png")))
+            window.settings_menu.close()
             window.manager.activate("properties")
             app.processEvents()
             original = window.panels.properties
@@ -127,6 +142,14 @@ def child(scale, platform):
                     and standalone.tools["outline"].dock.titleBarWidget().rect().contains(depth_button.geometry())
                 )
                 standalone.outline.depth_menu.close()
+                standalone.show_settings_menu()
+                app.processEvents()
+                checks["独立工作区设置菜单"] = (
+                    standalone.settings_button.isVisible() and standalone.settings_menu.isVisible()
+                    and "settings" not in standalone.tools
+                )
+                assert standalone.settings_menu.grab().save(str(output / (name + "-standalone-settings-menu.png")))
+                standalone.settings_menu.close()
                 assert standalone.grab().save(str(output / (name + "-standalone-outline.png")))
             finally:
                 standalone.dispose()

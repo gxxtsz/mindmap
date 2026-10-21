@@ -10,6 +10,7 @@ from mindmap_core import (
     LayoutInfo,
     LayoutRegistry,
     LayoutResult,
+    MindMapDocument,
     MindMapEngine,
     MindMapError,
     OperationRejected,
@@ -21,10 +22,29 @@ from mindmap_core import (
 
 def tree():
     engine = MindMapEngine()
+    # 本组验证旧文档的局部作用范围，显式使用未配置分支的原始曲线。
+    engine.set_branch_style([engine.root_id], None)
     first = engine.add_child(engine.root_id, "分支甲")
     second = engine.add_child(engine.root_id, "分支乙")
     leaf = engine.add_child(first, "末级")
     return engine, first, second, leaf
+
+
+def test_new_document_defaults_to_round_and_new_nodes_inherit_without_initial_history():
+    """新文档从创建起使用圆角正交；多级新增及同级、父级操作保持继承规则。"""
+    document = MindMapDocument.new()
+    engine = MindMapEngine(document)
+    assert document.root.style["branch"] == {"kind": "round"}
+    assert not engine.can_undo and not engine.is_dirty and engine.revision == 0
+    child = engine.add_child(engine.root_id)
+    leaf = engine.add_child(child)
+    sibling = engine.add_sibling(child)
+    parent = engine.insert_parent(leaf)
+    assert all(engine.get_node(key).style["branch"] == {"kind": "round"}
+               for key in (engine.root_id, child, leaf, sibling, parent))
+    engine.set_branch_style([child], "line", scope="level")
+    assert engine.get_node(engine.root_id).style["branch"] == {"kind": "round"}
+    assert MindMapDocument.new().root.style["branch"] == {"kind": "round"}
 
 
 def test_subtree_scope_history_and_hidden_nodes():

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError
 
@@ -98,8 +99,13 @@ class MindMapDocument:
 
     @classmethod
     def new(cls, text: str = "中心主题") -> MindMapDocument:
-        """建立仅包含根节点、默认向右展开的新文档，后续新增分支沿文档方向布局。"""
-        root = Node(text)
+        """建立默认向右展开、使用圆角正交连接线的新文档。
+
+        初始样式显式写入根主题，后续新增主题通过既有的父主题复制规则沿用。
+        不改变 Node 的空样式语义，文件读取时原有的未配置曲线仍可原样恢复；
+        初始化也不经过引擎事务，因此新文档保持未修改状态且没有额外撤销记录。
+        """
+        root = Node(text, style={"branch": {"kind": BranchStyle.ROUND.value}})
         return cls(root.id, {root.id: root})
 
     @property

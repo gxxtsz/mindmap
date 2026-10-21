@@ -114,6 +114,9 @@ class IconButton(QAbstractButton):
         self.icon_name = icon
         self.symbol = symbol
         self.notification = False
+        # Qt 在窗口首次显示时可能自动聚焦第一个可 Tab 访问的按钮。
+        # 单独记录键盘导航来源，避免把这种自动焦点误画成悬停或用户选中。
+        self._keyboard_focus = False
         self.setToolTip(tooltip)
         self.setAccessibleName(tooltip or symbol)
         self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -137,6 +140,32 @@ class IconButton(QAbstractButton):
         left = 8 if self.text() else (self.width() - size) // 2
         return QRect(left, (self.height() - size) // 2, size, size)
 
+    def enterEvent(self, event):
+        """鼠标进入后重绘自绘背景，不依赖宿主是否安装了 Qt 悬停样式。"""
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event):
+        """鼠标移开立即撤销悬停底色；选中状态继续由标准按钮状态决定。"""
+        super().leaveEvent(event)
+        self.update()
+
+    def focusInEvent(self, event):
+        """仅键盘导航显示焦点描边，弹出菜单或切换窗口后保留原来的来源。"""
+        reason = event.reason()
+        if reason in (Qt.FocusReason.TabFocusReason, Qt.FocusReason.BacktabFocusReason,
+                      Qt.FocusReason.ShortcutFocusReason):
+            self._keyboard_focus = True
+        elif reason not in (Qt.FocusReason.PopupFocusReason, Qt.FocusReason.ActiveWindowFocusReason):
+            self._keyboard_focus = False
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event):
+        """焦点离开时撤销描边，保留 Qt 标准焦点链与键盘激活行为。"""
+        super().focusOutEvent(event)
+        self.update()
+
     def paintEvent(self, event):
         theme = self.manager.theme
         painter = QPainter(self)
@@ -149,10 +178,16 @@ class IconButton(QAbstractButton):
             painter.setBrush(theme.color("toolbar-selected-bg-active" if active else "toolbar-bg-hovered"))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(area, radius, radius)
-        elif self.underMouse() or self.hasFocus():
+        elif self.underMouse():
             painter.setBrush(theme.color("toolbar-bg-hovered"))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(area, radius, radius)
+        if self.hasFocus() and self._keyboard_focus:
+            # 键盘焦点使用独立细描边，不再复用悬停填充；自动获得焦点时保持普通外观。
+            # 半像素内缩让边框完全落在原有背景区域，不改变按钮尺寸或点击范围。
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(theme.color("control-brand-border"), 1))
+            painter.drawRoundedRect(area.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         rect = self._icon_rect()
         icon = theme.icon(self.icon_name, rect.width()) if self.icon_name else None
         if icon and not icon.isNull():

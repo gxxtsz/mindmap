@@ -36,10 +36,10 @@ def test_layout_nonoverlap_deterministic(direction):
         assert all(not rect.intersects(other) for other in rectangles[i + 1 :])
     assert len(first.branches) == len(first.nodes) - 1
     parents = document.parents()
-    for node_id, curve in first.branches.items():
+    for node_id, branch in first.branches.items():
         for point, rect in (
-            (curve.points[0], first.nodes[parents[node_id]]),
-            (curve.points[-1], first.nodes[node_id]),
+            (branch.start, first.nodes[parents[node_id]]),
+            (branch.end, first.nodes[node_id]),
         ):
             x, y = point
             assert rect.x <= x <= rect.right and rect.y <= y <= rect.bottom

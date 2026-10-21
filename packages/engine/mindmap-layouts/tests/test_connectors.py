@@ -70,8 +70,9 @@ def test_short_and_degenerate_branches(kind, advance, offset, direction):
             assert sum(a * b for a, b in zip(tangent, arrow_axis, strict=True)) > 0
 
 
-def test_line_does_not_replace_default_and_level_is_local():
+def test_line_does_not_replace_legacy_curve_and_level_is_local():
     engine = MindMapEngine()
+    engine.set_branch_style([engine.root_id], None)
     child = engine.add_child(engine.root_id)
     leaf = engine.add_child(child)
     registry = create_default_layout_registry()

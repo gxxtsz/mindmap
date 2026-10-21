@@ -46,7 +46,7 @@ class BranchStyle(StrEnum):
 
 
 def normalize_branch_style(kind: BranchStyle | str | None) -> BranchStyle | None:
-    """校验调用参数；None 表示删除显式配置，恢复旧版默认曲线。"""
+    """校验调用参数；None 表示删除显式配置，恢复旧版原始曲线。"""
     if kind is None:
         return None
     try:

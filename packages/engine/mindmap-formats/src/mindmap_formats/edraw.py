@@ -162,6 +162,8 @@ def import_edraw_xml(data: bytes) -> MindMapDocument:
             connect(parent, child)
 
     document = MindMapDocument.new("亿图剪贴板")
+    # 此根节点只是剪贴板森林的临时容器，不是新建导图；粘贴外观由目标主题决定。
+    document.root.style.clear()
     document.root.children = [node.id for key, node in nodes.items() if key not in parents]
     for key, node in nodes.items():
         node.children = [nodes[child].id for child in children[key]]
