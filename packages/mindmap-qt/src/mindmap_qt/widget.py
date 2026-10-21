@@ -45,7 +45,7 @@ from .icons import IconMenuOptionButton, IconOptionMenu, add_icon_action, apply_
 from .items import NodeEditor, NodeItem
 from .rendering import BranchItem, VisualFactory, decode_image
 from .ui_style import CardFrame, UiColors, apply_ui_palette, dialog_styles, ui_colors
-from .view import MindMapView
+from .view import MIN_ZOOM, MindMapView
 from .view_controls import _ViewControls
 
 CLIPBOARD_MIME = "application/x-python-mindmap+json"
@@ -744,16 +744,25 @@ class MindMapWidget(QWidget):
             self.view.update_navigation_rect(center=self.node_items[key].sceneBoundingRect().center())
 
     def fit_to_view(self):
-        """按可见内容适应窗口，不把导航余量计入缩放；最高放大到原来的两倍。"""
+        """按可见内容适应窗口，将最终倍率限制在 10%～200%，不计入导航余量。
+
+        先提交正在编辑的节点，再按更新后的布局计算。达到最小倍率时保留内容
+        中心居中，允许超大导图的边缘超出视口，由用户平移查看，不继续缩小。
+        按钮、快捷键和分支聚焦均复用此入口，与交互缩放共用同一最小倍率。
+        """
         self.finish_edit(commit=True)
         rect = self.layout_result.bounds
         content = QRectF(rect.x, rect.y, rect.width, rect.height)
         self.view.fitInView(content, Qt.AspectRatioMode.KeepAspectRatio)
-        if self.view.transform().m11() > 2:
+        # Qt 的自动适配不会经过 MindMapView.zoom，必须在此显式约束最终倍率。
+        # 超出上下限时重建等比变换，避免沿用不受限制的倍率或累计缩放误差。
+        fitted = self.view.transform().m11()
+        target = min(2.0, max(MIN_ZOOM, fitted))
+        if target != fitted:
             self.view.resetTransform()
-            self.view.scale(2, 2)
-        # fitInView 已改变倍率，需以新倍率重新换算一屏余量。达到放大上限时
-        # 同样居中完整内容，不能改为居中根节点，否则单向布局的远端可能被裁掉。
+            self.view.scale(target, target)
+        # 按最终倍率重新换算一屏导航余量。触及任一倍率限制后仍居中内容范围，
+        # 不能改为居中根节点，否则单向布局会偏向一端，重复适配也无法正确定位。
         self.view.update_navigation_rect(center=content.center())
 
     def focus_node(self, node_id: str | None):

@@ -30,6 +30,16 @@ def canvas(qtbot):
     widget.dispose()
 
 
+@pytest.fixture
+def oversized_canvas(canvas):
+    """构造正常窗口在 10% 倍率下仍无法完整容纳的分支，覆盖真实布局范围。"""
+    widget, a, _ = canvas
+    with widget.engine.transaction("构造超过最小缩放范围的导图"):
+        for index in range(240):
+            widget.engine.add_child(a, f"超大导图节点 {index}")
+    return canvas
+
+
 def mouse(
     view,
     kind,
@@ -528,3 +538,73 @@ def test_fit_capped_zoom_keeps_asymmetric_content_fully_visible(canvas, directio
     assert widget.view.transform().m11() == pytest.approx(2)
     visible = widget.view.mapToScene(widget.view.viewport().rect()).boundingRect()
     assert visible.contains(content)
+
+
+@pytest.mark.parametrize("direction", ["left", "right", "down"])
+@pytest.mark.parametrize("entry", ["method", "button", "shortcut", "focus"])
+def test_fit_minimum_zoom_keeps_oversized_content_centered(oversized_canvas, qtbot, direction, entry):
+    """超宽、超高内容通过各适配入口都停在 10%，重复操作保持内容中心及导航余量。"""
+    widget, a, _ = oversized_canvas
+    widget.engine.set_layout(LayoutConfig(direction=direction))
+    view = widget.view
+    document, revision = widget.engine.document, widget.engine.revision
+    view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum())
+    view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+    centers = []
+    for _ in range(3):
+        if entry == "method":
+            widget.fit_to_view()
+        elif entry == "button":
+            qtbot.mouseClick(widget.toolbar.widgetForAction(widget.action("fit")), Qt.MouseButton.LeftButton)
+        elif entry == "shortcut":
+            qtbot.keyClick(view, Qt.Key.Key_0, Qt.KeyboardModifier.ControlModifier)
+        else:
+            widget.focus_node(a)
+
+        content = widget.scene.sceneRect()
+        # 确认真正触及下限；达到下限后允许内容超出视口，不能以完整展示为由继续缩小。
+        assert min(view.viewport().width() / content.width(), view.viewport().height() / content.height()) < 0.1
+        assert view.transform().m11() == pytest.approx(0.1)
+        assert view.transform().m22() == pytest.approx(0.1)
+        visible = view.mapToScene(view.viewport().rect()).boundingRect()
+        assert not visible.contains(content)
+        assert (visible.center() - content.center()).manhattanLength() < 2 / 0.1
+        centers.append(visible.center())
+
+        # 导航边距必须按最终倍率换算为一屏，不能沿用 Qt 自动适配得到的更小倍率。
+        projected_content = view.transform().mapRect(content)
+        navigation = view.transform().mapRect(view.sceneRect())
+        assert projected_content.left() - navigation.left() == pytest.approx(view.viewport().width())
+        assert navigation.right() - projected_content.right() == pytest.approx(view.viewport().width())
+        assert projected_content.top() - navigation.top() == pytest.approx(view.viewport().height())
+        assert navigation.bottom() - projected_content.bottom() == pytest.approx(view.viewport().height())
+
+    assert centers[1:] == centers[:-1]
+    assert widget.engine.document == document and widget.engine.revision == revision
+
+
+@pytest.mark.parametrize("direction", ["right", "down"])
+def test_fit_minimum_zoom_preserves_pan_and_zoom_controls(oversized_canvas, direction):
+    """适配触及下限后仍可拖动及放大，动作和滚轮继续缩小均不得突破同一限制。"""
+    widget, _, _ = oversized_canvas
+    widget.engine.set_layout(LayoutConfig(direction=direction))
+    widget.action("fit").trigger()
+    view = widget.view
+    document, revision = widget.engine.document, widget.engine.revision
+    assert view.transform().m11() == pytest.approx(0.1)
+
+    widget.action("zoom_out").trigger()
+    wheel(view, angle=-120, modifiers=Qt.KeyboardModifier.ControlModifier)
+    assert view.transform().m11() == pytest.approx(0.1)
+
+    start = QPoint(40, 40)
+    before = view.mapToScene(start)
+    mouse(view, QEvent.Type.MouseButtonPress, start, Qt.MouseButton.RightButton, Qt.MouseButton.RightButton)
+    mouse(view, QEvent.Type.MouseMove, start + QPoint(45, 35), buttons=Qt.MouseButton.RightButton)
+    mouse(view, QEvent.Type.MouseButtonRelease, start + QPoint(45, 35), Qt.MouseButton.RightButton)
+    assert (view.mapToScene(start) - before).manhattanLength() > 100
+    assert view.transform().m11() == pytest.approx(0.1)
+
+    widget.action("zoom_in").trigger()
+    assert view.transform().m11() == pytest.approx(0.12)
+    assert widget.engine.document == document and widget.engine.revision == revision

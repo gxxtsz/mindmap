@@ -6,6 +6,9 @@ from PySide6.QtWidgets import QApplication, QGraphicsRectItem, QGraphicsView
 
 from .items import NodeEditor, NodeItem
 
+# 交互缩放与“适应窗口”共用 10% 下限，避免自动适配绕过交互入口的倍率限制。
+MIN_ZOOM = 0.1
+
 
 class MindMapView(QGraphicsView):
     def __init__(self, owner, scene):
@@ -61,14 +64,14 @@ class MindMapView(QGraphicsView):
         event.accept()
 
     def zoom(self, factor, *, anchor=None):
-        """限制缩放比例；指定视口坐标时显式固定鼠标下的场景位置。
+        """将缩放比例限制在 10%～400%；指定视口坐标时显式固定鼠标下的场景位置。
 
         显式锚点不依赖系统光标或上一条鼠标移动事件，因此触控板滚动和合成的 Qt
         滚轮事件也具有同样的定位行为；省略锚点时围绕视口中心缩放。目标位置超出
         内容加一屏余量的范围时，由 Qt 将视口限制到最近边界，不额外扩展空白区域。
         """
         current = self.transform().m11()
-        target = min(4.0, max(0.1, current * factor))
+        target = min(4.0, max(MIN_ZOOM, current * factor))
         anchor = self.viewport().rect().center() if anchor is None else anchor
         before = self.mapToScene(anchor)
         previous_anchor = self.transformationAnchor()
