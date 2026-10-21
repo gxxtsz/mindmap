@@ -9,7 +9,8 @@ from .tree import TreeLayout
 def create_default_layout_registry() -> LayoutRegistry:
     """每次创建独立注册表和算法实例，宿主可继续显式注册自己的算法。"""
     registry = LayoutRegistry()
-    registry.register(TreeLayout())
+    # 内置实现只读取文档与测量表；第三方 register() 仍默认深拷贝隔离其副作用。
+    registry.register(TreeLayout(), copy_inputs=False)
     return registry
 
 

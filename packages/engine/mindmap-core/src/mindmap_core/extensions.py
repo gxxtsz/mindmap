@@ -54,9 +54,17 @@ class LayoutRegistry:
     def __init__(self):
         self._algorithms: dict[str, LayoutAlgorithm] = {}
         self._info: dict[str, LayoutInfo] = {}
+        self._copy_inputs: dict[str, bool] = {}
 
-    def register(self, algorithm: LayoutAlgorithm) -> None:
-        """注册一个算法；元信息和默认配置在注册时校验，重复标识明确拒绝。"""
+    def register(self, algorithm: LayoutAlgorithm, *, copy_inputs: bool = True) -> None:
+        """注册布局，校验元信息及默认配置；重复标识明确拒绝。
+
+        copy_inputs 默认开启，以独立副本隔离扩展对文档和测量表的修改。仅当宿主
+        确认实现完全只读时可显式关闭，例如本包组合入口注册的内置树布局；关闭后
+        实现不得保留可变输入或改写它们。输入和输出的公共契约校验始终执行。
+        """
+        if not isinstance(copy_inputs, bool):
+            raise MindMapError("布局输入隔离选项必须为布尔值")
         try:
             info = deepcopy(algorithm.info)
             if not isinstance(info, LayoutInfo) or not isinstance(info.default_config, LayoutConfig):
@@ -84,6 +92,7 @@ class LayoutRegistry:
             raise MindMapError(f"注册布局算法失败：{exc}") from exc
         self._algorithms[info.id] = algorithm
         self._info[info.id] = info
+        self._copy_inputs[info.id] = copy_inputs
 
     def get(self, algorithm_id: str) -> LayoutAlgorithm:
         """查找已注册实现；缺失时不回退到其他算法。"""
@@ -127,14 +136,16 @@ class LayoutRegistry:
         expand_all: bool = False,
         focus_id: str | None = None,
     ) -> LayoutResult:
-        """从文档配置调度布局，使用副本隔离外部实现，错误不改变宿主状态。"""
+        """调度并校验布局；按注册时的只读约定决定是否复制输入，默认隔离扩展。"""
         document.validate()
         self.validate_config(document.layout)
         algorithm = self.get(document.layout.algorithm_id)
         try:
-            result = algorithm.layout(
-                deepcopy(document), deepcopy(measurements), expand_all=expand_all, focus_id=focus_id
-            )
+            if self._copy_inputs[document.layout.algorithm_id]:
+                layout_document, sizes = deepcopy(document), deepcopy(measurements)
+            else:
+                layout_document, sizes = document, measurements
+            result = algorithm.layout(layout_document, sizes, expand_all=expand_all, focus_id=focus_id)
         except MindMapError:
             raise
         except Exception as exc:

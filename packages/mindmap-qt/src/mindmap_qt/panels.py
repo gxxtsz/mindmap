@@ -44,7 +44,7 @@ class MindMapPanels(QObject):
             raise TypeError("界面色板必须为 UiColors 或 None")
         for panel in (self.outline, self.properties, self.settings):
             panel._ui_colors_override = colors
-            panel.set_theme(colors or self.canvas.engine.document.theme)
+            panel.set_theme(colors or self.canvas._document.theme)
 
     def dispose(self):
         """幂等停止提交和弹层；关闭停靠面板时不应调用，退出宿主时才释放。"""
@@ -62,8 +62,8 @@ class MindMapPanels(QObject):
             return
         self.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
-        document = self.canvas.engine.document
-        parents, ancestors = document.parents(), set()
+        document = self.canvas._document
+        parents, ancestors = self.canvas._node_parents, set()
         for key in ids:
             parent = parents.get(key)
             while parent is not None:
@@ -76,9 +76,8 @@ class MindMapPanels(QObject):
             return
         try:
             focus = self.canvas.focus_id
-            focused_ids = set(document.descendants(focus)) if focus else set(document.nodes)
-            outside_focus = any(key not in focused_ids for key in ids)
-            if collapsed:
+            outside_focus = bool(focus) and any(key not in set(document.descendants(focus)) for key in ids)
+            if collapsed and not self.canvas._can_incremental():
                 candidate = self.canvas.engine.document
                 for key in collapsed:
                     candidate.nodes[key].expanded = True

@@ -4,28 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from copy import deepcopy
-from dataclasses import dataclass
 
 from .errors import MindMapError
-from .models import MindMapDocument
-
-
-@dataclass
-class DocumentState:
-    """内部文档持有者；回滚替换文档后，编辑服务仍引用同一个持有者。"""
-
-    document: MindMapDocument
+from .journal import DocumentState, TransactionJournal
 
 
 class TransactionManager:
-    """只在最外层保留临时恢复快照，完成清理和校验后统一提交。"""
+    """最外层创建实体日志，局部清理和校验成功后统一提交差量。"""
 
     def __init__(
         self,
         state: DocumentState,
-        finalize: Callable[[], None],
-        commit: Callable[[MindMapDocument, str], None],
+        finalize: Callable,
+        commit: Callable,
     ):
         self.state = state
         self.finalize = finalize
@@ -39,25 +30,32 @@ class TransactionManager:
             self.aborted = True
 
     @contextmanager
-    def transaction(self, label: str) -> Iterator[None]:
-        """合并嵌套操作；异常路径恢复最外层入口状态，正常路径只提交一次。"""
+    def transaction(self, label: str, *, rollback_only=False) -> Iterator[None]:
+        """合并嵌套操作；异常恢复登记实体，通知前结束日志生命周期以允许后续编辑。"""
         outer = self.depth == 0
-        before = deepcopy(self.state.document) if outer else None
         if outer:
             self.aborted = False
+            self.state.journal = TransactionJournal(self.state)
+        journal = self.state.journal
         self.depth += 1
         try:
             yield
             if outer:
                 if self.aborted:
                     raise MindMapError("事务包含失败操作，已整体回滚")
-                self.finalize()
+                self.finalize(journal)
+                if rollback_only:
+                    journal.rollback()
+                else:
+                    changes = journal.changes()
         except Exception:
             self.aborted = True
             if outer:
-                self.state.document = before
+                journal.rollback()
             raise
         finally:
             self.depth -= 1
-        if outer:
-            self.commit(before, label)
+            if outer:
+                self.state.journal = None
+        if outer and not rollback_only:
+            self.commit(changes, label)

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+from collections import Counter
 from typing import Any
 
 from .branch_styles import get_branch_style
@@ -27,34 +28,7 @@ def validate_document(document) -> None:
             raise MindMapError(f"子节点引用不存在：{node_id}")
         seen.add(node_id)
         node = document.nodes[node_id]
-        if node.id != node_id or not isinstance(node_id, str) or not node_id:
-            raise MindMapError("节点标识无效")
-        if not all(isinstance(value, str) for value in (node.text, node.note, node.hyperlink)):
-            raise MindMapError("节点文本、备注和链接必须为字符串")
-        if not isinstance(node.children, list) or not all(isinstance(x, str) for x in node.children):
-            raise MindMapError("子节点列表无效")
-        if not isinstance(node.expanded, bool) or node.direction not in (None, "left", "right"):
-            raise MindMapError("节点展开状态或方向无效")
-        if node.text_format not in ("plain", "markdown"):
-            raise MindMapError("文本格式必须是 plain 或 markdown")
-        for values in (node.tags, node.icons):
-            if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
-                raise MindMapError("标签和图标必须为字符串列表")
-        if not isinstance(node.style, dict) or not isinstance(node.metadata, dict):
-            raise MindMapError("节点样式和元数据必须为对象")
-        get_branch_style(node.style)
-        for key in ("font_size", "width", "border_width"):
-            if key in node.style:
-                positive_number(node.style[key], f"节点样式 {key}", allow_zero=key == "border_width")
-        for key in ("font_family", "text_color", "background", "border_color"):
-            if key in node.style and not isinstance(node.style[key], str):
-                raise MindMapError(f"节点样式 {key} 必须为字符串")
-        for key in ("bold", "italic", "underline"):
-            if key in node.style and not isinstance(node.style[key], bool):
-                raise MindMapError(f"节点样式 {key} 必须为布尔值")
-        positive_number(node.image_width, "图片宽度")
-        if node.image_id is not None and node.image_id not in document.assets:
-            raise MindMapError(f"图片资源缺失：{node.image_id}")
+        validate_node(document, node_id, node, json_data=False)
         stack.extend(reversed(node.children))
     if seen != set(document.nodes):
         raise MindMapError("文档包含未连接到根节点的节点")
@@ -89,6 +63,116 @@ def validate_document(document) -> None:
         )
     except (TypeError, ValueError) as exc:
         raise MindMapError("元数据与样式必须是有效的 JSON 数据") from exc
+
+
+def validate_node(document, node_id, node, *, json_data=True):
+    """校验单个实体，完整导入和受控差量提交共用同一套字段规则。"""
+    if node.id != node_id or not isinstance(node_id, str) or not node_id:
+        raise MindMapError("节点标识无效")
+    if not all(isinstance(value, str) for value in (node.text, node.note, node.hyperlink)):
+        raise MindMapError("节点文本、备注和链接必须为字符串")
+    if not isinstance(node.children, list) or not all(isinstance(x, str) for x in node.children):
+        raise MindMapError("子节点列表无效")
+    if not isinstance(node.expanded, bool) or node.direction not in (None, "left", "right"):
+        raise MindMapError("节点展开状态或方向无效")
+    if node.text_format not in ("plain", "markdown"):
+        raise MindMapError("文本格式必须是 plain 或 markdown")
+    for values in (node.tags, node.icons):
+        if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
+            raise MindMapError("标签和图标必须为字符串列表")
+    if not isinstance(node.style, dict) or not isinstance(node.metadata, dict):
+        raise MindMapError("节点样式和元数据必须为对象")
+    get_branch_style(node.style)
+    for key in ("font_size", "width", "border_width"):
+        if key in node.style:
+            positive_number(node.style[key], f"节点样式 {key}", allow_zero=key == "border_width")
+    for key in ("font_family", "text_color", "background", "border_color"):
+        if key in node.style and not isinstance(node.style[key], str):
+            raise MindMapError(f"节点样式 {key} 必须为字符串")
+    for key in ("bold", "italic", "underline"):
+        if key in node.style and not isinstance(node.style[key], bool):
+            raise MindMapError(f"节点样式 {key} 必须为布尔值")
+    positive_number(node.image_width, "图片宽度")
+    if node.image_id is not None and node.image_id not in document.assets:
+        raise MindMapError(f"图片资源缺失：{node.image_id}")
+    if json_data:
+        try:
+            json.dumps([node.metadata, node.style], allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise MindMapError("元数据与样式必须是有效的 JSON 数据") from exc
+
+
+def validate_changes(state, journal):
+    """校验受控编辑产生的局部变化，保留完整导入的字段和资源规则。
+
+    编辑器不允许外部直接改写子列表。变更父边仍校验引用、重复父级及循环；
+    只沿新父链检查连接性，并复用已确认路径。资源引用数在成功提交后才更新。
+    """
+    document = state.document
+    for key in journal.nodes:
+        node = document.nodes.get(key)
+        if node is None:
+            continue
+        validate_node(document, key, node)
+        if len(set(node.children)) != len(node.children):
+            raise MindMapError("节点树包含循环或重复父节点")
+        for child in node.children:
+            if child not in document.nodes:
+                raise MindMapError(f"子节点引用不存在：{child}")
+            if state.parents.get(child) != key:
+                raise MindMapError("节点树包含循环或重复父节点")
+    verified = {document.root_id}
+    for key in journal.parents:
+        if key not in document.nodes:
+            continue
+        path, seen = [], set()
+        while key not in verified:
+            if key in seen:
+                raise MindMapError("节点树包含循环或重复父节点")
+            seen.add(key)
+            path.append(key)
+            key = state.parents.get(key)
+            if key is None or key not in document.nodes:
+                raise MindMapError("文档包含未连接到根节点的节点")
+        verified.update(path)
+    usage = Counter()
+    for key, old in journal.nodes.items():
+        node = document.nodes.get(key)
+        if old is not None and old.image_id:
+            usage[old.image_id] -= 1
+        if node is not None and node.image_id:
+            usage[node.image_id] += 1
+    candidates = set(usage) | set(journal.assets) | getattr(state, "unused_assets", set())
+    for key in candidates:
+        if state.asset_counts.get(key, 0) + usage[key] == 0 and key in document.assets:
+            state.set_asset(key, None)
+    for key in journal.assets:
+        asset = document.assets.get(key)
+        if asset is None:
+            continue
+        if not isinstance(asset.data, bytes) or not asset.data:
+            raise MindMapError("图片数据必须为非空字节串")
+        if key != asset.id or hashlib.sha256(asset.data).hexdigest() != key:
+            raise MindMapError("图片内容与资源标识不匹配")
+        if not isinstance(asset.media_type, str) or not asset.media_type.startswith("image/"):
+            raise MindMapError("资源必须是图片")
+    if journal.settings:
+        if not isinstance(document.layout, LayoutConfig):
+            raise MindMapError("布局配置必须为 LayoutConfig")
+        document.layout.validate()
+        theme = document.theme
+        if (not isinstance(theme.palette, list) or not theme.palette
+                or not all(isinstance(value, str) and value for value in theme.palette)):
+            raise MindMapError("主题分支配色不能为空")
+        if not all(isinstance(getattr(theme, key), str) and getattr(theme, key)
+                   for key in ("name", "background", "node_background", "text", "border", "accent")):
+            raise MindMapError("主题名称及颜色必须为非空字符串")
+        if not isinstance(document.metadata, dict):
+            raise MindMapError("文档元数据必须为对象")
+        try:
+            json.dumps(document.metadata, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise MindMapError("元数据与样式必须是有效的 JSON 数据") from exc
 
 
 def finite(value: Any) -> bool:

@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Event, Timer, get_ident
 
 import pytest
 from mindmap_engine import (
@@ -46,6 +48,145 @@ def create(window, path):
     """显式路径的新建不需要对话框，返回具有独立组件的已保存会话。"""
     assert window.new_document(path)
     return window.active_session
+
+
+def create_large_session(window, path):
+    """构造超过后台保存阈值的导图，初始造数不计入任何交互或后台任务。"""
+    session = create(window, path)
+    document = MindMapDocument.new("大图保存")
+    keys = [document.root_id]
+    for index in range(1100):
+        node = Node(f"节点 {index}")
+        document.nodes[keys[index // 5]].children.append(node.id)
+        document.nodes[node.id] = node
+        keys.append(node.id)
+    session.engine.replace_document(document)
+    return session
+
+
+@pytest.fixture
+def controlled_save_executor(monkeypatch):
+    """用可控执行器注入竞态，实际进程路径另由完整工作台基准及独立进程验收覆盖。"""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        monkeypatch.setattr("mindmap_workbench.sessions._SAVE_POOL", executor)
+        yield executor
+
+
+def test_real_background_process_saves_without_running_in_gui_process(empty_window, tmp_path, qtbot):
+    """真实 spawn/pythonw 入口验收，覆盖 Windows venv 重定向及进程间模型传输。"""
+    import mindmap_workbench.sessions as sessions_module
+
+    session = create_large_session(empty_window, tmp_path / "真实后台进程.mindmap")
+    try:
+        session.engine.update_node(session.engine.root_id, text="进程保存成功")
+        session.timer.stop()
+        assert session.autosave(background=True)
+        future = session._background_save[0]
+        qtbot.waitUntil(lambda: session._background_save is None, timeout=15000)
+        assert future.result() != os.getpid()
+        assert not session.last_error and not session.engine.is_dirty
+        assert load_document(session.files.path) == session.engine.document
+    finally:
+        session._finish_background_save(wait=True)
+        if sessions_module._SAVE_POOL is not None:
+            sessions_module._SAVE_POOL.shutdown(wait=True, cancel_futures=True)
+            sessions_module._SAVE_POOL = None
+
+
+def test_background_save_uses_stable_version_without_marking_later_edit_saved(
+    empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
+):
+    session = create_large_session(empty_window, tmp_path / "后台版本.mindmap")
+    started, release = Event(), Event()
+    ui_thread = get_ident()
+    worker_threads = []
+
+    def held_writer(document, path, **options):
+        worker_threads.append(get_ident())
+        started.set()
+        assert release.wait(5)
+        save_document(document, path, **options)
+
+    monkeypatch.setattr("mindmap_workbench.sessions.save_document", held_writer)
+    monkeypatch.setattr("mindmap_workbench.sessions.save_snapshot", held_writer)
+    engine = session.engine
+    try:
+        engine.update_node(engine.root_id, text="捕获版本甲")
+        session.timer.stop()
+        assert session.autosave(background=True)
+        qtbot.waitUntil(started.is_set)
+        assert worker_threads == [worker_threads[0]] and worker_threads[0] != ui_thread
+        engine.update_node(engine.root_id, text="后台期间的版本乙")
+        session.timer.stop()
+        release.set()
+        qtbot.waitUntil(lambda: session._background_save is None)
+        session.timer.stop()
+        assert load_document(session.files.path).root.text == "捕获版本甲"
+        assert engine.is_dirty
+        assert engine.undo() and not engine.is_dirty
+        assert engine.redo() and engine.is_dirty
+        monkeypatch.setattr("mindmap_workbench.sessions.save_document", save_document)
+        monkeypatch.setattr("mindmap_workbench.sessions.save_snapshot", save_document)
+        assert session.autosave() and not engine.is_dirty
+        assert load_document(session.files.path).root.text == "后台期间的版本乙"
+    finally:
+        release.set()
+        session._finish_background_save(wait=True)
+
+
+def test_background_failure_keeps_old_file_and_explicit_retry_succeeds(
+    empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
+):
+    session = create_large_session(empty_window, tmp_path / "后台失败.mindmap")
+    original = session.files.path.read_bytes()
+
+    def fail(*args, **kwargs):
+        raise OSError("后台磁盘写入失败")
+
+    monkeypatch.setattr("mindmap_workbench.sessions.save_document", fail)
+    monkeypatch.setattr("mindmap_workbench.sessions.save_snapshot", fail)
+    session.engine.update_node(session.engine.root_id, text="必须保留的修改")
+    session.timer.stop()
+    assert session.autosave(background=True)
+    qtbot.waitUntil(lambda: session._background_save is None)
+    assert "后台磁盘" in session.last_error and session.engine.is_dirty
+    assert session.files.path.read_bytes() == original and not session.timer.isActive()
+    monkeypatch.setattr("mindmap_workbench.sessions.save_document", save_document)
+    monkeypatch.setattr("mindmap_workbench.sessions.save_snapshot", save_document)
+    assert session.flush() and not session.engine.is_dirty
+    assert load_document(session.files.path).root.text == "必须保留的修改"
+
+
+def test_explicit_save_waits_for_old_background_write_before_writing_new_version(
+    empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
+):
+    session = create_large_session(empty_window, tmp_path / "保存次序.mindmap")
+    started, release = Event(), Event()
+    ui_thread, writes = get_ident(), []
+
+    def held_writer(document, path, **options):
+        writes.append(document.root.text)
+        if get_ident() != ui_thread:
+            started.set()
+            assert release.wait(5)
+        save_document(document, path, **options)
+
+    monkeypatch.setattr("mindmap_workbench.sessions.save_document", held_writer)
+    monkeypatch.setattr("mindmap_workbench.sessions.save_snapshot", held_writer)
+    try:
+        session.engine.update_node(session.engine.root_id, text="先保存的版本")
+        session.timer.stop()
+        assert session.autosave(background=True)
+        qtbot.waitUntil(started.is_set)
+        session.engine.update_node(session.engine.root_id, text="最终版本")
+        Timer(0.03, release.set).start()
+        assert session.files.save()
+        assert session._background_save is None and not session.engine.is_dirty
+        assert writes == ["先保存的版本", "最终版本"]
+        assert load_document(session.files.path).root.text == "最终版本"
+    finally:
+        release.set()
+        session._finish_background_save(wait=True)
 
 
 def assert_initial_canvas(canvas):

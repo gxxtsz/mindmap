@@ -449,6 +449,7 @@ class NodePropertiesForm(QWidget):
         branch_styles=True,
         branch_scope="subtree",
         branch_nodes=None,
+        branch_kinds=None,
     ):
         """以正式快照填充单选或多选，不将默认值、混合值及未配置状态转换成修改请求。"""
         self._loading = True
@@ -504,7 +505,10 @@ class NodePropertiesForm(QWidget):
                 )
                 self.fields["style.width"].setEnabled(self._editable and custom is not False)
                 self.scope.setCurrentIndex(max(0, self.scope.findData(branch_scope)))
-                self.set_branch_values(branch_nodes if branch_nodes is not None else nodes)
+                if branch_kinds is not None:
+                    self.set_branch_kinds(branch_kinds)
+                else:
+                    self.set_branch_values(branch_nodes if branch_nodes is not None else nodes)
                 if not branch_styles:
                     self.fields["branch.kind"].setToolTip("当前布局算法不支持分支连接线样式")
             self._sync_font_buttons()
@@ -519,6 +523,14 @@ class NodePropertiesForm(QWidget):
                 "branch.kind",
                 self.common(kind.value if (kind := get_branch_style(node.style)) else None for node in nodes),
             )
+        finally:
+            self._loading = loading
+
+    def set_branch_kinds(self, kinds):
+        """使用宿主已经汇总的样式集合，只更新分支字段，避免枚举大子树的所有实体。"""
+        loading, self._loading = self._loading, True
+        try:
+            self._set_value("branch.kind", self.common(kind.value if kind else None for kind in kinds))
         finally:
             self._loading = loading
 

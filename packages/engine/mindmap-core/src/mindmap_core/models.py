@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -65,6 +66,38 @@ class Node:
     image_id: str | None = None
     image_width: float = 160.0
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __deepcopy__(self, memo: dict) -> Node:
+        """建立隔离节点副本，跳过不可变标量的通用序列化重建开销。
+
+        文字、标识和数值可直接共享；子节点、样式、标签和元数据仍通过同一个
+        memo 深拷贝，保留嵌套容器的别名关系和循环处理。遍历实例字段而非手写
+        固定字段列表，使后续新增字段及子类扩展也能进入事务快照和撤销历史。
+        """
+        result = type(self).__new__(type(self))
+        memo[id(self)] = result
+        state = memo.get(id(self.__dict__))
+        if state is not None:
+            result.__dict__ = state
+        else:
+            memo[id(self.__dict__)] = result.__dict__
+            atomic = (str, int, float, bool, bytes, type(None))
+            result.__dict__.update(
+                (name, value if type(value) in atomic else deepcopy(value, memo))
+                for name, value in self.__dict__.items()
+            )
+        if type(self) is not Node:
+            # 普通节点没有 slots；扩展节点若声明了槽字段，同样保持原有深拷贝能力。
+            for base in type(self).__mro__:
+                slots = base.__dict__.get("__slots__", ())
+                for name in (slots,) if isinstance(slots, str) else slots:
+                    if name in ("__dict__", "__weakref__"):
+                        continue
+                    if name.startswith("__") and not name.endswith("__"):
+                        name = f"_{base.__name__.lstrip('_')}{name}"
+                    if hasattr(self, name):
+                        object.__setattr__(result, name, deepcopy(getattr(self, name), memo))
+        return result
 
 
 @dataclass(frozen=True)

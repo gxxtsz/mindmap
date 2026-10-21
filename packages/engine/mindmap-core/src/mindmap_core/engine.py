@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from copy import deepcopy
+from copy import copy, deepcopy
 
 from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent, EventDispatcher
-from .history import ChangeSet, HistoryManager
+from .history import HistoryManager
 from .models import MindMapDocument, Node, Theme
 from .operations import DocumentEditor
 from .transactions import DocumentState, TransactionManager
@@ -34,6 +34,7 @@ class MindMapEngine:
         self.before_operation: Callable[[str, dict], bool] | None = None
         self.revision = 0
         self.document_generation = 0
+        self._previewing = False
 
     @property
     def document(self) -> MindMapDocument:
@@ -43,6 +44,15 @@ class MindMapEngine:
     @property
     def root_id(self) -> str:
         return self._state.document.root_id
+
+    @property
+    def node_count(self) -> int:
+        """返回当前节点总数，包括折叠节点；查询不建立文档快照。
+
+        供状态栏等只需要统计值的宿主使用，避免为读取一个整数复制整张导图。
+        返回值不持有内部文档引用，不能绕过事务、历史或修改通知。
+        """
+        return len(self._state.document.nodes)
 
     @property
     def history_limit(self) -> int:
@@ -68,15 +78,26 @@ class MindMapEngine:
         """按标识查询节点快照；无效标识使用中文异常报告。"""
         return deepcopy(self._editor.node(node_id))
 
+    def parent_id(self, node_id: str) -> str | None:
+        """返回父标识，根返回 None；不建立整图索引或快照，无效节点仍明确报错。"""
+        self._editor.node(node_id)
+        return self._state.parents.get(node_id)
+
     def subscribe(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:
-        """订阅已提交状态，返回取消订阅函数；监听器异常不会撤销提交。"""
+        """订阅已提交状态并返回取消函数，监听器异常不会撤销提交。
+
+        变化集只包含变化实体，可按事件方向更新独立读模型；不要为每次通知
+        再读取 document。重入产生的新事件排队分发，所有订阅者按修订号接收。
+        """
         return self._events.subscribe(callback)
 
-    def _notify(self, operation: str, ids=(), kind="change") -> None:
+    def _notify(self, operation: str, ids=(), kind="change", *, changes=None, forward=True) -> None:
         self.revision += 1
-        self._events.publish(ChangeEvent(operation, tuple(ids), self.revision, kind))
+        self._events.publish(ChangeEvent(operation, tuple(ids), self.revision, kind, changes, forward))
 
     def _guard(self, name: str, parameters: dict) -> None:
+        if self._previewing:
+            return
         try:
             if self.before_operation and self.before_operation(name, deepcopy(parameters)) is False:
                 raise OperationRejected(f"操作已被前置钩子取消：{name}")
@@ -90,21 +111,38 @@ class MindMapEngine:
         with self._transactions.transaction(label):
             yield
 
+    @contextmanager
+    def _preview_operation(self):
+        """内置画布的只回滚试算边界，禁止在已有事务内或外部扩展中使用。
+
+        返回只读候选文档和变更实体登记表；内部编辑照常写时复制、校验并恢复
+        父索引，但不执行用户钩子、不记录历史、不发送事件。调用方只允许同步
+        纯计算，不能处理事件循环或把候选引用交给外部代码。正式提交再执行钩子。
+        """
+        self._require_idle("事务期间不能执行候选试算")
+        self._previewing = True
+        try:
+            with self._transactions.transaction("布局试算", rollback_only=True):
+                yield self._state.document, self._state.journal.nodes
+        finally:
+            self._previewing = False
+
     def _execute(self, name: str, action: Callable, **parameters):
         self._guard(name, parameters)
         with self.transaction(name):
             return action(**parameters)
 
-    def _finalize(self) -> None:
-        # 清理必须发生在差异计算前，图片删除与节点修改才能一起撤销。
-        self._editor.prune_unused_assets()
-        self._state.document.validate()
+    def _finalize(self, journal) -> None:
+        # 结构由受控编辑器维护；变化实体复用导入字段校验，资源按引用差量清理。
+        from .validation import validate_changes
 
-    def _commit(self, before: MindMapDocument, label: str) -> None:
-        delta = ChangeSet.between(before, self._state.document)
+        validate_changes(self._state, journal)
+
+    def _commit(self, delta, label: str) -> None:
         if not delta.empty:
+            self._state.update_indexes(delta, parents=False)
             self._history.record(delta, label)
-            self._notify(label, delta.node_ids)
+            self._notify(label, delta.node_ids, changes=delta)
 
     def _require_idle(self, message: str) -> None:
         if self._transactions.depth:
@@ -118,7 +156,8 @@ class MindMapEngine:
             return False
         self._guard("undo", {})
         entry = self._history.undo(self._state.document)
-        self._notify(entry.label, entry.delta.node_ids, "undo")
+        self._state.update_indexes(entry.delta, forward=False)
+        self._notify(entry.label, entry.delta.node_ids, "undo", changes=entry.delta, forward=False)
         return True
 
     def redo(self) -> bool:
@@ -128,7 +167,8 @@ class MindMapEngine:
             return False
         self._guard("redo", {})
         entry = self._history.redo(self._state.document)
-        self._notify(entry.label, entry.delta.node_ids, "redo")
+        self._state.update_indexes(entry.delta)
+        self._notify(entry.label, entry.delta.node_ids, "redo", changes=entry.delta)
         return True
 
     def mark_saved(self) -> None:
@@ -137,13 +177,37 @@ class MindMapEngine:
         self._history.mark_saved()
         self._notify("保存", kind="saved")
 
+    def _capture_save_snapshot(self):
+        """受信任原生保存器专用的稳定读快照，不向扩展暴露内部可变实体。
+
+        引擎写入已统一采用实体写时复制，因此此处只复制字典和文档配置即可
+        固定节点版本。后台编码器只能读取；公共 document 仍返回完整深拷贝。
+        必须在 GUI/引擎线程捕获，返回快照、文档代次和历史状态令牌。
+        """
+        self._require_idle("事务提交前不能取得保存快照")
+        source = self._state.document
+        document = copy(source)
+        document.nodes, document.assets = source.nodes.copy(), source.assets.copy()
+        document.layout, document.theme = deepcopy(source.layout), deepcopy(source.theme)
+        document.metadata = deepcopy(source.metadata)
+        return document, self.document_generation, self._history._state
+
+    def _mark_saved_snapshot(self, generation, token):
+        """后台写入成功后标记对应历史状态；旧文档结果不得更新新文档保存位置。"""
+        self._require_idle("事务提交前不能建立保存标记")
+        if generation != self.document_generation:
+            return False
+        self._history.mark_saved(token)
+        self._notify("保存", kind="saved")
+        return True
+
     def replace_document(self, document: MindMapDocument) -> None:
         """校验新快照后原子替换并清空历史；算法是否可用由宿主布局服务检查。"""
         self._require_idle("事务期间不能替换文档")
         candidate = deepcopy(document)
         candidate.validate()
         self._guard("replace_document", {})
-        self._state.document = candidate
+        self._state.reset(candidate)
         self._history.reset()
         self.document_generation += 1
         self._notify("打开文档", candidate.nodes, "reset")
@@ -199,7 +263,7 @@ class MindMapEngine:
 
         def action(node_id, down):
             self._editor.node(node_id)
-            parent = self._state.document.parents().get(node_id)
+            parent = self._state.parents.get(node_id)
             if parent is None:
                 raise MindMapError("根节点不能调整同级顺序")
             siblings = self._editor.node(parent).children
@@ -219,7 +283,7 @@ class MindMapEngine:
         """保存独立布局配置；核心仅校验结构，宿主在界面使用前校验具体算法。"""
 
         def action(config):
-            self._state.document.layout = deepcopy(config)
+            self._state.set_setting("layout", config)
 
         self._execute("set_layout", action, config=config)
 
@@ -227,7 +291,7 @@ class MindMapEngine:
         """保存主题副本，避免多个文档共享可变主题。"""
 
         def action(theme):
-            self._state.document.theme = deepcopy(theme)
+            self._state.set_setting("theme", theme)
 
         self._execute("set_theme", action, theme=theme)
 

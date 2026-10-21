@@ -36,6 +36,34 @@ def test_snapshots_cannot_bypass_history(tree):
     assert not engine.can_undo
 
 
+def test_node_copy_preserves_aliases_and_extended_slot_fields():
+    """快照加速仍要隔离嵌套内容，保留同一副本内的共享引用及扩展字段。"""
+    class ExtendedNode(Node):
+        __slots__ = ("extra",)
+
+    node = ExtendedNode("扩展节点")
+    shared = {"嵌套列表": [1, 2]}
+    node.style["额外数据"] = shared
+    node.metadata["同一对象"] = shared
+    node.extra = {"扩展内容": [3]}
+    copied = deepcopy(node)
+    assert copied.style["额外数据"] is copied.metadata["同一对象"]
+    assert copied.style["额外数据"] is not shared
+    copied.metadata["同一对象"]["嵌套列表"].append(9)
+    copied.extra["扩展内容"].append(4)
+    assert shared["嵌套列表"] == [1, 2] and node.extra["扩展内容"] == [3]
+    container = deepcopy({"先复制的状态": node.__dict__, "节点": node})
+    assert container["先复制的状态"] is container["节点"].__dict__
+
+
+def test_node_count_follows_history_without_exposing_document(tree):
+    engine, a, *_ = tree
+    before = engine.node_count
+    engine.remove_nodes([a])
+    assert engine.node_count == before - 3
+    assert engine.undo() and engine.node_count == before
+
+
 def test_insert_move_and_exact_history(tree):
     engine, a, b, x, y = tree
     before = engine.document

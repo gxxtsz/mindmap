@@ -9,6 +9,7 @@ import json
 import platform
 import statistics
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import PySide6
@@ -24,7 +25,7 @@ def build_document(count=1000):
     parents = [document.root_id]
     for index in range(1, count):
         parent = document.nodes[parents[(index - 1) // 5]]
-        child = Node(f"节点 {index:04}：记录想法与行动")
+        child = Node(f"节点 {index:04}：记录想法与行动", style=deepcopy(parent.style))
         parent.children.append(child.id)
         document.nodes[child.id] = child
         parents.append(child.id)

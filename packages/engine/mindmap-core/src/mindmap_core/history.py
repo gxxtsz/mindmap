@@ -124,9 +124,9 @@ class HistoryManager:
         self._state = entry.after_token
         return entry
 
-    def mark_saved(self) -> None:
-        """只在持久化成功后记录当前位置。"""
-        self._saved = self._state
+    def mark_saved(self, token=None) -> None:
+        """持久化成功后记录对应状态；省略令牌时记录当前游标，后台保存传入捕获的令牌。"""
+        self._saved = self._state if token is None else token
 
     def reset(self) -> None:
         """替换文档时建立全新历史分支和保存位置。"""

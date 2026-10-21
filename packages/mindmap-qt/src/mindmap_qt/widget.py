@@ -11,9 +11,11 @@ from mindmap_engine import (
     FormatRegistry,
     LayoutConfig,
     LayoutRegistry,
+    LayoutResult,
     MindMapDocument,
     MindMapEngine,
     MindMapError,
+    Rect,
     apply_branch_style,
     branch_style_targets,
     create_default_format_registry,
@@ -22,6 +24,8 @@ from mindmap_engine import (
     encode_document,
     get_branch_style,
 )
+from mindmap_layouts import TreeLayout
+from mindmap_layouts.incremental_result import IncrementalTreeLayout
 from PySide6.QtCore import QMimeData, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QKeySequence
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -49,6 +53,7 @@ from .view import MIN_ZOOM, MindMapView
 from .view_controls import _ViewControls
 
 CLIPBOARD_MIME = "application/x-python-mindmap+json"
+VIRTUALIZATION_NODE_LIMIT = 1000
 
 
 class MindMapWidget(QWidget):
@@ -138,8 +143,17 @@ class MindMapWidget(QWidget):
         self._branch_scope = "subtree"
         self._preview_layout = None
         self._measurements = {}
+        self._measure_dirty = None
+        self._visual_document = None
+        self._visuals = {}
+        self._incremental_layout = None
+        self._incremental_key = None
+        self._virtualized = False
+        self._viewport_signature = None
         self._selection_undo, self._selection_redo = [], []
         self._document = self.engine.document
+        self._node_parents = self._document.parents()
+        self._node_order = None
         self._actions = {}
         self._mutating = set()
         self._custom_actions = []
@@ -436,7 +450,15 @@ class MindMapWidget(QWidget):
     def selected_node_ids(self) -> list[str]:
         """按树的先序顺序返回选择，移动后仍与文档层级一致。"""
         selected = {item.node.id for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
-        return [key for key in self._document.descendants(self._document.root_id) if key in selected]
+        if len(selected) < 2:
+            return list(selected)
+        if self._incremental_layout is not None:
+            return sorted(selected, key=self._incremental_layout.geometry.order)
+        if self._node_order is None:
+            self._node_order = {
+                key: index for index, key in enumerate(self._document.descendants(self._document.root_id))
+            }
+        return sorted(selected, key=self._node_order.__getitem__)
 
     def current_node_id(self) -> str:
         ids = self.selected_node_ids()
@@ -449,11 +471,14 @@ class MindMapWidget(QWidget):
         try:
             self.scene.clearSelection()
             for key in node_ids:
+                self._ensure_node_item(key)
                 if key in self.node_items:
                     self.node_items[key].setSelected(True)
         finally:
             self.scene.blockSignals(False)
         self._selection_changed()
+        if self._virtualized:
+            self._sync_viewport(force=True)
 
     def _selection_changed(self):
         if self._refreshing or self._disposed:
@@ -473,19 +498,47 @@ class MindMapWidget(QWidget):
             self.document_changing.emit(event)
             self._cancel_branch_menu()
             before = self.selected_node_ids()
-            old_document = self._document
+            old_parents = {key: self._node_parents.get(key) for key in before}
             if self.editor is not None:
                 self.finish_edit(commit=False)
-            self._document = self.engine.document
+            changes = event.changes
+            if changes is not None:
+                index = 1 if event.forward else 0
+                delta = changes.collections.get("nodes", {})
+                new_ids = [key for key, pair in delta.items()
+                           if pair[1 - index] is None and pair[index] is not None]
+                for key, pair in delta.items():
+                    old = pair[1 - index]
+                    new = pair[index]
+                    if old is not None and (new is None or old.children != new.children):
+                        for child in old.children:
+                            if self._node_parents.get(child) == key:
+                                self._node_parents.pop(child)
+                    if pair[index] is None:
+                        self._node_parents.pop(key, None)
+                changes.apply(self._document, forward=event.forward)
+                for key, pair in delta.items():
+                    node = pair[index]
+                    old = pair[1 - index]
+                    if node is not None and (old is None or old.children != node.children):
+                        for child in node.children:
+                            self._node_parents[child] = key
+                self._measure_dirty = None if "theme" in changes.settings else event.node_ids
+            else:
+                self._document = self.engine.document
+                self._node_parents = self._document.parents()
+                new_ids = []
+                self._measure_dirty = None
+                self._incremental_layout = None
+            self._node_order = None
             after = [key for key in before if key in self._document.nodes]
-            new_ids = set(self._document.nodes) - set(old_document.nodes)
-            parents = self._document.parents()
+            parents = self._node_parents
             if new_ids:
+                new_set = set(new_ids)
                 after = [
-                    key for key in self._document.nodes if key in new_ids and parents.get(key) not in new_ids
+                    key for key in new_ids if parents.get(key) not in new_set
                 ]
             if not after:
-                old_parents = old_document.parents()
                 after = [old_parents[key] for key in before if old_parents.get(key) in self._document.nodes]
                 after = after or [self.engine.root_id]
             if event.kind == "reset":
@@ -514,33 +567,129 @@ class MindMapWidget(QWidget):
         self.document_changed.emit(event)
 
     def refresh(self) -> None:
-        """刷新几何并复用按 ID 索引的图元；平移、缩放不会调用此方法。"""
+        """用提交事件维护的界面读模型刷新几何，复用按 ID 索引的图元。
+
+        局部提交只合并变化实体；只有文档替换才重建完整读模型。这里不能再次读取
+        engine.document，以免恢复整图深拷贝。内置树布局复用持久化摘要和局部路径，
+        大图仅同步视口图元；聚焦和第三方布局继续使用兼容路径。
+        """
         self.view.cancel_interaction()
         self._cancel_branch_menu(restore=False)
         # 在更新场景前记录中心，内容扩展时保持视图位置，删除或折叠导致范围缩小
         # 时再由视图限制到最近边界；不要为了容纳内容而自动修改用户的缩放比例。
         center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
-        document = self._document = self.engine.document
-        visuals, sizes = self.factory.measure(document)
+        document = self._document
+        dirty = self._measure_dirty
+        if dirty is None or self._visual_document is None:
+            visuals, sizes = self.factory.measure(document)
+        else:
+            visuals, sizes = self._visuals, self._measurements
+            self.factory.update_measurements(document, dirty, visuals, sizes)
+        self._visual_document, self._visuals = document, visuals
+        self._measure_dirty = ()
         self._measurements = sizes
-        self.layout_result = self.layout_registry.layout(document, sizes, focus_id=self.focus_id)
+        if self._can_incremental():
+            key = (id(self.layout_registry.get(document.layout.algorithm_id)),
+                   document.root_id, repr(document.layout))
+            if self._incremental_layout is None or key != self._incremental_key or dirty is None:
+                self.layout_registry.validate_config(document.layout)
+                self._incremental_layout = IncrementalTreeLayout(document, sizes)
+                self._incremental_key = key
+            else:
+                self._incremental_layout.update(document, sizes, dirty)
+            self.layout_result = self._incremental_layout.result()
+        else:
+            self._incremental_layout = None
+            self.layout_result = self.layout_registry.layout(document, sizes, focus_id=self.focus_id)
         result = self.layout_result
+        self._virtualized = self._incremental_layout is not None and len(result.nodes) > VIRTUALIZATION_NODE_LIMIT
+        self._viewport_signature = None
         self._refreshing = True
         self.scene.blockSignals(True)
         try:
-            self._set_node_items(document, visuals, result)
-            self._set_branch_items(result)
             bounds = result.bounds
             # 布局边界已覆盖可见节点、节点内图片及普通父子分支线。场景
             # 只记录内容范围，一屏操作余量由视图按当前窗口大小与倍率单独计算。
             self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
+            self.view.update_navigation_rect(center=center)
+            if self._virtualized:
+                self._sync_viewport(force=True)
+            else:
+                self._set_node_items(document, visuals, result)
+                self._set_branch_items(result)
             self._apply_ui_theme()
         finally:
             self.scene.blockSignals(False)
             self._refreshing = False
-        self.view.update_navigation_rect(center=center)
         self.view.update_cursor()
         self._schedule_view_reset()
+
+    def _can_incremental(self):
+        """仅启用受控内置树算法；自定义算法、聚焦及宿主替换的布局入口继续完整校验。"""
+        algorithm = self.layout_registry.get(self._document.layout.algorithm_id)
+        return (self.focus_id is None and type(algorithm) is TreeLayout
+                and "layout" not in self.layout_registry.__dict__ and "layout" not in algorithm.__dict__)
+
+    def _ensure_node_item(self, key):
+        """为程序选择或编辑按需实例化一个可见节点，不改变文档折叠或视口位置。"""
+        if key in self.node_items or not hasattr(self, "layout_result"):
+            return
+        rect = self.layout_result.nodes.get(key)
+        if rect is None:
+            return
+        item = NodeItem(self._document.nodes[key], self._visuals[key], self._document.theme, self)
+        self.scene.addItem(item)
+        self.node_items[key] = item
+        item.setPos(rect.x, rect.y)
+
+    def _viewport_changed(self):
+        """视图平移、缩放或尺寸变化后同步屏内对象；构造及批量刷新期间由 refresh 统一调用。"""
+        if getattr(self, "_virtualized", False) and not self._refreshing and not self._disposed:
+            self._sync_viewport()
+
+    def _sync_viewport(self, *, force=False):
+        """保留选择、编辑和鼠标捕获对象，其余图元仅维护视口及预取边距。
+
+        连接线采用父级局部路径和世界原点。子树平移时只移动现有图元，保持 Qt
+        路径和画笔不变；视口外实体仍存在于独立读模型和按需布局映射中。
+        """
+        selected = {item.node.id for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
+        if self.editor is not None:
+            selected.add(self.editor.node_id)
+        grabbed = self.scene.mouseGrabberItem()
+        if isinstance(grabbed, NodeItem):
+            selected.add(grabbed.node.id)
+        box = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
+        signature = (id(self.layout_result), box.x(), box.y(), box.width(), box.height(), frozenset(selected))
+        if not force and signature == self._viewport_signature:
+            return
+        self._viewport_signature = signature
+        margin = 100 / self.view.transform().m11()
+        viewport = Rect(box.x(), box.y(), box.width(), box.height()).padded(margin)
+        nodes, branches = self.layout_result.viewport(viewport, selected)
+        blocked = self.scene.blockSignals(True)
+        try:
+            self._set_node_items(self._document, self._visuals, LayoutResult(nodes=nodes))
+            for key in list(self.branch_items):
+                if key not in branches:
+                    self.scene.removeItem(self.branch_items.pop(key))
+            for key, (branch, origin) in branches.items():
+                item = self.branch_items.get(key)
+                if item is None:
+                    item = self.branch_items[key] = BranchItem(branch)
+                    self.scene.addItem(item)
+                else:
+                    item.set_branch(branch)
+                item.setPos(*origin)
+            # 同色主干去重的所有权和跨颜色透明叠加依赖稳定绘制次序。对象复用时
+            # 不能沿用创建先后顺序，否则平移到另一视口后交汇处颜色会改变。
+            ordered = sorted(branches, key=self.layout_result.geometry.layout_order)
+            for previous, following in zip(ordered, ordered[1:]):
+                self.branch_items[previous].stackBefore(self.branch_items[following])
+            if self.view.node_drag.active:
+                self.view.node_drag._dim_sources()
+        finally:
+            self.scene.blockSignals(blocked)
 
     def _set_node_items(self, document, visuals, result) -> None:
         """按给定快照展示节点，不改写正式文档和布局结果。
@@ -559,11 +708,16 @@ class MindMapWidget(QWidget):
                 self.scene.addItem(item)
                 self.node_items[key] = item
             elif (
-                item.node is not document.nodes[key]
-                or item.visual is not visuals[key]
-                or (item.theme is not document.theme)
+                item.visual is not visuals[key]
+                or item.node.expanded != document.nodes[key].expanded
+                or item.node.note != document.nodes[key].note
+                or item.node.hyperlink != document.nodes[key].hyperlink
+                or item.theme.accent != document.theme.accent
             ):
                 item.update_content(document.nodes[key], visuals[key], document.theme)
+            else:
+                # 视觉未变也同步实体引用，正文导航等读取当前快照，但不使 Qt 几何失效。
+                item.node, item.theme = document.nodes[key], document.theme
             item.setPos(rect.x, rect.y)
 
     def set_ui_colors(self, colors: UiColors | None) -> None:
@@ -608,8 +762,7 @@ class MindMapWidget(QWidget):
 
     def _sync_branch_actions(self) -> None:
         """按当前范围统计正式状态；同一主题下后代不同样式也显示为混合。"""
-        ids = branch_style_targets(self._document, self._branch_selection(), scope=self._branch_scope)
-        kinds = {get_branch_style(self._document.nodes[key].style) for key in ids}
+        kinds = self._branch_kinds(self._branch_selection(), self._branch_scope)
         self.branch_menu.sync(kinds, self._branch_scope, (self._ui_colors_override or self._document.theme))
         current = next(iter(kinds)) if len(kinds) == 1 else None
         label = "多种样式" if len(kinds) != 1 else current.label if current else "原始曲线"
@@ -619,6 +772,13 @@ class MindMapWidget(QWidget):
         icon = branch_style_icon(current, (self._ui_colors_override or self._document.theme))
         if action.icon().cacheKey() != icon.cacheKey():
             action.setIcon(icon)
+
+    def _branch_kinds(self, node_ids, scope="subtree"):
+        """画布和侧栏共用逻辑子树的样式摘要，折叠变化不再触发全图样式扫描。"""
+        if self._incremental_layout is not None:
+            return self._incremental_layout.style_kinds(node_ids, scope)
+        ids = branch_style_targets(self._document, node_ids, scope=scope)
+        return {get_branch_style(self._document.nodes[key].style) for key in ids}
 
     def _set_branch_scope(self, scope: str) -> None:
         """作用范围是组件偏好，不进入导图文件和撤销历史。"""
@@ -654,6 +814,7 @@ class MindMapWidget(QWidget):
                 self.scene.addItem(self.branch_items[key])
             else:
                 self.branch_items[key].set_branch(branch)
+            self.branch_items[key].setPos(0, 0)
 
     def _show_branch_layout(self, result) -> None:
         center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
@@ -756,8 +917,9 @@ class MindMapWidget(QWidget):
     def center_root(self):
         """将根节点或当前聚焦节点置于视口中央，保持用户的缩放比例。"""
         key = self.focus_id or self.engine.root_id
-        if not self._disposed and key in self.node_items:
-            self.view.update_navigation_rect(center=self.node_items[key].sceneBoundingRect().center())
+        rect = self.layout_result.nodes.get(key)
+        if not self._disposed and rect is not None:
+            self.view.update_navigation_rect(center=QRectF(rect.x, rect.y, rect.width, rect.height).center())
 
     def fit_to_view(self):
         """按可见内容适应窗口，将最终倍率限制在 10%～200%，不计入导航余量。
@@ -793,7 +955,7 @@ class MindMapWidget(QWidget):
 
     def begin_edit(self, node_id: str):
         """开始原地编辑；一个编辑会话在提交时只生成一次引擎操作。"""
-        if not self.editable or node_id not in self.node_items:
+        if not self.editable or node_id not in self.layout_result.nodes:
             return
         self.finish_edit(commit=True)
         self.select_nodes([node_id])

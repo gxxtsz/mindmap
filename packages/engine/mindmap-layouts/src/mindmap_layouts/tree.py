@@ -14,6 +14,7 @@ from mindmap_core import (
     MindMapError,
     Point,
     Rect,
+    get_branch_style,
 )
 
 from .connectors import route_branches
@@ -81,6 +82,28 @@ class TreeLayout:
             side = sides[root]
             sides = dict.fromkeys(visible, side)
         sizes = {key: size(key, document.nodes[key].text) for key in visible}
+        focus_branch = None
+        if focus_id and focus_id != document.root_id:
+            parents = document.parents()
+            focus_branch = focus_id
+            while parents[focus_branch] != document.root_id:
+                focus_branch = parents[focus_branch]
+        # 候选试算和正式提交经常得到相同几何。仅按影响几何/连线的只读内容建立键，
+        # 相同尺寸的文字修改也可复用；返回新的映射，避免调用方修改结果污染缓存。
+        request = (
+            document.layout.direction,
+            document.layout.compact,
+            tuple(document.root.children),
+            tuple(document.theme.palette),
+            document.theme.accent,
+            focus_branch,
+            tuple((key, sizes[key], tuple(children[key]), sides[key],
+                   get_branch_style(document.nodes[key].style)) for key in visible),
+        )
+        cached = getattr(self, "_last_layout", None)
+        if cached is not None and request == cached[0]:
+            result = cached[1]
+            return LayoutResult(nodes=result.nodes.copy(), branches=result.branches.copy(), bounds=result.bounds)
         heights = {}
         for node_id in reversed(visible):
             branch_height = sum(heights[child] for child in children[node_id])
@@ -128,4 +151,8 @@ class TreeLayout:
                 bounds = bounds.union(Rect(min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)))
         # 40 单位是绘制/导出的留白；按窗口尺寸换算的一屏操作余量由视图单独维护。
         result.bounds = bounds.padded(40)
+        # 键与值作为一个缓存项发布，避免并发的只读布局调用观察到不同请求的配对。
+        self._last_layout = (
+            request, LayoutResult(nodes=result.nodes.copy(), branches=result.branches.copy(), bounds=result.bounds)
+        )
         return result

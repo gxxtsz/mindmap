@@ -3,14 +3,47 @@
 from __future__ import annotations
 
 import os
+import sys
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from multiprocessing import get_context
 from pathlib import Path
 from uuid import uuid4
 
 from mindmap_docking import DocumentSpec
-from mindmap_engine import MindMapEngine, MindMapError, save_document
+from mindmap_engine import FormatRegistry, MindMapEngine, MindMapError, save_document
+from mindmap_formats.mindmap import MindmapCodec
 from mindmap_qt import MindMapFileController, MindMapPanels, MindMapWidget
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
+
+from .background_save import can_process_snapshot, save_snapshot
+
+# 延迟启动一个独立进程，避免编码、深拷贝及垃圾回收持有 GUI 的解释器锁。
+_SAVE_POOL = None
+BACKGROUND_SAVE_NODE_LIMIT = 1000
+
+
+def _save_pool():
+    """首次大图保存时才建立共享进程，Windows 使用无控制台解释器运行后台任务。"""
+    global _SAVE_POOL
+    if _SAVE_POOL is None:
+        context = get_context("spawn")
+        # 与 multiprocessing 绕过 venv 重定向器的规则一致，使用真实运行时的 pythonw。
+        # 父进程的模块搜索路径会由 spawn 传入，后台进程仍能加载当前工作区包。
+        interpreter = Path(getattr(sys, "_base_executable", sys.executable)).with_name("pythonw.exe")
+        if sys.platform == "win32" and not getattr(sys, "frozen", False) and interpreter.exists():
+            context.set_executable(str(interpreter))
+        _SAVE_POOL = ProcessPoolExecutor(max_workers=1, mp_context=context)
+    return _SAVE_POOL
+
+
+def _discard_save_pool(executor):
+    """工作进程异常退出后丢弃损坏的池；下一次显式请求或编辑可以重新建立进程。"""
+    global _SAVE_POOL
+    if _SAVE_POOL is executor:
+        _SAVE_POOL = None
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def path_key(path):
@@ -37,7 +70,12 @@ class MindMapSession(QObject):
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.setInterval(500)
-        self.timer.timeout.connect(self.autosave)
+        self.timer.timeout.connect(lambda: self.autosave(background=True))
+        self._background_save = None
+        self._save_poll = QTimer(self)
+        self._save_poll.setInterval(15)
+        self._save_poll.timeout.connect(self._finish_background_save)
+        self.files.wait_for_pending_write = lambda: self._finish_background_save(wait=True)
         self._unsubscribe = self.engine.subscribe(self._changed)
         self.files.error_occurred.connect(self._failed)
         self.canvas.error_occurred.connect(owner.window.show_status_message)
@@ -50,6 +88,7 @@ class MindMapSession(QObject):
 
     def _write(self, document, path, **kwargs):
         """所有写入先检查其他会话的文件归属，再复用引擎原子写入，禁止跨标签覆盖。"""
+        self._finish_background_save(wait=True)
         other = self.owner.find_path(path)
         if other is not None and other is not self:
             raise MindMapError("该文件已在另一个标签打开，请选择其他保存位置")
@@ -63,7 +102,11 @@ class MindMapSession(QObject):
 
     def _saved(self):
         self.last_error = ""
-        self.timer.stop()
+        if self.engine.is_dirty and not self.disposed:
+            if not self.timer.isActive():
+                self.timer.start()
+        else:
+            self.timer.stop()
         self.owner.sync(self)
 
     def _failed(self, message):
@@ -74,16 +117,82 @@ class MindMapSession(QObject):
         self.owner.window.show_status_message(f"{name}：{message}")
         self.owner.sync(self)
 
-    def autosave(self):
-        """计时保存不得结束原地编辑、移动焦点或提交仍在输入的侧栏字段。"""
+    def autosave(self, *, background=False):
+        """保存已提交版本，不结束编辑、移动焦点或提交草稿。
+
+        计时器对大图的内置原生编码器启用后台写入，只在 GUI 线程捕获稳定快照。
+        直接调用默认同步，保留显式保存、测试及宿主调用的成功/失败返回语义。
+        外部注入写入器或编码器继续同步，不能假定它们支持独立进程。
+        """
         if self.disposed:
             return False
+        if (background and self.engine.node_count > BACKGROUND_SAVE_NODE_LIMIT
+                and self.engine.is_dirty and self.files.writer == self._write):
+            try:
+                self.files._require_native_save_format()
+                entry = self.canvas.format_registry.get("mindmap")
+                registry = self.canvas.format_registry
+                if (type(entry.exporter) is MindmapCodec and "write" not in entry.exporter.__dict__
+                        and type(registry) is FormatRegistry
+                        and not {"get", "resolve", "write"}.intersection(registry.__dict__)):
+                    if self._background_save is not None:
+                        return True
+                    if self.files.path is None:
+                        raise MindMapError("导图尚未选择保存位置")
+                    target = self.files.validate_save_path(self.files.path)
+                    other = self.owner.find_path(target)
+                    if other is not None and other is not self:
+                        raise MindMapError("该文件已在另一个标签打开，请选择其他保存位置")
+                    document, generation, token = self.engine._capture_save_snapshot()
+                    if not can_process_snapshot(document):
+                        return self.files.save_committed()
+                    executor = _save_pool()
+                    try:
+                        future = executor.submit(save_snapshot, document, target)
+                    except BrokenProcessPool:
+                        _discard_save_pool(executor)
+                        raise MindMapError("后台保存进程不可用，请重新保存") from None
+                    self._background_save = future, generation, token, target, executor
+                    self._save_poll.start()
+                    return True
+            except (MindMapError, OSError) as exc:
+                self.files.report_error(str(exc))
+                return False
+        self._finish_background_save(wait=True)
         saved = self.files.save_committed()
         if saved and self.last_error:
             # 撤销回已保存快照时可以无需写盘，但旧错误也应清除，避免干净标签
             # 一直显示失败。实际写盘成功则已经由 state_changed 清除了错误。
             self._saved()
         return saved
+
+    def _finish_background_save(self, *, wait=False):
+        """GUI 线程接收完成结果，标记实际落盘的历史版本；过期文档结果不改保存位置。
+
+        显式保存、另存、替换或关闭会等待旧任务结束，确保旧文件写入不会晚于新
+        版本覆盖。后台期间的新编辑保持未保存状态，并继续安排下一次防抖写入。
+        """
+        pending = self._background_save
+        if pending is None:
+            return True
+        future, generation, token, target, executor = pending
+        if not wait and not future.done():
+            return False
+        self._background_save = None
+        self._save_poll.stop()
+        try:
+            future.result()
+        except Exception as exc:
+            if isinstance(exc, BrokenProcessPool):
+                _discard_save_pool(executor)
+            if not self.disposed:
+                self.files.report_error(f"后台保存失败：{exc}")
+            return False
+        if not self.disposed:
+            self.engine._mark_saved_snapshot(generation, token)
+            if self.files.path == target:
+                self.files.state_changed.emit()
+        return True
 
     def flush(self):
         """显式保存和关闭先完成已确认输入；输入法仍在合成时保留页面等待用户完成。"""
@@ -136,6 +245,7 @@ class MindMapSession(QObject):
             return
         self.disposed = True
         self.timer.stop()
+        self._finish_background_save(wait=True)
         self._unsubscribe()
         self.close_popups()
         self.settings_menu.close()

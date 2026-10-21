@@ -279,7 +279,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             status = "保存失败" if session.last_error else "待保存" if session.files.is_dirty else "已保存"
             title = session.files.path.name
             self.setWindowTitle(f"{'* ' if session.files.is_dirty else ''}{title} — 原生思维导图")
-            self.status_label.setText(f"  {len(session.engine.document.nodes)} 个节点 · "
+            self.status_label.setText(f"  {session.engine.node_count} 个节点 · "
                                       f"{len(session.canvas.selected_node_ids())} 个选中 · {status}")
         else:
             self.setWindowTitle("原生思维导图")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from mindmap_engine import MindMapError, apply_branch_style, branch_style_targets
+from mindmap_engine import MindMapError, apply_branch_style
 from PySide6.QtCore import QTimer
 
 from .properties import NodePropertiesForm, normalize_property
@@ -92,23 +92,23 @@ class NodePropertiesPanel(NodePropertiesForm):
         """从正式文档读取；自身提交期间不重建输入控件，保留光标、焦点和滚动位置。"""
         if self._disposed:
             return
-        document = self.canvas.engine.document
+        # 只读同步复用画布在提交后取得的快照；flush 的候选编辑仍使用独立副本。
+        document = self.canvas._document
         self._generation = self.canvas.engine.document_generation
         # 外部删除正在原地编辑的节点时，结束编辑通知可能早于画布选择重建。
         # 只读取新快照中仍存在的标识，随后正式选择通知会再次同步最终选择。
         self._ids = [key for key in self.canvas.selected_node_ids() if key in document.nodes]
         self.set_theme(document.theme)
-        targets = branch_style_targets(document, self._ids, scope=self.canvas._branch_scope)
         self.load_nodes(
             [document.nodes[key] for key in self._ids],
             root_id=document.root_id,
-            parents=document.parents(),
+            parents=self.canvas._node_parents,
             editable=self.canvas.editable and self.canvas.editor is None,
             branch_styles=self.canvas.layout_registry.info(
                 document.layout.algorithm_id
             ).supports_branch_styles,
             branch_scope=self.canvas._branch_scope,
-            branch_nodes=[document.nodes[key] for key in targets],
+            branch_kinds=self.canvas._branch_kinds(self._ids, self.canvas._branch_scope),
         )
 
     def _scope_changed(self, scope):
@@ -120,9 +120,7 @@ class NodePropertiesPanel(NodePropertiesForm):
             self.scope.setCurrentIndex(self.scope.findData(scope))
         finally:
             self._loading = loading
-        document = self.canvas.engine.document
-        targets = branch_style_targets(document, self._ids, scope=scope)
-        self.set_branch_values([document.nodes[key] for key in targets])
+        self.set_branch_kinds(self.canvas._branch_kinds(self._ids, scope))
 
     def _edited(self, key, value, immediate):
         if self._disposed or not self.canvas.editable or self.canvas.editor is not None or not self._ids:

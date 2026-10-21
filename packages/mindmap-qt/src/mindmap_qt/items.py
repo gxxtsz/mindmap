@@ -20,7 +20,9 @@ class NodeItem(QGraphicsObject):
         self.setToolTip(node.note or node.hyperlink)
 
     def update_content(self, node, visual, theme):
-        self.prepareGeometryChange()
+        # 文本、折叠状态或颜色变化不一定改变尺寸；仅在边界变化时使场景空间索引失效。
+        if (self.visual.width, self.visual.height) != (visual.width, visual.height):
+            self.prepareGeometryChange()
         self.node, self.visual, self.theme = node, visual, theme
         self.setToolTip(node.note or node.hyperlink)
         self.update()

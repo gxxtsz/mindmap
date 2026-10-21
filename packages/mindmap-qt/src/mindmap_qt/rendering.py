@@ -172,6 +172,9 @@ class VisualFactory:
     def __init__(self):
         ensure_fonts()
         self.cache: OrderedDict[tuple, NodeVisual] = OrderedDict()
+        # 活文档中的每个节点保留一份最近视觉；4096 项内容 LRU 只负责跨节点复用。
+        # 大图不能依赖有限 LRU 容纳全部节点，否则顺序测量会反复淘汰尚未访问的项。
+        self._node_visuals: dict[str, tuple[tuple, NodeVisual]] = {}
         self.pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
 
     def visual(self, node: Node, theme: Theme, document: MindMapDocument, *, is_root=False) -> NodeVisual:
@@ -190,9 +193,14 @@ class VisualFactory:
             is_root,
             repr(theme),
         )
+        previous = self._node_visuals.get(node.id)
+        if previous is not None and previous[0] == key:
+            return previous[1]
         if key in self.cache:
             self.cache.move_to_end(key)
-            return self.cache[key]
+            visual = self.cache[key]
+            self._node_visuals[node.id] = (key, visual)
+            return visual
         font = QFont(node.style.get("font_family") or QApplication.font().family())
         font.setPointSizeF(float(node.style.get("font_size", 13 if is_root else 11)))
         font.setBold(bool(node.style.get("bold", is_root)))
@@ -267,18 +275,58 @@ class VisualFactory:
             bool(node.children),
         )
         self.cache[key] = visual
+        self._node_visuals[node.id] = (key, visual)
         if len(self.cache) > 4096:
             self.cache.popitem(last=False)
         return visual
 
-    def measure(self, document: MindMapDocument) -> tuple[dict, dict]:
-        """一次获取节点视觉与布局尺寸；图片、节点标签和内边距均计入尺寸，供画布与导出共用。"""
+    def measure(
+        self, document: MindMapDocument, *, changed_node_ids=None, previous_document=None, previous_visuals=None
+    ) -> tuple[dict, dict]:
+        """一次取得节点视觉及完整尺寸，画布与导出共用；未变化节点直接复用排版。
+
+        节点最近视觉按标识保留，容量随活文档节点数增长；删除或替换文档时释放失效
+        标识，避免无限保留旧导图。增量调用必须同时给出 previous_document、其对应的
+        previous_visuals，以及相对该快照的完整 changed_node_ids；未变化节点直接
+        复用传入的正式视觉。不能从最近试算的缓存推断未变化节点，避免被拒绝的候选
+        污染正式画面。省略任一条件或主题变化时逐节点检查，兼容可变候选文档。
+        """
+        for key in self._node_visuals.keys() - document.nodes.keys():
+            del self._node_visuals[key]
+        changed = (
+            set(changed_node_ids)
+            if changed_node_ids is not None and previous_document is not None
+            and previous_visuals is not None and document.root_id == previous_document.root_id
+            and document.theme == previous_document.theme
+            else None
+        )
         visuals = {
-            key: self.visual(node, document.theme, document, is_root=key == document.root_id)
+            key: (
+                previous_visuals[key]
+                if changed is not None and key not in changed and key in previous_visuals
+                else self.visual(node, document.theme, document, is_root=key == document.root_id)
+            )
             for key, node in document.nodes.items()
         }
         sizes = {key: (value.width, value.height) for key, value in visuals.items()}
         return visuals, sizes
+
+    def update_measurements(self, document, node_ids, visuals, sizes) -> None:
+        """原地更新正式读模型对应的视觉和尺寸，只处理提交差量。
+
+        调用方必须保证主题和根未变化，且 node_ids 覆盖所有变化实体。试算不能
+        使用本接口修改正式字典；主题变化、装载与导出仍调用完整 measure。
+        """
+        for key in node_ids:
+            node = document.nodes.get(key)
+            if node is None:
+                visuals.pop(key, None)
+                sizes.pop(key, None)
+                self._node_visuals.pop(key, None)
+            else:
+                visual = self.visual(node, document.theme, document, is_root=key == document.root_id)
+                visuals[key] = visual
+                sizes[key] = visual.width, visual.height
 
 
 def curve_path(points) -> QPainterPath:
@@ -353,12 +401,16 @@ class BranchItem(QGraphicsPathItem):
     def __init__(self, branch: Curve | BranchPath):
         super().__init__()
         self._arrow = QPainterPath()
+        self._branch = None
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setZValue(-1)
         self.set_branch(branch)
 
     def set_branch(self, branch: Curve | BranchPath) -> None:
         """先通知几何变化，再替换路径与箭头；已有图元可跨样式安全复用。"""
+        if branch == self._branch:
+            return
+        self._branch = branch
         self.prepareGeometryChange()
         self._arrow = branch_arrow_path(branch)
         self.setPath(branch_path(branch))

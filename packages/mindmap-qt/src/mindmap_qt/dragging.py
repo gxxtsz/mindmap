@@ -6,8 +6,9 @@
 
 from __future__ import annotations
 
+from collections import ChainMap, defaultdict
 from dataclasses import dataclass, replace
-from math import ceil, hypot
+from math import ceil, floor, hypot
 
 from mindmap_engine import BranchPath, Curve, LayoutResult, MindMapDocument, MindMapEngine, Rect
 from PySide6.QtCore import (
@@ -29,6 +30,10 @@ from .rendering import paint_branch
 ENTER_DISTANCE = 24.0
 LEAVE_DISTANCE = 36.0
 ANIMATION_DURATION = 140
+# 千节点实测单帧已超过 16 毫秒；大图直接展示最终布局，避免动画阻塞后续输入。
+ANIMATION_NODE_LIMIT = 500
+# 小图预建全部候选；大图按指针附近的固定几何生成，避免开始拖动时分配数万落点。
+EAGER_TARGET_LIMIT = 500
 SCROLL_MARGIN = 32.0
 SCROLL_SPEED = 480.0
 SORT_DEPTH = 24.0
@@ -147,9 +152,19 @@ def _changes(document: MindMapDocument, proposal: _DropProposal) -> bool:
     if children != parent.children:
         return True
     if document.layout.direction == "both" and proposal.parent_id == document.root_id:
-        sides = document.branch_sides()
+        sides = _root_sides(document)
         return any(sides[key] != proposal.direction for key in proposal.roots)
     return False
+
+
+def _root_sides(document):
+    """只读取一级分支的有效方向，固定自动方向时不需要遍历每棵子树。"""
+    counts, result = {"left": 0, "right": 0}, {}
+    for key in document.root.children:
+        side = document.nodes[key].direction or min(counts, key=counts.get)
+        counts[side] += 1
+        result[key] = side
+    return result
 
 
 def _apply_move(engine: MindMapEngine, proposal: _DropProposal, document: MindMapDocument) -> bool:
@@ -163,14 +178,13 @@ def _apply_move(engine: MindMapEngine, proposal: _DropProposal, document: MindMa
         return False
     moving = set(proposal.roots)
     siblings = [key for key in document.nodes[proposal.parent_id].children if key not in moving]
-    parents = document.parents()
     both = document.layout.direction == "both"
     touches_root = proposal.parent_id == document.root_id or any(
-        parents[key] == document.root_id for key in proposal.roots
+        engine.parent_id(key) == document.root_id for key in proposal.roots
     )
     with engine.transaction("拖动节点"):
         if both and touches_root:
-            sides = document.branch_sides()
+            sides = _root_sides(document)
             for key in document.root.children:
                 if key not in moving and document.nodes[key].direction != sides[key]:
                     engine.update_node(key, direction=sides[key])
@@ -188,37 +202,126 @@ def _apply_move(engine: MindMapEngine, proposal: _DropProposal, document: MindMa
     return True
 
 
+class _RegionIndex:
+    """固定矩形的网格索引，查询结果保持原始顺序，不改变重叠落区的优先级。
+
+    大矩形放入少量后备项，避免跨越数千网格的分支间隙占用过多内存；小矩形只
+    登记其覆盖的单元。查询吸附时扩大点的搜索范围，最后仍由正式距离规则判定。
+    """
+
+    def __init__(self, entries):
+        self.entries = tuple(entries)
+        self.cells = defaultdict(list)
+        self.overflow = []
+        for index, (_, rect) in enumerate(self.entries):
+            left, right = floor(rect.left() / 256), floor(rect.right() / 256)
+            top, bottom = floor(rect.top() / 256), floor(rect.bottom() / 256)
+            if (right - left + 1) * (bottom - top + 1) > 64:
+                self.overflow.append(index)
+                continue
+            for x in range(left, right + 1):
+                for y in range(top, bottom + 1):
+                    self.cells[x, y].append(index)
+
+    def nearby(self, point, radius=0.0):
+        """查询点附近的候选矩形；半径使用场景单位，由调用方换算视口像素。"""
+        indices = set(self.overflow)
+        for x in range(floor((point.x() - radius) / 256), floor((point.x() + radius) / 256) + 1):
+            for y in range(floor((point.y() - radius) / 256), floor((point.y() + radius) / 256) + 1):
+                indices.update(self.cells.get((x, y), ()))
+        return (self.entries[index] for index in sorted(indices))
+
+
+class _OnDemand(dict):
+    """按需派生的手势缓存，固定起点内重复查询不重新扫描相同直接父级。"""
+
+    def __init__(self, loader):
+        super().__init__()
+        self.loader = loader
+
+    def __missing__(self, key):
+        value = self.loader(key)
+        self[key] = value
+        return value
+
+
+class _MovingSubtrees:
+    """通过祖先查询判断是否属于移动子树，拖动大分支不枚举全部后代。"""
+
+    def __init__(self, roots, parents):
+        self.roots, self.parents, self.cache = set(roots), parents, {}
+
+    def __contains__(self, key):
+        path, current = [], key
+        while current is not None and current not in self.roots and current not in self.cache:
+            path.append(current)
+            current = self.parents.get(current)
+        result = current in self.roots or self.cache.get(current, False)
+        for current in path:
+            self.cache[current] = result
+        return result
+
+
 class _DropResolver:
     """只读落点计算，缓存父索引、源子树和稳定几何，不读取场景中的预览图元。"""
 
     def __init__(self, document, layout, selection, focus_id):
         self.document = document
-        self.parents = document.parents()
+        self.layout = layout
+        self.geometry = getattr(layout, "geometry", None)
+        self._virtual = self.geometry is not None and len(layout.nodes) > 1000
+        self.parents = self.geometry.parents if self._virtual else document.parents()
         selected = set(selection)
         # 显式遍历并跳过已选祖先的后代，同时保留文档先序顺序。
-        roots, stack = [], [document.root_id]
-        while stack:
-            key = stack.pop()
-            if key in selected:
-                roots.append(key)
-            else:
-                stack.extend(reversed(document.nodes[key].children))
+        roots = []
+        if self._virtual:
+            for key in selected:
+                ancestor = self.parents.get(key)
+                while ancestor is not None and ancestor not in selected:
+                    ancestor = self.parents.get(ancestor)
+                if ancestor is None:
+                    roots.append(key)
+            roots.sort(key=self.geometry.order)
+        else:
+            stack = [document.root_id]
+            while stack:
+                key = stack.pop()
+                if key in selected:
+                    roots.append(key)
+                else:
+                    stack.extend(reversed(document.nodes[key].children))
         self.roots = tuple(roots)
-        self.moving = {key for root in roots for key in document.descendants(root)}
+        self.moving = (_MovingSubtrees(roots, self.parents) if self._virtual else
+                       {key for root in roots for key in document.descendants(root)})
         self.center_id = focus_id or document.root_id
         self.valid = bool(roots) and not {document.root_id, self.center_id}.intersection(roots)
-        self.sides = document.branch_sides()
         self.down = document.layout.direction == "down"
-        self.remaining = {
-            key: [child for child in node.children if child not in self.moving]
-            for key, node in document.nodes.items()
-        }
-        self.source_rects = [_qrect(rect) for key, rect in layout.nodes.items() if key in self.moving]
+        if self._virtual:
+            self.sides = _OnDemand(lambda key: "down" if self.down else
+                                   document.layout.direction if key == document.root_id
+                                   and document.layout.direction != "both" else self.geometry.side(key))
+            self.remaining = _OnDemand(lambda key: [child for child in document.nodes[key].children
+                                                    if child not in self.moving])
+            self.rows = _OnDemand(self._row)
+            self.source_rects = []
+        else:
+            self.sides = document.branch_sides()
+            self.remaining = {key: [child for child in node.children if child not in self.moving]
+                              for key, node in document.nodes.items()}
+            self.rows = {child: index for siblings in self.remaining.values()
+                         for index, child in enumerate(siblings)}
+            self.source_rects = [_qrect(rect) for key, rect in layout.nodes.items() if key in self.moving]
         self.targets: list[_Target] = []
         self.node_regions: dict[str, QRectF] = {}
         self._expanded_source = None
         self._expanded_scale = None
         self._expanded_targets = []
+        self._source_index = _RegionIndex(enumerate(self.source_rects))
+
+    def _row(self, key):
+        parent = self.parents[key]
+        self.rows.update((child, index) for index, child in enumerate(self.remaining[parent]))
+        return self.rows[key]
 
     def _proposal(self, parent, index, side=None):
         if self.document.layout.direction != "both" or parent != self.document.root_id:
@@ -226,52 +329,19 @@ class _DropResolver:
         return _DropProposal(self.roots, parent, index, side)
 
     def rebuild(self, nodes, *, scale=None):
-        """用正式起点布局建立命中区，手势开始时一次准备好当前倍率的排序几何。"""
+        """用正式起点建立稳定索引；小图预建排序候选，大图按指针位置准备附近候选。"""
         self.targets = []
+        if self._virtual:
+            self.node_regions = {}
+            self._gap_index = None
+            self._node_index = _RegionIndex(())
+            return
         self.node_regions = {key: _qrect(rect) for key, rect in nodes.items() if key not in self.moving}
-        for key, rect in self.node_regions.items():
-            if key == self.center_id:
-                sides = (
-                    ("left", "right")
-                    if self.document.layout.direction == "both" and (key == self.document.root_id)
-                    else (self.sides[key],)
-                )
-                for side in sides:
-                    zone = QRectF(rect)
-                    gap = 32 if self.document.layout.compact else 64
-                    if side == "left":
-                        zone.setLeft(rect.left() - gap)
-                        if len(sides) == 2:
-                            zone.setRight(rect.center().x())
-                    elif side == "down":
-                        zone.setBottom(rect.bottom() + gap)
-                    else:
-                        zone.setRight(rect.right() + gap)
-                        if len(sides) == 2:
-                            zone.setLeft(rect.center().x())
-                    proposal = self._proposal(key, len(self.remaining[key]), side)
-                    self.targets.append(_Target(proposal, key, "inside", zone))
-                continue
-            parent = self.parents[key]
-            siblings = self.remaining[parent]
-            index = siblings.index(key)
-            # 正文只有“作为子主题”一种语义；同级插入使用节点外缘及间隙，不能再
-            # 把正文切成隐形的上、中、下三段。零厚度外缘在命中时按视口像素扩展。
-            self.targets.append(
-                _Target(self._proposal(key, len(self.remaining[key])), key, "inside", QRectF(rect))
-            )
-            for position in ("before", "after"):
-                before = position == "before"
-                zone = (
-                    QRectF(rect.left() if before else rect.right(), rect.top(), 0, rect.height())
-                    if self.down
-                    else QRectF(rect.left(), rect.top() if before else rect.bottom(), rect.width(), 0)
-                )
-                self.targets.append(
-                    _Target(
-                        self._proposal(parent, index + (not before), self.sides[key]), key, position, zone
-                    )
-                )
+        self._node_index = _RegionIndex(self.node_regions.items())
+        self._region_order = {key: index for index, key in enumerate(self.node_regions)}
+        lazy = len(self.node_regions) > EAGER_TARGET_LIMIT
+        if not lazy:
+            self._append_node_targets(self.node_regions.items())
         # 同级间隙也是可操作区域，较高子树不会留下必须精准命中节点的空档。
         for parent, siblings in self.remaining.items():
             groups = {}
@@ -299,14 +369,76 @@ class _DropResolver:
                     if zone.width() > 0 and zone.height() > 0:
                         self.targets.append(
                             _Target(
-                                self._proposal(parent, siblings.index(following), side),
+                                self._proposal(parent, self.rows[following], side),
                                 following,
                                 "before",
                                 zone,
                             )
                         )
+        self._gap_index = None
+        if lazy:
+            self._gap_index = _RegionIndex((target, target.region) for target in self.targets)
+            self.targets = []
         if scale is not None:
             self._targets_at_scale(scale)
+
+    def _append_node_targets(self, regions):
+        """按正式节点顺序生成正文和两侧排序候选，小图和大图共用同一套落区语义。"""
+        for key, rect in regions:
+            if key == self.center_id:
+                sides = (
+                    ("left", "right")
+                    if self.document.layout.direction == "both" and key == self.document.root_id
+                    else (self.sides[key],)
+                )
+                for side in sides:
+                    zone = QRectF(rect)
+                    gap = 32 if self.document.layout.compact else 64
+                    if side == "left":
+                        zone.setLeft(rect.left() - gap)
+                        if len(sides) == 2:
+                            zone.setRight(rect.center().x())
+                    elif side == "down":
+                        zone.setBottom(rect.bottom() + gap)
+                    else:
+                        zone.setRight(rect.right() + gap)
+                        if len(sides) == 2:
+                            zone.setLeft(rect.center().x())
+                    self.targets.append(
+                        _Target(self._proposal(key, len(self.remaining[key]), side), key, "inside", zone)
+                    )
+                continue
+            parent, index = self.parents[key], self.rows[key]
+            self.targets.append(
+                _Target(self._proposal(key, len(self.remaining[key])), key, "inside", QRectF(rect))
+            )
+            for position in ("before", "after"):
+                before = position == "before"
+                zone = (
+                    QRectF(rect.left() if before else rect.right(), rect.top(), 0, rect.height())
+                    if self.down
+                    else QRectF(rect.left(), rect.top() if before else rect.bottom(), rect.width(), 0)
+                )
+                self.targets.append(
+                    _Target(self._proposal(parent, index + (not before), self.sides[key]), key, position, zone)
+                )
+
+    def _local_targets(self, point, scale):
+        """保守覆盖吸附半径及排序扩展，按需生成附近节点落点并保留完整大间隙。
+
+        中心主题的空侧落区可能远于吸附半径，因此总是纳入中心；最终仍使用原有
+        正文、方向约束和距离判断。恢复原始节点顺序，保持重叠候选的同距离优先级。
+        """
+        nearby = dict(self._node_index.nearby(point, (ENTER_DISTANCE + SORT_DEPTH) / scale))
+        if self.center_id in self.node_regions:
+            nearby[self.center_id] = self.node_regions[self.center_id]
+        self.targets = []
+        self._append_node_targets(
+            (key, nearby[key]) for key in sorted(nearby, key=self._region_order.__getitem__)
+        )
+        self.targets.extend(
+            target for target, _ in self._gap_index.nearby(point, (ENTER_DISTANCE + SORT_PADDING) / scale)
+        )
 
     def _sort_region(self, target, scale):
         """仅向节点外扩大排序落区；前后各 24 像素深，横向留 12 像素容错。
@@ -336,13 +468,18 @@ class _DropResolver:
         """排序仅允许在正文外的正确一侧，吸附和退出滞回也必须遵守该约束。"""
         if target.position == "inside":
             return True
-        rect = self.node_regions[target.reference]
+        rect = self.node_regions.get(target.reference)
+        if rect is None:
+            original = self.layout.nodes.get(target.reference)
+            if original is None:
+                return False
+            rect = _qrect(original)
         value = point.x() if self.down else point.y()
         leading, trailing = (rect.left(), rect.right()) if self.down else (rect.top(), rect.bottom())
         return value < leading if target.position == "before" else value > trailing
 
     def _targets_at_scale(self, scale):
-        """每档倍率仅换算一次扩大落区，连续排序移动复用矩形，不创建成千临时对象。
+        """落点集合和倍率不变时复用扩大落区，不在连续移动中创建成千临时对象。
 
         这里只缓存固定几何的视口换算，不试算候选文档或布局；手势起点提前建立，
         替换落点集合或改变视口倍率时自动失效。
@@ -353,6 +490,16 @@ class _DropResolver:
                 (target, self._sort_region(target, scale) if target.position != "inside" else target)
                 for target in self.targets
             ]
+            self._inside_targets = defaultdict(list)
+            self._center_targets = []
+            for target in self.targets:
+                if target.position == "inside":
+                    self._inside_targets[target.reference].append(target)
+                if target.reference == self.center_id:
+                    self._center_targets.append(target)
+            self._target_index = _RegionIndex(
+                (pair, pair[1].region) for pair in self._expanded_targets
+            )
         return self._expanded_targets
 
     def resolve(self, point, scale):
@@ -361,33 +508,34 @@ class _DropResolver:
         返回值的第二项表示明确进入某个操作区，可立即切换意图；只有外侧距离
         吸附才沿用退出滞回。拖动影像、短条和文字均不参与此只读命中计算。
         """
+        if self._virtual:
+            self._virtual_targets(point, scale)
+        elif self._gap_index is not None:
+            self._local_targets(point, scale)
+        self._targets_at_scale(scale)
         direct = next(
-            (key for key, rect in self.node_regions.items() if rect.contains(point)),
+            (key for key, rect in self._node_index.nearby(point) if rect.contains(point)),
             None,
         )
         if direct is not None:
-            choices = [
-                target
-                for target in self.targets
-                if target.reference == direct and target.position == "inside"
-            ]
+            choices = self._inside_targets.get(direct)
             if choices:
                 return min(choices, key=lambda target: _distance(point, target.region)), True
-        if any(rect.contains(point) for rect in self.source_rects):
+        if any(rect.contains(point) for _, rect in self._source_index.nearby(point)):
             return None, True
         # 中心主题向外延伸的一级分支落区保留，包括双向布局尚无主题的一侧。
         center = next(
             (
                 target
-                for target in self.targets
-                if target.reference == self.center_id and target.region.contains(point)
+                for target in self._center_targets
+                if target.region.contains(point)
             ),
             None,
         )
         if center is not None:
             return center, True
         candidates, slots, gaps = [], [], []
-        for target, expanded in self._targets_at_scale(scale):
+        for (target, expanded), _ in self._target_index.nearby(point, ENTER_DISTANCE / scale):
             if not self.allows(target, point):
                 continue
             candidates.append(expanded)
@@ -403,6 +551,60 @@ class _DropResolver:
         if best is not None and _distance(point, best.region) * scale <= ENTER_DISTANCE:
             return best, False
         return None, False
+
+    def _virtual_targets(self, point, scale):
+        """从冻结几何查询指针邻域及相邻同级间隙，跨屏拖动也无需重建整图索引。"""
+        geometry = self.geometry
+        radius = (ENTER_DISTANCE + SORT_DEPTH + SORT_PADDING) / scale
+        area = Rect(point.x() - radius, point.y() - radius, radius * 2, radius * 2)
+        candidates = geometry.query(area)
+        for parent, rect in geometry.visited_parent_rects.items():
+            if not geometry.expanded[parent]:
+                continue
+            logical = geometry._transform(rect)
+            view = geometry._transform(area)
+            for group in geometry.groups[parent].values():
+                origin = logical.center[1] - group.total / 2
+                rows = list(group.rows(view.y - origin, view.bottom - origin))
+                slots = {geometry.locations[key][2] for key, _ in rows}
+                for slot in tuple(slots):
+                    for step in (-1, 1):
+                        neighbor = slot + step
+                        while 0 <= neighbor < len(group.keys) and group.keys[neighbor] in self.moving:
+                            neighbor += step
+                        if 0 <= neighbor < len(group.keys):
+                            slots.add(neighbor)
+                for slot in slots:
+                    key = group.keys[slot]
+                    candidates[key] = geometry.rectangle(key)
+        center = self.layout.nodes.get(self.center_id)
+        if center is not None:
+            candidates[self.center_id] = center
+        self.source_rects = [_qrect(rect) for key, rect in candidates.items() if key in self.moving]
+        self._source_index = _RegionIndex(enumerate(self.source_rects))
+        keys = sorted((key for key in candidates if key not in self.moving), key=geometry.layout_order)
+        self.node_regions = {key: _qrect(candidates[key]) for key in keys}
+        self._node_index = _RegionIndex(self.node_regions.items())
+        self.targets = []
+        self._append_node_targets(self.node_regions.items())
+        parents = {self.parents[key] for key in keys if key in self.parents}
+        for parent in parents:
+            for side, group in geometry.groups[parent].items():
+                nearby = sorted((key for key in keys if self.parents.get(key) == parent
+                                 and geometry.locations[key][1] == side),
+                                key=lambda key: geometry.locations[key][2])
+                for previous, following in zip(nearby, nearby[1:]):
+                    low, high = geometry.locations[previous][2], geometry.locations[following][2]
+                    if any(key not in self.moving for key in group.keys[low + 1:high]):
+                        continue
+                    a, b = self.node_regions[previous], self.node_regions[following]
+                    zone = (QRectF(a.right(), min(a.top(), b.top()), b.left() - a.right(),
+                                   max(a.bottom(), b.bottom()) - min(a.top(), b.top())) if self.down else
+                            QRectF(min(a.left(), b.left()), a.bottom(),
+                                   max(a.right(), b.right()) - min(a.left(), b.left()), b.top() - a.bottom()))
+                    if zone.width() > 0 and zone.height() > 0:
+                        self.targets.append(_Target(self._proposal(parent, self.rows[following], self.sides[following]),
+                                                    following, "before", zone))
 
 
 class _DragLayer(QGraphicsItem):
@@ -587,7 +789,8 @@ class NodeDragController(QObject):
         if not resolver.valid:
             return False
         self.owner._cancel_branch_menu()
-        visuals, _ = self.owner.factory.measure(document)
+        # 正式图元已经持有测量结果，拖动影像只需要可见节点，无需再次测量整图。
+        visuals = {key: item.visual for key, item in self.owner.node_items.items()}
         self._base = _DragSnapshot(document, visuals, self.owner.layout_result)
         self._selection = selection
         self._resolver = resolver
@@ -595,11 +798,11 @@ class NodeDragController(QObject):
         self._origin = QPointF(origin)
         self._last_scene_point = self._last_scale = None
         self._ghost_nodes = {
-            key: rect for key, rect in self._base.layout.nodes.items() if key in resolver.moving
+            key: self._base.layout.nodes[key] for key in self.owner.node_items if key in resolver.moving
         }
         self._ghost_branches = [
-            branch
-            for key, branch in self._base.layout.branches.items()
+            _shift_branch(item._branch, (item.pos().x(), item.pos().y()), (item.pos().x(), item.pos().y()))
+            for key, item in self.owner.branch_items.items()
             if key in resolver.moving and resolver.parents.get(key) in resolver.moving
         ]
         self._ghost_bounds = QRectF()
@@ -614,10 +817,11 @@ class NodeDragController(QObject):
 
     def _dim_sources(self):
         """原位置保留淡色源分支作为参照，其他主题和连线完全保持原貌。"""
-        for key in self._resolver.moving:
-            if key in self.owner.node_items:
+        for key in self.owner.node_items:
+            if key in self._resolver.moving:
                 self.owner.node_items[key].setOpacity(0.18)
-            if key in self.owner.branch_items:
+        for key in self.owner.branch_items:
+            if key in self._resolver.moving:
                 self.owner.branch_items[key].setOpacity(0.12)
 
     def _connection_hint(self):
@@ -717,11 +921,12 @@ class NodeDragController(QObject):
         self._pointer = QPoint(position)
         self._offset = point - self._origin
         inside = self.view.viewport().rect().contains(position)
-        candidate, direct = self._resolver.resolve(point, scale) if inside else (None, True)
         current = self.target
         if not moved:
             # 重复移动及释放使用同一命中；滚动或缩放则按新场景坐标和倍率重算。
             candidate, direct = current, False
+        else:
+            candidate, direct = self._resolver.resolve(point, scale) if inside else (None, True)
         # 明确进入正文或排序区时立即按当前意图切换；只有离开所有明确落区后的
         # 外侧吸附使用 36 像素退出距离。旧排序锁定不能跨进正文继续提交同级移动。
         if (
@@ -753,6 +958,8 @@ class NodeDragController(QObject):
         折叠主题放下后才产生的新图元，从父节点当前位置附近出现并一起移动。
         """
         layout = self.owner.layout_result
+        if len(layout.nodes) > ANIMATION_NODE_LIMIT:
+            return
         parents = self.owner._document.parents()
         starts = {}
         bounds = layout.bounds
@@ -892,7 +1099,7 @@ class NodeDragController(QObject):
                         rect.height,
                     )
                     for key, rect in self._base.layout.nodes.items()
-                },
+                } if len(self._base.layout.nodes) <= ANIMATION_NODE_LIMIT else {},
             )
         self.cancel()
         return drop
@@ -914,11 +1121,33 @@ class NodeDragController(QObject):
 
         if not valid() or not _changes(drop.document, drop.proposal):
             return False
-        scratch = MindMapEngine(drop.document)
-        _apply_move(scratch, drop.proposal, drop.document)
-        candidate = scratch.document
-        _, sizes = self.owner.factory.measure(candidate)
-        self.owner.layout_registry.layout(candidate, sizes, focus_id=drop.focus_id)
+        if not self.owner._can_incremental() or self.owner._incremental_layout is None:
+            # 第三方布局可能拒绝合法结构，保留独立候选及原有隔离契约。
+            scratch = MindMapEngine(drop.document)
+            changed_ids = []
+            scratch.subscribe(lambda event: changed_ids.extend(event.node_ids))
+            _apply_move(scratch, drop.proposal, drop.document)
+            candidate = scratch.document
+            _, sizes = self.owner.factory.measure(
+                candidate, changed_node_ids=changed_ids,
+                previous_document=drop.document, previous_visuals=self.owner._visuals,
+            )
+            self.owner.layout_registry.layout(candidate, sizes, focus_id=drop.focus_id)
+        else:
+            # 受控树布局只试算变化实体及祖先。候选在原引擎的回滚日志内执行，
+            # 不建立临时引擎或整图副本，也不提前执行宿主钩子和发布历史事件。
+            with self.owner.engine._preview_operation() as (candidate, touched):
+                _apply_move(self.owner.engine, drop.proposal, drop.document)
+                changed_sizes = {}
+                for key in touched:
+                    node = candidate.nodes.get(key)
+                    if node is not None:
+                        visual = self.owner.factory.visual(node, candidate.theme, candidate,
+                                                           is_root=key == candidate.root_id)
+                        changed_sizes[key] = visual.width, visual.height
+                geometry = self.owner._incremental_layout.geometry.snapshot()
+                geometry.sync(candidate, ChainMap(changed_sizes, self.owner._measurements), touched)
+                _ = geometry.bounds
         # 外部布局或捕获释放的宿主回调有可能修改文档，不能让旧命令覆盖新内容。
         if not valid():
             return False
@@ -957,10 +1186,11 @@ class NodeDragController(QObject):
         self.target = None
         if not self.owner._disposed:
             # 拖动期间只改变源图元透明度，取消无需重建图元、重排或恢复折叠快照。
-            for key in self._resolver.moving:
-                if key in self.owner.node_items:
+            for key in self.owner.node_items:
+                if key in self._resolver.moving:
                     self.owner.node_items[key].setOpacity(1)
-                if key in self.owner.branch_items:
+            for key in self.owner.branch_items:
+                if key in self._resolver.moving:
                     self.owner.branch_items[key].setOpacity(1)
         self._display_nodes = {}
         self._base = self._resolver = None

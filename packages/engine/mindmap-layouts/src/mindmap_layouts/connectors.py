@@ -277,3 +277,29 @@ def route_branches(document: MindMapDocument, nodes: Mapping[str, Rect]) -> dict
     for group in groups.values():
         result.update(_deduplicate_straight_segments(group))
     return result
+
+
+def route_children(parent: Rect, children, kind: BranchStyle | None) -> dict[str, Curve | BranchPath]:
+    """只路由一个父级的直接子边，供增量画布使用，不建立整图父索引或配色表。
+
+    children 按正式同级顺序提供 (标识, 矩形, 方向, 颜色)。相同父级、方向和
+    画笔的共享主干仍统一去重，保证增量结果与完整路由的路径语义一致。
+    """
+    result, groups = {}, defaultdict(list)
+    for key, child, direction, color in children:
+        if kind is None:
+            start, end, _, _ = _anchors(parent, child, direction)
+            if direction == "down":
+                middle = (start[1] + end[1]) / 2
+                points = start, (start[0], middle), (end[0], middle), end
+            else:
+                middle = (start[0] + end[0]) / 2
+                points = start, (middle, start[1]), (middle, end[1]), end
+            result[key] = Curve(points, color)
+        else:
+            branch = route_branch(parent, child, kind, direction=direction, color=color)
+            result[key] = branch
+            groups[direction, color, branch.width].append((key, branch))
+    for group in groups.values():
+        result.update(_deduplicate_straight_segments(group))
+    return result

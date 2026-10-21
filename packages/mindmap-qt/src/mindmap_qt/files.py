@@ -30,6 +30,8 @@ class MindMapFileController(QObject):
         self.dialog_parent = dialog_parent
         self.writer = writer
         self.path: Path | None = None
+        # 宿主如有后台写入，可注入 GUI 线程等待边界；路径切换和显式保存先收束旧写入。
+        self.wait_for_pending_write = None
 
     @property
     def is_dirty(self) -> bool:
@@ -81,6 +83,8 @@ class MindMapFileController(QObject):
     def new_document(self):
         """用户允许替换后建立空白文档；返回是否完成，取消时保持文件状态。"""
         if self.confirm_replace():
+            if self.wait_for_pending_write is not None:
+                self.wait_for_pending_write()
             self.path = None
             self.engine.replace_document(MindMapDocument.new())
             self.canvas.reset_view()
@@ -121,6 +125,8 @@ class MindMapFileController(QObject):
         self.canvas.validate_document(document)
         if not self.confirm_replace():
             return False
+        if self.wait_for_pending_write is not None:
+            self.wait_for_pending_write()
         self.engine.replace_document(document)
         self.path = source
         self.state_changed.emit()
@@ -190,6 +196,8 @@ class MindMapFileController(QObject):
         try:
             target = self.validate_save_path(target)
             self._require_native_save_format()
+            if self.wait_for_pending_write is not None:
+                self.wait_for_pending_write()
             if only_if_dirty and not self.is_dirty:
                 return True
             self.writer(

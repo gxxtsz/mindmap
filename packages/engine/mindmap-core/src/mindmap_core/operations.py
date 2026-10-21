@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import fields
 
-from .branch_styles import apply_branch_style
+from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
 from .models import Asset, MindMapDocument, Node, new_id
 from .transactions import DocumentState
@@ -27,29 +27,59 @@ class DocumentEditor:
         except KeyError as exc:
             raise MindMapError(f"节点不存在：{node_id}") from exc
 
+    def edit(self, node_id: str) -> Node:
+        """验证节点存在后取得当前事务的可写副本，所有实体修改必须经过此入口。"""
+        self.node(node_id)
+        return self._state.edit_node(node_id)
+
+    def side(self, node_id: str) -> str:
+        """沿父链找到一级分支，仅扫描一级分支确定方向，不遍历其后代。"""
+        root = self.document.root_id
+        current = node_id
+        while current != root and self._state.parents.get(current) != root:
+            current = self._state.parents[current]
+        side = self.document.layout.direction
+        if side != "both":
+            return side
+        counts = {"left": 0, "right": 0}
+        for child in self.document.root.children:
+            side = self.node(child).direction or min(counts, key=counts.get)
+            counts[side] += 1
+            if child == current:
+                return side
+        return "right"
+
     def roots(self, node_ids) -> list[str]:
         selected = set(node_ids)
         for node_id in selected:
             self.node(node_id)
-        parents = self.document.parents()
+        parents = self._state.parents
         roots = []
-        for node_id in self.document.descendants(self.document.root_id):
-            if node_id not in selected:
-                continue
+        for node_id in selected:
             ancestor = parents.get(node_id)
             while ancestor is not None and ancestor not in selected:
                 ancestor = parents.get(ancestor)
             if ancestor is None:
                 roots.append(node_id)
+        if len(roots) > 1:
+            def order(key):
+                path = []
+                while key in parents:
+                    parent = parents[key]
+                    path.append(self.node(parent).children.index(key))
+                    key = parent
+                return tuple(reversed(path))
+            roots.sort(key=order)
         return roots
 
     def add_child(self, parent_id: str, text: str = "新节点", *, index: int | None = None) -> str:
         """新增子节点并返回 ID；index 为插入位置，省略时追加。"""
 
-        parent = self.node(parent_id)
+        parent = self.edit(parent_id)
         node = Node(text)
         self._inherit_branch(node, parent)
-        self.document.nodes[node.id] = node
+        self._state.put_node(node)
+        self._state.set_parent(node.id, parent_id)
         parent.children.insert(len(parent.children) if index is None else index, node.id)
         parent.expanded = True
         return node.id
@@ -57,28 +87,31 @@ class DocumentEditor:
     def add_sibling(self, node_id: str, text: str = "新节点", *, before: bool = False) -> str:
         """插入同级节点；根节点没有同级节点。"""
 
-        parent_id = self.document.parents().get(node_id)
+        parent_id = self._state.parents.get(node_id)
         if parent_id is None:
             raise MindMapError("根节点不能添加同级节点")
-        siblings = self.node(parent_id).children
+        siblings = self.edit(parent_id).children
         child = Node(text, direction=self.node(node_id).direction)
         self._inherit_branch(child, self.node(parent_id))
-        self.document.nodes[child.id] = child
+        self._state.put_node(child)
+        self._state.set_parent(child.id, parent_id)
         siblings.insert(siblings.index(node_id) + (0 if before else 1), child.id)
         return child.id
 
     def insert_parent(self, node_id: str, text: str = "父节点") -> str:
         """在现有节点上方插入一级，保持原节点及其后代 ID 不变。"""
 
-        parents = self.document.parents()
+        parents = self._state.parents
         if node_id not in parents:
             raise MindMapError("不能在根节点上方插入父节点")
         node = self.node(node_id)
         parent = Node(text, children=[node_id], direction=node.direction)
         self._inherit_branch(parent, self.node(parents[node_id]))
-        siblings = self.node(parents[node_id]).children
+        parent_id = parents[node_id]
+        siblings = self.edit(parent_id).children
         siblings[siblings.index(node_id)] = parent.id
-        self.document.nodes[parent.id] = parent
+        self._state.put_node(parent)
+        self._state.set_parent(parent.id, parent_id)
         return parent.id
 
     @staticmethod
@@ -93,6 +126,9 @@ class DocumentEditor:
 
     def set_branch_style(self, node_ids, kind, *, scope="subtree") -> None:
         """在当前事务中统一设置分支，作用范围及参数校验由共享文档操作完成。"""
+        node_ids = list(node_ids)
+        for key in branch_style_targets(self.document, node_ids, scope=scope):
+            self.edit(key)
         apply_branch_style(self.document, node_ids, kind, scope=scope)
 
     def update_node(self, node_id: str, **patch) -> None:
@@ -101,7 +137,7 @@ class DocumentEditor:
         allowed = {item.name for item in fields(Node)} - {"id", "children"}
         if patch.keys() - allowed:
             raise MindMapError("包含不可直接修改的节点字段")
-        node = self.node(node_id)
+        node = self.edit(node_id)
         for key, value in patch.items():
             setattr(node, key, deepcopy(value))
 
@@ -112,11 +148,11 @@ class DocumentEditor:
         roots = self.roots(node_ids)
         if self.document.root_id in roots:
             raise MindMapError("根节点不能删除")
-        parents = self.document.parents()
+        parents = self._state.parents
         for node_id in roots:
-            self.node(parents[node_id]).children.remove(node_id)
+            self.edit(parents[node_id]).children.remove(node_id)
             for child in self.document.descendants(node_id):
-                del self.document.nodes[child]
+                self._state.delete_node(child)
 
     def move_nodes(self, node_ids, target_id: str, position: str = "inside") -> None:
         """保持先序顺序移动子树；position 支持 inside、before、after。"""
@@ -128,18 +164,21 @@ class DocumentEditor:
         self.node(target_id)
         if self.document.root_id in roots:
             raise MindMapError("根节点不能移动")
-        moving = {x for root in roots for x in self.document.descendants(root)}
-        if target_id in moving:
-            raise MindMapError("不能移动到自身或后代节点")
-        parents = self.document.parents()
+        parents = self._state.parents
+        ancestor = target_id
+        moving = set(roots)
+        while ancestor is not None:
+            if ancestor in moving:
+                raise MindMapError("不能移动到自身或后代节点")
+            ancestor = parents.get(ancestor)
         if position not in ("inside", "before", "after"):
             raise MindMapError("不支持的移动位置")
         if position != "inside" and target_id == self.document.root_id:
             raise MindMapError("不能移动为根节点的同级")
         parent_id = target_id if position == "inside" else parents[target_id]
         for node_id in roots:
-            self.node(parents[node_id]).children.remove(node_id)
-        parent = self.node(parent_id)
+            self.edit(parents[node_id]).children.remove(node_id)
+        parent = self.edit(parent_id)
         index = (
             len(parent.children)
             if position == "inside"
@@ -147,24 +186,26 @@ class DocumentEditor:
         )
         parent.children[index:index] = roots
         parent.expanded = True
+        for node_id in roots:
+            self._state.set_parent(node_id, parent_id)
         if parent_id == self.document.root_id and position != "inside":
-            side = self.document.branch_sides()[target_id]
+            side = self.side(target_id)
             for node_id in roots:
-                self.node(node_id).direction = side if side in ("left", "right") else None
+                self.edit(node_id).direction = side if side in ("left", "right") else None
 
     def set_expanded(self, node_id: str, expanded: bool, *, recursive: bool = False) -> None:
         """修改折叠状态；递归模式也只产生一条历史记录。"""
 
         ids = self.document.descendants(node_id) if recursive else [node_id]
         for current in ids:
-            self.node(current).expanded = expanded
+            self.edit(current).expanded = expanded
 
     def attach_image(self, node_id: str, data: bytes, media_type: str = "image/png", *, width=160) -> str:
         """原子导入图片资源并关联节点，相同内容只保存一份。"""
 
         asset = Asset.from_bytes(data, media_type)
-        self.document.assets[asset.id] = asset
-        node = self.node(node_id)
+        self._state.set_asset(asset.id, asset)
+        node = self.edit(node_id)
         node.image_id, node.image_width = asset.id, width
         return asset.id
 
@@ -195,16 +236,19 @@ class DocumentEditor:
         fragment = deepcopy(fragment)
 
         fragment.validate()
-        parent = self.node(parent_id)
+        parent = self.edit(parent_id)
         mapping = {node_id: new_id() for node_id in fragment.nodes if node_id != fragment.root_id}
         for node_id, new in mapping.items():
             node = deepcopy(fragment.nodes[node_id])
             node.id, node.children = new, [mapping[x] for x in node.children]
-            self.document.nodes[new] = node
+            self._state.put_node(node)
         roots = [mapping[x] for x in fragment.root.children]
         parent.children.extend(roots)
         parent.expanded = True
-        self.document.assets.update(fragment.assets)
+        for key in roots:
+            self._state.set_parent(key, parent_id)
+        for key, asset in fragment.assets.items():
+            self._state.set_asset(key, asset)
         return roots
 
     def prune_unused_assets(self) -> None:

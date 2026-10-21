@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from mindmap_engine import MindMapError, Theme, apply_branch_style, get_branch_style
+from mindmap_engine import MindMapError, Theme, apply_branch_style
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
@@ -192,7 +192,7 @@ class GlobalSettingsPanel(QWidget):
 
     def _sync_menu(self, menu, record):
         """只同步动作展示，避免 setChecked 反向提交；禁用原因与表单保持一致。"""
-        colors = ui_colors(getattr(self, "_ui_colors_override", None) or self.canvas.engine.document.theme)
+        colors = ui_colors(getattr(self, "_ui_colors_override", None) or self.canvas._document.theme)
         menu.set_colors(colors)
         for key, actions in record["actions"].items():
             field = getattr(self, key)
@@ -324,11 +324,12 @@ class GlobalSettingsPanel(QWidget):
             else:
                 engine.set_branch_style([document.root_id], value, scope="subtree")
 
-    def sync(self, *_):
+    def sync(self, *events):
         """从正式状态同步值、混合状态及布局能力；不创建默认配置或触发用户选择信号。"""
-        if self._disposed:
+        if self._disposed or (events and getattr(events[0], "kind", None) == "saved"):
             return
-        document = self.canvas.engine.document
+        # 仅同步控件，复用提交后的界面快照；修改设置时另行建立候选文档。
+        document = self.canvas._document
         info = self.canvas.layout_registry.info(document.layout.algorithm_id)
         editable = self.canvas.editable and self.canvas.editor is None
         self._loading = True
@@ -342,7 +343,7 @@ class GlobalSettingsPanel(QWidget):
                 self.direction.model().item(index).setEnabled(
                     self.direction.itemData(index) in info.directions
                 )
-            kinds = {get_branch_style(node.style) for node in document.nodes.values()}
+            kinds = self.canvas._branch_kinds([document.root_id])
             kind = next(iter(kinds)) if len(kinds) == 1 else MIXED
             with QSignalBlocker(self.branch), QSignalBlocker(self.theme):
                 self.branch.set_value(kind)

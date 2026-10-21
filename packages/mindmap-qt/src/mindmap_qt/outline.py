@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 from math import ceil, floor
 
 from PySide6.QtCore import (
@@ -33,7 +34,9 @@ class OutlineModel(QAbstractItemModel):
 
     def __init__(self, document, parent=None):
         super().__init__(parent)
-        self.document = document
+        self.document = copy(document)
+        self.document.nodes = document.nodes.copy()
+        self.document.assets = document.assets.copy()
         self._reindex()
 
     def _reindex(self):
@@ -46,6 +49,57 @@ class OutlineModel(QAbstractItemModel):
             child: row for node in self.document.nodes.values() for row, child in enumerate(node.children)
         }
         self.rows[self.document.root_id] = 0
+        self._next_identifier = len(self.identifiers) + 1
+
+    def apply_changes(self, event):
+        """按提交差量维护稳定标识、父级和行号；文本/折叠不扫描整棵树。
+
+        结构变化沿用 Qt 模型重置语义，但只重建实际改变父级的索引。文档字典由
+        模型独立持有，节点只读共享，避免画布原地应用差量后丢失比较基线。
+        """
+        delta = event.changes.collections.get("nodes", {})
+        index = 1 if event.forward else 0
+        structural = any(pair[0] is None or pair[1] is None or pair[0].children != pair[1].children
+                         for pair in delta.values())
+        fresh = {key for key, pair in delta.items() if pair[index] is not None and pair[index].children
+                 and (pair[1 - index] is None or not pair[1 - index].children)}
+        if structural:
+            self.beginResetModel()
+        try:
+            event.changes.apply(self.document, forward=event.forward)
+            if structural:
+                for key, pair in delta.items():
+                    old = pair[1 - index]
+                    if old is not None:
+                        for child in old.children:
+                            if self.parents.get(child) == key:
+                                self.parents.pop(child)
+                                self.rows.pop(child, None)
+                    if pair[index] is None:
+                        identifier = self.identifiers.pop(key, None)
+                        self.keys.pop(identifier, None)
+                        self.parents.pop(key, None)
+                        self.rows.pop(key, None)
+                    elif key not in self.identifiers:
+                        identifier = self._next_identifier
+                        self._next_identifier += 1
+                        self.identifiers[key] = identifier
+                        self.keys[identifier] = key
+                for key, pair in delta.items():
+                    node = pair[index]
+                    if node is not None:
+                        for row, child in enumerate(node.children):
+                            self.parents[child], self.rows[child] = key, row
+            else:
+                for key, pair in delta.items():
+                    if pair[0].text != pair[1].text:
+                        model_index = self.index_for(key)
+                        self.dataChanged.emit(model_index, model_index,
+                                              [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole])
+        finally:
+            if structural:
+                self.endResetModel()
+        return structural, fresh
 
     def replace_document(self, document):
         """仅在结构变化时重置模型；普通文本变化不丢失用户的树展开和滚动状态。"""
@@ -58,12 +112,16 @@ class OutlineModel(QAbstractItemModel):
             )
         if structural:
             self.beginResetModel()
-            self.document = document
+            self.document = copy(document)
+            self.document.nodes = document.nodes.copy()
+            self.document.assets = document.assets.copy()
             self._reindex()
             self.endResetModel()
         else:
             old = self.document
-            self.document = document
+            self.document = copy(document)
+            self.document.nodes = document.nodes.copy()
+            self.document.assets = document.assets.copy()
             for key, node in document.nodes.items():
                 if node.text != old.nodes[key].text:
                     index = self.index_for(key)
@@ -143,8 +201,11 @@ class OutlinePanel(QTreeView):
             self._depth_actions[depth] = action
             action.triggered.connect(lambda checked=False, value=depth: self.set_display_depth(value))
         self._depth_actions[2].setChecked(True)
-        self.tree_model = OutlineModel(canvas.engine.document, self)
+        self.tree_model = OutlineModel(canvas._document, self)
         self.setModel(self.tree_model)
+        self._expanded_ids = set()
+        self.expanded.connect(lambda index: self._expanded_ids.add(self.tree_model.node_id(index)))
+        self.collapsed.connect(lambda index: self._expanded_ids.discard(self.tree_model.node_id(index)))
         self.setHeaderHidden(True)
         self.setUniformRowHeights(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -165,7 +226,7 @@ class OutlinePanel(QTreeView):
         canvas.document_changed.connect(self._document_changed)
         self._apply_display_depth()
         self.sync_selection(canvas.selected_node_ids())
-        self.set_theme(canvas.engine.document.theme)
+        self.set_theme(canvas._document.theme)
 
     @property
     def display_depth(self) -> int | None:
@@ -279,22 +340,40 @@ class OutlinePanel(QTreeView):
             self._syncing = False
 
     def _document_changed(self, event):
+        # 保存只改变历史保存标记，既不改变树也不改变主题；无需重新扫描所有节点。
+        if event.kind == "saved":
+            return
         self._syncing = True
         try:
-            previous = {
-                key: self.isExpanded(self.tree_model.index_for(key))
-                for key, node in self.tree_model.document.nodes.items()
-                if node.children
-            }
+            previous = set(self._expanded_ids)
             scroll = self.verticalScrollBar().value()
-            changed = self.tree_model.replace_document(self.canvas.engine.document)
+            if event.changes is not None:
+                changed, fresh = self.tree_model.apply_changes(event)
+            else:
+                changed = self.tree_model.replace_document(self.canvas._document)
+                fresh = set()
             # reset 即使结构完全相同，也代表整份导图替换，必须重新应用预设。
-            if changed or event.kind == "reset":
-                self._apply_display_depth(None if event.kind == "reset" else previous)
+            if event.kind == "reset":
+                self._expanded_ids.clear()
+                self._apply_display_depth()
+                self.verticalScrollBar().setValue(scroll)
+            elif changed:
+                self._expanded_ids.clear()
+                for key in previous:
+                    node = self.tree_model.document.nodes.get(key)
+                    if node is not None and node.children:
+                        self.setExpanded(self.tree_model.index_for(key), True)
+                for key in fresh - previous:
+                    depth, current = 1, key
+                    while current in self.tree_model.parents:
+                        depth += 1
+                        current = self.tree_model.parents[current]
+                    self.setExpanded(self.tree_model.index_for(key),
+                                     self._display_depth is None or depth < self._display_depth)
                 self.verticalScrollBar().setValue(scroll)
         finally:
             self._syncing = False
-        self.set_theme(self.canvas.engine.document.theme)
+        self.set_theme(self.canvas._document.theme)
         self.sync_selection(self.canvas.selected_node_ids())
 
     def set_theme(self, theme):

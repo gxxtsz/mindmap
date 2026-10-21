@@ -124,6 +124,12 @@ class MindMapView(QGraphicsView):
         center = visible.center() if center is None else center
         self.setSceneRect(self.scene().sceneRect().adjusted(-width, -height, width, height))
         self.centerOn(center)
+        self.owner._viewport_changed()
+
+    def scrollContentsBy(self, dx, dy):
+        """原生滚动完成后按新逻辑视口同步图元，边缘自动滚动也复用此入口。"""
+        super().scrollContentsBy(dx, dy)
+        self.owner._viewport_changed()
 
     def showEvent(self, event):
         """首次显示或隐藏标签重新可见时，唤醒画布尚未完成的初始定位请求。"""
@@ -361,6 +367,13 @@ class MindMapView(QGraphicsView):
             if ids:
                 current = self.owner.node_items[ids[0]].sceneBoundingRect().center()
                 dx, dy = directions[event.key()]
+                if self.owner._virtualized:
+                    target = self.owner.layout_result.geometry.nearest(ids[0], dx, dy)
+                    if target is not None:
+                        self.owner.select_nodes([target])
+                        self.ensureVisible(self.owner.node_items[target], 50, 50)
+                    event.accept()
+                    return
                 candidates = []
                 for node_id, item in self.owner.node_items.items():
                     offset = item.sceneBoundingRect().center() - current
