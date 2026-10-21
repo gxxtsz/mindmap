@@ -26,6 +26,13 @@ uv build --package mindmap-docking
 `editor_header_height`／`compact_editor_header_height` 控制标签行高度，默认32／28逻辑像素。
 业务文档控件应自行铺满正文；需要跟随外壳底色时由宿主显式传递，框架不改写业务数据。
 
+侧栏活动工具采用蓝底白色图标，已打开但未活动的工具采用柔和蓝底和蓝色图标，普通悬停保留灰底。
+状态色由 `ToolWindow.Button.selectedBackground`／`selectedForeground` 和
+`ToolWindow.Button.inactiveBackground`／`inactiveForeground` 分别控制，可通过 `ThemeTokens` 覆盖；
+这些颜色仅用于工具入口，不改变树行和菜单的选中颜色。浅色和深色主题各自提供配色。
+键盘导航使用独立的2逻辑像素 `control-brand-border` 焦点描边，侧栏描边位于填充外侧，
+正常模式间隔2逻辑像素，紧凑模式至少间隔1逻辑像素；自动获得焦点时不显示描边。
+
 ## 接入现有 Qt 窗口
 
 ```python

@@ -47,6 +47,15 @@ class _StripeEntryButton(IconButton):
     def _background_radius(self):
         return 5 if self.manager.theme.compact else 6
 
+    def _focus_rect(self):
+        """将两像素焦点圈放在填充外侧，正常模式留两像素间隔，紧凑模式至少留一像素。
+
+        焦点圈的外缘限制在按钮点击范围内，避免紧凑布局或业务自定义尺寸裁掉描边；
+        背景仍保持原来的 32／28 方格，焦点状态不会挤动侧栏或改变按钮几何。
+        """
+        bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        return self._background_rect().adjusted(-3, -3, 3, 3).intersected(bounds)
+
 
 class StripeButton(_StripeEntryButton):
     """侧栏工具入口；所属侧栏管理生命周期，按钮本身不创建或持有业务 QWidget。"""

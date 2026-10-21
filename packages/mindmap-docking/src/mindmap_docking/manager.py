@@ -536,9 +536,14 @@ class DockManager(QObject):
         if owner_id:
             self.mark_active(owner_id)
         elif focus:
+            was_active = bool(self.active_id)
             self.active_id = ""
             for panel in self.panels.values():
                 panel.update_header()
+            # 焦点回到编辑器或工具入口时也通知侧栏重绘，及时撤销活动蓝底。
+            # 只同步外观，不通过 refresh 重挂业务控件，避免打断编辑器输入。
+            if was_active:
+                self.active_changed.emit("")
         if changed:
             self.refresh()
 

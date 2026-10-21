@@ -134,6 +134,14 @@ class IconButton(QAbstractButton):
         """返回状态背景圆角的逻辑像素半径。"""
         return 5
 
+    def _focus_rect(self):
+        """返回键盘焦点描边的中心线矩形，默认将两像素描边收在背景区域内。
+
+        标题栏小按钮的外侧留白有限，因此默认内缩一像素；侧栏入口可覆盖此接口，
+        将焦点圈放在状态背景外。返回值只参与绘制，不改变布局、点击范围或焦点链。
+        """
+        return self._background_rect().adjusted(1, 1, -1, -1)
+
     def _icon_rect(self):
         """统一图标画布；紧凑模式必须实际绘制为 16，不能仅缩小资源请求值。"""
         size = 16 if self.manager.theme.compact else 20
@@ -173,35 +181,45 @@ class IconButton(QAbstractButton):
         area = self._background_rect()
         radius = self._background_radius()
         tool_id = getattr(self, "tool_id", None)
-        active = self.isChecked() and tool_id is not None and tool_id == self.manager.active_id
-        if self.isDown() or self.isChecked():
-            painter.setBrush(theme.color("toolbar-selected-bg-active" if active else "toolbar-bg-hovered"))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(area, radius, radius)
-        elif self.underMouse():
-            painter.setBrush(theme.color("toolbar-bg-hovered"))
+        selected = self.isChecked() and tool_id is not None
+        active = selected and tool_id == self.manager.active_id
+        foreground = theme.color("text-muted")
+        background_key = None
+        # 工具入口的打开状态与面板活动状态分别着色，避免活动蓝底扩散到树行、菜单等
+        # 共用 toolbar-selected-bg-active 的控件；悬停也不能覆盖已打开工具的状态。
+        if selected:
+            background_key = ("ToolWindow.Button.selectedBackground" if active
+                              else "ToolWindow.Button.inactiveBackground")
+            foreground = theme.color("ToolWindow.Button.selectedForeground" if active
+                                     else "ToolWindow.Button.inactiveForeground")
+        elif self.isDown() or self.isChecked() or self.underMouse():
+            background_key = "toolbar-bg-hovered"
+        if background_key is not None:
+            painter.setBrush(theme.color(background_key))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(area, radius, radius)
         if self.hasFocus() and self._keyboard_focus:
-            # 键盘焦点使用独立细描边，不再复用悬停填充；自动获得焦点时保持普通外观。
-            # 半像素内缩让边框完全落在原有背景区域，不改变按钮尺寸或点击范围。
+            # 焦点仅表示键盘将操作的按钮，不改变工具的活动状态和填充色。
+            # 描边矩形由控件规格决定，圆角随外扩或内缩同步，深色主题使用更亮的品牌色。
+            focus_area = self._focus_rect()
+            focus_radius = max(0, radius + (focus_area.width() - area.width()) / 2)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(theme.color("control-brand-border"), 1))
-            painter.drawRoundedRect(area.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+            painter.setPen(QPen(theme.color("control-brand-border"), 2))
+            painter.drawRoundedRect(focus_area, focus_radius, focus_radius)
         rect = self._icon_rect()
         icon = theme.icon(self.icon_name, rect.width()) if self.icon_name else None
         if icon and not icon.isNull():
-            if active:
+            if selected:
                 pixmap = icon.pixmap(rect.size(), self.devicePixelRatioF())
                 tint = QPainter(pixmap)
                 tint.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-                tint.fillRect(pixmap.rect(), theme.color("ToolWindow.Button.selectedForeground", "#FFFFFF"))
+                tint.fillRect(pixmap.rect(), foreground)
                 tint.end()
                 painter.drawPixmap(rect, pixmap)
             else:
                 icon.paint(painter, rect)
         else:
-            painter.setPen(QPen(theme.color("text-muted"), 1.2))
+            painter.setPen(QPen(foreground, 1.2))
             c = self.rect().center()
             if self.symbol == "close":
                 painter.drawLine(c + QPoint(-4, -4), c + QPoint(4, 4))
@@ -211,7 +229,7 @@ class IconButton(QAbstractButton):
             elif self.symbol == "maximize":
                 painter.drawRect(QRect(c.x() - 4, c.y() - 4, 8, 8))
             elif self.symbol == "more":
-                painter.setBrush(theme.color("text-muted"))
+                painter.setBrush(foreground)
                 painter.setPen(Qt.PenStyle.NoPen)
                 for y in (-4, 0, 4):
                     painter.drawEllipse(QPoint(c.x(), c.y() + y), 1, 1)
@@ -225,8 +243,7 @@ class IconButton(QAbstractButton):
             text_rect = self.rect().adjusted(rect.right() + 7, 0, -8, 0)
             label = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight,
                                                 max(0, text_rect.width()))
-            painter.setPen(theme.color("ToolWindow.Button.selectedForeground", "#FFFFFF")
-                           if active else theme.color("text-default"))
+            painter.setPen(foreground if selected else theme.color("text-default"))
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
         if self.notification:
             painter.setPen(Qt.PenStyle.NoPen)
