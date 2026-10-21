@@ -4,8 +4,8 @@ from pathlib import Path
 
 from mindmap_docking import DockManager, DockPosition, Theme, ToolWindowSpec
 from mindmap_engine import MindMapError, create_default_format_registry, create_default_layout_registry
-from mindmap_qt import UiColors
-from mindmap_qt.rendering import ensure_fonts
+from mindmap_qt_render import ensure_fonts
+from mindmap_qt_ui import UiColors
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
 from PySide6.QtCore import QLibraryInfo, QPoint, QSettings, QSignalBlocker, Qt, QTranslator
 from PySide6.QtGui import QAction, QIcon, QPalette
@@ -386,7 +386,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def hideEvent(self, event):
         if hasattr(self, "sessions"):
             for session in self.sessions.values():
-                session.panels.settings._close_popups()
+                session.panels.settings.close_popups()
         super().hideEvent(event)
 
     def closeEvent(self, event):

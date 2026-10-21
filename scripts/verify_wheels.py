@@ -1,4 +1,4 @@
-"""在仓库外创建八个干净环境，分别验证成员 wheel 的依赖隔离与桌面完整流程。
+"""在仓库外创建十三个干净环境，验证成员 wheel 的依赖隔离与桌面完整流程。
 
 本脚本只使用 uv 管理环境和依赖。临时目录退出前会被清理，执行任何递归清理前
 先确认其绝对路径仍是本次创建的系统临时目录子项，避免删除工作区或其他目录。
@@ -17,18 +17,23 @@ from pathlib import Path
 
 
 def run():
-    """仅从本仓库 dist 读取八个成员的 wheel，在独立环境中验证依赖与运行。"""
+    """仅从本仓库 dist 读取十三个成员的 wheel，在独立环境中验证依赖与运行。"""
     repository = Path(__file__).resolve().parents[1]
     distribution = repository / "dist"
     wheels = {}
-    # 引擎成员比 Qt 组件多一层分组目录，使用显式映射避免根据包名推断目录深度。
+    # 引擎与 Qt 成员位于各自分组目录，使用显式映射避免根据包名推断目录深度。
     # 键继续使用 wheel 文件的下划线名称，值指向各成员包含 pyproject.toml 的真实目录。
     member_paths = {
         "mindmap_core": "packages/engine/mindmap-core",
         "mindmap_layouts": "packages/engine/mindmap-layouts",
         "mindmap_formats": "packages/engine/mindmap-formats",
         "mindmap_engine": "packages/engine/mindmap-engine",
-        "mindmap_qt": "packages/mindmap-qt",
+        "mindmap_qt": "packages/qt/mindmap-qt",
+        "mindmap_qt_render": "packages/qt/mindmap-qt-render",
+        "mindmap_qt_ui": "packages/qt/mindmap-qt-ui",
+        "mindmap_qt_canvas": "packages/qt/mindmap-qt-canvas",
+        "mindmap_qt_panels": "packages/qt/mindmap-qt-panels",
+        "mindmap_qt_workspace": "packages/qt/mindmap-qt-workspace",
         "mindmap_docking": "packages/mindmap-docking",
         "mindmap_shell": "packages/mindmap-shell",
         "mindmap_workbench": "apps/mindmap-workbench",
@@ -39,7 +44,7 @@ def run():
         )
         wheels[name] = distribution / f"{name}-{metadata['project']['version']}-py3-none-any.whl"
     if not all(path.is_file() for path in wheels.values()):
-        raise RuntimeError("请先运行 uv build --all-packages 构建八个成员的 wheel")
+        raise RuntimeError("请先运行 uv build --all-packages 构建十三个成员的 wheel")
     uv = shutil.which("uv")
     if not uv:
         raise RuntimeError("未找到 uv")
@@ -191,6 +196,110 @@ print(json.dumps({"核心包无Qt": True, "核心文件往返": True}))
 """,
             ]
         )
+        # 每个能力包单独解析 wheel 元数据；下层环境中不能出现上层包或兼容门面。
+        # 示例代码只导入安装环境的模块，当前目录位于仓库外且已移除 PYTHONPATH。
+        qt_checks = {
+            "render": '''
+from mindmap_engine import MindMapDocument, create_default_layout_registry
+from mindmap_qt_render import NodeItem, VisualFactory, export_document
+document = MindMapDocument.new("独立渲染导出")
+visuals, sizes = VisualFactory().measure(document)
+item = NodeItem(document.root, visuals[document.root_id], document.theme)
+assert not hasattr(item, "owner") and sizes[document.root_id][0] > 0
+for extension in ("png", "svg", "pdf"):
+    target = Path("render." + extension)
+    export_document(document, target, layout_registry=create_default_layout_registry())
+    assert target.stat().st_size > 100
+''',
+            "ui": '''
+from mindmap_engine import MindMapDocument
+from mindmap_qt_ui import NodePropertiesForm, UiColors
+form = NodePropertiesForm()
+document = MindMapDocument.new("独立属性表单")
+form.load_nodes([document.root], root_id=document.root_id, parents={}, editable=True)
+assert form.fields["style.font_size"].value() > 0
+assert UiColors.__module__ == "mindmap_qt_ui.ui_style"
+form.close()
+''',
+            "canvas": '''
+from mindmap_qt_canvas import MindMapFileController, MindMapWidget
+class Inputs:
+    def flush_pending_edits(self):
+        pass
+canvas = MindMapWidget()
+node = canvas.engine.add_child(canvas.engine.root_id, "独立交互画布")
+canvas.reveal_nodes([node])
+assert canvas.selected_node_ids() == [node]
+files = MindMapFileController(canvas, Inputs())
+files.path = Path("canvas.mindmap")
+assert files.save()
+assert files.open_path("canvas.mindmap")
+canvas.export("canvas.png")
+canvas.dispose()
+canvas.close()
+''',
+            "panels": '''
+from mindmap_engine import MindMapEngine
+from mindmap_qt_panels import OutlinePanel, PanelHost
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QWidget
+class Host(QWidget):
+    selection_changed = Signal(list)
+    document_changed = Signal(object)
+    def __init__(self):
+        super().__init__()
+        self.engine = MindMapEngine()
+        self.document_view = self.engine.document
+    def selected_node_ids(self):
+        return [self.engine.root_id]
+host = Host()
+outline = OutlinePanel(host, host)
+outline.set_display_depth(1)
+assert outline.tree_model.document.root_id == host.engine.root_id
+assert PanelHost.__module__ == "mindmap_qt_panels.contracts"
+host.close()
+''',
+            "workspace": '''
+from mindmap_qt_workspace import MindMapWorkspace
+workspace = MindMapWorkspace()
+workspace.resize(1000, 700)
+workspace.show()
+app.processEvents()
+workspace.show_tool_window("outline", focus=False)
+workspace.panels.properties.fields["style.font_size"].setValue(25)
+workspace.flush_pending_edits()
+assert workspace.canvas.engine.document.root.style["font_size"] == 25
+workspace.restore_state(workspace.save_state())
+workspace.dispose()
+workspace.close()
+''',
+        }
+        allowed = {
+            "render": {"render"},
+            "ui": {"render", "ui"},
+            "canvas": {"render", "ui", "canvas"},
+            "panels": {"render", "ui", "panels"},
+            "workspace": set(qt_checks),
+        }
+        for capability, check in qt_checks.items():
+            name = "mindmap_qt_" + capability
+            directory = temporary / ("env-" + name)
+            execute([uv, "venv", "--python", "3.12", directory])
+            execute([uv, "pip", "install", "--python", interpreter(directory),
+                     "--constraint", constraints, wheels[name]])
+            forbidden = {"mindmap_qt", "mindmap_docking", "mindmap_shell", "mindmap_workbench"}
+            forbidden.update("mindmap_qt_" + item for item in set(qt_checks) - allowed[capability])
+            prelude = (
+                "import importlib.util, sys\nfrom pathlib import Path\n"
+                + f"for name in {sorted(forbidden)!r}:\n"
+                + "    assert importlib.util.find_spec(name) is None, name\n"
+                + f"import {name} as installed\n"
+                + "assert Path(installed.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())\n"
+                + "from PySide6.QtWidgets import QApplication\napp = QApplication([])\n"
+            )
+            execute([interpreter(directory), "-c", prelude + check])
+            independent[name] = True
+            print(f"{name}：独立安装、依赖隔离与功能验证通过", flush=True)
         execute([uv, "venv", "--python", "3.12", qt_env])
         execute(
             [
@@ -213,6 +322,12 @@ import importlib.util, json
 from PySide6.QtWidgets import QApplication
 from mindmap_engine import MindMapEngine
 from mindmap_qt import MindMapWidget, MindMapWorkspace
+from mindmap_qt_canvas import MindMapWidget as DirectWidget
+from mindmap_qt_workspace import MindMapWorkspace as DirectWorkspace
+from mindmap_qt import widget as old_module
+from mindmap_qt_canvas import widget as new_module
+assert MindMapWidget is DirectWidget and MindMapWorkspace is DirectWorkspace
+assert old_module is new_module
 assert importlib.util.find_spec("mindmap_workbench") is None
 assert importlib.util.find_spec("mindmap_docking") is None
 assert importlib.util.find_spec("mindmap_shell") is None
@@ -323,7 +438,10 @@ print(json.dumps({"外壳包独立安装与依赖隔离": True, "随包模板生
 import importlib.util, json, sys
 from importlib.metadata import distributions
 from pathlib import Path
-import mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_qt, mindmap_engine
+import mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_engine
+import mindmap_qt_canvas, mindmap_qt_panels, mindmap_qt_ui, mindmap_qt_render
+assert importlib.util.find_spec("mindmap_qt") is None
+assert importlib.util.find_spec("mindmap_qt_workspace") is None
 from mindmap_docking import DockPosition, DockTarget
 from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
@@ -373,7 +491,8 @@ for suffix in ("png", "svg", "pdf"):
     target = Path("workbench." + suffix)
     window.canvas.export(target)
     assert target.stat().st_size > 500
-for module in (mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_qt, mindmap_engine):
+for module in (mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_engine,
+               mindmap_qt_canvas, mindmap_qt_panels, mindmap_qt_ui, mindmap_qt_render):
     assert Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 assert window.new_document(Path("second.mindmap").absolute())
 secondary = window.active_session
@@ -411,7 +530,7 @@ print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台
         pins = {name.lower().replace("_", "-"): version
                 for name, version in workbench_result.pop("已验证运行依赖").items()}
         # 发行约束来自真正通过验收的干净环境，避免交付时重新解析出其他版本。
-        # 八个成员全部来自当前仓库，完整保留本次验证的固定版本。
+        # 十三个成员全部来自当前仓库，完整保留本次验证的固定版本。
         for name, wheel in wheels.items():
             pins[name.replace("_", "-")] = wheel.name.split("-")[1]
         release_constraints = repository / ".artifacts/release-constraints.txt"

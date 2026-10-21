@@ -13,7 +13,8 @@ from uuid import uuid4
 from mindmap_docking import DocumentSpec
 from mindmap_engine import FormatRegistry, MindMapEngine, MindMapError, save_document
 from mindmap_formats.mindmap import MindmapCodec
-from mindmap_qt import MindMapFileController, MindMapPanels, MindMapWidget
+from mindmap_qt_canvas import MindMapFileController, MindMapWidget
+from mindmap_qt_panels import MindMapPanels
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -227,8 +228,8 @@ class MindMapSession(QObject):
 
     def close_popups(self):
         """离开会话时关闭旧菜单、候选预览和字段下拉框，拒绝迟到的选择回调。"""
-        self.canvas._cancel_branch_menu()
-        self.panels.settings._close_popups()
+        self.canvas.cancel_transient_ui()
+        self.panels.settings.close_popups()
         self.panels.outline.depth_menu.close()
         fields = self.panels.properties.fields
         fields["branch.kind"].hidePopup()

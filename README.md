@@ -75,7 +75,7 @@ uv run --locked --package mindmap-workbench mindmap-workbench 我的导图.mindm
 
 ## 工作区
 
-源码按子系统分组，四个无界面引擎包统一位于 `packages/engine/`：
+源码按子系统分组，四个无界面引擎包位于 `packages/engine/`，五个 Qt 功能包与兼容入口位于 `packages/qt/`：
 
 ```text
 packages/
@@ -84,7 +84,13 @@ packages/
 │  ├─ mindmap-layouts/
 │  ├─ mindmap-formats/
 │  └─ mindmap-engine/
-├─ mindmap-qt/
+├─ qt/
+│  ├─ mindmap-qt-render/
+│  ├─ mindmap-qt-ui/
+│  ├─ mindmap-qt-canvas/
+│  ├─ mindmap-qt-panels/
+│  ├─ mindmap-qt-workspace/
+│  └─ mindmap-qt/
 ├─ mindmap-docking/
 └─ mindmap-shell/
 apps/
@@ -93,8 +99,8 @@ tests/
 └─ desktop/
 ```
 
-`engine/` 仅用于目录分组，四个引擎成员各自保留 `pyproject.toml`、`src/`、`tests/` 和许可证。
-桌面基础包的组合回归集中在 `tests/desktop/`；八个成员均可独立构建。
+`engine/` 和 `qt/` 用于目录分组，各成员保留独立的 `pyproject.toml`、`src/`、README 和许可证，测试随所属成员管理。
+桌面基础包的组合回归集中在 `tests/desktop/`；十三个成员均可独立构建。
 
 | 成员 | 导入名 | 职责 |
 | --- | --- | --- |
@@ -102,7 +108,12 @@ tests/
 | mindmap-layouts | mindmap_layouts | 内置树布局和默认布局注册表，只依赖核心 |
 | mindmap-formats | mindmap_formats | 原生容器、JSON、大纲和原子文件读写，只依赖核心 |
 | mindmap-engine | mindmap_engine | 默认组合入口，重新导出上述三个包的公开接口，无 Qt 依赖 |
-| mindmap-qt | mindmap_qt | 原生画布、输入、图片及图形导出 |
+| mindmap-qt-render | mindmap_qt_render | 测量、静态图元、文字图片绘制和图形导出 |
+| mindmap-qt-ui | mindmap_qt_ui | 共享配色、控件、属性表单和弹窗 |
+| mindmap-qt-canvas | mindmap_qt_canvas | 交互画布、选择、拖动、编辑和文件控制器 |
+| mindmap-qt-panels | mindmap_qt_panels | 通过公开宿主协议连接的大纲、属性和全局设置 |
+| mindmap-qt-workspace | mindmap_qt_workspace | 组合画布与面板的独立 Qt 停靠工作区 |
+| mindmap-qt | mindmap_qt | 保留原公开类、子模块路径和模块对象的兼容入口 |
 | mindmap-docking | mindmap_docking | 停靠面板、文档标签、分屏、主题与布局管理 |
 | mindmap-shell | mindmap_shell | 桌面外壳、应用动作、菜单和启动流程 |
 | mindmap-workbench | mindmap_workbench | 多导图思维导图桌面应用 |
@@ -120,14 +131,15 @@ uv run --locked --all-packages python scripts/verify_wheels.py
 uv run --locked --all-packages python scripts/verify_workbench.py
 ```
 
-八个成员全部在当前仓库构建，wheel 验收仅使用本仓库 `dist/` 中的构建结果，
+十三个成员全部在当前仓库构建，wheel 验收仅使用本仓库 `dist/` 中的构建结果，
 在仓库外的干净环境中验证依赖隔离和工作台完整流程。
 安装报告与固定版本约束写入 `.artifacts/`，视觉验收结果写入 `.artifacts/workbench-visual/`。
 视觉验收检查 100%、150%、200% 三档缩放；Windows 默认使用原生 `windows` 平台，
 其他系统默认使用 `offscreen`。Windows 也可传入 `--platform offscreen` 执行离屏检查。
 
 `mindmap-qt` 的独立画布、面板组合、文件控制器和嵌入工作区接口见
-[组件说明](packages/mindmap-qt/README.md)，它们不依赖桌面框架。
+[组件说明](packages/qt/mindmap-qt/README.md)，它们不依赖桌面框架。
+工作台直接依赖画布、面板、UI 和渲染包，不安装兼容入口或独立 Qt 工作区。
 [桌面框架说明](docs/桌面框架.md)介绍两个基础包的接口、依赖方向和应用配置；
 代码与资源许可见[资源与许可](docs/资源与许可.md)。
 `scripts/branch_style_lab.py` 直接调用正式路由及绘制代码，输出四种布局方向的样式验收图；

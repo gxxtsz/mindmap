@@ -10,8 +10,8 @@ dependencies = []
 package = false
 
 [tool.uv.workspace]
-# 引擎、画布、停靠组件和桌面外壳统一在本仓库构建，共用一个锁文件。
-members = ["packages/engine/*", "packages/mindmap-qt", "packages/mindmap-docking", "packages/mindmap-shell", "apps/*"]
+# 引擎与 Qt 成员按子系统分组，全部成员共用工作区及锁文件。
+members = ["packages/engine/*", "packages/qt/*", "packages/mindmap-docking", "packages/mindmap-shell", "apps/*"]
 
 [tool.uv.sources]
 mindmap-core = { workspace = true }
@@ -19,6 +19,11 @@ mindmap-layouts = { workspace = true }
 mindmap-formats = { workspace = true }
 mindmap-engine = { workspace = true }
 mindmap-qt = { workspace = true }
+mindmap-qt-render = { workspace = true }
+mindmap-qt-ui = { workspace = true }
+mindmap-qt-canvas = { workspace = true }
+mindmap-qt-panels = { workspace = true }
+mindmap-qt-workspace = { workspace = true }
 mindmap-docking = { workspace = true }
 mindmap-shell = { workspace = true }
 
@@ -26,7 +31,7 @@ mindmap-shell = { workspace = true }
 dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.11,<1"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages/engine/mindmap-core/tests", "packages/engine/mindmap-layouts/tests", "packages/engine/mindmap-formats/tests", "packages/engine/mindmap-engine/tests", "packages/mindmap-qt/tests", "tests/desktop", "apps/mindmap-workbench/tests"]
+testpaths = ["packages/engine/mindmap-core/tests", "packages/engine/mindmap-layouts/tests", "packages/engine/mindmap-formats/tests", "packages/engine/mindmap-engine/tests", "packages/qt/mindmap-qt/tests", "packages/qt/mindmap-qt-panels/tests", "tests/desktop", "apps/mindmap-workbench/tests"]
 addopts = "--import-mode=importlib"
 qt_api = "pyside6"
 

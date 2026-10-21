@@ -1,0 +1,19 @@
+[project]
+name = "mindmap-qt-render"
+version = "0.1.0"
+description = "思维导图的 Qt 测量、静态绘制与图形导出"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mindmap-engine>=0.1.0,<0.2",
+    "PySide6>=6.9,<7",
+]
+license = "MIT"
+license-files = ["LICENSE"]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mindmap_qt_render"]

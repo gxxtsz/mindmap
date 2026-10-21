@@ -17,12 +17,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_workspace_and_lock_only_reference_current_repository():
-    """八个工作区成员全部从仓库内部解析，锁文件没有相邻目录依赖。"""
+    """十三个工作区成员全部从仓库内部解析，锁文件没有相邻目录依赖。"""
     project = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
     sources = project["tool"]["uv"]["sources"]
     expected = {
         "mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-engine",
         "mindmap-qt", "mindmap-docking", "mindmap-shell", "mindmap-workbench",
+        "mindmap-qt-render", "mindmap-qt-ui", "mindmap-qt-canvas", "mindmap-qt-panels",
+        "mindmap-qt-workspace",
     }
     assert set(sources) == expected - {"mindmap-workbench"}
     assert all(source == {"workspace": True} for source in sources.values())
@@ -34,6 +36,8 @@ def test_workspace_and_lock_only_reference_current_repository():
     for member in members.values():
         source = (ROOT / member["source"]["editable"]).resolve()
         assert source.is_relative_to(ROOT) and (source / "pyproject.toml").is_file()
+        if member["name"].startswith("mindmap-qt"):
+            assert source == ROOT / "packages/qt" / member["name"]
         metadata = tomllib.loads((source / "pyproject.toml").read_text("utf-8"))
         assert all(dependency.startswith(("mindmap-", "PySide6"))
                    for dependency in metadata["project"]["dependencies"])
@@ -44,11 +48,13 @@ def test_package_imports_keep_engine_canvas_and_shell_boundaries():
     boundaries = (
         ("packages/mindmap-docking/src", {"mindmap_shell", "mindmap_workbench", "mindmap_qt", "mindmap_engine"}),
         ("packages/mindmap-shell/src", {"mindmap_workbench", "mindmap_qt", "mindmap_engine"}),
-        ("packages/mindmap-qt/src", {"mindmap_docking", "mindmap_shell", "mindmap_workbench"}),
+        ("packages/qt", {"mindmap_docking", "mindmap_shell", "mindmap_workbench"}),
         ("packages/engine", {"mindmap_docking", "mindmap_shell", "mindmap_workbench", "mindmap_qt", "PySide6"}),
     )
     for directory, forbidden in boundaries:
-        for path in (ROOT / directory).rglob("*.py"):
+        source_root = ROOT / directory
+        assert source_root.is_dir(), directory
+        for path in source_root.rglob("*.py"):
             if "tests" in path.parts:
                 continue
             for node in ast.walk(ast.parse(path.read_text("utf-8"))):
