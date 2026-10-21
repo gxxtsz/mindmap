@@ -17,3 +17,5 @@ wheels/
 htmlcov/
 *.tmp
 .artifacts/
+
+*.mindmap
