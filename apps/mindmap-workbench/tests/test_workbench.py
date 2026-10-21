@@ -17,10 +17,10 @@ from mindmap_engine import (
     load_document,
     save_document,
 )
-from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
+from mindmap_workbench.shell_adapter import build_window
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QImage
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QTabBar, QToolButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QToolButton
 
 
 @pytest.fixture
@@ -28,10 +28,13 @@ def window(qtbot, tmp_path):
     widget = build_window(storage_dir=tmp_path / "配置", restore=False)
 
     def prepare_close(item):
-        item.engine.mark_saved()
-        item.files._unsaved_import = False
+        for session in item.sessions.values():
+            session.panels.properties.discard_pending()
+            session.canvas.finish_edit(commit=False)
+            session.engine.mark_saved()
 
     qtbot.addWidget(widget, before_close_func=prepare_close)
+    assert widget.new_document(tmp_path / "初始.mindmap")
     widget.show()
     QApplication.processEvents()
     yield widget
@@ -39,13 +42,13 @@ def window(qtbot, tmp_path):
     widget.close()
 
 
-def test_default_single_document_and_editable_framework(window):
+def test_new_file_session_and_editable_framework(window):
     assert len(window.engine.document.nodes) == 1
     assert window.engine.document.root.style["branch"] == {"kind": "round"}
     assert not window.engine.can_undo and not window.files.is_dirty
     assert window.panels.settings.branch.currentData() == "round"
-    assert list(window.manager.documents) == [DOCUMENT_ID]
-    assert window.manager.documents[DOCUMENT_ID]["widget"] is window.canvas
+    assert list(window.manager.documents) == [window.active_session.id]
+    assert window.manager.documents[window.active_session.id]["widget"] is window.canvas
     assert window.manager.states["properties"].visible
     assert window.panels.properties.isVisible()
     assert window.panels.properties.fields["style.font_size"].isVisible()
@@ -96,7 +99,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected
     assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "设置"]
     files = next(action.menu() for action in main.actions() if action.text() == "文件")
-    assert [action.text() for action in files.actions()] == ["新建", "打开 / 导入…", "保存", "另存为…", "导出图形", "退出"]
+    assert [action.text() for action in files.actions()] == ["新建", "打开…", "保存", "保存全部", "另存为…", "导出图形", "退出"]
     exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
     assert [action.text() for action in exports.actions()] == ["PNG 图片…", "SVG 矢量图…", "PDF 文档…"]
     assert all(action.isEnabled() for action in exports.actions())
@@ -173,6 +176,7 @@ def test_menu_wheel_preference_survives_restart_without_document_changes(window,
     restored = build_window(storage_dir=window.manager.storage_dir)
     qtbot.addWidget(restored)
     try:
+        assert restored.new_document(window.manager.storage_dir / "重启.mindmap")
         assert restored.canvas.wheel_mode == "zoom" and not restored.files.is_dirty
         assert "settings" not in restored.manager.specs
     finally:
@@ -199,7 +203,8 @@ def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
         assert "settings" not in restored.manager.states
         assert set(restored.manager.hosts) == {"main"}
         assert restored.manager.states["properties"].visible
-        assert restored.panels.properties.isVisible()
+        assert restored.active_session is None
+        assert restored._properties_stack.isVisible()
         restored.manager.restore_layout(snapshot)
         assert "settings" not in restored.manager.states
         assert restored.manager.states["properties"].visible
@@ -215,7 +220,7 @@ def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
     manager.activate("outline", focus=False)
     panel = manager.panel("outline")
     button, = panel.action_buttons
-    assert button.defaultAction() is tree.depth_action
+    assert button.defaultAction() is window._depth_action
     assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
     assert not button.icon().isNull() and button.width() == 28
     assert button.iconSize() == QSize(14, 14)
@@ -270,22 +275,26 @@ def test_outline_depth_preferences_survive_new_open_and_restart(window, qtbot, t
     tree = window.panels.outline
     tree.set_display_depth(depth)
     assert int(window.preferences.value("outline/display_depth")) == (0 if depth is None else depth)
-    assert window.new_document() and tree.display_depth == depth
+    assert window.new_document(tmp_path / "新建.mindmap") and tree.display_depth == depth
+    tree = window.panels.outline
     document = MindMapDocument.new("待打开的导图")
     engine = MindMapEngine(document)
     child = engine.add_child(engine.root_id, "直接子节点")
     engine.add_child(child, "更深子节点")
     path = tmp_path / "层级验收.mindmap"
     save_document(engine.document, path)
-    assert window.open_path(path) and tree.display_depth == depth
+    assert window.open_path(path)
+    tree = window.panels.outline
+    assert tree.display_depth == depth
     assert tree.isExpanded(tree.tree_model.index_for(window.engine.root_id)) == (depth != 1)
     window.engine.mark_saved()
     window.close()
     restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
     qtbot.addWidget(restored)
     try:
-        assert restored.panels.outline.display_depth == depth
+        assert restored.active_session is None
         assert restored.open_path(path)
+        assert restored.panels.outline.display_depth == depth
         assert restored.panels.outline.isExpanded(
             restored.panels.outline.tree_model.index_for(restored.engine.root_id)
         ) == (depth != 1)
@@ -303,6 +312,7 @@ def test_outline_invalid_preferences_use_default(qtbot, tmp_path, value):
         preferences.sync()
     restored = build_window(storage_dir=tmp_path, restore=False)
     qtbot.addWidget(restored)
+    assert restored.new_document(tmp_path / "默认层级.mindmap")
     assert restored.panels.outline.display_depth == 2
     restored.close()
 
@@ -334,6 +344,7 @@ def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatc
         restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
         qtbot.addWidget(restored)
         try:
+            assert restored.new_document(window.manager.storage_dir / "粘贴偏好.mindmap")
             assert restored.canvas.edraw_paste_options == ("replace", False)
             assert not restored.engine.is_dirty and not restored.engine.can_undo
             assert not restored.engine.document.metadata
@@ -360,6 +371,7 @@ def test_edraw_paste_preferences_validate_saved_values(window, qtbot, mode, keep
     restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
     qtbot.addWidget(restored)
     try:
+        assert restored.new_document(window.manager.storage_dir / "粘贴校验.mindmap")
         assert restored.canvas.edraw_paste_options == expected
     finally:
         restored.close()
@@ -389,10 +401,10 @@ def test_panel_and_file_icons_stay_distinct_and_available_after_theme_changes(wi
         menu.deleteLater()
 
 
-def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, qtbot):
-    """按钮和键盘共享真实历史动作；标签关闭后新建仍复用画布和动作实例。"""
+def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, qtbot, tmp_path):
+    """按钮和键盘共享所属会话的历史动作；关闭后新建使用独立实例。"""
     canvas, engine = window.canvas, window.engine
-    group, _ = window.host.editor.find_token(DOCUMENT_ID)
+    group, _ = window.host.editor.find_token(window.active_session.id)
     toolbar = group.cornerWidget()
     assert canvas.toolbar.isHidden()
     assert toolbar.actions() == [canvas.action("undo"), canvas.action("redo")]
@@ -413,11 +425,14 @@ def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, 
     assert all(not toolbar.widgetForAction(action).isEnabled() for action in toolbar.actions())
     assert canvas.action("fit").isEnabled() and canvas.action("center").isEnabled()
     engine.mark_saved()
-    assert window.manager.close_document(DOCUMENT_ID)
-    assert window.new_document()
-    group, _ = window.host.editor.find_token(DOCUMENT_ID)
-    assert group.cornerWidget().actions() == [canvas.action("undo"), canvas.action("redo")]
-    assert canvas._view_controls.isVisible() and canvas.toolbar.isHidden()
+    assert window.manager.close_document(window.active_session.id)
+    assert canvas._disposed and window.canvas is None
+    assert window.new_document(tmp_path / "新历史.mindmap")
+    current = window.canvas
+    group, _ = window.host.editor.find_token(window.active_session.id)
+    assert group.cornerWidget().actions() == [current.action("undo"), current.action("redo")]
+    assert current is not canvas and not window.engine.can_undo
+    assert current._view_controls.isVisible() and current.toolbar.isHidden()
 
 
 def test_canvas_controls_follow_viewport_theme_and_stay_out_of_export(window, qtbot, tmp_path):
@@ -500,7 +515,7 @@ def test_graphic_export_menu_selects_format_and_keeps_fold_state(window, tmp_pat
     else:
         assert data.startswith(b"%PDF-") and b"%%EOF" in data
     assert engine.document == before and engine.revision == revision
-    assert window.files.path is None and window.files.is_dirty
+    assert window.files.path.name == "初始.mindmap" and window.files.is_dirty
     menu.deleteLater()
 
 
@@ -525,7 +540,7 @@ def test_file_save_flushes_properties_and_inline_text(window, tmp_path):
     assert files.save()
     assert load_document(files.path).root.style["font_size"] == 22
     assert not files.is_dirty
-    assert window.manager.documents[DOCUMENT_ID]["title"] == "文档.mindmap"
+    assert window.manager.documents[window.active_session.id]["title"] == "文档.mindmap"
     canvas.begin_edit(window.engine.root_id)
     canvas.editor.setPlainText("原地文字")
     assert files.save()
@@ -536,65 +551,13 @@ def test_file_save_flushes_properties_and_inline_text(window, tmp_path):
     assert files.is_dirty
 
 
-@pytest.mark.parametrize("operation", ["new", "open_path", "open_dialog"])
-def test_closed_tab_reappears_only_after_successful_new_or_open(window, qtbot, tmp_path, monkeypatch, operation):
-    """关闭可取消；新建或打开失败、取消均不显示标签，成功后复用原画布替换内容。"""
-    manager, canvas, engine = window.manager, window.canvas, window.engine
-    source = tmp_path / "待打开.mindmap"
-    save_document(MindMapDocument.new("文件主题"), source)
-    engine.update_node(engine.root_id, text="关闭前的修改")
-    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Cancel)
-    group, index = window.host.editor.find_token(DOCUMENT_ID)
-    close = group.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
-    qtbot.mouseClick(close, Qt.MouseButton.LeftButton)
-    assert not manager.documents[DOCUMENT_ID]["closed"]
-    assert group.currentWidget() is canvas
-    engine.mark_saved()
-    qtbot.mouseClick(close, Qt.MouseButton.LeftButton)
-    assert manager.documents[DOCUMENT_ID]["closed"] and not canvas._disposed
-
-    # 即使关闭后的原会话还有修改，取消替换也不能提前显示标签或替换内容。
-    engine.update_node(engine.root_id, text="关闭后仍保留的修改")
-    before, revision = engine.document, engine.revision
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
-    window.open_dialog()
-    assert window.host.editor.find_token(DOCUMENT_ID) is None
-    bad = tmp_path / "损坏.mindmap"
-    bad.write_bytes(b"broken")
-    with pytest.raises(MindMapError):
-        window.open_path(bad)
-    assert window.host.editor.find_token(DOCUMENT_ID) is None
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(source), ""))
-
-    def perform():
-        """通过实际文件控制流程替换内容，不直接调用共用停靠组件的打开接口。"""
-        if operation == "new":
-            return window.new_document()
-        if operation == "open_path":
-            return window.open_path(source)
-        return window.open_dialog()
-
-    perform()
-    assert manager.documents[DOCUMENT_ID]["closed"]
-    assert window.host.editor.find_token(DOCUMENT_ID) is None
-    assert engine.document == before and engine.revision == revision
-    assert window.files.path is None and window.files.is_dirty
-    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Discard)
-    perform()
-    group, index = window.host.editor.find_token(DOCUMENT_ID)
-    assert group.widget(index) is canvas and canvas.isVisible()
-    assert not manager.documents[DOCUMENT_ID]["closed"] and not canvas._disposed
-    assert engine.document.root.text == ("中心主题" if operation == "new" else "文件主题")
-    assert window.files.path == (None if operation == "new" else source)
-
-
 def test_invalid_open_failed_save_and_cancel_keep_session(window, tmp_path, monkeypatch):
     before = window.engine.document
     bad = tmp_path / "损坏.mindmap"
     bad.write_bytes(b"broken")
     with pytest.raises(MindMapError):
         window.open_path(bad)
-    assert window.engine.document == before and window.files.path is None
+    assert window.engine.document == before and window.files.path.name == "初始.mindmap"
     window.engine.update_node(window.engine.root_id, text="未保存")
     target = tmp_path / "原文档.mindmap"
     target.write_bytes(b"original")
@@ -653,7 +616,7 @@ def test_no_lossless_format_reports_save_failure_without_dialog(window, monkeypa
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: pytest.fail("不应弹出保存对话框"))
     assert not window.files.save()
     assert "未注册" in window.statusBar().currentMessage()
-    assert window.engine.document == before and window.files.path is None
+    assert window.engine.document == before and window.files.path.name == "初始.mindmap"
 
 
 class MenuLayout(TreeLayout):
@@ -690,21 +653,21 @@ def test_layout_extension_still_works_without_algorithm_menu(window):
 
 
 class RootCodec:
-    """用于验证有损导入，以及仅写格式不能作为主文档保存的独立格式。"""
+    """验证额外解码器不能扩大文件打开范围，仅写格式也不能成为主保存格式。"""
 
     def read(self, stream, *, options):
-        return MindMapDocument.new(stream.read().decode("utf-8"))
+        pytest.fail("扩展格式不能用于文件打开")
 
     def write(self, document, stream, *, options):
         stream.write(document.root.text.encode("utf-8"))
 
 
-def test_dynamic_formats_lossy_import_and_save_as(window, tmp_path, monkeypatch):
-    """动态格式不再创建导出入口；有损导入必须另存为完整格式，拒绝仅写目标。"""
+def test_dynamic_formats_do_not_expand_opening_and_save_as_still_works(window, tmp_path, monkeypatch):
+    """注册额外格式不能增加文件打开能力；保存和内存编解码仍沿用能力检查。"""
     registry = window.canvas.format_registry
     registry.register(FormatInfo("root-read", "根节点导入", (".read",)), importer=RootCodec())
     registry.register(FormatInfo("root-write", "根节点导出", (".write",)), exporter=RootCodec())
-    assert "*.read" in window.files.format_filters("open") and "*.write" not in window.files.format_filters("open")
+    assert window.files.format_filters("open") == "思维导图 (*.mindmap)"
     assert "*.read" not in window.files.format_filters("save") and "*.write" not in window.files.format_filters("save")
     menu = window.main_menu()
     assert [action.text() for action in menu.actions()] == ["文件", "编辑", "视图", "设置"]
@@ -714,23 +677,27 @@ def test_dynamic_formats_lossy_import_and_save_as(window, tmp_path, monkeypatch)
     for purpose in ("export", "unknown"):
         with pytest.raises(MindMapError, match="未知文件对话框用途"):
             window.files.format_filters(purpose)
-    source = tmp_path / "有损.read"
-    source.write_text("导入内容", "utf-8")
-    assert window.open_path(source)
-    assert window.files.path is None and window.files.is_dirty
+    source = tmp_path / "额外格式.read"
+    source.write_text("额外内容", "utf-8")
+    with pytest.raises(MindMapError, match="仅支持打开 .mindmap"):
+        window.open_path(source)
+    original_path = window.files.path
     before, revision = window.engine.document, window.engine.revision
     output = tmp_path / "不能完整保存.write"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(output), ""))
-    assert not window.files.save()
-    assert not output.exists() and window.files.path is None and window.files.is_dirty
+    assert not window.files.save(save_as=True)
+    assert not output.exists() and window.files.path == original_path
     assert "请选择可完整保存导图的格式" in window.statusBar().currentMessage()
     assert window.engine.document == before and window.engine.revision == revision
     monkeypatch.setattr(QFileDialog, "getSaveFileName",
                         lambda *args: (str(tmp_path / "另存"), "JSON 文档 (*.json)"))
-    assert window.files.save()
+    assert window.files.save(save_as=True)
     assert window.files.path.suffix == ".json" and not window.files.is_dirty
-    assert window.new_document()
-    assert len(window.manager.documents) == 1 and window.files.path is None
+    # 即使 JSON 已通过另存为绑定到现有会话，也不能借路径查重绕过打开限制。
+    with pytest.raises(MindMapError, match="仅支持打开 .mindmap"):
+        window.open_path(window.files.path)
+    assert window.new_document(tmp_path / "又一份.mindmap")
+    assert len(window.manager.documents) == 2 and window.files.path.suffix == ".mindmap"
 
 
 @pytest.mark.parametrize("invalid", ["", "unknown", 123, ["zoom"]])
@@ -743,6 +710,7 @@ def test_invalid_saved_wheel_mode_falls_back_to_scroll(window, qtbot, invalid):
     restored = build_window(storage_dir=storage)
     qtbot.addWidget(restored)
     try:
+        assert restored.new_document(storage / "滚轮校验.mindmap")
         assert restored.canvas.wheel_mode == "scroll"
         assert restored.canvas.action("wheel_scroll").isChecked()
         assert not restored.files.is_dirty
@@ -785,22 +753,24 @@ def test_shell_theme_preserves_pending_input_document_and_export(window, tmp_pat
 
 
 @pytest.mark.parametrize("mode", list(ViewMode))
-def test_panel_modes_and_closed_document_keep_instances(window, mode):
+def test_panel_modes_keep_instances_and_closed_session_is_disposed(window, mode, tmp_path):
     manager, panel = window.manager, window.panels.properties
     manager.set_view_mode("properties", mode)
     manager.move("properties", DockTarget(DockPosition.LEFT_BOTTOM))
     manager.activate("properties")
-    assert manager.panel("properties").content is panel
+    assert manager.panel("properties").content.currentWidget() is panel
     manager.hide("properties")
     manager.activate("properties")
-    assert manager.panel("properties").content is panel
-    assert manager.close_document(DOCUMENT_ID)
-    assert not window.canvas._disposed
-    assert window.new_document()
-    assert manager.documents[DOCUMENT_ID]["widget"] is window.canvas
+    assert manager.panel("properties").content.currentWidget() is panel
+    canvas = window.canvas
+    assert manager.close_document(window.active_session.id)
+    assert window.canvas is None and canvas._disposed
+    assert window.new_document(tmp_path / "释放后新建.mindmap")
+    current = window.canvas
+    assert manager.documents[window.active_session.id]["widget"] is current and current is not canvas
     window.dispose()
     window.dispose()
-    assert not panel.timer.isActive() and not window.canvas._downloads
+    assert not panel.timer.isActive() and not current._downloads
 
 
 def test_preferences_restore_and_local_input_shortcuts(window, qtbot):
@@ -827,6 +797,7 @@ def test_preferences_restore_and_local_input_shortcuts(window, qtbot):
     restored = build_window(storage_dir=storage)
     qtbot.addWidget(restored)
     try:
+        assert restored.new_document(window.manager.storage_dir / "重启.mindmap")
         assert restored.canvas.wheel_mode == "zoom"
         assert restored.manager.states["outline"].position == DockPosition.BOTTOM_LEFT
         assert restored.manager.states["outline"].visible

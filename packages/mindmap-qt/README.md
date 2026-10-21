@@ -20,7 +20,7 @@ finally:
 ```
 
 组件提供节点、图片和 11 种父子分支的绘制及 PNG/SVG/PDF 导出。
-专用剪贴板使用当前版本 JSON，与文件打开共用格式校验，不读取旧版本数据。
+专用剪贴板使用当前版本 JSON，与原生容器共用文档结构校验，不读取旧版本数据。
 
 构造函数接受 `layout_registry` 和 `format_registry`，省略时分别创建独立默认实例。
 画布与图形导出使用同一个布局注册表，剪贴板使用注入的 JSON、Markdown 和纯文本实现。
@@ -169,16 +169,23 @@ finally:
 
 `MindMapFileController(canvas, panels, dialog_parent=None, *, writer=...)`
 提供宿主无关的文件生命周期，不读写本机偏好，也不拥有画布。
-`path` 表示当前保存位置，`is_dirty` 同时包含引擎修改状态与有损导入待保存状态。
+`path` 表示当前保存位置，`is_dirty` 只反映引擎修改状态；有损文件导入及其待保存状态已删除。
 `new_document()`、`open_path()`、`save()` 返回是否完成操作，
 `confirm_replace()` 统一处理保存确认；主文档只使用可完整往返的格式。
+`open_path(path)` 仅接收 `.mindmap`，不再接受 `format_id` 参数；扩展名比较忽略大小写，始终使用原生容器解码。
+`validate_open_path(path)` 在读取文件、分配会话和提交输入前校验扩展名；不匹配时抛出 `MindMapError`。
+`open_dialog()` 只显示 `思维导图 (*.mindmap)`，取消或校验失败不改变当前文档；JSON、大纲及扩展格式不能用于文件打开。
 保存、图形导出和确认替换前，控制器会提交有效属性输入与原地文字。
+`save_committed()` 仅将已提交快照按当前路径和格式原子保存，返回是否成功；不弹出对话框、不提交侧栏草稿、不结束原地编辑。
+该接口用于宿主自动保存，无绑定路径时报告失败；与普通保存共用格式校验和可注入写入器，成功才更新保存标记。
+保存事件只更新状态，不触发画布的文档替换通知，不取消菜单、连接线预览或输入法，也不清空撤销历史。
+多导图宿主应为每份会话分别创建画布、面板组合和文件控制器，自行管理活动会话、文件归属、计时器及关闭策略。
 文件解析和画布验证成功后才询问是否替换；写入成功后才更新路径与保存标记。
 `export_dialog(format_id="svg")` 接受 `png`、`svg`、`pdf`，打开所选格式的保存对话框及折叠范围选择，默认使用 SVG。
 默认文件名和唯一文件筛选对应所选格式；省略扩展名时自动补齐，其他扩展名或无效格式抛出 `MindMapError`。
 取消文件选择时不询问导出范围，成功导出不更新保存位置，也不清除未保存标记。
 文档导出专用的 `export_document_dialog()`、`export_path()` 已删除，不保留兼容接口。
-`format_filters()` 仅接受 `open`、`save`；`export` 及其他值抛出 `MindMapError`。
+`format_filters()` 仅接受 `open`、`save`；`open` 固定返回原生格式筛选，`save` 根据完整往返能力生成；其他值抛出 `MindMapError`。
 格式注册表、编解码器与原子写入继续用于正常保存和剪贴板，JSON 保存保持可用。
 `open_path()` 的异常交给宿主处理；
 `save()` 写入失败返回 False，并通过 `error_occurred(str)` 报告。

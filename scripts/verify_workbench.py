@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,7 +16,7 @@ def child(scale, platform):
     from mindmap_docking import ViewMode
     from mindmap_engine import MindMapEngine, Theme
     from mindmap_qt import MindMapWorkspace
-    from mindmap_workbench.shell_adapter import DOCUMENT_ID, build_window
+    from mindmap_workbench.shell_adapter import build_window
     from PySide6.QtCore import QCoreApplication, QEvent, Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QToolButton
@@ -24,9 +25,18 @@ def child(scale, platform):
     output = ROOT / ".artifacts/workbench-visual" / platform / f"{scale:g}x"
     output.mkdir(parents=True, exist_ok=True)
     results = []
+    temporary = TemporaryDirectory(prefix="mindmap-visual-")
+    data_dir = Path(temporary.name)
     for name in ("light", "dark"):
-        window = build_window(storage_dir=output / ("state-" + name), theme=name, restore=False)
+        window = build_window(storage_dir=data_dir / ("配置-" + name), theme=name, restore=False)
         try:
+            window.resize(1440, 960)
+            window.show()
+            app.processEvents()
+            assert window.canvas is None and len(window.sessions) == 0
+            assert window.grab().save(str(output / (name + "-welcome.png")))
+            assert window.new_document(data_dir / (name + "-主导图.mindmap"))
+            primary = window.active_session
             with window.engine.transaction("建立验收导图"):
                 root = window.engine.root_id
                 window.engine.update_node(root, text="思维导图工作台")
@@ -34,14 +44,17 @@ def child(scale, platform):
                 window.engine.add_child(first, "画布与引擎保持独立")
                 window.engine.add_child(first, "外壳修改只维护 桌面外壳")
                 window.engine.add_child(root, "文件保存与图形导出")
-            window.resize(1440, 960)
-            window.show()
+            assert window.new_document(data_dir / (name + "-并行导图.json"))
+            secondary = window.active_session
+            secondary.engine.update_node(secondary.engine.root_id, text="独立会话与历史")
+            assert window.save_all()
+            window.manager.activate_document(primary.id)
             window.activateWindow()
             window.manager.activate("outline", focus=False)
             app.processEvents()
             window.canvas.fit_to_view()
             app.processEvents()
-            group, _ = window.host.editor.find_token(DOCUMENT_ID)
+            group, _ = window.host.editor.find_token(primary.id)
             controls = window.canvas._view_controls
             # 从实际视口像素检查左右顶部接缝；嵌入画布应填满矩形，不再露出内层圆角。
             viewport_image = window.canvas.view.viewport().grab().toImage()
@@ -52,7 +65,8 @@ def child(scale, platform):
                 "面板尺寸": window.panels.properties.width() >= 330,
                 "面板内容可见": window.panels.properties.fields["style.font_size"].isVisible(),
                 "画布可用": window.canvas.view.width() > 400 and window.canvas.view.height() > 400,
-                "单一文档": len(window.manager.documents) == 1,
+                "多个独立文档": len(window.sessions) == 2 and primary.canvas is not secondary.canvas,
+                "活动侧栏": window._properties_stack.currentWidget() is primary.panels.properties,
                 "标签栏历史入口": group.cornerWidget().actions() == [
                     window.canvas.action("undo"), window.canvas.action("redo"),
                 ],
@@ -65,6 +79,16 @@ def child(scale, platform):
                 "画布导航浮条": controls.isVisible()
                 and window.canvas.view.viewport().geometry().contains(controls.geometry()),
             }
+            # 真实菜单仅保留“打开”入口；固定原生筛选不随保存和剪贴板格式增加。
+            main_menu = window.main_menu()
+            file_menu = main_menu.actions()[0].menu()
+            checks["仅打开原生导图"] = (file_menu.actions()[1].text() == "打开…"
+                and window.files.format_filters("open") == "思维导图 (*.mindmap)")
+            file_menu.popup(window.title_bar.menu.mapToGlobal(window.title_bar.menu.rect().bottomLeft()))
+            app.processEvents()
+            assert file_menu.grab().save(str(output / (name + "-file-menu.png")))
+            file_menu.close()
+            main_menu.deleteLater()
             # 层级按钮使用真实标题布局和菜单几何，逐档缩放核验，不能只检查动作存在。
             outline = window.panels.outline
             button, = window.manager.panel("outline").action_buttons
@@ -110,7 +134,7 @@ def child(scale, platform):
             original = window.panels.properties
             window.manager.set_view_mode("properties", ViewMode.UNDOCK)
             app.processEvents()
-            checks["临时展开保留实例"] = window.manager.panel("properties").content is original
+            checks["临时展开保留实例"] = window.manager.panel("properties").content.currentWidget() is original
             assert window.grab().save(str(output / (name + "-overlay.png")))
             window.manager.set_view_mode("properties", ViewMode.DOCK_PINNED)
             app.processEvents()
@@ -163,14 +187,31 @@ def child(scale, platform):
                 standalone.dispose()
                 standalone.close()
                 standalone.deleteLater()
+            # 在真实分屏上切换焦点，验证各缩放下菜单、侧栏和历史都随所属导图。
+            window.manager.activate("properties", focus=False)
+            window.host.editor.split_token(secondary.id, Qt.Orientation.Horizontal)
+            secondary.canvas.view.setFocus()
+            app.processEvents()
+            checks["分屏焦点与侧栏"] = (window.active_session is secondary
+                and window._properties_stack.currentWidget() is secondary.panels.properties)
+            window.manager.set_theme(name)
+            primary.canvas.fit_to_view()
+            secondary.canvas.fit_to_view()
+            app.processEvents()
+            assert window.grab().save(str(output / (name + "-sessions-split.png")))
+            window.manager.restore_default_layout()
+            checks["默认布局保留文件"] = (len(window.sessions) == 2
+                and all(window.host.editor.find_token(item.id) for item in (primary, secondary))
+                and window.active_session is secondary)
+            checks["重复打开保留会话"] = window.open_path(primary.files.path) and len(window.sessions) == 2
             results.append({"主题": name, "实际倍率": window.devicePixelRatioF(),
                             "检查": checks, "通过": all(checks.values())})
         finally:
-            window.engine.mark_saved()
             window.close()
             window.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             app.processEvents()
+    temporary.cleanup()
     (output / "report.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), "utf-8")
     return 0 if all(item["通过"] for item in results) else 1
 

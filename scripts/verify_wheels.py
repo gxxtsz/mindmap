@@ -329,9 +329,12 @@ from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 from mindmap_workbench.shell_adapter import build_window
-from mindmap_engine import load_document
+from mindmap_engine import MindMapError, load_document
 app = QApplication([])
 window = build_window(storage_dir=Path("workbench-state").absolute(), restore=False)
+assert window.canvas is None and not len(window.sessions)
+assert window.new_document(Path("workbench.mindmap").absolute())
+primary = window.active_session
 window.show()
 app.processEvents()
 assert window.panels.properties.fields["style.font_size"].isVisible()
@@ -359,8 +362,7 @@ window.canvas.select_nodes([window.engine.root_id])
 window.canvas.set_branch_style("round")
 window.canvas.select_nodes([node])
 window.canvas.set_branch_style("arrow2", scope="level")
-window.files.path = Path("workbench.mindmap").absolute()
-assert window.files.save()
+assert window.save()
 assert load_document(window.files.path) == window.engine.document
 assert window.engine.document.root.style["font_size"] == 23
 assert window.open_path(window.files.path)
@@ -373,9 +375,27 @@ for suffix in ("png", "svg", "pdf"):
     assert target.stat().st_size > 500
 for module in (mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_qt, mindmap_engine):
     assert Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+assert window.new_document(Path("second.json").absolute())
+secondary = window.active_session
+secondary.engine.update_node(secondary.engine.root_id, text="独立保存")
+assert window.save_all() and not secondary.files.is_dirty
+assert load_document(secondary.files.path).root.text == "独立保存"
+assert window.files.format_filters("open") == "思维导图 (*.mindmap)"
+try:
+    window.open_path(secondary.files.path)
+except MindMapError as error:
+    assert "仅支持打开 .mindmap" in str(error)
+else:
+    raise AssertionError("安装后的工作台不能打开非原生导图")
+assert window.active_session is secondary
+assert window.open_path(primary.files.path) and window.active_session is primary
+assert len(window.sessions) == 2
+window.manager.restore_default_layout()
+assert len(window.sessions) == 2 and window.active_session is primary
 window.close()
-assert window.canvas._disposed
-print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台文件与导出": True,
+assert primary.canvas._disposed and secondary.canvas._disposed and not len(window.sessions)
+print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台文件与导出": True, "多导图与自动保存边界": True,
+                  "仅打开原生导图": True,
                   "编辑与撤销重做": True, "图片与分支样式": True, "侧栏属性与工作区": True,
                   "已验证运行依赖": {item.metadata["Name"]: item.version for item in distributions()}}))
 """])

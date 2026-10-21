@@ -68,6 +68,97 @@ def test_document_title_survives_modified_close_and_reopen(docking):
         manager.set_document_title("missing", "标题")
 
 
+def test_document_activation_preserves_location_and_side_panel_focus(docking, qtbot):
+    """显式激活只改变标签与焦点，分屏位置不变；工具输入焦点不取代活动文档。"""
+    manager, area = docking.manager, docking.host.editor
+    peer = manager.register_document(DocumentSpec("active-peer", "另一份", lambda: QLineEdit("内容")))
+    area.split_token("active-peer", Qt.Orientation.Horizontal)
+    events = []
+    manager.document_activated.connect(events.append)
+    location = area.find_token("active-peer")
+    manager.activate_document("doc")
+    manager.activate_document("active-peer")
+    assert events == ["doc", "active-peer"]
+    assert manager.active_document_id == "active-peer" and area.find_token("active-peer") == location
+    docking.register("input-peer", factory=lambda: QLineEdit("工具输入"))
+    manager.activate("input-peer")
+    QApplication.processEvents()
+    assert manager.active_document_id == "active-peer"
+    docking.window.activateWindow()
+    docking.document.setFocus()
+    qtbot.waitUntil(lambda: manager.active_document_id == "doc")
+    assert peer is manager.documents["active-peer"]["widget"]
+    with pytest.raises(ValueError, match="尚未打开"):
+        manager.activate_document("不存在")
+
+
+def test_batch_close_checks_all_before_removing_any_page(docking):
+    """后一目标拒绝关闭时前一目标仍保留；默认缓存和主动释放策略可同时使用。"""
+    manager, area = docking.manager, docking.host.editor
+    checks, closed = [], []
+    allowed = [False]
+    for key in ("batch-one", "batch-two"):
+        manager.register_document(DocumentSpec(
+            key, key, lambda: QLabel("内容"), dispose_on_close=True,
+            can_close=lambda identifier=key: checks.append(identifier) or (identifier == "batch-one" or allowed[0]),
+            on_closed=lambda identifier=key: closed.append(identifier),
+        ))
+    assert not manager.close_documents(["batch-one", "batch-two"])
+    assert checks == ["batch-one", "batch-two"] and not closed
+    assert area.find_token("batch-one") and area.find_token("batch-two")
+    allowed[0] = True
+    assert manager.close_documents(["batch-one", "batch-two"])
+    assert closed == ["batch-one", "batch-two"]
+    assert "batch-one" not in manager.documents and "batch-two" not in manager.documents
+    assert manager.active_document_id == "doc"
+    assert manager.close_document("doc")
+    assert "doc" in manager.documents and manager.active_document_id == ""
+
+
+def test_empty_page_factory_has_no_document_token_and_survives_restore(docking):
+    """空分组页面不进入布局数据，每个分屏各有实例，恢复结构后仍可显示。"""
+    manager, area = docking.manager, docking.host.editor
+    pages = []
+
+    def factory():
+        page = QLabel("打开或新建")
+        pages.append(page)
+        return page
+
+    area.set_empty_widget_factory(factory)
+    manager.close_document("doc")
+    group = area.groups[0]
+    assert group.count() == 0 and group._empty_widget.isVisible()
+    snapshot = manager.capture_layout()
+    manager.restore_layout(snapshot)
+    QApplication.processEvents()
+    assert area.groups[0]._empty_widget is not pages[0]
+    assert area.groups[0]._empty_widget.isVisible() and len(pages) == 2
+    manager.open_document("doc")
+    assert not area.groups[0]._empty_widget.isVisible()
+
+
+def test_preserve_open_documents_is_opt_in_and_invalid_restore_has_no_effect(docking):
+    """业务可保留快照外文档；普通宿主继续按模板隐藏文档，非法数据先校验。"""
+    manager, area = docking.manager, docking.host.editor
+    template = manager.capture_layout()
+    manager.register_document(DocumentSpec("new-live", "新会话", lambda: QLabel("内容")))
+    manager.preserve_open_documents = True
+    manager.activate_document("new-live")
+    manager.restore_layout(template)
+    assert area.find_token("doc") and area.find_token("new-live")
+    assert manager.active_document_id == "new-live"
+    current = manager.capture_layout()
+    invalid = dict(current, schema_version=999)
+    with pytest.raises(ValueError):
+        manager.restore_layout(invalid)
+    assert manager.capture_layout() == current
+    manager.preserve_open_documents = False
+    manager.restore_layout(template)
+    assert area.find_token("new-live") is None
+    assert manager.documents["new-live"]["closed"] and manager.active_document_id == "doc"
+
+
 def test_document_actions_follow_current_tab_without_taking_ownership(docking, qtbot):
     """当前页共享原动作状态；空配置、工具页和非法输入都不留下错误入口。"""
     manager, area = docking.manager, docking.host.editor

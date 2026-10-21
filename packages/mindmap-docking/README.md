@@ -52,10 +52,14 @@ finally:
 ## 公共能力
 
 - `ToolWindowSpec` 注册工具面板，内容工厂延迟创建且仅创建一次，关闭或迁移保留实例。
-- `DocumentSpec` 注册文档，支持取消关闭、修改标记、关闭后重开、主窗口内分屏及标签迁移。
+- `DocumentSpec` 注册文档，支持取消关闭、修改标记、主窗口内分屏及标签迁移；`dispose_on_close=False` 默认关闭后缓存重用，设为 `True` 则关闭后移除注册并延迟销毁控件。
+- `active_document_id`、`document_activated` 跟踪活动文档；`activate_document(id)` 只切换原标签和焦点，不移动分屏位置，侧栏焦点不覆盖活动文档。
+- `close_documents(ids)` 先检查全部目标，全部通过后才移除页面；`on_closed` 可停止业务计时器和订阅。
+- `host.editor.set_empty_widget_factory(factory)` 给每个空分组创建独立页面，空白页不占用标签、文档标识或快照。
 - `DockPosition`、`DockTarget`、`ViewMode` 描述停靠位置、移动目标与显示模式；宿主仅允许 `main`，模式仅保留固定停靠、取消固定停靠和主窗口内临时展开。
 - `set_document_actions(document_id, actions)` 在当前文档标签栏右侧复用已有 `QAction`；空序列清除入口。
 - `capture_layout()`、`restore_layout(snapshot)` 操作版本 1 的布局快照，恢复仅接受字典，业务文档内容不进入布局。
+- 构造参数 `preserve_open_documents=False` 默认维持按快照恢复行为；设为 `True` 则过滤未知文档标识，保留全部当前打开文档和活动文档，缺失于快照的文档按原编辑区顺序追加。恢复前先校验，不修改调用方快照。
 - `set_default_layout()` 记录宿主初始排布，`restore_default_layout()` 或 `Shift+F12` 恢复该模板；未建立模板时不改变状态。
 - 会话自动保存和恢复保留当前排布；命名布局的保存、列举、重命名、删除及弹窗保存接口已移除。
 - `Theme`、`ThemeTokens`、`IconRegistry` 提供明暗主题、局部覆盖与图标注入。

@@ -115,7 +115,7 @@ def test_scope_mixed_selection_and_new_node_style(canvas):
 
 
 @pytest.mark.parametrize(
-    "transition", ["selection", "document", "layout", "readonly", "edit", "dispose", "focus", "undo", "saved"]
+    "transition", ["selection", "document", "layout", "readonly", "edit", "dispose", "focus", "undo"]
 )
 def test_preview_cancelled_on_state_change(canvas, transition):
     widget, first, children = canvas
@@ -135,13 +135,24 @@ def test_preview_cancelled_on_state_change(canvas, transition):
         widget.focus_node(first)
     elif transition == "undo":
         widget.engine.undo()
-    elif transition == "saved":
-        widget.engine.mark_saved()
     else:
         widget.dispose()
     assert widget._preview_layout is None
     if transition in ("readonly", "edit"):
         assert not widget.action("branch_style").isEnabled()
+
+
+def test_saved_notification_preserves_preview_and_menu(canvas):
+    """自动保存只更新历史保存位置，不能取消正在查看的连接线候选或菜单。"""
+    widget, first, children = canvas
+    widget.branch_menu.popup(widget.mapToGlobal(widget.rect().center()))
+    widget.preview_branch_style("arrow")
+    preview = widget._preview_layout
+    before = widget.engine.document
+    widget.engine.mark_saved()
+    assert widget._preview_layout is preview and widget.branch_menu.isVisible()
+    assert widget.engine.document == before and widget.engine.can_undo
+    widget.branch_menu.close()
 
 
 def test_no_selection_uses_focused_topic_or_root(canvas):

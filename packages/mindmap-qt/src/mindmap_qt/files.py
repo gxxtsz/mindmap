@@ -1,4 +1,4 @@
-"""宿主无关的文件生命周期：打开与保存格式筛选、保存决策及图形导出。"""
+"""宿主无关的文件生命周期：原生导图打开、完整格式保存及图形导出。"""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ class MindMapFileController(QObject):
     state_changed = Signal()
     message = Signal(str)
     error_occurred = Signal(str)
+    # 文件打开只接收原生容器；与保存、剪贴板的通用编解码注册表分开约束。
+    OPEN_FILTER = "思维导图 (*.mindmap)"
 
     def __init__(self, canvas, panels, dialog_parent=None, *, writer=save_document):
         super().__init__(dialog_parent)
@@ -29,43 +31,40 @@ class MindMapFileController(QObject):
         self.writer = writer
         self.path: Path | None = None
         self._path_format_id: str | None = None
-        self._unsaved_import = False
 
     @property
     def is_dirty(self) -> bool:
-        """有损导入即使尚无编辑历史，也必须另存为可完整往返的文档。"""
-        return self.engine.is_dirty or self._unsaved_import
+        """只读返回引擎修改状态；原生导图打开不再产生待另存的导入状态。"""
+        return self.engine.is_dirty
 
     def report_error(self, message):
         """把失败交给宿主的状态栏或日志，不自行显示阻塞错误对话框。"""
         self.error_occurred.emit(message)
 
-    def _update_status(self):
-        self.state_changed.emit()
-
     def format_filters(self, purpose: str) -> str:
         """按 open 或 save 生成当前格式筛选项，其他用途抛出 MindMapError。
 
-        打开允许所有具备读取能力的格式，主文档保存只允许完整往返的格式；
-        通用写入器仍由保存和剪贴板复用，不再提供文档导出专用筛选。
+        打开固定为 .mindmap，不受额外格式注册影响；保存继续使用完整往返格式。
+        通用编解码器仍由保存和剪贴板使用，不作为文件导入入口。
         """
-        return ";;".join(self._format_label(entry) for entry in self._format_entries(purpose))
-
-    def _format_entries(self, purpose):
-        entries = self.canvas.format_registry.list()
         if purpose == "open":
-            return tuple(entry for entry in entries if entry.importer is not None)
+            return self.OPEN_FILTER
         if purpose == "save":
-            return tuple(entry for entry in entries if entry.can_save)
+            return ";;".join(self._format_label(entry) for entry in self._save_formats())
         raise MindMapError("未知文件对话框用途")
+
+    def _save_formats(self):
+        """保存格式仍根据完整往返能力筛选，打开限制不改变写入器和剪贴板。"""
+        return tuple(entry for entry in self.canvas.format_registry.list() if entry.can_save)
 
     @staticmethod
     def _format_label(entry):
         return f"{entry.info.name} ({' '.join('*' + ext for ext in entry.info.extensions)})"
 
-    def _selected_format(self, selected, purpose):
+    def _selected_save_format(self, selected):
+        """仅解析保存对话框的格式选择；原生文件打开不再接受显式格式覆盖。"""
         matches = [
-            entry.info.id for entry in self._format_entries(purpose) if self._format_label(entry) == selected
+            entry.info.id for entry in self._save_formats() if self._format_label(entry) == selected
         ]
         if len(matches) > 1:
             raise MindMapError("格式筛选项存在歧义，请为扩展使用不同名称")
@@ -75,7 +74,7 @@ class MindMapFileController(QObject):
         """提交已完成输入并询问保存；取消或保存失败返回 False，不释放任何控件。"""
         self.panels.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
-        if not self.engine.is_dirty and not self._unsaved_import:
+        if not self.engine.is_dirty:
             return True
         choice = QMessageBox.question(
             self.dialog_parent,
@@ -95,7 +94,6 @@ class MindMapFileController(QObject):
         if self.confirm_replace():
             self.path = None
             self._path_format_id = None
-            self._unsaved_import = False
             self.engine.replace_document(MindMapDocument.new())
             self.canvas.center_root()
             self.state_changed.emit()
@@ -103,28 +101,42 @@ class MindMapFileController(QObject):
         return False
 
     def open_dialog(self):
-        """按当前导入能力选择文件，返回是否成功打开；不缓存格式列表。"""
-        path, selected = QFileDialog.getOpenFileName(
-            self.dialog_parent, "打开 / 导入", "", self.format_filters("open") + ";;所有文件 (*)"
+        """只显示原生导图筛选；取消不提交输入或修改当前文档状态。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self.dialog_parent, "打开导图", "", self.OPEN_FILTER
         )
         if path:
-            return self.open_path(path, format_id=self._selected_format(selected, "open"))
+            return self.open_path(path)
         return False
 
-    def open_path(self, path: str | Path, *, format_id: str | None = None):
-        """解析格式并试算布局成功后再询问替换；有损导入不沿用源文件保存路径。"""
+    @staticmethod
+    def validate_open_path(path: str | Path) -> Path:
+        """统一验证文件扩展名，供对话框、会话与命令行在分配页面前使用。
+
+        扩展名比较忽略大小写；禁止通过“所有文件”、手工输入或显式格式参数绕过。
+        此处不读取文件、不提交输入，拒绝时保留当前文档和界面状态。
+        """
         source = Path(path)
+        if source.suffix.lower() != ".mindmap":
+            raise MindMapError("仅支持打开 .mindmap 文件")
+        return source
+
+    def open_path(self, path: str | Path):
+        """只使用原生容器解码，内容与画布校验成功后才询问替换并绑定原路径。
+
+        不再接受导入格式选择；将 JSON 或文本改名为 .mindmap 也必须通过原生
+        容器验证，不能通过扩展名绕过内容校验。失败不修改当前文档或保存标记。
+        """
+        source = self.validate_open_path(path)
         registry = self.canvas.format_registry
-        entry = registry.resolve(source, format_id=format_id)
-        document = load_document(source, registry=registry, format_id=entry.info.id)
+        document = load_document(source, registry=registry, format_id="mindmap")
         self.canvas.validate_document(document)
         if not self.confirm_replace():
             return False
         self.engine.replace_document(document)
-        self.path = source if entry.can_save else None
-        self._path_format_id = entry.info.id if entry.can_save else None
-        self._unsaved_import = not entry.can_save
-        self._update_status()
+        self.path = source
+        self._path_format_id = "mindmap"
+        self.state_changed.emit()
         self.canvas.fit_to_view()
         return True
 
@@ -132,7 +144,7 @@ class MindMapFileController(QObject):
         """保存成功后才更新文件路径与已保存标记；失败保持脏状态。"""
         self.panels.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
-        if not self._format_entries("save"):
+        if not self._save_formats():
             self.report_error("未注册可完整往返文档的保存格式")
             return False
         target = self.path
@@ -147,15 +159,32 @@ class MindMapFileController(QObject):
             if not filename:
                 return False
             target = Path(filename)
-            format_id = self._selected_format(selected, "save")
+            format_id = self._selected_save_format(selected)
             if not target.suffix:
                 entry = (
                     self.canvas.format_registry.get(format_id)
                     if format_id is not None
-                    else self._format_entries("save")[0]
+                    else self._save_formats()[0]
                 )
                 format_id = entry.info.id
                 target = target.with_suffix(entry.info.extensions[0])
+        return self._write_snapshot(target, format_id)
+
+    def save_committed(self):
+        """只保存已提交快照，不弹出选择框、不结束原地编辑或提交侧栏草稿。
+
+        自动保存调用此边界；保存通知仅更新历史的保存位置，不产生新的编辑记录。
+        无绑定路径时报告错误并返回 False，成功后才建立保存标记。
+        """
+        if self.path is None:
+            self.report_error("导图尚未选择保存位置")
+            return False
+        if not self.is_dirty:
+            return True
+        return self._write_snapshot(self.path, self._path_format_id)
+
+    def _write_snapshot(self, target, format_id):
+        """手动和自动保存共用格式检查及原子写入，失败不更新绑定路径。"""
         try:
             entry = self.canvas.format_registry.resolve(target, format_id=format_id, writing=True)
             if not entry.can_save:
@@ -167,7 +196,7 @@ class MindMapFileController(QObject):
         except (MindMapError, OSError) as exc:
             self.report_error(str(exc))
             return False
-        self.path, self._unsaved_import = target, False
+        self.path = target
         self._path_format_id = entry.info.id
         self.engine.mark_saved()
         self.state_changed.emit()

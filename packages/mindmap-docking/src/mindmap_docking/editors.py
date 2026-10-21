@@ -173,6 +173,7 @@ class EditorGroup(QTabWidget):
         self.area = area
         self.manager = area.manager
         self.group_id = group_id or uuid4().hex[:8]
+        self._empty_widget = None
         self.setObjectName(f"editor_group_{self.group_id}")
         self.setTabBar(EditorTabBar(self))
         # 角部控件交给 QTabWidget 分配空间，长标题仍可使用原生标签滚动按钮，
@@ -246,8 +247,10 @@ class EditorGroup(QTabWidget):
         painter.fillRect(self.rect(), self.manager.theme.color("editor-bg"))
         # 只在整张编辑器卡片外侧绘制圆角；标签栏与正文平直相接，细线延伸到左右边缘。
         theme = self.manager.theme
-        painter.fillRect(0, 0, self.width(), self.tabBar().height(), theme.color("editor-header-bg"))
-        painter.fillRect(0, self.tabBar().height() - 1, self.width(), 1, theme.color("editor-border"))
+        # 没有真实标签时不绘制空标签栏，宿主提供的欢迎页可覆盖完整编辑区域。
+        if self.count():
+            painter.fillRect(0, 0, self.width(), self.tabBar().height(), theme.color("editor-header-bg"))
+            painter.fillRect(0, self.tabBar().height() - 1, self.width(), 1, theme.color("editor-border"))
 
     def add_token(self, token, widget, title, icon=None, index=-1):
         """迁移时先从旧标签容器移除，再添加同一个 QWidget，绝不复制业务内容。"""
@@ -268,6 +271,9 @@ class EditorGroup(QTabWidget):
         # insertTab 可能先发出 currentChanged，彼时稳定 token 尚未写入，需补同步。
         self._sync_document_actions()
         self.tabBar()._update_close_buttons()
+        self._sync_empty()
+        if token in self.manager.documents:
+            self.manager._set_active_document(token)
         widget.show()
 
     def close_token(self, token):
@@ -277,18 +283,46 @@ class EditorGroup(QTabWidget):
             self.manager.close_document(token)
 
     def close_others(self, token):
-        for index in reversed(range(self.count())):
-            other = self.tabBar().tabData(index)
-            if other != token:
-                self.close_token(other)
+        """批量文档先完成全部保存检查，再关闭页面；检查失败时连工具标签也不隐藏。"""
+        others = [self.tabBar().tabData(index) for index in range(self.count())
+                  if self.tabBar().tabData(index) != token]
+        if self.manager.close_documents([other for other in others if other in self.manager.documents]):
+            for other in others:
+                if other.startswith("tool:"):
+                    self.manager.hide(other[5:])
+
+    def set_empty_widget(self, factory):
+        """宿主提供空白页工厂；空白页仅是装饰控件，不注册文档、不进入快照。"""
+        if self._empty_widget is not None:
+            self._empty_widget.hide()
+            self._empty_widget.deleteLater()
+        self._empty_widget = factory() if factory else None
+        if self._empty_widget is not None:
+            self._empty_widget.setParent(self)
+        self._sync_empty()
+
+    def _sync_empty(self):
+        if self._empty_widget is not None:
+            self._empty_widget.setGeometry(self.rect())
+            self._empty_widget.setVisible(self.count() == 0)
+            if not self.count():
+                self._empty_widget.raise_()
+            self._corners.refresh()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_empty()
 
     def _current_changed(self, index):
         self._sync_document_actions()
+        self._sync_empty()
         if index < 0 or self.manager.refreshing:
             return
         token = self.tabBar().tabData(index)
         if isinstance(token, str) and token.startswith("tool:"):
             self.manager.mark_active(token[5:])
+        elif token in self.manager.documents:
+            self.manager._set_active_document(token)
         self.manager.schedule_save()
 
     def dragEnterEvent(self, event):
@@ -335,6 +369,7 @@ class EditorArea(QWidget):
         super().__init__(host)
         self.host = host
         self.manager = host.manager
+        self._empty_widget_factory = None
         self.setObjectName(f"editor_{host.host_id}")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._layout = QHBoxLayout(self)
@@ -347,10 +382,18 @@ class EditorArea(QWidget):
 
     def _new_group(self, parent=None, group_id=None):
         group = EditorGroup(self, group_id)
+        if self._empty_widget_factory:
+            group.set_empty_widget(self._empty_widget_factory)
         self.groups.append(group)
         if parent:
             parent.addWidget(group)
         return group
+
+    def set_empty_widget_factory(self, factory):
+        """为已有及后续新建、布局恢复生成的空分组提供独立空白页。"""
+        self._empty_widget_factory = factory
+        for group in self.groups:
+            group.set_empty_widget(factory)
 
     def group(self, group_id=""):
         return next((group for group in self.groups if group.group_id == group_id), self.groups[0])

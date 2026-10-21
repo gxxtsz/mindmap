@@ -104,7 +104,9 @@ class DocumentSpec:
 
     factory 在注册时创建一次；can_close 在用户请求关闭或退出前调用，返回 False
     可以取消操作。modified=True 且未提供关闭决策时默认阻止关闭，保护业务数据。
-    on_closed 在页面从标签区移除后调用；普通关闭保留实例，dispose=True 才销毁。
+    on_closed 在页面从标签区移除后调用；默认关闭保留实例，启用 dispose_on_close
+    或显式 close_document(..., dispose=True) 才移除注册并延迟销毁控件。批量关闭
+    在所有 can_close 通过后才执行 on_closed，拒绝时不移除任何目标页面。
     """
 
     id: str
@@ -114,6 +116,8 @@ class DocumentSpec:
     can_close: Callable[[], bool] | None = None
     on_closed: Callable[[], None] | None = None
     modified: bool = False
+    # 默认保留关闭后的控件；多文档宿主可选择关闭即销毁，避免隐藏会话持续占用资源。
+    dispose_on_close: bool = False
 
     def __post_init__(self):
         if not self.id or self.id.startswith("tool:") or not self.title:

@@ -458,9 +458,10 @@ class MindMapWidget(QWidget):
         if self._disposed:
             return
         # 在画布刷新引发选择信号之前通知宿主，防止旧侧栏输入被提交到新文档或撤销状态。
-        self.document_changing.emit(event)
-        self._cancel_branch_menu()
         if event.kind != "saved":
+            # 自动保存只更新保存标记，不触发文档替换通知，不打断菜单或未完成输入。
+            self.document_changing.emit(event)
+            self._cancel_branch_menu()
             before = self.selected_node_ids()
             old_document = self._document
             if self.editor is not None:

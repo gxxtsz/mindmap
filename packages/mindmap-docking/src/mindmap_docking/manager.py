@@ -46,14 +46,19 @@ class DockManager(QObject):
     tool_registered = Signal(str)
     tool_unregistered = Signal(str)
     document_closed = Signal(str)
+    document_activated = Signal(str)
 
     def __init__(self, storage_dir=None, parent=None, *, application_id="mindmap-app",
                  theme=None, layout_store=None,
-                 shortcut_context=Qt.ShortcutContext.WidgetWithChildrenShortcut):
+                 shortcut_context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
+                 preserve_open_documents=False):
         """创建独立会话，可注入主题和存储；不会修改应用全局样式。
 
         application_id 是配置目录的稳定标识，不能包含路径分隔符。默认快捷键仅在
         本组件内部生效；完整工作台可以显式选择 WindowShortcut。
+        preserve_open_documents 默认关闭，恢复快照时按记录控制文档可见状态；
+        多文件宿主启用后只恢复容器布局，保留全部当前文档及逻辑活动文档，忽略
+        快照中已不存在的文档标识。该策略不负责重开文件或序列化业务内容。
         """
         super().__init__(parent)
         if QApplication.instance() is None:
@@ -67,6 +72,9 @@ class DockManager(QObject):
         self.panels = {}
         self.hosts = {}
         self.documents = {}
+        self.active_document_id = ""
+        self.preserve_open_documents = preserve_open_documents
+        self._closing_documents = False
         self._last_editor = {}
         self.actions = {}
         self.settings = LayoutSettings()
@@ -473,6 +481,7 @@ class DockManager(QObject):
                     location = host.editor.find_token(document_id)
                     if location and location[0].area.host is host:
                         self._last_editor[host.host_id] = document_id
+                        self._set_active_document(document_id)
                         break
                 break
         owner_id = ""
@@ -656,7 +665,7 @@ class DockManager(QObject):
             drag.deleteLater()
 
     def add_document(self, document_id, title, widget, host_id="main", icon="document", *,
-                     can_close=None, on_closed=None, modified=False):
+                     can_close=None, on_closed=None, modified=False, dispose_on_close=False):
         """注册已有文档控件并显示；标识必须唯一，文档内容不进入布局配置。"""
         if document_id in self.documents or not document_id or document_id.startswith("tool:"):
             raise ValueError(f"文档标识重复：{document_id}")
@@ -664,6 +673,7 @@ class DockManager(QObject):
             raise ValueError("文档内容或目标宿主无效")
         self.documents[document_id] = {"title": title, "widget": widget, "icon": icon,
                                        "can_close": can_close, "on_closed": on_closed,
+                                       "dispose_on_close": bool(dispose_on_close),
                                        "modified": bool(modified), "closed": False, "host_id": host_id}
         self.move_document(document_id, host_id)
         self.set_document_modified(document_id, modified)
@@ -674,7 +684,8 @@ class DockManager(QObject):
             raise ValueError("文档重复或宿主不存在")
         widget = spec.factory()
         self.add_document(spec.id, spec.title, widget, host_id, spec.icon,
-                          can_close=spec.can_close, on_closed=spec.on_closed, modified=spec.modified)
+                          can_close=spec.can_close, on_closed=spec.on_closed, modified=spec.modified,
+                          dispose_on_close=spec.dispose_on_close)
         return widget
 
     def set_document_title(self, document_id: str, title: str) -> None:
@@ -740,31 +751,86 @@ class DockManager(QObject):
         return all(self.can_close_document(key) for key, doc in list(self.documents.items()) if not doc["closed"])
 
     def close_document(self, document_id, *, dispose=False):
-        """关闭标签并保留内容，或显式销毁并注销。取消时不修改容器及父对象。"""
-        doc = self.documents[document_id]
-        if not doc["closed"] and not self.can_close_document(document_id):
+        """按注册的关闭策略处理一份文档；显式 dispose=True 也可销毁缓存文档。"""
+        return self.close_documents([document_id], dispose=dispose)
+
+    def close_documents(self, document_ids, *, dispose=False):
+        """先检查全部目标，全部允许后才移除标签；任一拒绝时不关闭任何目标。
+
+        关闭过程中屏蔽容器临时选择通知，清理结束后统一选择剩余文档。业务可在
+        can_close 中保存内容，在 on_closed 中停止计时器和订阅，控件销毁仍由本组件负责。
+        """
+        ids = list(dict.fromkeys(document_ids))
+        documents = [(key, self.documents[key]) for key in ids]
+        if any(not doc["closed"] and not self.can_close_document(key) for key, doc in documents):
             return False
-        for host in self.hosts.values():
-            location = host.editor.find_token(document_id)
-            if location:
-                location[0].removeTab(location[1])
-                break
-        doc["widget"].hide()
-        doc["widget"].setParent(self.parking)
-        first_close = not doc["closed"]
-        doc["closed"] = True
-        if first_close:
-            if doc["on_closed"]:
-                try:
-                    doc["on_closed"]()
-                except Exception as error:
-                    self.message.emit(f"文档关闭通知失败：{error}")
-            self.document_closed.emit(document_id)
-        if dispose:
-            doc["widget"].deleteLater()
-            del self.documents[document_id]
+        self._closing_documents = True
+        try:
+            for key, doc in documents:
+                for host in self.hosts.values():
+                    location = host.editor.find_token(key)
+                    if location:
+                        location[0].removeTab(location[1])
+                        break
+                doc["widget"].hide()
+                doc["widget"].setParent(self.parking)
+                first_close, doc["closed"] = not doc["closed"], True
+                if first_close:
+                    if doc["on_closed"]:
+                        try:
+                            doc["on_closed"]()
+                        except Exception as error:
+                            self.message.emit(f"文档关闭通知失败：{error}")
+                    self.document_closed.emit(key)
+                if dispose or doc["dispose_on_close"]:
+                    self.documents.pop(key, None)
+                    doc["widget"].deleteLater()
+        finally:
+            self._closing_documents = False
+        self._select_remaining_document()
         self.schedule_save()
         return True
+
+    def _set_active_document(self, document_id):
+        """记录逻辑活动文档，不移动页面或抢走侧栏输入焦点；空字符串表示没有文档。"""
+        if self.refreshing or self._closing_documents:
+            return
+        if document_id and (document_id not in self.documents or self.documents[document_id]["closed"]):
+            return
+        if self.active_document_id != document_id:
+            self.active_document_id = document_id
+            self.document_activated.emit(document_id)
+        if document_id:
+            self._last_editor["main"] = document_id
+
+    def _select_remaining_document(self):
+        """关闭或恢复完成后保留有效活动页，否则按编辑组顺序选取一个可见文档。"""
+        current = self.documents.get(self.active_document_id)
+        if current and not current["closed"]:
+            return
+        host = self.hosts.get("main")
+        if host:
+            for group in host.editor.groups:
+                indexes = [group.currentIndex()] + list(range(group.count()))
+                for index in indexes:
+                    token = group.tabBar().tabData(index) if index >= 0 else None
+                    if token in self.documents and not self.documents[token]["closed"]:
+                        group.setCurrentIndex(index)
+                        self._set_active_document(token)
+                        return
+        self._set_active_document("")
+
+    def activate_document(self, document_id):
+        """激活已打开的文档及其所在分组，保留原标签顺序、分屏和控件实例。"""
+        for host in self.hosts.values():
+            location = host.editor.find_token(document_id)
+            if location and document_id in self.documents:
+                group, index = location
+                group.setCurrentIndex(index)
+                self._set_active_document(document_id)
+                group.widget(index).setFocus(Qt.FocusReason.OtherFocusReason)
+                return
+        raise ValueError("文档尚未打开")
 
     def open_document(self, document_id, host_id="main"):
         """重新打开已关闭的文档，继续使用同一内容实例和业务修改状态。"""
@@ -1036,6 +1102,38 @@ class DockManager(QObject):
         data["hosts"] = {"main": main}
 
     def _restore_snapshot(self, data):
+        if self.preserve_open_documents:
+            # 文件会话由业务维护：旧运行时标识不能重开文件，缺失于模板的现有文档
+            # 则追加到接收组，避免恢复默认布局把仍在编辑的文件变成隐藏文档。
+            data = copy.deepcopy(data)
+            opened = [key for host in self.hosts.values() for group in host.editor.groups
+                      for index in range(group.count())
+                      if (key := group.tabBar().tabData(index)) in self.documents
+                      and not self.documents[key]["closed"]]
+            groups = []
+
+            def collect(node):
+                if node["kind"] == "tabs":
+                    groups.append(node)
+                    tokens = node["tokens"]
+                    selected = tokens[node["current"]] if 0 <= node["current"] < len(tokens) else None
+                    node["tokens"] = [token for token in tokens if token.startswith("tool:") or token in opened]
+                    node["current"] = node["tokens"].index(selected) if selected in node["tokens"] else 0
+                else:
+                    for child in node["children"]:
+                        collect(child)
+
+            collect(data["hosts"]["main"]["editor"])
+            if not groups:
+                node = {"kind": "tabs", "id": uuid4().hex[:8], "tokens": [], "current": 0}
+                data["hosts"]["main"]["editor"] = node
+                groups.append(node)
+            present = {token for group in groups for token in group["tokens"]}
+            target = next((group for group in groups if group["id"] == data["hosts"]["main"].get("current_group")), groups[0])
+            target["tokens"].extend(key for key in opened if key not in present)
+            for group in groups:
+                if self.active_document_id in group["tokens"]:
+                    group["current"] = group["tokens"].index(self.active_document_id)
         # 恢复前先创建即将显示的已注册工具；业务工厂失败时尚未拆卸任何现有容器。
         for item in data["tools"]:
             if item["id"] in self.specs and item.get("visible") and item.get("available", True):
@@ -1076,6 +1174,11 @@ class DockManager(QObject):
         finally:
             self.refreshing = False
         self.refresh()
+        if self.preserve_open_documents and self.active_document_id in self.documents:
+            location = self.hosts["main"].editor.find_token(self.active_document_id)
+            if location:
+                location[0].setCurrentIndex(location[1])
+        self._select_remaining_document()
         self.theme_changed.emit(self.theme.name)
 
     def schedule_save(self):
