@@ -96,7 +96,10 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected
     assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "设置"]
     files = next(action.menu() for action in main.actions() if action.text() == "文件")
-    assert any(action.text() == "导出图形…" and action.isEnabled() for action in files.actions())
+    assert [action.text() for action in files.actions()] == ["新建", "打开 / 导入…", "保存", "另存为…", "导出图形", "退出"]
+    exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
+    assert [action.text() for action in exports.actions()] == ["PNG 图片…", "SVG 矢量图…", "PDF 文档…"]
+    assert all(action.isEnabled() for action in exports.actions())
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
     assert all("滚轮" not in action.text() and "布局算法" != action.text() for action in view.actions())
     assert window.manager.states["properties"].visible
@@ -449,6 +452,66 @@ def test_canvas_controls_follow_viewport_theme_and_stay_out_of_export(window, qt
         canvas.export(hidden)
         assert QImage(str(visible)) == QImage(str(hidden))
         controls.show()
+
+
+@pytest.mark.parametrize(("format_id", "label"), [("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档")])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_graphic_export_menu_selects_format_and_keeps_fold_state(window, tmp_path, monkeypatch, format_id, label, expanded):
+    """每个菜单项打开对应的单格式对话框，生成正确文件，折叠范围选择不改写文档。"""
+    canvas, engine = window.canvas, window.engine
+    engine.add_child(engine.root_id, "折叠子节点")
+    canvas.action("collapse_all").trigger()
+    before, revision = engine.document, engine.revision
+    dialogs, ranges = [], []
+    target = tmp_path / "导出图形"
+
+    def select_file(*args):
+        """记录真实菜单回调传入的标题、默认文件名和唯一格式，模拟省略扩展名。"""
+        dialogs.append(args)
+        return str(target), f"{label} (*.{format_id})"
+
+    export = canvas.export
+
+    def capture_range(path, *, expand_all):
+        """记录范围参数后执行真实导出，避免只验证动作接线却没有生成有效文件。"""
+        ranges.append(expand_all)
+        return export(path, expand_all=expand_all)
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", select_file)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args:
+                        QMessageBox.StandardButton.Yes if expanded else QMessageBox.StandardButton.No)
+    monkeypatch.setattr(canvas, "export", capture_range)
+    menu = window.main_menu()
+    files = next(action.menu() for action in menu.actions() if action.text() == "文件")
+    exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
+    next(action for action in exports.actions() if action.data() == format_id).trigger()
+    assert dialogs == [(window, "导出 " + label, f"思维导图.{format_id}", f"{label} (*.{format_id})")]
+    assert ranges == [expanded]
+    output = target.with_suffix("." + format_id)
+    data = output.read_bytes()
+    assert len(data) > 500
+    if format_id == "png":
+        assert not QImage(str(output)).isNull()
+    elif format_id == "svg":
+        assert b"<svg" in data
+    else:
+        assert data.startswith(b"%PDF-") and b"%%EOF" in data
+    assert engine.document == before and engine.revision == revision
+    assert window.files.path is None and window.files.is_dirty
+    menu.deleteLater()
+
+
+def test_graphic_export_cancel_or_wrong_suffix_does_not_write(window, tmp_path, monkeypatch):
+    """取消文件选择不询问范围；扩展名不符时保留既有文件，不输出另一种格式。"""
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: pytest.fail("不应询问导出范围"))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
+    window.files.export_dialog("png")
+    target = tmp_path / "保留.svg"
+    target.write_bytes(b"original")
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), "PNG 图片 (*.png)"))
+    with pytest.raises(MindMapError, match="请使用 .png 扩展名"):
+        window.files.export_dialog("png")
+    assert target.read_bytes() == b"original" and not target.with_suffix(".png").exists()
 
 
 def test_file_save_flushes_properties_and_inline_text(window, tmp_path):

@@ -173,20 +173,30 @@ class MindMapFileController(QObject):
         self.state_changed.emit()
         return True
 
-    def export_dialog(self):
-        """提交有效输入后选择图形格式与折叠范围，导出不改变保存标记。"""
+    def export_dialog(self, format_id: str = "svg"):
+        """为 png、svg 或 pdf 打开单格式保存对话框，默认使用 svg。
+
+        宿主菜单先选择格式，对话框只显示该格式并给出相应默认文件名；取消时
+        不询问折叠范围。输入提交和原有折叠范围选择继续保留，不改变保存位置。
+        无扩展名时补齐所选格式；不同扩展名直接报错，避免输出类型偏离菜单选择。
+        """
+        formats = {"png": "PNG 图片", "svg": "SVG 矢量图", "pdf": "PDF 文档"}
+        if not isinstance(format_id, str) or format_id not in formats:
+            raise MindMapError("支持的图形导出格式为 PNG、SVG、PDF")
+        label, extension = formats[format_id], "." + format_id
         self.panels.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
-        path, selected = QFileDialog.getSaveFileName(
-            self.dialog_parent, "导出图形", "思维导图.svg", "SVG 矢量图 (*.svg);;PNG 图片 (*.png);;PDF 文档 (*.pdf)"
+        path, _ = QFileDialog.getSaveFileName(
+            self.dialog_parent, "导出 " + label, "思维导图" + extension, f"{label} (*{extension})"
         )
         if not path:
             return
         target = Path(path)
         if not target.suffix:
-            target = target.with_suffix(
-                ".png" if "PNG" in selected else ".pdf" if "PDF" in selected else ".svg"
-            )
+            target = target.with_suffix(extension)
+        elif target.suffix.lower() != extension:
+            # 不静默改写用户输入的另一个文件名，防止绕过保存对话框的覆盖确认。
+            raise MindMapError(f"已选择{label}，请使用 {extension} 扩展名")
         expand = QMessageBox.question(
             self.dialog_parent,
             "导出范围",

@@ -174,7 +174,9 @@ finally:
 `confirm_replace()` 统一处理保存确认；主文档只使用可完整往返的格式。
 保存、图形导出和确认替换前，控制器会提交有效属性输入与原地文字。
 文件解析和画布验证成功后才询问是否替换；写入成功后才更新路径与保存标记。
-`export_dialog()` 提供 PNG、SVG、PDF 图形导出及折叠范围选择，不更新保存位置，也不清除未保存标记。
+`export_dialog(format_id="svg")` 接受 `png`、`svg`、`pdf`，打开所选格式的保存对话框及折叠范围选择，默认使用 SVG。
+默认文件名和唯一文件筛选对应所选格式；省略扩展名时自动补齐，其他扩展名或无效格式抛出 `MindMapError`。
+取消文件选择时不询问导出范围，成功导出不更新保存位置，也不清除未保存标记。
 文档导出专用的 `export_document_dialog()`、`export_path()` 已删除，不保留兼容接口。
 `format_filters()` 仅接受 `open`、`save`；`export` 及其他值抛出 `MindMapError`。
 格式注册表、编解码器与原子写入继续用于正常保存和剪贴板，JSON 保存保持可用。

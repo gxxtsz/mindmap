@@ -129,7 +129,6 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ("open", "打开 / 导入…", self.open_dialog, "Ctrl+O", "folder", False),
             ("save", "保存", self.files.save, "Ctrl+S", "save", False),
             ("save_as", "另存为…", lambda: self.files.save(save_as=True), "Ctrl+Shift+S", "save-as", False),
-            ("export", "导出图形…", self.files.export_dialog, "", "export-image", False),
             ("quit", "退出", self.close, "Ctrl+Q", "exit", False),
         ):
             self.add_action(ActionSpec(
@@ -216,9 +215,21 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         """按文件、编辑、视图、设置组织菜单，复用画布动作及其启用状态。
 
         格式注册表继续服务于打开、保存和剪贴板，不再据此创建文档导出入口；
-        图形导出仍由文件菜单中的共用动作提供。
+        图形导出在文件菜单内按格式列出，选择后直接进入对应的单格式保存对话框。
         """
         menu = super().main_menu()
+        # 子菜单由本次主菜单拥有，继承外壳明暗主题；按默认参数捕获格式，避免
+        # 循环回调全部指向最后一项。文件菜单的其余入口继续复用已有 QAction。
+        files = next(action.menu() for action in menu.actions() if action.text() == "文件")
+        exports = QMenu("导出图形", files)
+        exports.setIcon(self.manager.theme.icon("export-image"))
+        exports.menuAction().setProperty("mindmap_icon", "export-image")
+        for format_id, label in (("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档")):
+            action = exports.addAction(label + "…")
+            action.setData(format_id)
+            action.triggered.connect(lambda checked=False, selected=format_id:
+                                     self.canvas.call(lambda: self.files.export_dialog(selected)))
+        files.insertMenu(self.action("app.quit"), exports)
         # 使用设置菜单作为稳定锚点，避免删除工作区后依赖菜单数字下标。
         anchor = next(action for action in menu.actions() if action.text() == "设置")
         edit = QMenu("编辑", menu)
