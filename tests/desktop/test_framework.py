@@ -200,6 +200,10 @@ def test_workbench_auxiliary_frame_keeps_brand_and_shared_business_actions(qapp,
     assert auxiliary.action("business.add") is window.action("business.add")
     window.add_action(ActionSpec("business.late", "稍后加入", lambda: calls.append(2), toolbar=True))
     assert any(item.text() == "稍后加入" for item in auxiliary.title_bar.action_buttons)
+    # 初始动作和运行期间追加的动作都必须位于窗口控制按钮之前，不能占据已删除的齿轮位置。
+    for item in (window, auxiliary):
+        bar = item.title_bar
+        assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.minimize) for button in bar.action_buttons)
     auxiliary.action("business.add").trigger()
     assert calls == [1]
     window.manager.shutdown()

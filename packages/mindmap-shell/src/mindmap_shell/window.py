@@ -120,17 +120,12 @@ class _TitleBar(QWidget):
         for spec in window._action_specs:
             if spec.toolbar:
                 self.add_action(window.manager.actions[spec.id])
-        self.options = QToolButton(self)
-        self.options.setToolTip("外观与布局")
-        self.options.setAccessibleName("外观与布局")
-        self.options.clicked.connect(lambda: window.appearance_menu().exec(self.options.mapToGlobal(QPoint(0, self.options.height()))))
-        self.box.addWidget(self.options)
-        # 顶部纯图标入口统一为正方形，清除通用水平留白，避免按钮变窄后再次挤压图标。
-        for button in (self.menu, self.options):
-            button.setProperty("titleBarAction", True)
-            button.setFixedSize(32, 32)
-            button.setIconSize(QSize(20, 20))
-            button.setStyleSheet("QToolButton { padding:0; }")
+        # 设置统一从左侧主菜单进入，不再创建右侧齿轮及其占位。
+        # 主菜单保持正方形命中区域，清除通用留白，避免挤压图标。
+        self.menu.setProperty("titleBarAction", True)
+        self.menu.setFixedSize(32, 32)
+        self.menu.setIconSize(QSize(20, 20))
+        self.menu.setStyleSheet("QToolButton { padding:0; }")
         self.minimize = _WindowControlButton(self, "minimize")
         self.maximize = _WindowControlButton(self, "maximize")
         self.close = _WindowControlButton(self, "close")
@@ -152,10 +147,10 @@ class _TitleBar(QWidget):
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setDefaultAction(action)
         self.action_buttons.append(button)
-        # 运行期间追加业务动作时，仍放在外观和原生窗口控制按钮之前。
-        # 初始构造阶段外观按钮尚不存在，此时按声明顺序正常追加。
-        if hasattr(self, "options"):
-            self.box.insertWidget(self.box.indexOf(self.options), button)
+        # 删除齿轮后以最小化按钮作为稳定插入点，动态动作仍在窗口控制按钮之前。
+        # 初始构造阶段窗口按钮尚未创建，此时按声明顺序正常追加。
+        if hasattr(self, "minimize"):
+            self.box.insertWidget(self.box.indexOf(self.minimize), button)
         else:
             self.box.addWidget(button)
 
@@ -184,8 +179,7 @@ class _TitleBar(QWidget):
         """)
         self.setFixedHeight(42 if theme.compact else 52)
         self.logo.setPixmap(theme.icon(self.window.spec.icon, 20).pixmap(20, 20))
-        for button, name in [(self.menu, "menu"), (self.options, "settings")]:
-            button.setIcon(theme.icon(name))
+        self.menu.setIcon(theme.icon("menu"))
         for button in (self.minimize, self.maximize, self.close):
             button.refresh_theme()
 
@@ -388,41 +382,33 @@ class WorkbenchWindow(QMainWindow):
             self.show_status_message(str(error))
 
     def appearance_menu(self):
-        """公开的外观菜单可由业务放进自己的菜单栏或设置页。"""
+        """构建平铺设置菜单；外观、界面显示、布局三组仅用分隔线区分。
+
+        业务可复用此菜单并插入自己的设置入口；每次展开时从管理器读取勾选状态，
+        动作仍通过原主题和选项接口提交，沿用会话保存及界面刷新流程。
+        """
         menu = QMenu("外观与布局", self)
         for name, label in [("light", "浅色"), ("dark", "深色")]:
             action = menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(self.manager.theme.name == name)
             action.triggered.connect(lambda checked=False, value=name: self.manager.set_theme(value))
-        menu.addSeparator()
-        for key, label in [("compact", "紧凑模式"), ("show_bars", "显示停靠栏"),
-                           ("always_header_icons", "始终显示标题按钮"),
-                           ("widescreen", "宽屏布局"), ("left_side_by_side", "左侧并排"),
-                           ("right_side_by_side", "右侧并排")]:
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(getattr(self.manager.settings, key))
-            action.triggered.connect(lambda checked, value=key: self.manager.set_option(value, checked))
-        layouts = menu.addMenu("命名布局")
-        layouts.addAction("另存为…", lambda: self.manager.prompt_save_layout(self))
-        for name in self.manager.layout_names:
-            sub = layouts.addMenu(name)
-            sub.addAction("应用", lambda checked=False, item=name: self.manager.restore_layout(item))
-            if name != "默认":
-                sub.addAction("更新", lambda checked=False, item=name: self.manager.save_layout(item))
-                sub.addAction("重命名…", lambda checked=False, item=name: self.rename_layout(item))
-                action = sub.addAction("删除", lambda checked=False, item=name: self.manager.delete_layout(item))
-                action.setEnabled(name != self.manager.current_layout)
+        # 第一组选项紧接明暗主题；后续两组各加一条分隔线，不引入额外子菜单。
+        option_groups = [
+            [("compact", "紧凑模式")],
+            [("show_bars", "显示停靠栏"), ("always_header_icons", "始终显示标题按钮")],
+            [("widescreen", "宽屏布局"), ("left_side_by_side", "左侧并排"),
+             ("right_side_by_side", "右侧并排")],
+        ]
+        for index, options in enumerate(option_groups):
+            if index:
+                menu.addSeparator()
+            for key, label in options:
+                action = menu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(getattr(self.manager.settings, key))
+                action.triggered.connect(lambda checked, value=key: self.manager.set_option(value, checked))
         return menu
-
-    def rename_layout(self, name):
-        new, accepted = QInputDialog.getText(self, "重命名布局", "新名称：", text=name)
-        if accepted:
-            try:
-                self.manager.rename_layout(name, new)
-            except ValueError as error:
-                self.show_status_message(str(error))
 
     def search_tools(self):
         titles = [spec.title for key, spec in self.manager.specs.items() if self.manager.states[key].available]

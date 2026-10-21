@@ -50,7 +50,9 @@ finally:
 - `DocumentSpec` 注册文档，支持取消关闭、修改标记、关闭后重开、分屏及跨窗口迁移。
 - `DockPosition`、`DockTarget`、`ViewMode` 描述停靠位置、移动目标与显示模式。
 - `set_document_actions(document_id, actions)` 在当前文档标签栏右侧复用已有 `QAction`；空序列清除入口。
-- `capture_layout()`、`restore_layout(...)` 操作版本 1 的布局快照，业务文档内容不进入布局。
+- `capture_layout()`、`restore_layout(snapshot)` 操作版本 1 的布局快照，恢复仅接受字典，业务文档内容不进入布局。
+- `set_default_layout()` 记录宿主初始排布，`restore_default_layout()` 或 `Shift+F12` 恢复该模板；未建立模板时不改变状态。
+- 会话自动保存和恢复保留当前排布；命名布局的保存、列举、重命名、删除及弹窗保存接口已移除。
 - `Theme`、`ThemeTokens`、`IconRegistry` 提供明暗主题、局部覆盖与图标注入。
 
 文档动作继续由业务持有，必须在清除入口或注销文档前保持有效。按钮自动跟随动作的启用状态、提示和图标，

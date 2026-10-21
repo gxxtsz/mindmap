@@ -1,4 +1,4 @@
-"""布局回归：命名规则、原子验证、磁盘回退与多框架内容迁移。"""
+"""布局回归：会话迁移、默认恢复、原子验证与多框架内容迁移。"""
 
 import copy
 import json
@@ -36,79 +36,84 @@ def test_snapshot_restores_mode_location_theme_and_content(docking):
 
 
 def test_legacy_name_setting_is_removed_when_loading_saved_layout(docking):
-    """旧命名布局仍可恢复，已删除的名称开关不会影响侧栏或再次写入磁盘。"""
+    """旧会话中的名称开关不会影响侧栏，也不会再次写入磁盘。"""
     manager = docking.manager
-    manager.save_layout("旧布局")
     manager.save_session()
     payload = manager.layout_store.load()
     payload["session"]["settings"]["show_names"] = True
-    payload["layouts"]["旧布局"]["settings"]["show_names"] = True
     manager.layout_store.save(payload)
     assert manager.load_session()
-    manager.restore_layout("旧布局")
     for rail in (docking.host.left_rail, docking.host.right_rail):
         assert rail.width() == manager.theme.rail_width
         assert all(button.text() == "" for button in rail._buttons.values())
     assert "show_names" not in manager.capture_layout()["settings"]
-    assert "show_names" not in manager._layouts["旧布局"]["settings"]
     with pytest.raises(KeyError, match="未知布局选项"):
         manager.set_option("show_names", True)
     manager.save_session()
     payload = json.loads(manager.storage_file.read_text("utf-8"))
     assert "show_names" not in payload["session"]["settings"]
-    assert "show_names" not in payload["layouts"]["旧布局"]["settings"]
+    assert set(payload) == {"schema_version", "session"}
 
 
-def test_named_layout_apply_rename_and_delete(docking):
+@pytest.mark.parametrize("obsolete", [
+    {"current_layout": "旧布局", "layouts": {"旧布局": {"schema_version": 99}}},
+    {"current_layout": ["损坏的名称"], "layouts": "损坏的布局集合"},
+])
+def test_legacy_named_fields_are_ignored_and_removed_on_save(docking, obsolete):
+    """废弃字段无论结构还是快照损坏，都不妨碍有效会话恢复。"""
     manager = docking.manager
     manager.activate("alpha", focus=False)
-    manager.save_layout("编码布局")
     manager.move("alpha", DockTarget(DockPosition.RIGHT_TOP))
-    manager.save_layout("调试布局")
-    assert manager.current_layout == "调试布局"
-    manager.restore_layout("编码布局")
-    assert manager.states["alpha"].position == DockPosition.LEFT_TOP
-    manager.rename_layout("编码布局", "日常编码")
-    assert manager.current_layout == "日常编码"
-    assert "编码布局" not in manager.layout_names
-    manager.delete_layout("调试布局")
-    assert "调试布局" not in manager.layout_names
-    assert manager.storage_file.exists()
-    payload = json.loads(manager.storage_file.read_text("utf-8"))
-    assert "日常编码" in payload["layouts"]
+    manager.set_theme("dark")
+    manager.layout_store.save({"schema_version": 1, "session": manager.capture_layout(), **obsolete})
+    manager.restore_default_layout()
+    assert manager.load_session()
+    assert manager.states["alpha"].position == DockPosition.RIGHT_TOP
+    assert manager.states["alpha"].visible and manager.theme.name == "dark"
+    manager.save_session()
+    assert set(manager.layout_store.load()) == {"schema_version", "session"}
 
 
-@pytest.mark.parametrize("operation", ["save", "rename", "delete"])
-def test_factory_default_layout_is_read_only(docking, operation):
+def test_default_shortcut_restores_independent_template(docking, qtbot):
+    """真实快捷键恢复默认状态；反复修改和恢复不会污染内建模板。"""
+    manager = docking.manager
+    manager.activate("alpha", focus=False)
+    content = manager.panel("alpha").content
+    manager.set_default_layout()
+    for _ in range(2):
+        manager.move("alpha", DockTarget(DockPosition.RIGHT_BOTTOM))
+        manager.set_option("compact", True)
+        manager.set_theme("dark")
+        docking.window.activateWindow()
+        docking.document.setFocus()
+        QApplication.processEvents()
+        qtbot.keyClick(docking.document, Qt.Key.Key_F12, Qt.KeyboardModifier.ShiftModifier)
+        assert manager.states["alpha"].position == DockPosition.LEFT_TOP
+        assert manager.states["alpha"].visible
+        assert manager.theme.name == "light" and not manager.settings.compact
+        assert manager.panel("alpha").content is content
+
+
+def test_default_restore_without_template_does_not_change_state(docking):
+    """没有默认模板时恢复接口保持当前状态，也不触发新的保存。"""
+    manager = docking.manager
+    manager._default_snapshot = None
+    manager.activate("alpha", focus=False)
+    before = manager.capture_layout()
+    manager._save_timer.stop()
+    manager.restore_default_layout()
+    assert manager.capture_layout() == before
+    assert not manager._save_timer.isActive()
+
+
+@pytest.mark.parametrize("layout", ["默认", "旧布局", None, []])
+def test_restore_requires_snapshot_and_leaves_state_unchanged(docking, layout):
+    """快照接口拒绝名称及其他非字典输入，在预检失败时保留当前布局。"""
     manager = docking.manager
     before = manager.capture_layout()
-    with pytest.raises(ValueError):
-        if operation == "save":
-            manager.save_layout("默认")
-        elif operation == "rename":
-            manager.rename_layout("默认", "覆盖默认")
-        else:
-            manager.delete_layout("默认")
+    with pytest.raises(ValueError, match="布局格式"):
+        manager.restore_layout(layout)
     assert manager.capture_layout() == before
-    assert manager.layout_names == ["默认"]
-
-
-def test_current_layout_cannot_be_deleted(docking):
-    manager = docking.manager
-    manager.save_layout("当前布局")
-    with pytest.raises(ValueError):
-        manager.delete_layout("当前布局")
-    manager.restore_layout("默认")
-    manager.delete_layout("当前布局")
-    assert "当前布局" not in manager.layout_names
-
-
-@pytest.mark.parametrize("name", ["", "   ", "过" * 81])
-def test_invalid_layout_name_does_not_create_entry(docking, name):
-    before = docking.manager.layout_names
-    with pytest.raises(ValueError):
-        docking.manager.save_layout(name)
-    assert docking.manager.layout_names == before
 
 
 @pytest.mark.parametrize("damage", ["version", "duplicate", "position", "host", "geometry"])
@@ -173,7 +178,6 @@ def test_session_round_trip_uses_fresh_factories(system_factory, tmp_path):
     first.manager.move("alpha", DockTarget(DockPosition.BOTTOM_RIGHT))
     first.manager.set_view_mode("alpha", ViewMode.WINDOW)
     first.manager.set_theme("dark")
-    first.manager.save_layout("中文命名布局")
     first.manager.save_session()
     first.manager.shutdown()
     second = system_factory(tmp_path / "共享存储")
@@ -181,8 +185,7 @@ def test_session_round_trip_uses_fresh_factories(system_factory, tmp_path):
     assert second.manager.theme.name == "dark"
     assert second.manager.states["alpha"].position == DockPosition.BOTTOM_RIGHT
     assert second.manager.states["alpha"].mode == ViewMode.WINDOW
-    assert second.manager.current_layout == "中文命名布局"
-    assert "中文命名布局" in second.manager.layout_names
+    assert set(second.manager.layout_store.load()) == {"schema_version", "session"}
     assert second.calls["alpha"] == 1
     assert second.manager.panel("alpha").content is not first.manager.panel("alpha").content
 

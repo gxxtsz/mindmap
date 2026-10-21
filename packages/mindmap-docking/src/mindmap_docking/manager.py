@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QMimeData, QObject, QPoint, QRect, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QCursor, QDrag, QKeySequence
-from PySide6.QtWidgets import QApplication, QInputDialog, QMenu, QTabWidget, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QTabWidget, QWidget
 
 from .models import (
     MODE_LABELS,
@@ -29,7 +29,6 @@ from .storage import JsonLayoutStore
 from .theme import Theme
 
 MIME_TYPE = "application/x-mindmap-dock-v1"
-DEFAULT_LAYOUT = "默认"
 
 
 class DockManager(QObject):
@@ -90,8 +89,6 @@ class DockManager(QObject):
         self.drag_committed = False
         self.session_token = uuid4().hex
         self._hidden_snapshot = None
-        self._layouts = {}
-        self.current_layout = DEFAULT_LAYOUT
         self._default_snapshot = None
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -156,9 +153,10 @@ class DockManager(QObject):
             self._pending_tool_states[tool_id] = asdict(state)
         else:
             self._pending_tool_states.pop(tool_id, None)
-            for snapshot in [self._default_snapshot, *self._layouts.values()]:
-                if snapshot:
-                    snapshot["tools"] = [item for item in snapshot["tools"] if item["id"] != tool_id]
+            # 永久卸载同时清理内建模板，防止恢复默认布局时重新保留该工具的状态。
+            if self._default_snapshot:
+                snapshot = self._default_snapshot
+                snapshot["tools"] = [item for item in snapshot["tools"] if item["id"] != tool_id]
         panel = self.panels.pop(tool_id, None)
         floating = self.floating.pop(tool_id, None)
         if floating:
@@ -244,7 +242,7 @@ class DockManager(QObject):
             ("hide_all", "隐藏全部工具窗口 / 恢复", "Ctrl+Shift+F12", self.hide_restore_all),
             ("editor_focus", "返回中央工作区", "Escape", self.focus_editor),
             ("last_tool", "跳转到最后工具窗口", "F12", self.focus_last_tool),
-            ("default", "恢复默认布局", "Shift+F12", lambda: self.restore_layout(DEFAULT_LAYOUT)),
+            ("default", "恢复默认布局", "Shift+F12", self.restore_default_layout),
             ("maximize", "最大化工具窗口 / 恢复", "Ctrl+Shift+'", lambda: self.toggle_maximize(self.active_id)),
             ("resize_left", "向左拉伸", "Ctrl+Alt+Shift+Left", lambda: self.resize_active(-36, 0)),
             ("resize_right", "向右拉伸", "Ctrl+Alt+Shift+Right", lambda: self.resize_active(36, 0)),
@@ -1005,57 +1003,30 @@ class DockManager(QObject):
         }
 
     def set_default_layout(self):
-        """应用完成初始注册与布局后调用，建立不可被命名保存覆盖的内建模板。"""
+        """由宿主在初始注册和排布完成后调用，独立保存内建默认快照。
+
+        默认模板仅存在内存中，不从会话文件读取，也不随用户调整自动覆盖。
+        """
         self._default_snapshot = copy.deepcopy(self.capture_layout())
-        self._layouts[DEFAULT_LAYOUT] = copy.deepcopy(self._default_snapshot)
 
-    def save_layout(self, name):
-        """保存命名布局；默认布局永远来自应用内建模板，不接受覆盖。"""
-        name = name.strip()
-        if not name or len(name) > 80 or name == DEFAULT_LAYOUT:
-            raise ValueError("布局名称应为1至80个字符，且不能使用“默认”")
-        self._layouts[name] = self.capture_layout()
-        self.current_layout = name
-        self.save_session()
-        self.layout_changed.emit()
+    def restore_default_layout(self):
+        """恢复宿主建立的默认模板；尚未建立模板时不改变当前状态。
 
-    @property
-    def layout_names(self):
-        return list(self._layouts)
+        复用快照恢复的预检、迁移和延迟保存流程，模板自身不会被后续修改污染。
+        """
+        if self._default_snapshot is not None:
+            self.restore_layout(self._default_snapshot)
 
-    def rename_layout(self, old_name, new_name):
-        """原子替换布局名称，保护默认模板且不允许与已有名称冲突。"""
-        new_name = new_name.strip()
-        if old_name == DEFAULT_LAYOUT or old_name not in self._layouts or not new_name or len(new_name) > 80 or new_name in self._layouts:
-            raise ValueError("默认布局不可改名；新名称必须有效且不能重复")
-        self._layouts[new_name] = self._layouts.pop(old_name)
-        if self.current_layout == old_name:
-            self.current_layout = new_name
-        self.save_session()
+    def restore_layout(self, layout: dict):
+        """恢复版本化快照字典；不再接受布局名称，非法输入抛出 ValueError。
 
-    def delete_layout(self, name):
-        """删除非当前自定义布局；默认模板与正在使用的布局必须先保留。"""
-        if name in (DEFAULT_LAYOUT, self.current_layout):
-            raise ValueError("默认布局和当前布局不可删除")
-        del self._layouts[name]
-        self.save_session()
-
-    def restore_layout(self, layout):
-        """接受布局名或版本化字典；完整预检在任何 QWidget 迁移前完成。"""
-        if isinstance(layout, str):
-            if layout not in self._layouts:
-                raise KeyError("布局不存在")
-            data = copy.deepcopy(self._layouts[layout])
-            current = layout
-        else:
-            data = copy.deepcopy(layout)
-            current = self.current_layout
+        深拷贝并完整预检后才迁移 QWidget，既不修改调用方快照，也避免无效数据
+        破坏当前控件归属；恢复成功后继续通过会话自动保存记录当前排布。
+        """
+        data = copy.deepcopy(layout)
         self._validate_snapshot(data)
         data = self._normalize_snapshot(data)
         self._restore_snapshot(data)
-        if isinstance(layout, str):
-            self._layouts[layout] = copy.deepcopy(data)
-        self.current_layout = current
         self._hidden_snapshot = None
         self.schedule_save()
 
@@ -1219,10 +1190,14 @@ class DockManager(QObject):
             self._save_timer.start()
 
     def save_session(self):
-        """将完整会话提交给可替换的存储器；默认 JSON 存储采用原子替换。"""
+        """仅保存当前会话快照；默认 JSON 存储采用原子替换。
+
+        保留版本 1 的会话外层及快照格式，不再写入命名布局集合或当前布局名称。
+        读取旧配置后的下一次正常保存也会自然清除这些废弃字段。
+        """
         if self.closing or not self.hosts:
             return
-        payload = {"schema_version": 1, "current_layout": self.current_layout, "session": self.capture_layout(), "layouts": {name: data for name, data in self._layouts.items() if name != DEFAULT_LAYOUT}}
+        payload = {"schema_version": 1, "session": self.capture_layout()}
         try:
             self.layout_store.save(payload)
         except OSError as error:
@@ -1236,33 +1211,16 @@ class DockManager(QObject):
                 return False
             if payload.get("schema_version") != 1:
                 raise ValueError("不支持的会话版本")
-            if not isinstance(payload.get("current_layout", DEFAULT_LAYOUT), str) or not isinstance(payload.get("layouts", {}), dict):
-                raise ValueError("当前布局名称或命名布局集合无效")
+            # 旧文件中的命名布局字段已经废弃；只校验实际会话，避免废弃数据损坏
+            # 导致仍然有效的窗口排布、主题和尺寸无法恢复。
             self._validate_snapshot(payload["session"])
-            layouts = {}
-            for name, data in payload.get("layouts", {}).items():
-                if name != DEFAULT_LAYOUT:
-                    self._validate_snapshot(data)
-                    layouts[name] = self._normalize_snapshot(data)
             self._restore_snapshot(self._normalize_snapshot(payload["session"]))
-            self._layouts.update(layouts)
-            self.current_layout = payload.get("current_layout", DEFAULT_LAYOUT)
-            if self.current_layout not in self._layouts:
-                self.current_layout = DEFAULT_LAYOUT
             return True
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             if self._default_snapshot:
                 self._restore_snapshot(copy.deepcopy(self._default_snapshot))
             self.message.emit(f"布局文件无效，已恢复默认布局：{error}")
             return False
-
-    def prompt_save_layout(self, parent):
-        name, accepted = QInputDialog.getText(parent, "保存布局", "布局名称：")
-        if accepted and name.strip():
-            try:
-                self.save_layout(name)
-            except ValueError as error:
-                self.message.emit(str(error))
 
     def shutdown(self):
         """应用退出前调用：先保存，再断开全局事件与计时器，最后释放隐藏内容。"""

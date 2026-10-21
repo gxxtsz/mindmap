@@ -102,10 +102,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ))
         self.canvas.set_properties_handler(self._show_properties)
         self._register_file_actions()
-        # 旧设置面板只保留兼容访问对象，不再注册工具窗口；快捷键改为右上角菜单。
+        # 设置由左上角主菜单承载；旧面板只保留兼容访问对象，不再注册工具窗口。
         self.settings_menu = self.panels.settings.create_menu(self)
-        self.title_bar.options.setToolTip("设置")
-        self.title_bar.options.setAccessibleName("设置")
         self.settings_action = self.manager.register_action(
             "app.settings", "导图设置", self.show_settings_menu, shortcut="Alt+3", icon="settings",
         )
@@ -141,13 +139,17 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ))
 
     def show_settings_menu(self):
-        """快捷键直接展开右上角的导图设置，保留当前侧栏和原地编辑状态。"""
+        """在左上角主菜单按钮下展开导图设置，保留侧栏和原地编辑状态。
+
+        Alt+3 继续直达共用设置菜单；定位只依赖保留的主菜单按钮，避免引用
+        已移除的右侧入口，同时不增加新的可见按钮。
+        """
         if not self._disposed:
-            button = self.title_bar.options
+            button = self.title_bar.menu
             self.settings_menu.popup(button.mapToGlobal(QPoint(0, button.height())))
 
     def appearance_menu(self):
-        """扩展公开的齿轮菜单；导图设置与外壳外观沿用各自的状态和保存语义。"""
+        """扩展主菜单中的设置；导图设置与外壳外观沿用各自的状态和保存语义。"""
         menu = super().appearance_menu()
         menu.setTitle("设置")
         if hasattr(self, "settings_menu"):

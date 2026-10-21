@@ -53,30 +53,85 @@ def test_default_single_document_and_editable_framework(window):
     assert "settings" not in window.manager.states
     assert window.host.region_sizes["dock"]["right"] == 360
     bar = window.title_bar
-    assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.options) for button in bar.action_buttons)
+    assert all(bar.box.indexOf(button) < bar.box.indexOf(bar.minimize) for button in bar.action_buttons)
+    assert all(button.accessibleName() not in {"设置", "外观与布局"}
+               for button in bar.findChildren(QToolButton))
 
 
-def test_top_right_gear_contains_shared_settings_and_existing_options(window, qtbot):
-    """点击真实齿轮核对菜单，同时验证侧栏移除及原外观选项保留。"""
+@pytest.mark.parametrize("theme_name", ["light", "dark"])
+def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtbot, theme_name):
+    """明暗主题下点击左上角主菜单，核对设置子菜单中的三组平铺选项。"""
+    window.manager.set_theme(theme_name)
+    expected = [
+        "导图设置", None, "浅色", "深色", "紧凑模式", None,
+        "显示停靠栏", "始终显示标题按钮", None, "宽屏布局", "左侧并排", "右侧并排",
+    ]
     popped = []
 
     def inspect_menu():
-        menu = QApplication.activePopupWidget()
-        assert isinstance(menu, QMenu)
-        popped.append([action.text() for action in menu.actions()])
-        assert menu.actions()[0].menu() is window.settings_menu
-        menu.close()
+        main = QApplication.activePopupWidget()
+        assert isinstance(main, QMenu)
+        try:
+            settings_action = next(action for action in main.actions() if action.text() == "设置")
+            menu = settings_action.menu()
+            # 菜单刚进入事件循环时使用键盘展开，避免模拟鼠标与子菜单延时竞争。
+            main.setActiveAction(settings_action)
+            qtbot.keyClick(main, Qt.Key.Key_Right)
+            qtbot.waitUntil(menu.isVisible)
+            popped.append([None if action.isSeparator() else action.text() for action in menu.actions()])
+            assert menu.actions()[0].menu() is window.settings_menu
+            for action in menu.actions()[2:4]:
+                assert action.isChecked() == (action.text() == ("浅色" if theme_name == "light" else "深色"))
+            assert all(action.menu() is None for action in menu.actions()[2:])
+            menu.close()
+        finally:
+            main.close()
 
     QTimer.singleShot(0, inspect_menu)
-    qtbot.mouseClick(window.title_bar.options, Qt.MouseButton.LeftButton)
-    assert popped and {"导图设置", "浅色", "深色", "命名布局"} <= set(popped[0])
+    qtbot.mouseClick(window.title_bar.menu, Qt.MouseButton.LeftButton)
+    assert popped == [expected]
     assert set(window.manager.specs) == {"outline", "properties"}
     main = window.main_menu()
+    settings = next(action.menu() for action in main.actions() if action.text() == "设置")
+    assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected
     workspace = next(action.menu() for action in main.actions() if action.text() == "工作区")
     tools = next(action.menu() for action in workspace.actions() if action.text() == "工具窗口")
     assert [action.text() for action in tools.actions()] == ["大纲", "节点属性"]
     assert window.manager.states["properties"].visible
     main.deleteLater()
+
+
+@pytest.mark.parametrize(("label", "key"), [
+    ("紧凑模式", "compact"), ("显示停靠栏", "show_bars"),
+    ("始终显示标题按钮", "always_header_icons"), ("宽屏布局", "widescreen"),
+    ("左侧并排", "left_side_by_side"), ("右侧并排", "right_side_by_side"),
+])
+def test_grouped_menu_options_toggle_and_reopen_with_current_state(window, label, key):
+    """各组选项沿用原回调，重新打开菜单时展示最新勾选状态。"""
+    initial = getattr(window.manager.settings, key)
+    for expected in (not initial, initial):
+        menu = window.appearance_menu()
+        action = next(action for action in menu.actions() if action.text() == label)
+        assert action.isCheckable() and action.isChecked() != expected
+        action.trigger()
+        assert getattr(window.manager.settings, key) == expected
+        menu.deleteLater()
+    menu = window.appearance_menu()
+    assert next(action for action in menu.actions() if action.text() == label).isChecked() == initial
+    menu.deleteLater()
+
+
+@pytest.mark.parametrize(("label", "theme_name"), [("深色", "dark"), ("浅色", "light")])
+def test_grouped_menu_theme_actions_update_theme(window, label, theme_name):
+    """主题动作仍切换外壳主题，后续菜单的主题勾选与管理器保持一致。"""
+    window.manager.set_theme("light" if theme_name == "dark" else "dark")
+    menu = window.appearance_menu()
+    next(action for action in menu.actions() if action.text() == label).trigger()
+    assert window.manager.theme.name == theme_name
+    menu.deleteLater()
+    menu = window.appearance_menu()
+    assert next(action for action in menu.actions() if action.text() == label).isChecked()
+    menu.deleteLater()
 
 
 def test_settings_shortcut_and_real_menu_click_preserve_properties(window, qtbot):
@@ -117,7 +172,7 @@ def test_menu_wheel_preference_survives_restart_without_document_changes(window,
 
 
 def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
-    """旧会话与命名布局中可见的设置浮窗均不会恢复为侧栏或新增窗口。"""
+    """带命名布局字段的旧会话仍可加载，已移除的设置浮窗不会恢复。"""
     snapshot = window.manager.capture_layout()
     legacy = deepcopy(next(item for item in snapshot["tools"] if item["id"] == "properties"))
     legacy.update(id="settings", visible=True, mode="float")
@@ -131,14 +186,17 @@ def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
     restored = build_window(storage_dir=window.manager.storage_dir)
     qtbot.addWidget(restored)
     try:
-        for layout in (snapshot, "旧布局"):
-            restored.manager.restore_layout(layout)
-            restored.show()
-            QApplication.processEvents()
-            assert "settings" not in restored.manager.states
-            assert "settings" not in restored.manager.floating
-            assert restored.manager.states["properties"].visible
-            assert restored.panels.properties.isVisible()
+        restored.show()
+        QApplication.processEvents()
+        assert "settings" not in restored.manager.states
+        assert "settings" not in restored.manager.floating
+        assert restored.manager.states["properties"].visible
+        assert restored.panels.properties.isVisible()
+        restored.manager.restore_layout(snapshot)
+        assert "settings" not in restored.manager.states
+        assert restored.manager.states["properties"].visible
+        restored.manager.save_session()
+        assert set(restored.manager.layout_store.load()) == {"schema_version", "session"}
     finally:
         restored.close()
 

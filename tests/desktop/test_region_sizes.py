@@ -293,7 +293,7 @@ def test_invalid_region_sizes_are_rejected_before_mutating_layout(docking, inval
     assert docking.calls == {}
 
 
-def test_legacy_session_named_layout_and_pending_plugin_are_normalized_on_save(system_factory, tmp_path):
+def test_legacy_session_and_pending_plugin_are_normalized_on_save(system_factory, tmp_path):
     directory = tmp_path / "旧版区域布局"
     first = system_factory(directory)
     legacy = first.manager.capture_layout()
@@ -309,24 +309,25 @@ def test_legacy_session_named_layout_and_pending_plugin_are_normalized_on_save(s
     assert second.manager.load_session()
     second.manager.save_session()
     payload = json.loads(second.manager.storage_file.read_text("utf-8"))
-    for snapshot in [payload["session"], *payload["layouts"].values()]:
-        assert "remember_size" not in snapshot["settings"]
-        assert all("extent" not in item for item in snapshot["tools"])
-        assert "region_sizes" in snapshot["hosts"]["main"]
+    assert set(payload) == {"schema_version", "session"}
+    snapshot = payload["session"]
+    assert "remember_size" not in snapshot["settings"]
+    assert all("extent" not in item for item in snapshot["tools"])
+    assert "region_sizes" in snapshot["hosts"]["main"]
     second.register("later", DockPosition.LEFT_TOP)
     assert second.manager.states["later"].position == DockPosition.RIGHT_BOTTOM
     assert second.host.region_sizes["overlay"]["right"] == 470
 
 
-def test_shared_dock_and_overlay_sizes_round_trip_with_named_layout(docking):
+def test_shared_dock_and_overlay_sizes_round_trip_with_snapshot(docking):
     manager, host = docking.manager, docking.host
     manager.activate("alpha", focus=False)
     drag_region(host, "left", 380)
     host._set_region_extent(DockPosition.RIGHT_BOTTOM, 420, overlay=True)
-    manager.save_layout("共享尺寸")
+    snapshot = manager.capture_layout()
     host._set_region_extent(DockPosition.LEFT_TOP, 230)
     host._set_region_extent(DockPosition.RIGHT_TOP, 270, overlay=True)
-    manager.restore_layout("共享尺寸")
+    manager.restore_layout(snapshot)
     settle()
     assert host.left.width() == 380
     assert host.region_sizes["overlay"]["right"] == 420

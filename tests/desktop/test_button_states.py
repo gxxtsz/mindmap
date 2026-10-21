@@ -82,12 +82,12 @@ def test_keyboard_focus_uses_outline_and_still_opens_menu(button_window, qtbot, 
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-@pytest.mark.parametrize("source", ["more", "gear"])
+@pytest.mark.parametrize("source", ["more", "menu"])
 def test_hover_and_menu_cancel_leave_no_background(button_window, qtbot, theme, source):
-    """真实移入、移出以及菜单打开后取消均应恢复普通背景，覆盖截图中的两个入口。"""
+    """侧栏更多和左上角主菜单在悬停及取消弹窗后均恢复普通背景。"""
     window = button_window
     window.manager.set_theme(theme)
-    button = window.host.left_rail.more if source == "more" else window.title_bar.options
+    button = window.host.left_rail.more if source == "more" else window.title_bar.menu
     editor = window.manager.documents["editor"]["widget"]
     x = 7 if source == "more" else 3
     editor.setFocus()
