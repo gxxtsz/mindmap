@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "思维导图文档格式和原子文件读写"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["mindmap-core>=0.1.0,<0.2"]
+dependencies = [
+    "mindmap-core>=0.1.0,<0.2",
+]
 license = "MIT"
 license-files = ["LICENSE"]
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from mindmap_engine import MindMapError, Theme, apply_branch_style
+from mindmap_core import MindMapError, Theme, apply_branch_style
 from mindmap_qt_ui.branch_styles import populate_branch_combo
-from mindmap_qt_ui.icons import _toolbar_icon
+from mindmap_qt_ui.icons import toolbar_icon
 from mindmap_qt_ui.property_controls import MIXED, BranchPicker
 from mindmap_qt_ui.settings_menu import SettingsMenu
 from mindmap_qt_ui.ui_style import (
@@ -408,7 +408,7 @@ class GlobalSettingsPanel(QWidget):
             (self.theme, ("sun", "moon", "palette")),
         ):
             for index, icon in enumerate(icons):
-                field.setItemIcon(index, _toolbar_icon(icon, colors.text, colors.muted, colors.accent))
+                field.setItemIcon(index, toolbar_icon(icon, colors.text, colors.muted, colors.accent))
             apply_ui_palette(field.view(), colors)
         with QSignalBlocker(self.branch):
             current = self.branch.value()

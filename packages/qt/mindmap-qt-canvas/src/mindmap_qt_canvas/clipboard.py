@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from mindmap_engine import MAX_ARCHIVE_BYTES, MindMapDocument, MindMapError, import_edraw_xml
+from mindmap_core import MindMapDocument, MindMapError
+from mindmap_formats import MAX_ARCHIVE_BYTES, import_edraw_xml
 
 EDRAW_CLIPBOARD_MIME = "application/edraw-mind-xml"
 

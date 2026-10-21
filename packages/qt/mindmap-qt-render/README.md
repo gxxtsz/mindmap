@@ -1,6 +1,6 @@
 # mindmap-qt-render
 
-思维导图的 Qt 测量、静态绘制与图形导出。本包可以独立构建和安装，不依赖 `mindmap-qt` 兼容入口、桌面外壳或停靠框架。
+思维导图的 Qt 测量、静态绘制与图形导出。本包可以独立构建和安装，不依赖桌面外壳或停靠框架。
 
 要求 Python 3.12+、PySide6 `>=6.9,<7`。宿主先创建 `QApplication`，所有图形接口在 GUI 线程调用。
 
@@ -10,7 +10,8 @@
 
 ```python
 from PySide6.QtWidgets import QApplication
-from mindmap_engine import MindMapDocument, create_default_layout_registry
+from mindmap_core import MindMapDocument
+from mindmap_layouts import create_default_layout_registry
 from mindmap_qt_render import export_document
 
 app = QApplication([])
@@ -24,3 +25,7 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 `VisualFactory` 维护文字及图片缓存，返回的 `NodeVisual` 只读共享。
 `NodeItem` 是静态图元，不持有编辑宿主；交互节点和文本编辑器属于画布包。
+
+本包的运行依赖只有 `mindmap-core` 和 PySide6，不安装内置布局、格式或交互组件。
+上述默认树布局示例需另行安装 `mindmap-layouts`；自定义宿主也可只实现核心 `LayoutAlgorithm`
+并注册到 `LayoutRegistry` 后传入导出器。独立安装验收使用自定义布局验证三种图形输出。

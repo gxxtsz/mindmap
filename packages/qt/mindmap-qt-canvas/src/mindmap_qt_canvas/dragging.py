@@ -10,7 +10,7 @@ from collections import ChainMap, defaultdict
 from dataclasses import dataclass, replace
 from math import ceil, floor, hypot
 
-from mindmap_engine import BranchPath, Curve, LayoutResult, MindMapDocument, MindMapEngine, Rect
+from mindmap_core import BranchPath, Curve, LayoutResult, MindMapDocument, MindMapEngine, Rect
 from mindmap_qt_render.rendering import paint_branch
 from PySide6.QtCore import (
     QEasingCurve,
@@ -556,26 +556,7 @@ class _DropResolver:
         geometry = self.geometry
         radius = (ENTER_DISTANCE + SORT_DEPTH + SORT_PADDING) / scale
         area = Rect(point.x() - radius, point.y() - radius, radius * 2, radius * 2)
-        candidates = geometry.query(area)
-        for parent, rect in geometry.visited_parent_rects.items():
-            if not geometry.expanded[parent]:
-                continue
-            logical = geometry._transform(rect)
-            view = geometry._transform(area)
-            for group in geometry.groups[parent].values():
-                origin = logical.center[1] - group.total / 2
-                rows = list(group.rows(view.y - origin, view.bottom - origin))
-                slots = {geometry.locations[key][2] for key, _ in rows}
-                for slot in tuple(slots):
-                    for step in (-1, 1):
-                        neighbor = slot + step
-                        while 0 <= neighbor < len(group.keys) and group.keys[neighbor] in self.moving:
-                            neighbor += step
-                        if 0 <= neighbor < len(group.keys):
-                            slots.add(neighbor)
-                for slot in slots:
-                    key = group.keys[slot]
-                    candidates[key] = geometry.rectangle(key)
+        candidates = geometry.query_with_sibling_neighbors(area, skipped_ids=self.moving)
         center = self.layout.nodes.get(self.center_id)
         if center is not None:
             candidates[self.center_id] = center
@@ -586,24 +567,16 @@ class _DropResolver:
         self._node_index = _RegionIndex(self.node_regions.items())
         self.targets = []
         self._append_node_targets(self.node_regions.items())
-        parents = {self.parents[key] for key in keys if key in self.parents}
-        for parent in parents:
-            for side, group in geometry.groups[parent].items():
-                nearby = sorted((key for key in keys if self.parents.get(key) == parent
-                                 and geometry.locations[key][1] == side),
-                                key=lambda key: geometry.locations[key][2])
-                for previous, following in zip(nearby, nearby[1:]):
-                    low, high = geometry.locations[previous][2], geometry.locations[following][2]
-                    if any(key not in self.moving for key in group.keys[low + 1:high]):
-                        continue
-                    a, b = self.node_regions[previous], self.node_regions[following]
-                    zone = (QRectF(a.right(), min(a.top(), b.top()), b.left() - a.right(),
-                                   max(a.bottom(), b.bottom()) - min(a.top(), b.top())) if self.down else
-                            QRectF(min(a.left(), b.left()), a.bottom(),
-                                   max(a.right(), b.right()) - min(a.left(), b.left()), b.top() - a.bottom()))
-                    if zone.width() > 0 and zone.height() > 0:
-                        self.targets.append(_Target(self._proposal(parent, self.rows[following], self.sides[following]),
-                                                    following, "before", zone))
+        for parent, previous, following in geometry.adjacent_sibling_pairs(keys, skipped_ids=self.moving):
+            a, b = self.node_regions[previous], self.node_regions[following]
+            zone = (QRectF(a.right(), min(a.top(), b.top()), b.left() - a.right(),
+                           max(a.bottom(), b.bottom()) - min(a.top(), b.top())) if self.down else
+                    QRectF(min(a.left(), b.left()), a.bottom(),
+                           max(a.right(), b.right()) - min(a.left(), b.left()), b.top() - a.bottom()))
+            if zone.width() > 0 and zone.height() > 0:
+                self.targets.append(_Target(self._proposal(parent, self.rows[following], self.sides[following]),
+                                            following, "before", zone))
+
 
 
 class _DragLayer(QGraphicsItem):
@@ -1135,7 +1108,7 @@ class NodeDragController(QObject):
         else:
             # 受控树布局只试算变化实体及祖先。候选在原引擎的回滚日志内执行，
             # 不建立临时引擎或整图副本，也不提前执行宿主钩子和发布历史事件。
-            with self.owner.engine._preview_operation() as (candidate, touched):
+            with self.owner.engine.preview_operation() as (candidate, touched):
                 _apply_move(self.owner.engine, drop.proposal, drop.document)
                 changed_sizes = {}
                 for key in touched:

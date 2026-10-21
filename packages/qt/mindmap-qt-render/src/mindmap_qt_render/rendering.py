@@ -8,7 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
-from mindmap_engine import BranchPath, Curve, MindMapDocument, MindMapError, Node, Theme
+from mindmap_core import BranchPath, Curve, MindMapDocument, MindMapError, Node, Theme
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,

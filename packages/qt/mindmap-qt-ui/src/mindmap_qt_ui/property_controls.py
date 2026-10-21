@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindmap_engine import BranchStyle, Theme
+from mindmap_core import BranchStyle, Theme
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (

@@ -13,13 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def child(scale, platform):
     """每个缩放在新进程创建 QApplication，避免运行期间修改 Qt 缩放基线。"""
+    from mindmap_core import Theme
     from mindmap_docking import ViewMode
-    from mindmap_engine import MindMapEngine, Theme
-    from mindmap_qt import MindMapWorkspace
     from mindmap_workbench.shell_adapter import build_window
     from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QFileDialog, QToolButton
+    from PySide6.QtWidgets import QApplication, QFileDialog
 
     app = QApplication([])
     output = ROOT / ".artifacts/workbench-visual" / platform / f"{scale:g}x"
@@ -194,35 +193,6 @@ def child(scale, platform):
                 path = output / (name + "-export." + suffix)
                 window.canvas.export(path)
                 checks["导出" + suffix] = path.stat().st_size > 500
-            standalone = MindMapWorkspace(MindMapEngine(window.engine.document))
-            try:
-                standalone.resize(1100, 750)
-                standalone.show()
-                standalone.show_tool_window("outline")
-                app.processEvents()
-                depth_button = standalone.tools["outline"].dock.titleBarWidget().findChild(
-                    QToolButton, "outline_display_depth",
-                )
-                QTest.mouseClick(depth_button, Qt.MouseButton.LeftButton)
-                app.processEvents()
-                checks["独立工作区层级菜单"] = (
-                    depth_button.isVisible() and standalone.outline.depth_menu.isVisible()
-                    and standalone.tools["outline"].dock.titleBarWidget().rect().contains(depth_button.geometry())
-                )
-                standalone.outline.depth_menu.close()
-                standalone.show_settings_menu()
-                app.processEvents()
-                checks["独立工作区设置菜单"] = (
-                    standalone.settings_button.isVisible() and standalone.settings_menu.isVisible()
-                    and "settings" not in standalone.tools
-                )
-                assert standalone.settings_menu.grab().save(str(output / (name + "-standalone-settings-menu.png")))
-                standalone.settings_menu.close()
-                assert standalone.grab().save(str(output / (name + "-standalone-outline.png")))
-            finally:
-                standalone.dispose()
-                standalone.close()
-                standalone.deleteLater()
             # 在真实分屏上切换焦点，验证各缩放下菜单、侧栏和历史都随所属导图。
             window.manager.activate("properties", focus=False)
             window.host.editor.split_token(secondary.id, Qt.Orientation.Horizontal)

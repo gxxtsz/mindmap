@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from mindmap_engine import Theme
+from mindmap_core import Theme
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPolygonF
 from PySide6.QtWidgets import QComboBox, QStyle, QStyleOptionComboBox, QVBoxLayout, QWidget

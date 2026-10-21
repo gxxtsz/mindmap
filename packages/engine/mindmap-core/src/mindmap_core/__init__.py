@@ -2,7 +2,7 @@
 
 from .branch_styles import BranchStyle, apply_branch_style, branch_style_targets, get_branch_style
 from .config import Direction, LayoutConfig
-from .engine import MindMapEngine
+from .engine import MindMapEngine, SaveSnapshot
 from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent
 from .extensions import (
@@ -39,6 +39,7 @@ __all__ = [
     "LayoutResult",
     "MindMapDocument",
     "MindMapEngine",
+    "SaveSnapshot",
     "MindMapError",
     "Node",
     "OperationRejected",

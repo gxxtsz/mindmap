@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from mindmap_engine import BranchStyle, Theme, get_branch_style
+from mindmap_core import BranchStyle, Theme, get_branch_style
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (

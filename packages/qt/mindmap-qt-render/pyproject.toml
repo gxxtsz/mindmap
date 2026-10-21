@@ -5,7 +5,7 @@ description = "思维导图的 Qt 测量、静态绘制与图形导出"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mindmap-engine>=0.1.0,<0.2",
+    "mindmap-core>=0.1.0,<0.2",
     "PySide6>=6.9,<7",
 ]
 license = "MIT"

@@ -3,7 +3,8 @@
 import os
 from dataclasses import fields
 
-from mindmap_engine import Asset, LayoutConfig, MindMapDocument, Node, Theme, save_document
+from mindmap_core import Asset, LayoutConfig, MindMapDocument, Node, Theme
+from mindmap_formats import save_document
 
 _NODE_FIELDS = frozenset(item.name for item in fields(Node))
 

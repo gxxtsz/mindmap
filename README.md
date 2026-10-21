@@ -2,7 +2,7 @@
 
 使用 Python、PySide6 与 uv workspace 构建的思维导图引擎及多导图桌面工作台。
 工作台支持 Python 3.12、3.13；当前工作区使用 Python 3.12，锁定 PySide6 6.12.0。
-各引擎包的 Python 要求为 3.12+，不依赖 Qt 或桌面框架。
+三个引擎包的 Python 要求为 3.12+，不依赖 Qt 或桌面框架。
 
 ## 快速开始
 
@@ -75,51 +75,45 @@ uv run --locked --package mindmap-workbench mindmap-workbench 我的导图.mindm
 
 ## 工作区
 
-源码按子系统分组，四个无界面引擎包位于 `packages/engine/`，五个 Qt 功能包与兼容入口位于 `packages/qt/`：
+十个成员按引擎、Qt 组件、桌面基础设施和应用分组，分别独立构建，共用根目录的 `.venv` 和 `uv.lock`。
 
 ```text
 packages/
 ├─ engine/
 │  ├─ mindmap-core/
 │  ├─ mindmap-layouts/
-│  ├─ mindmap-formats/
-│  └─ mindmap-engine/
+│  └─ mindmap-formats/
 ├─ qt/
 │  ├─ mindmap-qt-render/
 │  ├─ mindmap-qt-ui/
 │  ├─ mindmap-qt-canvas/
-│  ├─ mindmap-qt-panels/
-│  ├─ mindmap-qt-workspace/
-│  └─ mindmap-qt/
-├─ mindmap-docking/
-└─ mindmap-shell/
+│  └─ mindmap-qt-panels/
+└─ desktop/
+   ├─ mindmap-docking/
+   └─ mindmap-shell/
 apps/
 └─ mindmap-workbench/
 tests/
-└─ desktop/
+└─ integration/
 ```
 
-`engine/` 和 `qt/` 用于目录分组，各成员保留独立的 `pyproject.toml`、`src/`、README 和许可证，测试随所属成员管理。
-桌面基础包的组合回归集中在 `tests/desktop/`；十三个成员均可独立构建。
+| 成员 | 职责与依赖边界 |
+| --- | --- |
+| mindmap-core | 模型、编辑、事务、历史、事件及扩展协议，仅依赖标准库 |
+| mindmap-layouts | 树布局、连接线路由、增量几何，只依赖核心 |
+| mindmap-formats | 原生容器、JSON、大纲、剪贴板解析及原子读写，只依赖核心 |
+| mindmap-qt-render | 文字图片测量、静态绘制及图形导出，只依赖核心和 Qt |
+| mindmap-qt-ui | 共享控件、表单、弹窗及色板，分支预览复用布局与渲染 |
+| mindmap-qt-canvas | 交互编辑、选择、拖动、剪贴板及文件控制器 |
+| mindmap-qt-panels | 通过公开宿主协议连接的大纲、属性和全局设置，不依赖画布 |
+| mindmap-docking | 停靠、文档标签、分屏、主题与布局持久化，仅依赖 Qt |
+| mindmap-shell | 主窗口、应用动作、菜单、启动与项目模板，依赖停靠和 Qt |
+| mindmap-workbench | 多导图会话、自动保存及应用装配，组合上述组件 |
 
-| 成员 | 导入名 | 职责 |
-| --- | --- | --- |
-| mindmap-core | mindmap_core | 模型、编辑、事务、历史、事件、几何及扩展协议，无项目内依赖 |
-| mindmap-layouts | mindmap_layouts | 内置树布局和默认布局注册表，只依赖核心 |
-| mindmap-formats | mindmap_formats | 原生容器、JSON、大纲和原子文件读写，只依赖核心 |
-| mindmap-engine | mindmap_engine | 默认组合入口，重新导出上述三个包的公开接口，无 Qt 依赖 |
-| mindmap-qt-render | mindmap_qt_render | 测量、静态图元、文字图片绘制和图形导出 |
-| mindmap-qt-ui | mindmap_qt_ui | 共享配色、控件、属性表单和弹窗 |
-| mindmap-qt-canvas | mindmap_qt_canvas | 交互画布、选择、拖动、编辑和文件控制器 |
-| mindmap-qt-panels | mindmap_qt_panels | 通过公开宿主协议连接的大纲、属性和全局设置 |
-| mindmap-qt-workspace | mindmap_qt_workspace | 组合画布与面板的独立 Qt 停靠工作区 |
-| mindmap-qt | mindmap_qt | 保留原公开类、子模块路径和模块对象的兼容入口 |
-| mindmap-docking | mindmap_docking | 停靠面板、文档标签、分屏、主题与布局管理 |
-| mindmap-shell | mindmap_shell | 桌面外壳、应用动作、菜单和启动流程 |
-| mindmap-workbench | mindmap_workbench | 多导图思维导图桌面应用 |
-
-工作区共用根目录的 `.venv` 和 `uv.lock`。成员各自声明运行依赖，通过
-`tool.uv.sources` 的 `workspace = true` 引用本地成员。
+分发名中的连字符对应导入名中的下划线，例如 `mindmap-core` 使用 `import mindmap_core`。
+调用方直接导入能力提供者：模型及编辑来自 `mindmap_core`，默认布局来自 `mindmap_layouts`，文件读写来自 `mindmap_formats`。
+每个成员的单元与组件测试位于自身 `tests/`；跨包组合、依赖边界和发行回归位于 `tests/integration/`。
+根 pytest 按成员目录收集，新增测试无需逐项修改根配置。
 
 ## 检查与构建
 
@@ -131,22 +125,21 @@ uv run --locked --all-packages python scripts/verify_wheels.py
 uv run --locked --all-packages python scripts/verify_workbench.py
 ```
 
-十三个成员全部在当前仓库构建，wheel 验收仅使用本仓库 `dist/` 中的构建结果，
+十个成员全部在当前仓库构建，wheel 验收仅使用本仓库 `dist/` 中的构建结果，
 在仓库外的干净环境中验证依赖隔离和工作台完整流程。
 安装报告与固定版本约束写入 `.artifacts/`，视觉验收结果写入 `.artifacts/workbench-visual/`。
 视觉验收检查 100%、150%、200% 三档缩放；Windows 默认使用原生 `windows` 平台，
 其他系统默认使用 `offscreen`。Windows 也可传入 `--platform offscreen` 执行离屏检查。
 
-`mindmap-qt` 的独立画布、面板组合、文件控制器和嵌入工作区接口见
-[组件说明](packages/qt/mindmap-qt/README.md)，它们不依赖桌面框架。
-工作台直接依赖画布、面板、UI 和渲染包，不安装兼容入口或独立 Qt 工作区。
+独立画布与文件接口见[画布说明](packages/qt/mindmap-qt-canvas/README.md)，
+业务面板与宿主协议见[面板说明](packages/qt/mindmap-qt-panels/README.md)。
 [桌面框架说明](docs/桌面框架.md)介绍两个基础包的接口、依赖方向和应用配置；
 代码与资源许可见[资源与许可](docs/资源与许可.md)。
 `scripts/branch_style_lab.py` 直接调用正式路由及绘制代码，输出四种布局方向的样式验收图；
 `scripts/benchmark.py` 用于千节点性能验收，生成节点沿用默认分支样式。
 `scripts/benchmark_interactions.py --nodes 10000` 使用完整工作台的隐藏窗口验收大图展开、收起、拖动和自动保存，
 同步命令与绘制分别计时，默认中文报告写入 `.artifacts/performance/`。
-正式画布已接入差量事务、撤销、增量布局及视口图元；本机一万节点局部展开约 8 毫秒，松手提交约 11 毫秒。
+正式画布已接入差量事务、撤销、增量布局及视口图元；具体耗时以当前机器生成的中文性能报告为准。
 大图原生自动保存使用独立 Python 进程，本轮没有引入 Rust。
 `scripts/verify_node_drag.py` 验收千节点吸附性能及四方向明暗主题截图；分别传入
 `--scale-factor 1`、`--scale-factor 1.5`、`--scale-factor 2` 检查三档显示缩放，结果写入 `.artifacts/node-drag/`。

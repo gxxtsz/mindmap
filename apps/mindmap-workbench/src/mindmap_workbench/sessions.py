@@ -10,9 +10,9 @@ from multiprocessing import get_context
 from pathlib import Path
 from uuid import uuid4
 
+from mindmap_core import FormatRegistry, MindMapEngine, MindMapError
 from mindmap_docking import DocumentSpec
-from mindmap_engine import FormatRegistry, MindMapEngine, MindMapError, save_document
-from mindmap_formats.mindmap import MindmapCodec
+from mindmap_formats import MindmapCodec, save_document
 from mindmap_qt_canvas import MindMapFileController, MindMapWidget
 from mindmap_qt_panels import MindMapPanels
 from PySide6.QtCore import QObject, Qt, QTimer
@@ -130,8 +130,7 @@ class MindMapSession(QObject):
         if (background and self.engine.node_count > BACKGROUND_SAVE_NODE_LIMIT
                 and self.engine.is_dirty and self.files.writer == self._write):
             try:
-                self.files._require_native_save_format()
-                entry = self.canvas.format_registry.get("mindmap")
+                entry = self.files.require_native_save_format()
                 registry = self.canvas.format_registry
                 if (type(entry.exporter) is MindmapCodec and "write" not in entry.exporter.__dict__
                         and type(registry) is FormatRegistry
@@ -144,16 +143,16 @@ class MindMapSession(QObject):
                     other = self.owner.find_path(target)
                     if other is not None and other is not self:
                         raise MindMapError("该文件已在另一个标签打开，请选择其他保存位置")
-                    document, generation, token = self.engine._capture_save_snapshot()
-                    if not can_process_snapshot(document):
+                    snapshot = self.engine.capture_save_snapshot()
+                    if not can_process_snapshot(snapshot.document):
                         return self.files.save_committed()
                     executor = _save_pool()
                     try:
-                        future = executor.submit(save_snapshot, document, target)
+                        future = executor.submit(save_snapshot, snapshot.document, target)
                     except BrokenProcessPool:
                         _discard_save_pool(executor)
                         raise MindMapError("后台保存进程不可用，请重新保存") from None
-                    self._background_save = future, generation, token, target, executor
+                    self._background_save = future, snapshot, target, executor
                     self._save_poll.start()
                     return True
             except (MindMapError, OSError) as exc:
@@ -176,7 +175,7 @@ class MindMapSession(QObject):
         pending = self._background_save
         if pending is None:
             return True
-        future, generation, token, target, executor = pending
+        future, snapshot, target, executor = pending
         if not wait and not future.done():
             return False
         self._background_save = None
@@ -190,7 +189,7 @@ class MindMapSession(QObject):
                 self.files.report_error(f"后台保存失败：{exc}")
             return False
         if not self.disposed:
-            self.engine._mark_saved_snapshot(generation, token)
+            self.engine.mark_saved_snapshot(snapshot)
             if self.files.path == target:
                 self.files.state_changed.emit()
         return True

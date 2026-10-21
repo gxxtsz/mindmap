@@ -1,6 +1,6 @@
 # mindmap-qt-panels
 
-通过公开宿主协议连接的大纲、属性与设置面板。本包可以独立构建和安装，不依赖 `mindmap-qt` 兼容入口、桌面外壳或停靠框架。
+通过公开宿主协议连接的大纲、属性与设置面板。本包可以独立构建和安装，不依赖桌面外壳或停靠框架。
 
 要求 Python 3.12+、PySide6 `>=6.9,<7`。宿主先创建 `QApplication`，所有图形接口在 GUI 线程调用。
 
@@ -21,3 +21,29 @@
 正式事务分开，外部文档变化会取消过期输入，输入法候选保持原有提交语义。
 
 仓库中的 `tests/test_host_protocol.py` 提供不使用画布的完整宿主实现与回归示例。
+
+## 面板组合与生命周期
+
+```python
+from mindmap_qt_canvas import MindMapWidget
+from mindmap_qt_panels import MindMapPanels
+
+# 宿主应先创建 QApplication；此示例额外使用独立安装的画布包。
+canvas = MindMapWidget()
+panels = MindMapPanels(canvas)
+# 将 panels.outline、panels.properties 放入宿主布局，设置菜单由宿主承载。
+settings_menu = panels.settings.create_menu(canvas)
+```
+
+`outline` 提供 `display_depth`、`set_display_depth()`、`display_depth_changed` 和 `depth_action`；
+None 表示所有层，1～9 表示指定层数，根主题计第1层。展开状态不修改导图折叠和历史。
+`properties` 按字体、主题、分支分组，离散项立即提交，文本与数值等待400毫秒或失焦；
+只提交实际修改的字段，输入法候选不被保存、导出或外部刷新强制确认。
+
+`settings.create_menu(parent)` 提供滚轮、布局方向、紧凑布局、整图连接线及导图主题。
+设置提交前请求有效属性输入，通过候选校验后写入一次事务；只读或文字编辑期间只允许调整滚轮。
+菜单只展示当前值，不自动更改自定义主题。设置对象不注册独立侧栏，菜单显示位置由宿主决定。
+
+保存前调用 `flush_pending_edits()`；永久退出时先 `panels.dispose()`，再释放宿主或画布。
+面板协调器不销毁 QWidget，最终控件所有权由宿主布局管理。
+`set_ui_colors(UiColors | None)` 只刷新展示，不提交草稿、不改写导图主题或历史。

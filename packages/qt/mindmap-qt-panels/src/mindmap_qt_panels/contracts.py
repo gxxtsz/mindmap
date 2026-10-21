@@ -7,7 +7,7 @@
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
-from mindmap_engine import BranchStyle, LayoutRegistry, MindMapDocument, MindMapEngine
+from mindmap_core import BranchStyle, LayoutRegistry, MindMapDocument, MindMapEngine
 from PySide6.QtCore import SignalInstance
 
 

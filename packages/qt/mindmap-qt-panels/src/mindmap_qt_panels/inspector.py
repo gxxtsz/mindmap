@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from mindmap_engine import MindMapError, apply_branch_style
+from mindmap_core import MindMapError, apply_branch_style
 from mindmap_qt_ui.properties import NodePropertiesForm, normalize_property
 from mindmap_qt_ui.ui_style import sidebar_surface
 from PySide6.QtCore import QTimer

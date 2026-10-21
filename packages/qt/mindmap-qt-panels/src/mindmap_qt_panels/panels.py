@@ -1,6 +1,6 @@
 """与停靠框架无关的思维导图面板组合及选择、输入生命周期。"""
 
-from mindmap_engine import MindMapError
+from mindmap_core import MindMapError
 from mindmap_qt_ui.ui_style import UiColors
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QWidget

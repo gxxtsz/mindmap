@@ -5,7 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from mindmap_engine import Curve, LayoutRegistry, MindMapError
+from mindmap_core import Curve, LayoutRegistry, MindMapError
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QMarginsF, QRectF, QSize, QSizeF
 from PySide6.QtGui import QColor, QImage, QPageSize, QPainter, QPdfWriter
 from PySide6.QtSvg import QSvgGenerator

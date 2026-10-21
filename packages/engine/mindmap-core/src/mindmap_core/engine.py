@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from copy import copy, deepcopy
+from dataclasses import dataclass, field
 
 from .branch_styles import BranchStyle
 from .config import LayoutConfig
@@ -14,6 +15,25 @@ from .history import HistoryManager
 from .models import MindMapDocument, Node, Theme
 from .operations import DocumentEditor
 from .transactions import DocumentState, TransactionManager
+
+
+@dataclass(frozen=True, slots=True)
+class SaveSnapshot:
+    """引擎生成的稳定保存版本，供受信任的只读编码器使用。
+
+    document 与当前引擎共享未变化的实体，后续正式编辑采用写时复制，因此不会
+    改写此版本。调用方不得修改其中的节点、资源或嵌套字段；需要可修改副本时应
+    使用 engine.document。冻结外壳不代表文档被递归冻结。捕获与完成通知均应在
+    引擎所属线程调用，后台进程仅接收 document，不接收此凭据或活跃引擎。
+
+    其余字段属于不透明保存凭据，调用方不得构造、替换或解释；只能将原对象交回
+    生成它的引擎。凭据不写入导图文件，也不改变公开文档快照的深拷贝语义。
+    """
+
+    document: MindMapDocument
+    _owner: object = field(repr=False)
+    _generation: int = field(repr=False)
+    _token: str = field(repr=False)
 
 
 class MindMapEngine:
@@ -35,6 +55,7 @@ class MindMapEngine:
         self.revision = 0
         self.document_generation = 0
         self._previewing = False
+        self._snapshot_owner = object()
 
     @property
     def document(self) -> MindMapDocument:
@@ -112,18 +133,23 @@ class MindMapEngine:
             yield
 
     @contextmanager
-    def _preview_operation(self):
-        """内置画布的只回滚试算边界，禁止在已有事务内或外部扩展中使用。
+    def preview_operation(self) -> Iterator[tuple[MindMapDocument, Collection[str]]]:
+        """同步试算引擎操作，退出时始终回滚；禁止嵌套进入已有事务。
 
-        返回只读候选文档和变更实体登记表；内部编辑照常写时复制、校验并恢复
-        父索引，但不执行用户钩子、不记录历史、不发送事件。调用方只允许同步
-        纯计算，不能处理事件循环或把候选引用交给外部代码。正式提交再执行钩子。
+        上下文返回候选文档和随操作更新的只读变化节点集合。修改只能通过当前
+        引擎的编辑方法执行，禁止直接改写候选文档。候选只允许在作用域内读取，
+        不得保存引用、传给不受信任扩展、处理事件循环或跨线程使用。
+
+        操作仍执行结构维护及提交校验，但不调用 before_operation、不记录历史、
+        不发事件；正常退出和异常退出都恢复原文档及索引。嵌套进入、撤销、重做、
+        替换文档及保存标记等冲突操作抛出 MindMapError。正式提交仍须重新执行
+        操作及前置钩子，试算成功不代表获得正式修改授权。
         """
         self._require_idle("事务期间不能执行候选试算")
         self._previewing = True
         try:
             with self._transactions.transaction("布局试算", rollback_only=True):
-                yield self._state.document, self._state.journal.nodes
+                yield self._state.document, self._state.journal.nodes.keys()
         finally:
             self._previewing = False
 
@@ -177,12 +203,14 @@ class MindMapEngine:
         self._history.mark_saved()
         self._notify("保存", kind="saved")
 
-    def _capture_save_snapshot(self):
-        """受信任原生保存器专用的稳定读快照，不向扩展暴露内部可变实体。
+    def capture_save_snapshot(self) -> SaveSnapshot:
+        """捕获正式版本及保存凭据，不改变历史或修改状态。
 
         引擎写入已统一采用实体写时复制，因此此处只复制字典和文档配置即可
         固定节点版本。后台编码器只能读取；公共 document 仍返回完整深拷贝。
-        必须在 GUI/引擎线程捕获，返回快照、文档代次和历史状态令牌。
+        必须在引擎所属线程且没有活动事务时捕获，否则抛出 MindMapError。
+        返回的 document 仅供受信任编码器读取，禁止修改；后台写入成功后将整个
+        SaveSnapshot 交回 mark_saved_snapshot。写入失败不得标记保存成功。
         """
         self._require_idle("事务提交前不能取得保存快照")
         source = self._state.document
@@ -190,14 +218,22 @@ class MindMapEngine:
         document.nodes, document.assets = source.nodes.copy(), source.assets.copy()
         document.layout, document.theme = deepcopy(source.layout), deepcopy(source.theme)
         document.metadata = deepcopy(source.metadata)
-        return document, self.document_generation, self._history._state
+        return SaveSnapshot(document, self._snapshot_owner, self.document_generation, self._history._state)
 
-    def _mark_saved_snapshot(self, generation, token):
-        """后台写入成功后标记对应历史状态；旧文档结果不得更新新文档保存位置。"""
+    def mark_saved_snapshot(self, snapshot: SaveSnapshot) -> bool:
+        """标记实际写入的版本，期间的新编辑仍保持未保存。
+
+        snapshot 必须由 capture_save_snapshot 取得；错误类型抛出 TypeError。
+        其他引擎或替换文档之前的凭据返回 False，不改变保存位置、不发送事件。
+        有效凭据返回 True 并发出 saved 事件；它标记捕获时的历史状态，因此只有
+        当前历史游标与该版本一致时文档才变为干净。活动事务内禁止调用。
+        """
+        if not isinstance(snapshot, SaveSnapshot):
+            raise TypeError("保存凭据必须为 SaveSnapshot")
         self._require_idle("事务提交前不能建立保存标记")
-        if generation != self.document_generation:
+        if snapshot._owner is not self._snapshot_owner or snapshot._generation != self.document_generation:
             return False
-        self._history.mark_saved(token)
+        self._history.mark_saved(snapshot._token)
         self._notify("保存", kind="saved")
         return True
 

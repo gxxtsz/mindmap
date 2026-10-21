@@ -1,0 +1,22 @@
+[project]
+name = "mindmap-shell"
+version = "0.1.0"
+description = "思维导图项目的桌面外壳、应用动作与启动流程"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "mindmap-docking>=0.1.0,<0.2",
+    "PySide6>=6.12,<6.13",
+]
+
+[project.scripts]
+mindmap-new = "mindmap_shell.scaffold:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mindmap_shell"]

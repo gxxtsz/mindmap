@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from types import MappingProxyType
 
-from mindmap_engine import (
+from mindmap_core import (
     BranchStyle,
     FormatRegistry,
     LayoutConfig,
@@ -19,13 +19,10 @@ from mindmap_engine import (
     Rect,
     apply_branch_style,
     branch_style_targets,
-    create_default_format_registry,
-    create_default_layout_registry,
-    decode_document,
-    encode_document,
     get_branch_style,
 )
-from mindmap_layouts import TreeLayout
+from mindmap_formats import create_default_format_registry, decode_document, encode_document
+from mindmap_layouts import TreeLayout, create_default_layout_registry
 from mindmap_layouts.incremental_result import IncrementalTreeLayout
 from mindmap_qt_render.exporting import export_document
 from mindmap_qt_render.rendering import BranchItem, VisualFactory, decode_image

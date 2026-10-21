@@ -2,7 +2,8 @@
 
 from functools import lru_cache
 
-from mindmap_engine import BranchStyle, MindMapDocument, Node, Rect, Theme, route_branches
+from mindmap_core import BranchStyle, MindMapDocument, Node, Rect, Theme
+from mindmap_layouts import route_branches
 from mindmap_qt_render.rendering import paint_branch
 from PySide6.QtCore import QEvent, QRectF, QSignalBlocker, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap

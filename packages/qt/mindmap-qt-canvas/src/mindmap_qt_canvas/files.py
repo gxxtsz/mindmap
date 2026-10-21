@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from mindmap_engine import MindMapDocument, MindMapError, load_document, save_document
+from mindmap_core import FormatRegistration, MindMapDocument, MindMapError
+from mindmap_formats import load_document, save_document
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
@@ -65,14 +66,20 @@ class MindMapFileController(QObject):
             return self.OPEN_FILTER
         raise MindMapError("未知文件对话框用途")
 
-    def _require_native_save_format(self):
-        """确认原生格式可完整读写；缺失或仅单向可用时拒绝保存，不回退其他格式。"""
+    def require_native_save_format(self) -> FormatRegistration:
+        """返回可完整读写的原生格式注册项，供同步及后台保存共用。
+
+        不读取或写入文件、不提交输入、不改变保存位置及引擎状态。原生格式缺失、
+        仅能导入或仅能导出时抛出中文 MindMapError，禁止回退到其他编解码器。
+        调用方只读检查返回项；后台能力仍需根据编码器自身的公开契约决定。
+        """
         try:
             entry = self.canvas.format_registry.get("mindmap")
         except MindMapError as exc:
             raise MindMapError("未注册可用的 .mindmap 原生编解码器") from exc
         if not entry.can_save:
             raise MindMapError("未注册可用的 .mindmap 原生编解码器")
+        return entry
 
     def confirm_replace(self) -> bool:
         """提交已完成输入并询问保存；取消或保存失败返回 False，不释放任何控件。"""
@@ -171,7 +178,7 @@ class MindMapFileController(QObject):
         self.panels.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
         try:
-            self._require_native_save_format()
+            self.require_native_save_format()
         except MindMapError as exc:
             self.report_error(str(exc))
             return False
@@ -208,7 +215,7 @@ class MindMapFileController(QObject):
         """
         try:
             target = self.validate_save_path(target)
-            self._require_native_save_format()
+            self.require_native_save_format()
             if self.wait_for_pending_write is not None:
                 self.wait_for_pending_write()
             if only_if_dirty and not self.is_dirty:

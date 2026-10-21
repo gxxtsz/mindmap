@@ -13,8 +13,8 @@ from copy import deepcopy
 from pathlib import Path
 
 import PySide6
-from mindmap_engine import MindMapDocument, MindMapEngine, Node
-from mindmap_qt import MindMapWidget
+from mindmap_core import MindMapDocument, MindMapEngine, Node
+from mindmap_qt_canvas import MindMapWidget
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 

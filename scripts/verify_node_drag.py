@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 
 from benchmark import build_document
-from mindmap_engine import LayoutConfig, MindMapEngine, Theme
-from mindmap_qt import MindMapWidget
+from mindmap_core import LayoutConfig, MindMapEngine, Theme
+from mindmap_qt_canvas import MindMapWidget
 from PySide6.QtCore import QAbstractAnimation, QBuffer, QIODevice, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication

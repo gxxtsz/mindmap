@@ -9,15 +9,8 @@ from copy import deepcopy
 from threading import Event, Timer, get_ident
 
 import pytest
-from mindmap_engine import (
-    LayoutConfig,
-    MindMapDocument,
-    MindMapError,
-    Node,
-    Theme,
-    load_document,
-    save_document,
-)
+from mindmap_core import LayoutConfig, MindMapDocument, MindMapError, Node, Theme
+from mindmap_formats import load_document, save_document
 from mindmap_workbench.shell_adapter import build_window
 from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QInputMethodEvent
@@ -314,8 +307,8 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     assert window.canvas is window.engine is window.files is window.panels is None
     assert window.manager.documents == {}
     group = window.host.editor.groups[0]
-    assert group._empty_widget.isVisible() and group.count() == 0
-    assert {button.text() for button in group._empty_widget.findChildren(QPushButton)} == {"新建导图", "打开文件"}
+    assert group.empty_widget.isVisible() and group.count() == 0
+    assert {button.text() for button in group.empty_widget.findChildren(QPushButton)} == {"新建导图", "打开文件"}
     assert not any(window.action("app." + key).isEnabled() for key in ("save", "save_all", "save_as"))
     assert not window.settings_action.isEnabled()
     assert window.host.left.isHidden() and window.host.right.isHidden()
@@ -333,13 +326,13 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     assert not menu.actions()[1].menu().actions()[0].isEnabled()
     menu.deleteLater()
     session = create(window, tmp_path / "第一份.mindmap")
-    assert not group._empty_widget.isVisible() and group.count() == 1
+    assert not group.empty_widget.isVisible() and group.count() == 1
     assert window.host.right.isVisible() and session.panels.properties.isVisible()
     session.engine.update_node(session.engine.root_id, text="关闭时立即保存")
     assert window.manager.close_document(session.id)
     assert load_document(session.files.path).root.text == "关闭时立即保存"
     assert window.active_session is None and not window.manager.documents
-    assert group._empty_widget.isVisible() and session.disposed and session.canvas._disposed
+    assert group.empty_widget.isVisible() and session.disposed and session.canvas._disposed
     assert window.host.left.isHidden() and window.host.right.isHidden()
     assert not window._depth_action.isVisible()
 
@@ -364,7 +357,7 @@ def test_empty_start_preserves_sidebar_layout_across_restart(empty_window, tmp_p
         restarted.show()
         QApplication.processEvents()
         assert restarted.host.left.isHidden() and restarted.host.right.isHidden()
-        assert restarted.host.editor.groups[0]._empty_widget.isVisible()
+        assert restarted.host.editor.groups[0].empty_widget.isVisible()
         # 切换主题和恢复布局也不能在没有导图时显示空侧栏。
         restarted.manager.set_theme("dark")
         restarted.manager.restore_layout(original)
@@ -868,9 +861,12 @@ def test_layout_restore_preserves_live_documents_and_restart_only_shell(empty_wi
     second = create(window, tmp_path / "乙.mindmap")
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     window.manager.activate_document(first.id)
-    for layout in (snapshot, window.manager._default_snapshot):
+    for layout in (snapshot, None):
         before = deepcopy(layout)
-        window.manager.restore_layout(layout)
+        if layout is None:
+            window.manager.restore_default_layout()
+        else:
+            window.manager.restore_layout(layout)
         assert layout == before and window.active_session is first
         assert all(window.host.editor.find_token(session.id) for session in (first, second))
         group, index = window.host.editor.find_token(second.id)

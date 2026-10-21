@@ -2,8 +2,10 @@
 
 from pathlib import Path
 
+from mindmap_core import MindMapError
 from mindmap_docking import DockManager, DockPosition, Theme, ToolWindowSpec
-from mindmap_engine import MindMapError, create_default_format_registry, create_default_layout_registry
+from mindmap_formats import create_default_format_registry
+from mindmap_layouts import create_default_layout_registry
 from mindmap_qt_render import ensure_fonts
 from mindmap_qt_ui import UiColors
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
@@ -359,8 +361,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                 stack.setPalette(palette)
                 stack.setAutoFillBackground(True)
             for group in self.host.editor.groups:
-                if group._empty_widget:
-                    group._empty_widget.refresh_theme()
+                if group.empty_widget:
+                    group.empty_widget.refresh_theme()
             self._sync_depth_action()
 
     def _layout_changed(self):

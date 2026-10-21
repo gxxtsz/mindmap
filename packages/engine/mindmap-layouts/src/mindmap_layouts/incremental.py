@@ -6,7 +6,7 @@ incremental_result 组合；单独测量本模块不包含事务、排版或 Qt 
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Container, Iterable, Iterator, Mapping
 from copy import copy
 from dataclasses import dataclass
 from math import isfinite
@@ -463,6 +463,61 @@ class IncrementalTreeGeometry:
                     pending.append((child, self._child_rect(rect, child, direction, prefix), direction))
                     prefix += self.metrics[child][1] + self.gap_y
         return result
+
+    def query_with_sibling_neighbors(
+        self, viewport: Rect, *, skipped_ids: Container[str] = ()
+    ) -> dict[str, Rect]:
+        """查询视口节点及相交同级区段前后的候选，供局部排序命中使用。
+
+        viewport 使用最终布局方向的世界坐标。返回新的节点到不可变矩形映射，
+        不修改文档或几何版本；查询仅沿相交子树及其相邻同级项展开，不枚举整图。
+        四方向的坐标换算、分组和同级索引均在本服务内处理。
+
+        skipped_ids 只让向前、向后寻找邻居时越过指定节点，例如正在移动的主题；
+        它不删除视口内的命中节点，也不删除区段本身的节点，调用方仍可据此判断
+        指针是否位于移动来源上。只调用 skipped_ids 的成员判断，不枚举它，允许
+        大图宿主使用惰性子树集合。未知标识无影响，结果不暴露内部索引或缓存对象。
+        """
+        result = self.query(viewport)
+        logical_view = self._transform(viewport)
+        for parent, rect in self.visited_parent_rects.items():
+            if not self.expanded[parent]:
+                continue
+            logical = self._transform(rect)
+            for group in self.groups[parent].values():
+                origin = logical.center[1] - group.total / 2
+                rows = group.rows(logical_view.y - origin, logical_view.bottom - origin)
+                slots = {self.locations[key][2] for key, _ in rows}
+                for slot in tuple(slots):
+                    for step in (-1, 1):
+                        neighbor = slot + step
+                        while 0 <= neighbor < len(group.keys) and group.keys[neighbor] in skipped_ids:
+                            neighbor += step
+                        if 0 <= neighbor < len(group.keys):
+                            slots.add(neighbor)
+                for slot in slots:
+                    key = group.keys[slot]
+                    result[key] = self.rectangle(key)
+        return result
+
+    def adjacent_sibling_pairs(
+        self, node_ids: Iterable[str], *, skipped_ids: Container[str] = ()
+    ) -> Iterator[tuple[str, str, str]]:
+        """按布局分组返回候选中相邻的父节点、前项、后项标识。
+
+        仅当两候选之间没有未跳过的同级项时返回该对，用于生成排序间隙。输入可
+        来自局部视口查询；根节点及未知标识不参与。skipped_ids 只进行成员判断，
+        无须枚举正在移动的整棵子树。该查询不公开同级索引、方向组或可变缓存。
+        """
+        keys = {key for key in node_ids if key in self.parents}
+        for parent in {self.parents[key] for key in keys}:
+            for side, group in self.groups[parent].items():
+                nearby = sorted((key for key in keys if self.parents[key] == parent
+                                 and self.locations[key][1] == side), key=lambda key: self.locations[key][2])
+                for previous, following in zip(nearby, nearby[1:]):
+                    low, high = self.locations[previous][2], self.locations[following][2]
+                    if all(key in skipped_ids for key in group.keys[low + 1:high]):
+                        yield parent, previous, following
 
     def query(self, viewport: Rect) -> dict[str, Rect]:
         """返回与视口相交的可见节点，利用子树包围盒及同级高度索引跳过屏外分支。

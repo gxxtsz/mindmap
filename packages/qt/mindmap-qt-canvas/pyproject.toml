@@ -5,8 +5,9 @@ description = "可独立嵌入的 Qt 思维导图交互画布与文件控制器"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "mindmap-engine>=0.1.0,<0.2",
+    "mindmap-core>=0.1.0,<0.2",
     "mindmap-layouts>=0.1.0,<0.2",
+    "mindmap-formats>=0.1.0,<0.2",
     "mindmap-qt-render>=0.1.0,<0.2",
     "mindmap-qt-ui>=0.1.0,<0.2",
     "PySide6>=6.9,<7",

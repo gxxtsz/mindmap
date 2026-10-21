@@ -3,8 +3,7 @@
 from copy import deepcopy
 
 import pytest
-from mindmap_docking import DockPosition, DockTarget, ViewMode
-from mindmap_engine import (
+from mindmap_core import (
     FormatInfo,
     FormatRegistry,
     LayoutConfig,
@@ -13,10 +12,10 @@ from mindmap_engine import (
     MindMapEngine,
     MindMapError,
     Theme,
-    TreeLayout,
-    load_document,
-    save_document,
 )
+from mindmap_docking import DockPosition, DockTarget, ViewMode
+from mindmap_formats import load_document, save_document
+from mindmap_layouts import TreeLayout
 from mindmap_workbench.shell_adapter import build_window
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QImage
@@ -321,8 +320,8 @@ def test_outline_invalid_preferences_use_default(qtbot, tmp_path, value):
 
 def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatch, qtbot):
     """真实粘贴保存两项偏好；取消不覆盖，重建工作台从相同配置目录恢复。"""
-    from mindmap_qt.clipboard import EDRAW_CLIPBOARD_MIME
-    from mindmap_qt.dialogs import EdrawPasteOptions
+    from mindmap_qt_canvas.clipboard import EDRAW_CLIPBOARD_MIME
+    from mindmap_qt_ui.dialogs import EdrawPasteOptions
     from PySide6.QtCore import QMimeData
 
     original = QMimeData()
@@ -336,12 +335,12 @@ def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatc
     QApplication.clipboard().setMimeData(mime)
     try:
         assert window.canvas.edraw_paste_options == ("append", True)
-        monkeypatch.setattr("mindmap_qt.widget.edraw_paste_options",
+        monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
                             lambda *args, **kwargs: EdrawPasteOptions("replace", False))
         window.canvas.paste()
         assert window.preferences.value("clipboard/edraw_mode") == "replace"
         assert window.preferences.value("clipboard/edraw_keep_children", type=bool) is False
-        monkeypatch.setattr("mindmap_qt.widget.edraw_paste_options", lambda *args, **kwargs: None)
+        monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options", lambda *args, **kwargs: None)
         assert window.canvas.paste() == []
         restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
         qtbot.addWidget(restored)

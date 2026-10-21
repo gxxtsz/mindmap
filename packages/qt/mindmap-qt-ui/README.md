@@ -1,6 +1,6 @@
 # mindmap-qt-ui
 
-思维导图的共享 Qt 控件、属性表单与弹窗。本包可以独立构建和安装，不依赖 `mindmap-qt` 兼容入口、桌面外壳或停靠框架。
+思维导图的共享 Qt 控件、属性表单与弹窗。本包可以独立构建和安装，不依赖桌面外壳或停靠框架。
 
 要求 Python 3.12+、PySide6 `>=6.9,<7`。宿主先创建 `QApplication`，所有图形接口在 GUI 线程调用。
 
@@ -10,7 +10,7 @@
 
 ```python
 from PySide6.QtWidgets import QApplication
-from mindmap_engine import MindMapDocument
+from mindmap_core import MindMapDocument
 from mindmap_qt_ui import NodePropertiesForm
 
 app = QApplication([])
@@ -27,3 +27,9 @@ app.exec()
 
 其他共享组件包括分支选择器、字体选择器、颜色按钮、图标及粘贴选项弹窗。
 本包使用渲染包生成正式分支预览，不导入交互画布或业务面板。
+
+## 公开图标接口
+
+`toolbar_icon(name, foreground, disabled, accent) -> QIcon` 按名称及三种颜色生成、缓存图标。
+颜色分别用于普通、禁用和选中状态；缓存包含多档设备像素比。未知名称抛出 ValueError。
+调用前须有 QApplication，并在 GUI 线程使用；返回图标供动作或按钮展示，不持有引擎或文档。

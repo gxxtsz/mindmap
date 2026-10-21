@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindmap_engine import Theme, get_branch_style
+from mindmap_core import Theme, get_branch_style
 from PySide6.QtCore import QEvent, QPointF, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPalette, QPolygonF
 from PySide6.QtWidgets import (
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .branch_styles import populate_branch_combo
-from .icons import _toolbar_icon
+from .icons import toolbar_icon
 from .property_controls import MIXED, BranchPicker, ColorButton, FlowLayout, FontPicker, ToggleButton
 from .ui_style import ComboBox, apply_ui_palette, control_styles, menu_styles, scrollbar_styles, ui_colors
 
@@ -564,10 +564,10 @@ class NodePropertiesForm(QWidget):
         apply_ui_palette(self, colors, window=surface)
         for name in ("bold", "italic", "underline"):
             self.fields["style." + name].setIcon(
-                _toolbar_icon("font_" + name, colors.text, colors.muted, colors.accent)
+                toolbar_icon("font_" + name, colors.text, colors.muted, colors.accent)
             )
-        self.increase_size.setIcon(_toolbar_icon("font_increase", colors.text, colors.muted, colors.accent))
-        self.decrease_size.setIcon(_toolbar_icon("font_decrease", colors.text, colors.muted, colors.accent))
+        self.increase_size.setIcon(toolbar_icon("font_increase", colors.text, colors.muted, colors.accent))
+        self.decrease_size.setIcon(toolbar_icon("font_decrease", colors.text, colors.muted, colors.accent))
         # 补全列表是独立弹层，不一定继承表单 QSS；显式着色但不重建字体模型或输入框。
         popup = self.fields["style.font_family"].completer().popup()
         apply_ui_palette(popup, colors)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from mindmap_engine import Theme
+from mindmap_core import Theme
 from PySide6.QtCore import QByteArray, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
@@ -15,7 +15,7 @@ from .ui_style import apply_ui_palette, toolbar_styles, ui_colors
 _ICON_SIZE = 20
 _MENU_OPTION_SIZE = 32
 _MENU_PADDING = 6
-_ICON_PROPERTY = "mindmap_toolbar_icon"
+_ICON_PROPERTY = "mindmaptoolbar_icon"
 _THEME_PROPERTY = "mindmap_toolbar_theme"
 
 
@@ -137,12 +137,16 @@ _SVG_BODIES = {
 
 
 @lru_cache(maxsize=128)
-def _toolbar_icon(name: str, foreground: str, disabled: str, accent: str) -> QIcon:
+def toolbar_icon(name: str, foreground: str, disabled: str, accent: str) -> QIcon:
     """按图形和主题颜色缓存图标；仅在已有 QApplication 的 GUI 线程调用。
 
     SVG 按多档物理分辨率直接绘制，避免先生成小位图再放大；显式提供禁用和选中
     图像，使只读状态及紧凑布局开关在明暗主题中都保持清晰、稳定的视觉反馈。
+    name 必须为内置图标名称，未知名称抛出 ValueError。三个颜色分别用于普通、
+    禁用和选中状态，返回的 QIcon 不持有文档或引擎，调用方可赋给自己的动作。
     """
+    if name not in _SVG_BODIES:
+        raise ValueError(f"工具栏图标不存在：{name}")
     icon = QIcon()
     variants = (
         (foreground, ((QIcon.Mode.Normal, QIcon.State.Off),)),
@@ -222,7 +226,7 @@ def set_action_icon(action: QAction, icon_name: str, theme: Theme) -> None:
         raise ValueError(f"工具栏图标不存在：{icon_name}")
     action.setProperty(_ICON_PROPERTY, icon_name)
     colors = ui_colors(theme)
-    icon = _toolbar_icon(icon_name, colors.text, colors.muted, colors.accent)
+    icon = toolbar_icon(icon_name, colors.text, colors.muted, colors.accent)
     if action.icon().cacheKey() != icon.cacheKey():
         action.setIcon(icon)
 

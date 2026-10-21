@@ -101,20 +101,21 @@ def test_save_snapshot_is_stable_across_changes_and_old_save_preserves_new_dirty
     document, keys = document_with_nodes(20)
     engine = MindMapEngine(document)
     engine.update_node(keys[1], text="版本甲", style={"branch": {"kind": "round"}})
-    snapshot, generation, token = engine._capture_save_snapshot()
+    saved = engine.capture_save_snapshot()
+    snapshot = saved.document
     expected = deepcopy(snapshot)
     engine.update_node(keys[1], text="版本乙")
     engine.set_branch_style([engine.root_id], "arrow")
     engine.move_nodes([keys[-1]], keys[-3])
     assert snapshot == expected
-    assert engine._mark_saved_snapshot(generation, token) and engine.is_dirty
+    assert engine.mark_saved_snapshot(saved) and engine.is_dirty
     for _ in range(3):
         assert engine.undo()
     assert not engine.is_dirty and engine.document == snapshot
     assert engine.redo() and engine.is_dirty
     engine.replace_document(MindMapDocument.new("另一文档"))
     engine.update_node(engine.root_id, text="另一文档的未保存修改")
-    assert not engine._mark_saved_snapshot(generation, token) and engine.is_dirty
+    assert not engine.mark_saved_snapshot(saved) and engine.is_dirty
 
 
 def test_unused_asset_restored_by_undo_is_pruned_by_next_commit():
@@ -136,14 +137,14 @@ def test_internal_preview_restores_structure_and_never_calls_hooks_or_publishes(
     engine.subscribe(events.append)
     engine.before_operation = lambda *args: hooks.append(args)
     before = engine.document
-    with engine._preview_operation() as (candidate, touched):
+    with engine.preview_operation() as (candidate, touched):
         engine.move_nodes([keys[-1]], keys[-3])
         assert keys[-1] in candidate.nodes[keys[-3]].children
         assert keys[-3] in touched
     assert not events and not hooks and not engine.can_undo and engine.revision == 0
     assert engine.document == before and engine._state.parents == before.parents()
     with pytest.raises(RuntimeError):
-        with engine._preview_operation():
+        with engine.preview_operation():
             engine.remove_nodes([keys[1]])
             raise RuntimeError("试算拒绝")
     assert engine.document == before

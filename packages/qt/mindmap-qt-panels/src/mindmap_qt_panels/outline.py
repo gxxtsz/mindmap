@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import copy
 from math import ceil, floor
 
-from mindmap_qt_ui.icons import _toolbar_icon
+from mindmap_qt_ui.icons import toolbar_icon
 from mindmap_qt_ui.ui_style import apply_ui_palette, menu_styles, outline_colors, scrollbar_styles
 from PySide6.QtCore import (
     QAbstractItemModel,
@@ -405,7 +405,7 @@ class OutlinePanel(QTreeView):
         apply_ui_palette(self, colors)
         # 标题入口只呈现低对比度线条图标，当前层级由悬停提示和菜单勾选表达。
         # 图标随界面色板刷新，不读取导图主题之外的全局样式，明暗宿主保持一致。
-        self.depth_action.setIcon(_toolbar_icon("outline_depth", colors.muted, colors.muted, colors.text))
+        self.depth_action.setIcon(toolbar_icon("outline_depth", colors.muted, colors.muted, colors.text))
         self.depth_menu.setStyleSheet(menu_styles(colors))
         apply_ui_palette(self.depth_menu, colors)
         self.viewport().update()

@@ -2,7 +2,7 @@
 
 基于项目内置 `mindmap-shell`、`mindmap-docking` 的多导图桌面应用，直接使用
 `mindmap-qt-canvas`、`mindmap-qt-panels`、`mindmap-qt-ui`、`mindmap-qt-render`。
-不依赖 `mindmap-qt` 兼容入口或 `mindmap-qt-workspace`，停靠及应用外壳继续由现有桌面组件管理。
+各组件按公开接口协作，停靠及应用外壳继续由现有桌面组件管理。
 支持 Python 3.12、3.13，当前工作区锁定 PySide6 6.12.0。
 
 克隆本仓库后直接在根目录运行，开发与发行均不需要其他源码目录：
@@ -94,7 +94,7 @@ Escape 取消原地文字编辑或退出分支聚焦；隐藏活动面板后自�
 其中 `preferences.ini` 保存滚轮和大纲层级等偏好，`outline/display_depth` 的0表示所有层、1～9表示指定层数，缺失或非法值回退2层。
 工作台画布的显示底色跟随外壳主题；导图主题仍决定节点、连接线及 PNG/SVG/PDF 导出的背景，不因切换外壳主题而改写。
 
-开发期通过 uv workspace 引用本仓库的十三个成员，普通源码更新后重启即可使用，包元数据更新后需要重新同步。
+开发期通过 uv workspace 引用本仓库的十个成员，普通源码更新后重启即可使用，包元数据更新后需要重新同步。
 正式交付使用同一仓库构建的 wheel；桌面基础包的版本和验收随应用统一管理。
 适配入口为 `mindmap_workbench.shell_adapter`，配置说明见[桌面框架](../../docs/桌面框架.md)。
 检查与构建步骤见[仓库说明](../../README.md)。

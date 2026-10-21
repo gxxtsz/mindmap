@@ -7,15 +7,12 @@ members = [
     "mindmap",
     "mindmap-core",
     "mindmap-docking",
-    "mindmap-engine",
     "mindmap-formats",
     "mindmap-layouts",
-    "mindmap-qt",
     "mindmap-qt-canvas",
     "mindmap-qt-panels",
     "mindmap-qt-render",
     "mindmap-qt-ui",
-    "mindmap-qt-workspace",
     "mindmap-shell",
     "mindmap-workbench",
 ]
@@ -67,30 +64,13 @@ source = { editable = "packages/engine/mindmap-core" }
 [[package]]
 name = "mindmap-docking"
 version = "0.1.0"
-source = { editable = "packages/mindmap-docking" }
+source = { editable = "packages/desktop/mindmap-docking" }
 dependencies = [
     { name = "pyside6" },
 ]
 
 [package.metadata]
 requires-dist = [{ name = "pyside6", specifier = ">=6.12,<6.13" }]
-
-[[package]]
-name = "mindmap-engine"
-version = "0.1.0"
-source = { editable = "packages/engine/mindmap-engine" }
-dependencies = [
-    { name = "mindmap-core" },
-    { name = "mindmap-formats" },
-    { name = "mindmap-layouts" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mindmap-core", editable = "packages/engine/mindmap-core" },
-    { name = "mindmap-formats", editable = "packages/engine/mindmap-formats" },
-    { name = "mindmap-layouts", editable = "packages/engine/mindmap-layouts" },
-]
 
 [[package]]
 name = "mindmap-formats"
@@ -115,32 +95,12 @@ dependencies = [
 requires-dist = [{ name = "mindmap-core", editable = "packages/engine/mindmap-core" }]
 
 [[package]]
-name = "mindmap-qt"
-version = "0.1.0"
-source = { editable = "packages/qt/mindmap-qt" }
-dependencies = [
-    { name = "mindmap-qt-canvas" },
-    { name = "mindmap-qt-panels" },
-    { name = "mindmap-qt-render" },
-    { name = "mindmap-qt-ui" },
-    { name = "mindmap-qt-workspace" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mindmap-qt-canvas", editable = "packages/qt/mindmap-qt-canvas" },
-    { name = "mindmap-qt-panels", editable = "packages/qt/mindmap-qt-panels" },
-    { name = "mindmap-qt-render", editable = "packages/qt/mindmap-qt-render" },
-    { name = "mindmap-qt-ui", editable = "packages/qt/mindmap-qt-ui" },
-    { name = "mindmap-qt-workspace", editable = "packages/qt/mindmap-qt-workspace" },
-]
-
-[[package]]
 name = "mindmap-qt-canvas"
 version = "0.1.0"
 source = { editable = "packages/qt/mindmap-qt-canvas" }
 dependencies = [
-    { name = "mindmap-engine" },
+    { name = "mindmap-core" },
+    { name = "mindmap-formats" },
     { name = "mindmap-layouts" },
     { name = "mindmap-qt-render" },
     { name = "mindmap-qt-ui" },
@@ -149,7 +109,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mindmap-engine", editable = "packages/engine/mindmap-engine" },
+    { name = "mindmap-core", editable = "packages/engine/mindmap-core" },
+    { name = "mindmap-formats", editable = "packages/engine/mindmap-formats" },
     { name = "mindmap-layouts", editable = "packages/engine/mindmap-layouts" },
     { name = "mindmap-qt-render", editable = "packages/qt/mindmap-qt-render" },
     { name = "mindmap-qt-ui", editable = "packages/qt/mindmap-qt-ui" },
@@ -161,14 +122,14 @@ name = "mindmap-qt-panels"
 version = "0.1.0"
 source = { editable = "packages/qt/mindmap-qt-panels" }
 dependencies = [
-    { name = "mindmap-engine" },
+    { name = "mindmap-core" },
     { name = "mindmap-qt-ui" },
     { name = "pyside6" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mindmap-engine", editable = "packages/engine/mindmap-engine" },
+    { name = "mindmap-core", editable = "packages/engine/mindmap-core" },
     { name = "mindmap-qt-ui", editable = "packages/qt/mindmap-qt-ui" },
     { name = "pyside6", specifier = ">=6.9,<7" },
 ]
@@ -178,13 +139,13 @@ name = "mindmap-qt-render"
 version = "0.1.0"
 source = { editable = "packages/qt/mindmap-qt-render" }
 dependencies = [
-    { name = "mindmap-engine" },
+    { name = "mindmap-core" },
     { name = "pyside6" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mindmap-engine", editable = "packages/engine/mindmap-engine" },
+    { name = "mindmap-core", editable = "packages/engine/mindmap-core" },
     { name = "pyside6", specifier = ">=6.9,<7" },
 ]
 
@@ -193,57 +154,44 @@ name = "mindmap-qt-ui"
 version = "0.1.0"
 source = { editable = "packages/qt/mindmap-qt-ui" }
 dependencies = [
-    { name = "mindmap-engine" },
+    { name = "mindmap-core" },
+    { name = "mindmap-layouts" },
     { name = "mindmap-qt-render" },
     { name = "pyside6" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "mindmap-engine", editable = "packages/engine/mindmap-engine" },
+    { name = "mindmap-core", editable = "packages/engine/mindmap-core" },
+    { name = "mindmap-layouts", editable = "packages/engine/mindmap-layouts" },
     { name = "mindmap-qt-render", editable = "packages/qt/mindmap-qt-render" },
-    { name = "pyside6", specifier = ">=6.9,<7" },
-]
-
-[[package]]
-name = "mindmap-qt-workspace"
-version = "0.1.0"
-source = { editable = "packages/qt/mindmap-qt-workspace" }
-dependencies = [
-    { name = "mindmap-engine" },
-    { name = "mindmap-qt-canvas" },
-    { name = "mindmap-qt-panels" },
-    { name = "mindmap-qt-ui" },
-    { name = "pyside6" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mindmap-engine", editable = "packages/engine/mindmap-engine" },
-    { name = "mindmap-qt-canvas", editable = "packages/qt/mindmap-qt-canvas" },
-    { name = "mindmap-qt-panels", editable = "packages/qt/mindmap-qt-panels" },
-    { name = "mindmap-qt-ui", editable = "packages/qt/mindmap-qt-ui" },
     { name = "pyside6", specifier = ">=6.9,<7" },
 ]
 
 [[package]]
 name = "mindmap-shell"
 version = "0.1.0"
-source = { editable = "packages/mindmap-shell" }
+source = { editable = "packages/desktop/mindmap-shell" }
 dependencies = [
     { name = "mindmap-docking" },
+    { name = "pyside6" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mindmap-docking", editable = "packages/mindmap-docking" }]
+requires-dist = [
+    { name = "mindmap-docking", editable = "packages/desktop/mindmap-docking" },
+    { name = "pyside6", specifier = ">=6.12,<6.13" },
+]
 
 [[package]]
 name = "mindmap-workbench"
 version = "0.1.0"
 source = { editable = "apps/mindmap-workbench" }
 dependencies = [
+    { name = "mindmap-core" },
     { name = "mindmap-docking" },
-    { name = "mindmap-engine" },
+    { name = "mindmap-formats" },
+    { name = "mindmap-layouts" },
     { name = "mindmap-qt-canvas" },
     { name = "mindmap-qt-panels" },
     { name = "mindmap-qt-render" },
@@ -254,13 +202,15 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mindmap-docking", editable = "packages/mindmap-docking" },
-    { name = "mindmap-engine", editable = "packages/engine/mindmap-engine" },
+    { name = "mindmap-core", editable = "packages/engine/mindmap-core" },
+    { name = "mindmap-docking", editable = "packages/desktop/mindmap-docking" },
+    { name = "mindmap-formats", editable = "packages/engine/mindmap-formats" },
+    { name = "mindmap-layouts", editable = "packages/engine/mindmap-layouts" },
     { name = "mindmap-qt-canvas", editable = "packages/qt/mindmap-qt-canvas" },
     { name = "mindmap-qt-panels", editable = "packages/qt/mindmap-qt-panels" },
     { name = "mindmap-qt-render", editable = "packages/qt/mindmap-qt-render" },
     { name = "mindmap-qt-ui", editable = "packages/qt/mindmap-qt-ui" },
-    { name = "mindmap-shell", editable = "packages/mindmap-shell" },
+    { name = "mindmap-shell", editable = "packages/desktop/mindmap-shell" },
     { name = "pyside6", specifier = ">=6.12,<7" },
 ]
 

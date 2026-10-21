@@ -20,17 +20,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
-from mindmap_engine import (
-    BranchStyle,
-    LayoutConfig,
-    MindMapDocument,
-    MindMapEngine,
-    Rect,
-    TreeLayout,
-    apply_branch_style,
-    route_branches,
-)
-from mindmap_qt.rendering import ensure_fonts, paint_branch
+from mindmap_core import BranchStyle, LayoutConfig, MindMapDocument, MindMapEngine, Rect, apply_branch_style
+from mindmap_layouts import TreeLayout, route_branches
+from mindmap_qt_render.rendering import ensure_fonts, paint_branch
 from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPaintEvent, QPen
 from PySide6.QtSvg import QSvgGenerator, QSvgRenderer
