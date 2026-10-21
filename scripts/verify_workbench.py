@@ -17,9 +17,9 @@ def child(scale, platform):
     from mindmap_engine import MindMapEngine, Theme
     from mindmap_qt import MindMapWorkspace
     from mindmap_workbench.shell_adapter import build_window
-    from PySide6.QtCore import QCoreApplication, QEvent, Qt
+    from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QToolButton
+    from PySide6.QtWidgets import QApplication, QFileDialog, QToolButton
 
     app = QApplication([])
     output = ROOT / ".artifacts/workbench-visual" / platform / f"{scale:g}x"
@@ -44,7 +44,7 @@ def child(scale, platform):
                 window.engine.add_child(first, "画布与引擎保持独立")
                 window.engine.add_child(first, "外壳修改只维护 桌面外壳")
                 window.engine.add_child(root, "文件保存与图形导出")
-            assert window.new_document(data_dir / (name + "-并行导图.json"))
+            assert window.new_document(data_dir / (name + "-并行导图.mindmap"))
             secondary = window.active_session
             secondary.engine.update_node(secondary.engine.root_id, text="独立会话与历史")
             assert window.save_all()
@@ -79,16 +79,52 @@ def child(scale, platform):
                 "画布导航浮条": controls.isVisible()
                 and window.canvas.view.viewport().geometry().contains(controls.geometry()),
             }
-            # 真实菜单仅保留“打开”入口；固定原生筛选不随保存和剪贴板格式增加。
+            # 真实菜单保留固定原生打开和保存；扩展编解码器不能增加文件格式入口。
             main_menu = window.main_menu()
             file_menu = main_menu.actions()[0].menu()
             checks["仅打开原生导图"] = (file_menu.actions()[1].text() == "打开…"
                 and window.files.format_filters("open") == "思维导图 (*.mindmap)")
+            checks["仅保存原生导图"] = window.files.format_filters("save") == "思维导图 (*.mindmap)"
             file_menu.popup(window.title_bar.menu.mapToGlobal(window.title_bar.menu.rect().bottomLeft()))
             app.processEvents()
             assert file_menu.grab().save(str(output / (name + "-file-menu.png")))
             file_menu.close()
+            exports = next(action.menu() for action in file_menu.actions() if action.text() == "导出图形")
+            checks["图形导出格式保留"] = [action.text() for action in exports.actions()] == [
+                "PNG 图片…", "SVG 矢量图…", "PDF 文档…",
+            ]
+            exports.popup(window.title_bar.menu.mapToGlobal(window.title_bar.menu.rect().bottomRight()))
+            app.processEvents()
+            assert exports.grab().save(str(output / (name + "-export-menu.png")))
+            exports.close()
             main_menu.deleteLater()
+            # 通过真正的另存为入口打开 Qt 文件对话框，抓取明暗主题和唯一筛选。
+            # 验收专用包装关闭系统原生对话框，便于同一进程读到控件并自动取消；
+            # 产品仍使用原来的静态入口和系统默认选择，不改用户路径及导图内容。
+            original_dialog = QFileDialog.getSaveFileName
+
+            def capture_save_dialog(parent, title, initial, filters):
+                """截图实际模态对话框后取消，验证固定筛选及取消状态不影响会话。"""
+                def capture():
+                    dialog = app.activeModalWidget()
+                    if not isinstance(dialog, QFileDialog):
+                        checks["保存对话框可见"] = False
+                        app.closeAllWindows()
+                        return
+                    checks["保存对话框可见"] = dialog.isVisible()
+                    checks["保存对话框唯一格式"] = dialog.nameFilters() == ["思维导图 (*.mindmap)"]
+                    checks["保存对话框截图"] = dialog.grab().save(str(output / (name + "-save-dialog.png")))
+                    dialog.reject()
+
+                QTimer.singleShot(100, capture)
+                return original_dialog(parent, title, initial, filters, options=QFileDialog.Option.DontUseNativeDialog)
+
+            QFileDialog.getSaveFileName = capture_save_dialog
+            try:
+                original_path = window.files.path
+                checks["取消另存为保留路径"] = not window.save(save_as=True) and window.files.path == original_path
+            finally:
+                QFileDialog.getSaveFileName = original_dialog
             # 层级按钮使用真实标题布局和菜单几何，逐档缩放核验，不能只检查动作存在。
             outline = window.panels.outline
             button, = window.manager.panel("outline").action_buttons

@@ -21,6 +21,8 @@ save_document(restored, "大纲.md", registry=registry)
 后缀有多个匹配时要求明确指定。所有导出复用原子文件写入，失败保持已有目标不变。
 `encode_document` 和 `decode_document` 提供内存流入口；`dumps`、`loads` 提供 JSON 文本入口。
 文件服务不修改任何引擎保存标记，宿主应在主文档保存成功后调用 `mark_saved()`。
+上述是底层通用文件与内存交换能力；桌面工作台及 Qt 文件控制器的打开、保存和另存为只允许 `.mindmap`，不提供其他文件格式入口。
+JSON、Markdown 和文本编解码器仍用于剪贴板，PNG、SVG、PDF 图形导出由画布独立处理。
 
 ## 亿图脑图剪贴板
 

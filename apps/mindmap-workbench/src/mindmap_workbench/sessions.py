@@ -203,8 +203,9 @@ class MindMapSessionManager(QObject):
         candidate = MindMapSession(self)
         try:
             if path is not None:
-                target = Path(path).resolve()
-                candidate.files.path = target if target.suffix else target.with_suffix(".mindmap")
+                # 扩展名补齐和原生格式限制统一交给文件控制器；首次写入完成后
+                # 才注册会话，错误后缀或路径冲突不会创建半初始化的标签。
+                candidate.files.path = Path(path).resolve()
             if not candidate.files.save(save_as=path is None):
                 candidate.dispose()
                 candidate.canvas.deleteLater()

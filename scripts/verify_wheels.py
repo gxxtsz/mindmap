@@ -375,14 +375,22 @@ for suffix in ("png", "svg", "pdf"):
     assert target.stat().st_size > 500
 for module in (mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_qt, mindmap_engine):
     assert Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-assert window.new_document(Path("second.json").absolute())
+assert window.new_document(Path("second.mindmap").absolute())
 secondary = window.active_session
 secondary.engine.update_node(secondary.engine.root_id, text="独立保存")
 assert window.save_all() and not secondary.files.is_dirty
 assert load_document(secondary.files.path).root.text == "独立保存"
 assert window.files.format_filters("open") == "思维导图 (*.mindmap)"
+assert window.files.format_filters("save") == "思维导图 (*.mindmap)"
+unsupported = Path("unsupported.json").absolute()
+assert not window.new_document(unsupported) and not unsupported.exists()
+# 安装后的保存边界同样拒绝手工绑定的错误后缀，不调用可注入写入器。
+original_path = secondary.files.path
+secondary.files.path = unsupported
+assert not window.save() and not unsupported.exists()
+secondary.files.path = original_path
 try:
-    window.open_path(secondary.files.path)
+    window.open_path(unsupported)
 except MindMapError as error:
     assert "仅支持打开 .mindmap" in str(error)
 else:
@@ -395,7 +403,7 @@ assert len(window.sessions) == 2 and window.active_session is primary
 window.close()
 assert primary.canvas._disposed and secondary.canvas._disposed and not len(window.sessions)
 print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台文件与导出": True, "多导图与自动保存边界": True,
-                  "仅打开原生导图": True,
+                  "仅打开和保存原生导图": True,
                   "编辑与撤销重做": True, "图片与分支样式": True, "侧栏属性与工作区": True,
                   "已验证运行依赖": {item.metadata["Name"]: item.version for item in distributions()}}))
 """])

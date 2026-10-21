@@ -611,13 +611,28 @@ def test_open_rejects_invalid_canvas_before_save_confirmation(window, tmp_path, 
     assert window.files.is_dirty
 
 
-def test_no_lossless_format_reports_save_failure_without_dialog(window, monkeypatch):
-    """没有完整往返格式时直接报告失败，不弹出无法完成保存的文件对话框。"""
-    window.canvas.format_registry = FormatRegistry()
+@pytest.mark.parametrize("native", ["missing", "read-only", "write-only", "lossy"])
+def test_unavailable_native_format_reports_save_failure_without_dialog(window, monkeypatch, native):
+    """即使 JSON 可完整读写，原生编解码器不可用也不能回退或弹出保存对话框。"""
+    original = window.canvas.format_registry
+    registry = FormatRegistry()
+    json_entry = original.get("json")
+    registry.register(json_entry.info, importer=json_entry.importer, exporter=json_entry.exporter)
+    if native != "missing":
+        entry = original.get("mindmap")
+        registry.register(
+            FormatInfo("mindmap", "思维导图", (".mindmap",), native != "lossy"),
+            importer=None if native == "write-only" else entry.importer,
+            exporter=None if native == "read-only" else entry.exporter,
+        )
+    monkeypatch.setattr(window.canvas, "format_registry", registry)
     before = window.engine.document
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: pytest.fail("不应弹出保存对话框"))
+    monkeypatch.setattr(window.files, "writer", lambda *args, **kwargs: pytest.fail("不能回退写入 JSON"))
     assert not window.files.save()
-    assert "未注册" in window.statusBar().currentMessage()
+    assert not window.files.save(save_as=True)
+    assert not window.files.save_committed()
+    assert "未注册可用的 .mindmap 原生编解码器" in window.statusBar().currentMessage()
     assert window.engine.document == before and window.files.path.name == "初始.mindmap"
 
 
@@ -655,22 +670,24 @@ def test_layout_extension_still_works_without_algorithm_menu(window):
 
 
 class RootCodec:
-    """验证额外解码器不能扩大文件打开范围，仅写格式也不能成为主保存格式。"""
+    """额外编解码器只供底层交换，任何能力组合都不能扩大应用文件范围。"""
 
     def read(self, stream, *, options):
-        pytest.fail("扩展格式不能用于文件打开")
+        pytest.fail("扩展格式不能用于文件打开或保存")
 
     def write(self, document, stream, *, options):
         stream.write(document.root.text.encode("utf-8"))
 
 
-def test_dynamic_formats_do_not_expand_opening_and_save_as_still_works(window, tmp_path, monkeypatch):
-    """注册额外格式不能增加文件打开能力；保存和内存编解码仍沿用能力检查。"""
+def test_dynamic_formats_do_not_expand_opening_or_saving(window, tmp_path, monkeypatch):
+    """完整扩展格式也不能扩大文件范围，与原生后缀冲突时仍明确使用原生编码。"""
     registry = window.canvas.format_registry
     registry.register(FormatInfo("root-read", "根节点导入", (".read",)), importer=RootCodec())
     registry.register(FormatInfo("root-write", "根节点导出", (".write",)), exporter=RootCodec())
+    registry.register(FormatInfo("root-full", "完整扩展", (".full", ".mindmap"), True),
+                      importer=RootCodec(), exporter=RootCodec())
     assert window.files.format_filters("open") == "思维导图 (*.mindmap)"
-    assert "*.read" not in window.files.format_filters("save") and "*.write" not in window.files.format_filters("save")
+    assert window.files.format_filters("save") == "思维导图 (*.mindmap)"
     menu = window.main_menu()
     assert [action.text() for action in menu.actions()] == ["文件", "编辑", "视图", "设置"]
     menu.deleteLater()
@@ -685,19 +702,19 @@ def test_dynamic_formats_do_not_expand_opening_and_save_as_still_works(window, t
         window.open_path(source)
     original_path = window.files.path
     before, revision = window.engine.document, window.engine.revision
-    output = tmp_path / "不能完整保存.write"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(output), ""))
-    assert not window.files.save(save_as=True)
-    assert not output.exists() and window.files.path == original_path
-    assert "请选择可完整保存导图的格式" in window.statusBar().currentMessage()
+    for suffix in (".json", ".write", ".full"):
+        output = tmp_path / ("不支持保存" + suffix)
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(output), ""))
+        assert not window.files.save(save_as=True)
+        assert not output.exists() and window.files.path == original_path
+        assert "仅支持保存为 .mindmap 文件" in window.statusBar().currentMessage()
     assert window.engine.document == before and window.engine.revision == revision
     monkeypatch.setattr(QFileDialog, "getSaveFileName",
-                        lambda *args: (str(tmp_path / "另存"), "JSON 文档 (*.json)"))
+                        lambda *args: (str(tmp_path / "另存"), "完整扩展 (*.full *.mindmap)"))
     assert window.files.save(save_as=True)
-    assert window.files.path.suffix == ".json" and not window.files.is_dirty
-    # 即使 JSON 已通过另存为绑定到现有会话，也不能借路径查重绕过打开限制。
-    with pytest.raises(MindMapError, match="仅支持打开 .mindmap"):
-        window.open_path(window.files.path)
+    assert window.files.path.suffix == ".mindmap" and not window.files.is_dirty
+    assert load_document(window.files.path, format_id="mindmap") == before
+    assert window.open_path(window.files.path) and len(window.sessions) == 1
     assert window.new_document(tmp_path / "又一份.mindmap")
     assert len(window.manager.documents) == 2 and window.files.path.suffix == ".mindmap"
 

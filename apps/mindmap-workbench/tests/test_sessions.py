@@ -158,7 +158,7 @@ def test_new_cancel_failure_and_path_collision_leave_sessions_unchanged(empty_wi
 def test_duplicate_open_preserves_split_position_memory_and_path_case(empty_window, tmp_path):
     window = empty_window
     first = create(window, tmp_path / "One.mindmap")
-    second = create(window, tmp_path / "Two.json")
+    second = create(window, tmp_path / "Two.mindmap")
     window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
     first.engine.update_node(first.engine.root_id, text="不从磁盘重载")
     first.timer.stop()
@@ -182,10 +182,105 @@ def test_save_as_cannot_overwrite_other_session(empty_window, tmp_path, monkeypa
     assert second.files.path == tmp_path / "乙.mindmap" and second.files.is_dirty
     assert first.files.path.read_bytes() == original
     assert "另一个标签" in second.last_error
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "另存.json"), "JSON 文档 (*.json)"))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "另存.mindmap"), ""))
     assert window.save(save_as=True)
-    assert second.files.path.suffix == ".json" and not second.last_error
+    assert second.files.path.suffix == ".mindmap" and not second.last_error
     assert load_document(second.files.path).root.text == "第二份修改"
+
+
+@pytest.mark.parametrize("suffix", ["", ".mindmap", ".MINDMAP"])
+def test_new_and_save_as_use_native_format_and_normalize_suffix(empty_window, tmp_path, monkeypatch, suffix):
+    """首次保存和另存为共用扩展名规则，外部筛选名称不能改变实际原生编码。"""
+    window = empty_window
+    initial = tmp_path / ("初次保存" + suffix)
+    session = create(window, initial)
+    expected = initial if suffix else initial.with_suffix(".mindmap")
+    assert session.files.path == expected
+    assert load_document(expected, format_id="mindmap") == session.engine.document
+    original = expected.read_bytes()
+    session.engine.update_node(session.engine.root_id, text="另存后的内容")
+    target = tmp_path / ("另存目标" + suffix)
+    dialogs, writes = [], []
+
+    def choose(*args):
+        """模拟对话框返回废弃筛选，控制器也只能使用固定的原生编码。"""
+        dialogs.append(args[1:])
+        return str(target), "JSON 文档 (*.json)"
+
+    def writer(document, path, **options):
+        """记录真正交给写入器的路径及格式，验证补齐在路径占用检查之前完成。"""
+        writes.append((path, options["format_id"]))
+        save_document(document, path, **options)
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", choose)
+    session.files.writer = writer
+    assert window.save(save_as=True)
+    output = target if suffix else target.with_suffix(".mindmap")
+    assert dialogs == [("保存导图", str(expected), "思维导图 (*.mindmap)")]
+    assert writes == [(output, "mindmap")]
+    assert session.files.path == output and not session.files.is_dirty
+    assert load_document(output, format_id="mindmap") == session.engine.document
+    assert expected.read_bytes() == original
+
+
+@pytest.mark.parametrize("suffix", [".json", ".md", ".txt", ".bin", ".png", ".svg", ".pdf"])
+def test_new_and_save_as_reject_other_suffixes_without_writing(empty_window, tmp_path, monkeypatch, suffix):
+    """手工后缀不能绕过原生筛选，已有同名文件和现有会话始终保留。"""
+    window = empty_window
+    session = create(window, tmp_path / "保留.mindmap")
+    original_path = session.files.path
+    original = original_path.read_bytes()
+    session.engine.update_node(session.engine.root_id, text="保留内存修改")
+    session.timer.stop()
+    target = tmp_path / ("错误保存" + suffix)
+    target.write_bytes(b"original")
+    before, revision = session.engine.document, session.engine.revision
+    monkeypatch.setattr("mindmap_workbench.sessions.save_document", lambda *args, **kwargs: pytest.fail("不能写入"))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), "思维导图 (*.mindmap)"))
+    assert not window.new_document(target)
+    assert not window.new_document()
+    assert not window.save(save_as=True)
+    assert "仅支持保存为 .mindmap 文件" in session.last_error
+    assert list(window.sessions.values()) == [session] and window.active_session is session
+    assert session.files.path == original_path and session.files.is_dirty
+    assert session.engine.document == before and session.engine.revision == revision
+    assert original_path.read_bytes() == original and target.read_bytes() == b"original"
+    assert not target.with_suffix(".mindmap").exists()
+
+
+@pytest.mark.parametrize("operation", ["save", "autosave", "save_all"])
+@pytest.mark.parametrize("dirty", [False, True])
+def test_bound_non_native_path_cannot_bypass_save_validation(empty_window, tmp_path, monkeypatch, operation, dirty):
+    """即使外部错误绑定路径，手动、自动和批量保存也不能跳过检查或调用写入器。"""
+    window = empty_window
+    session = create(window, tmp_path / "原路径.mindmap")
+    original_path = session.files.path
+    original = original_path.read_bytes()
+    if dirty:
+        session.engine.update_node(session.engine.root_id, text="等待保存")
+    target = tmp_path / "非法绑定.json"
+    target.write_bytes(b"untouched")
+    session.files.writer = lambda *args, **kwargs: pytest.fail("不能调用写入器")
+    session.files.path = target
+    try:
+        call = {"save": window.save, "autosave": session.autosave, "save_all": window.save_all}[operation]
+        assert not call()
+        assert session.files.path == target and session.files.is_dirty == dirty
+        assert "仅支持保存为 .mindmap 文件" in session.last_error
+        assert target.read_bytes() == b"untouched" and original_path.read_bytes() == original
+        assert window.active_session is session and len(window.sessions) == 1
+    finally:
+        # 恢复测试故意破坏的绑定，避免退出时的保存检查阻止测试窗口销毁。
+        session.files.path = original_path
+
+
+def test_new_suffix_completion_checks_other_session_ownership(empty_window, tmp_path):
+    """省略后缀的目标必须先补齐，再检查是否已经被其他会话占用。"""
+    session = create(empty_window, tmp_path / "占用.mindmap")
+    original = session.files.path.read_bytes()
+    assert not empty_window.new_document(session.files.path.with_suffix(""))
+    assert len(empty_window.sessions) == 1 and empty_window.active_session is session
+    assert session.files.path.read_bytes() == original
 
 
 def test_save_as_cancel_keeps_pending_autosave(empty_window, tmp_path, monkeypatch, qtbot):
@@ -366,7 +461,7 @@ def test_outline_depth_is_per_session_and_preferences_are_shared(empty_window, t
 
 
 def test_autosave_debounce_undo_redo_and_view_only_changes(empty_window, tmp_path, qtbot):
-    session = create(empty_window, tmp_path / "自动.json")
+    session = create(empty_window, tmp_path / "自动.mindmap")
     writes = []
 
     def writer(document, path, **options):
