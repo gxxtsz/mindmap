@@ -240,6 +240,9 @@ def edraw_paste_options(
     replace.toggled.connect(sync_choices)
     keep.toggled.connect(sync_choices)
     sync_choices()
+    # 显示前将初始焦点交给实际选中的粘贴方式，避免 Qt 默认聚焦首项，
+    # 造成未选项的焦点虚线与另一项的选中高亮同时出现；多树来源会聚焦追加项。
+    modes.checkedButton().setFocus()
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
     return EdrawPasteOptions("replace" if replace.isChecked() else "append", keep.isChecked())
