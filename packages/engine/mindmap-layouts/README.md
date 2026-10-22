@@ -21,6 +21,14 @@ result = registry.layout(document)
 左向镜像，向下转置，双向按实际左右位置分组；未配置样式时保持旧 `Curve` 及其控制点。
 普通弧线、坡度曲线和圆角采用已恢复公式；主干比例、短边保护、箭头尺寸及第 11 类参数为独立重建。
 
+## 主题间距
+
+`LayoutConfig.options` 支持 `level_gap`（父子间距，24～500）和 `sibling_gap`（同级子树间距，4～500），单位为导图逻辑像素。
+仅接受有限数值，拒绝布尔值和未知键；方向只决定坐标转置，不改变参数含义。
+公开接口 `resolve_tree_spacing(config) -> tuple[float, float]` 返回两个有效间距，完整布局、增量几何和界面复用该入口。
+缺省值依照旧 `compact` 标记解析为32／10或64／22，不修改原配置；显式参数逐项覆盖缺省值。
+新参数保存在现有原生格式的 options 中，文件格式版本不变；完整布局缓存包含有效间距，避免修改后复用旧几何。
+
 ## 正式画布增量几何
 
 `mindmap_layouts.incremental.IncrementalTreeGeometry` 已接入正式画布，维护子树摘要、

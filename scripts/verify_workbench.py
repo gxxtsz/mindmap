@@ -13,12 +13,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def child(scale, platform):
     """每个缩放在新进程创建 QApplication，避免运行期间修改 Qt 缩放基线。"""
-    from mindmap_core import Theme
+    from mindmap_core import BranchStyle, Theme
     from mindmap_docking import ViewMode
     from mindmap_workbench.shell_adapter import build_window
-    from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt, QTimer
+    from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt, QTimer
+    from PySide6.QtGui import QEnterEvent
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QFileDialog
+    from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
 
     app = QApplication([])
     output = ROOT / ".artifacts/workbench-visual" / platform / f"{scale:g}x"
@@ -109,13 +110,26 @@ def child(scale, platform):
                 ratio = image.devicePixelRatio()
                 return image.pixelColor(int((point.x() + 0.5) * ratio), int((point.y() + 0.5) * ratio))
 
+            # 原生 Windows 的系统鼠标消息不保证在自动化进程中派发给客户区。
+            # 移动后显式发送进入/离开事件，验证真实控件样式，避免抓取旧悬停状态。
+            window.activateWindow()
+            QTest.mouseMove(window.title_bar, QPoint(window.width() // 2, window.title_bar.height() // 2))
+            QTest.qWait(40)
             QTest.mouseMove(recent_button, recent_button.rect().center())
+            QTest.qWait(40)
+            local = recent_button.rect().center()
+            QApplication.sendEvent(recent_button, QEnterEvent(
+                QPointF(local), QPointF(recent_button.mapTo(window, local)),
+                QPointF(recent_button.mapToGlobal(local)),
+            ))
             app.processEvents()
             checks["最近文件入口仅文字"] = (recent_button.icon().isNull()
                 and recent_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextOnly)
             checks["最近文件入口悬停灰底"] = recent_background() == window.manager.theme.color("window-control-bg-hovered")
             assert window.title_bar.grab().save(str(output / (name + "-recent-hover.png")))
             QTest.mouseMove(window.title_bar, QPoint(window.width() // 2, window.title_bar.height() // 2))
+            QTest.qWait(40)
+            QApplication.sendEvent(recent_button, QEvent(QEvent.Type.Leave))
             app.processEvents()
             checks["最近文件入口默认透明"] = recent_background() == window.manager.theme.color("main-window-titlebar-bg")
             assert window.title_bar.grab().save(str(output / (name + "-recent-idle.png")))
@@ -192,24 +206,129 @@ def child(scale, platform):
             checks["大纲所有层"] = outline.isExpanded(outline.tree_model.index_for(first))
             outline.set_display_depth(2)
             assert window.grab().save(str(output / (name + ".png")))
-            window.show_settings_menu()
+            # 设置菜单直接承载滚轮子菜单，导图布局和外观只从侧栏进入。
+            settings_menu = window.appearance_menu()
+            settings_menu.popup(window.title_bar.menu.mapToGlobal(QPoint(0, window.title_bar.menu.height())))
             app.processEvents()
-            checks["设置菜单入口"] = window.settings_menu.isVisible() and "settings" not in window.manager.specs
-            assert window.settings_menu.grab().save(str(output / (name + "-settings-menu.png")))
+            checks["滚轮直接位于设置顶部"] = (
+                settings_menu.actions()[0].menu() is window.settings_menu
+                and settings_menu.actions()[0].text().startswith("滚轮行为：")
+                and not any(action.text().startswith(("导图设置", "导图布局", "连接线样式", "导图主题"))
+                            for action in settings_menu.actions())
+            )
+            assert settings_menu.grab().save(str(output / (name + "-settings-menu.png")))
+            settings_menu.setActiveAction(settings_menu.actions()[0])
+            QTest.keyClick(settings_menu, Qt.Key.Key_Right)
+            app.processEvents()
+            checks["滚轮仅含两个选项"] = window.settings_menu.isVisible() and [
+                action.text() for action in window.settings_menu.actions()
+            ] == ["上下滚动", "缩放"]
+            assert window.settings_menu.grab().save(str(output / (name + "-wheel-menu.png")))
+            window.settings_menu.close()
+            settings_menu.close()
+            settings_menu.deleteLater()
+            window.activateWindow()
+            window.canvas.view.setFocus()
+            QTest.keyClick(window.canvas.view, Qt.Key.Key_3, Qt.KeyboardModifier.AltModifier)
+            app.processEvents()
+            settings = window.panels.settings
+            checks["布局侧栏入口"] = settings.isVisible() and not window.panels.properties.isVisible()
+            checks["侧栏包含布局和外观"] = list(settings.sections) == ["导图布局", "导图外观"]
+            checks["整图外观控件可见"] = settings.branch.isVisible() and settings.theme.isVisible()
+            # 从真实控件几何及可见标签验收紧凑样式，所有尺寸均为逻辑像素。
+            picker = settings.direction
+            checks["布局入口紧凑"] = (picker.width(), picker.height()) == (120, 34)
+            checks["布局入口文字完整"] = (
+                picker.fontMetrics().horizontalAdvance(picker.currentText()) <= picker.width() - 66
+            )
+            checks["布局无底部提示"] = not any(
+                label.isVisible() and ("间距按100%" in label.text() or "应用于整张导图" in label.text())
+                for label in settings.findChildren(QLabel)
+            )
+            window.canvas.fit_to_view()
+            app.processEvents()
+            assert window.grab().save(str(output / (name + "-settings.png")))
+            assert settings.grab().save(str(output / (name + "-layout-sidebar.png")))
             # 当前方向固定蓝底，悬停其他方向为灰底；两种状态须在不同缩放下同时可辨。
-            direction = next(action.menu() for action in window.settings_menu.actions()
-                             if action.menu() and action.menu().objectName() == "settings_direction")
-            direction.popup(window.settings_menu.mapToGlobal(window.settings_menu.rect().topRight()))
+            settings.direction.showPopup()
+            direction = settings.direction.popup_menu
             selected = next(action for action in direction.actions() if action.data() == "right")
             hovered = next(action for action in direction.actions() if action.data() == "left")
             direction.setActiveAction(hovered)
             app.processEvents()
+            checks["布局菜单紧凑"] = direction.width() == 144 and all(
+                direction.actionGeometry(action).height() == 28 for action in direction.actions()
+            )
+            anchor_right = picker.mapToGlobal(QPoint(picker.width(), 0)).x()
+            available = picker.screen().availableGeometry()
+            can_align = available.left() <= anchor_right - direction.width() and anchor_right <= available.right() + 1
+            # 高缩放下测试窗口可能超出屏幕，此时菜单应遵守 Qt 屏幕避让，
+            # 不要求它继续跟随已经位于屏幕外的入口；正常情况仍核对侧栏内对齐。
+            checks["布局菜单向侧栏内展开"] = (
+                abs(direction.x() + direction.width() - anchor_right) <= 1
+                and direction.x() >= settings.mapToGlobal(QPoint(0, 0)).x()
+            ) if can_align else (
+                direction.x() >= available.left() and direction.x() + direction.width() <= available.right() + 1
+            )
+            checks["布局菜单无系统投影"] = bool(direction.windowFlags() & Qt.WindowType.NoDropShadowWindowHint)
             checks["设置选中与悬停"] = selected.isChecked() and not hovered.isChecked()
-            checks["设置当前值摘要"] = direction.title() == "布局方向：向右"
+            checks["设置当前值摘要"] = settings.direction.currentText() == "向右"
             assert direction.grab().save(str(output / (name + "-settings-direction.png")))
             direction.close()
-            assert window.grab().save(str(output / (name + "-settings.png")))
-            window.settings_menu.close()
+            # 新迁入侧栏的两种选择器也检查真实弹层、选择与撤销；截图仍采用
+            # 当前外壳色板，导图主题变化不能修改应用主题或污染其他标签。
+            before = window.engine.document
+            settings.branch.showPopup()
+            app.processEvents()
+            branch_menu = settings.branch.popup_menu
+            checks["整图连接线四列网格"] = len(branch_menu.buttons) == 11 and all(
+                button.isVisible() and button.parentWidget().rect().contains(button.geometry())
+                for button in branch_menu.buttons.values()
+            )
+            assert branch_menu.grab().save(str(output / (name + "-settings-branch.png")))
+            QTest.mouseClick(branch_menu.buttons[BranchStyle.ARROW], Qt.MouseButton.LeftButton)
+            checks["整图连接线可撤销"] = (
+                all(node.style["branch"]["kind"] == "arrow" for node in window.engine.document.nodes.values())
+                and window.engine.undo() and window.engine.document == before
+            )
+            settings.theme.showPopup()
+            app.processEvents()
+            theme_view = settings.theme.view()
+            checks["导图主题选项完整"] = [settings.theme.itemText(index) for index in range(settings.theme.count())] == [
+                "浅色", "深色", "自定义",
+            ] and not settings.theme.model().item(settings.theme.findData("custom")).isEnabled()
+            assert theme_view.window().grab().save(str(output / (name + "-settings-theme.png")))
+            target = settings.theme.model().index(settings.theme.findData("dark"), 0)
+            # Windows 原生组合框会短暂屏蔽展开后的快速鼠标松开，防止同一次
+            # 点击误选选项。按系统双击间隔等待后再点击，模拟正常的用户选择。
+            QTest.qWait(QApplication.doubleClickInterval())
+            QTest.mouseClick(theme_view.viewport(), Qt.MouseButton.LeftButton,
+                             pos=theme_view.visualRect(target).center())
+            checks["导图主题实际选择"] = window.engine.document.theme == Theme.dark()
+            checks["导图主题与应用及其他标签独立"] = (
+                window.manager.theme.name == name and secondary.engine.document.theme == Theme()
+            )
+            checks["导图主题可撤销"] = window.engine.undo() and window.engine.document == before
+            settings.horizontal.setValue(80)
+            settings.vertical.setValue(30)
+            settings.flush()
+            checks["布局自定义间距"] = window.engine.document.layout.options == {
+                "level_gap": 80, "sibling_gap": 30,
+            }
+            checks["布局自定义预设"] = not any(button.isChecked() for button in settings.preset_buttons)
+            window.host.region_sizes["dock"]["right"] = 260
+            window.manager.refresh()
+            app.processEvents()
+            window.canvas.fit_to_view()
+            app.processEvents()
+            checks["窄侧栏无水平滚动"] = settings.scroll.horizontalScrollBar().maximum() == 0
+            checks["窄侧栏字段完整"] = all(
+                field.parentWidget().width() >= field.width()
+                for field in (settings.horizontal, settings.vertical, settings.branch, settings.theme)
+            )
+            assert window.grab().save(str(output / (name + "-layout-narrow.png")))
+            window.host.region_sizes["dock"]["right"] = 360
+            window.manager.refresh()
             window.manager.activate("properties")
             app.processEvents()
             original = window.panels.properties

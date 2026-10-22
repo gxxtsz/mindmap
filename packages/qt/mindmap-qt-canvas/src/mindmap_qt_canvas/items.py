@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from weakref import ref
+
+from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QPainterPath, QTextCursor
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject, QGraphicsTextItem
+from shiboken6 import isValid
 
 FOLD_HOVER_PADDING = 10.0
 FOLD_HIDE_DELAY = 200
@@ -20,7 +24,11 @@ class FoldControlItem(QGraphicsObject):
 
     def __init__(self, node_item):
         super().__init__(node_item)
-        self.node_item = node_item
+        # Qt 的 parentItem 已负责按钮随父节点销毁；Python 只反向借用父节点。
+        # 若这里强引用 node_item，会和 node_item.fold_control 形成循环，使已从
+        # 场景移除的父子图元滞留到 GC；GC 可能在另一个图元的 Qt 构造回调中重入，
+        # 此时再析构旧的 QGraphicsObject 父子树会触发原生访问冲突。
+        self._node_item_ref = ref(node_item)
         self.direction = "right"
         self._rect = QRectF()
         self._bounds = QRectF()
@@ -29,6 +37,16 @@ class FoldControlItem(QGraphicsObject):
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.sync()
 
+    @property
+    def node_item(self) -> NodeItem | None:
+        """借用仍有效的父节点；外部保留按钮包装对象也不延长父节点生命周期。
+
+        父节点的 Python 或 Qt 对象已经释放时返回 None，迟到的显示、命中及权限
+        查询直接忽略，禁止再访问已经失效的 PySide 包装对象。
+        """
+        item = self._node_item_ref()
+        return item if item is not None and isValid(item) else None
+
     def sync(self) -> None:
         """同步当前节点的数量、方向及可见性，不读取或复制整份引擎文档。
 
@@ -36,6 +54,8 @@ class FoldControlItem(QGraphicsObject):
         因此宿主每次同步节点实体后均调用本接口，计数只取当前 children 的长度。
         """
         item = self.node_item
+        if item is None:
+            return
         self.direction = item.owner._fold_direction(item.node.id) if item.owner is not None else "right"
         rect = item.visual.fold_rect(
             self.direction, child_count=0 if item.node.expanded else len(item.node.children)
@@ -62,6 +82,8 @@ class FoldControlItem(QGraphicsObject):
     def sync_visibility(self) -> None:
         """同步绘制状态；悬停移出后的 200 毫秒内保留按钮，收起计数始终显示。"""
         item = self.node_item
+        if item is None:
+            return
         self.setVisible(bool(item.owner is not None and not item.owner._disposed and item.node.children and (
             not item.node.expanded or item.hovered or item.isSelected() or item._fold_hide_pending
         )))
@@ -75,7 +97,7 @@ class FoldControlItem(QGraphicsObject):
         检测尺寸，不重新测量节点或建立整图索引。透明连接通道仍维持斜向移动。
         """
         item = self.node_item
-        if item.owner is None or item.owner._disposed or not item.node.children:
+        if item is None or item.owner is None or item.owner._disposed or not item.node.children:
             return None
         local = self.mapFromScene(scene_position)
         if self._hit_path.contains(local):
@@ -88,7 +110,11 @@ class FoldControlItem(QGraphicsObject):
 
         closest = distance(self._rect)
         if item.node.expanded:
-            reach = 16.0 if item.owner.document_view.layout.compact else 32.0
+            config = item.owner.document_view.layout
+            # 内置布局的分叉热区跟随实际父子间距，数值自定义后也不伸入子节点。
+            # 扩展算法沿用原有紧凑标记，不解释其专有 options。
+            reach = (resolve_tree_spacing(config)[0] / 2 if config.algorithm_id == "tree"
+                     else 16.0 if config.compact else 32.0)
             if self.direction == "left":
                 stem = QRectF(-reach, item.visual.height / 2, reach, 0)
             elif self.direction == "down":
@@ -105,10 +131,11 @@ class FoldControlItem(QGraphicsObject):
 
     def can_activate(self) -> bool:
         """实时检查修改权限；编辑、拖动或释放组件后不得提交折叠命令。"""
-        owner = self.node_item.owner
+        item = self.node_item
+        owner = item.owner if item is not None else None
         return bool(owner is not None and not owner._disposed and owner.editable
                     and owner.editor is None and not owner.view.node_drag.active
-                    and self.node_item.node.children)
+                    and item.node.children)
 
     def button_rect(self) -> QRectF:
         """返回与绘制一致的按钮矩形；坐标相对于所属节点，透明连接通道不在其中。"""
@@ -116,6 +143,8 @@ class FoldControlItem(QGraphicsObject):
 
     def contains_button(self, scene_position) -> bool:
         """以场景坐标检查实际圆角按钮，防止透明悬停通道被当成点击或拖动入口。"""
+        if self.node_item is None:
+            return False
         path = QPainterPath()
         path.addRoundedRect(self._rect, 10, 10)
         return self.isVisible() and path.contains(self.mapFromScene(scene_position))
@@ -131,6 +160,8 @@ class FoldControlItem(QGraphicsObject):
     def paint(self, painter, option, widget=None):
         """借用统一描画入口及场景当前底色，仅绘制按钮，不修改任何文档状态。"""
         item = self.node_item
+        if item is None:
+            return
         item.visual.paint_fold_control(
             painter, item.node, rect=self._rect, background=self.scene().backgroundBrush().color()
         )

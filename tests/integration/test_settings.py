@@ -4,41 +4,65 @@ from copy import deepcopy
 from dataclasses import replace
 
 import pytest
-from mindmap_core import LayoutConfig, LayoutInfo, MindMapDocument, MindMapError, Theme
+from mindmap_core import BranchStyle, LayoutConfig, LayoutInfo, MindMapDocument, MindMapError, Theme
 from mindmap_formats import load_document, save_document
 from mindmap_layouts import TreeLayout
 from mindmap_qt_canvas import MindMapWidget
 from mindmap_qt_ui.property_controls import MIXED
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication, QCheckBox
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 
-def menu_action(menu, key, value=None):
-    """按公开菜单中的分组和值找到动作，不依赖隐藏兼容表单的激活信号。"""
-    if key == "compact":
-        return next(action for action in menu.actions() if action.objectName() == "settings_compact")
-    sub = next(action.menu() for action in menu.actions()
-               if action.menu() is not None and action.menu().objectName() == "settings_" + key)
-    return next(action for action in sub.actions() if action.data() == value)
+def menu_action(menu, value):
+    """滚轮菜单直接承载两个选项，不再经过导图设置的中间子菜单。"""
+    return next(action for action in menu.actions() if action.data() == value)
 
 
 def choose(field, value):
-    """通过共用菜单实际提交，兼容表单仅用于定位所属控制器。"""
+    """通过实际侧栏弹层选择文档设置，滚轮仍从独立菜单修改本机偏好。"""
     panel = field.parentWidget()
     while not hasattr(panel, "create_menu"):
         panel = panel.parentWidget()
     key = next(name for name in ("wheel", "direction", "compact", "branch", "theme")
                if getattr(panel, name) is field)
+    if not field.isEnabled():
+        return
+    if key == "direction":
+        field.showPopup()
+        menu = field.popup_menu
+        QApplication.processEvents()
+        action = next(action for action in menu.actions() if action.data() == value)
+        action.trigger()
+        field.hidePopup()
+        QApplication.processEvents()
+        return
+    if key == "branch":
+        field.showPopup()
+        QApplication.processEvents()
+        button = field.popup_menu.reset if value is None else field.popup_menu.buttons[BranchStyle(value)]
+        button.click()
+        QApplication.processEvents()
+        return
+    if key == "theme":
+        field.showPopup()
+        QApplication.processEvents()
+        field.view().setCurrentIndex(field.model().index(field.findData(value), 0))
+        QTest.keyClick(field.view(), Qt.Key.Key_Return)
+        QApplication.processEvents()
+        return
+    if key == "compact":
+        # 保留旧独立宿主的字段接口；工作台和菜单已改为三个间距预设。
+        if field.isEnabled() and field.isChecked() != value:
+            field.click()
+        return
     menu = panel.create_menu()
     menu.popup(QPoint(20, 20))
     QApplication.processEvents()
-    action = menu_action(menu, key, value)
-    if isinstance(field, QCheckBox) and action.isChecked() == value:
-        menu.close()
-    else:
-        action.trigger()
-        menu.close()
+    action = menu_action(menu, value)
+    action.trigger()
+    menu.close()
     QApplication.processEvents()
     menu.deleteLater()
 
@@ -119,9 +143,10 @@ def test_local_override_mixed_reselect_reset_and_cancel(workspace, qtbot):
     canvas.set_branch_style("line", scope="level")
     assert panel.branch.value() is MIXED
     before, revision = canvas.engine.document, canvas.engine.revision
-    workspace.show_settings_menu()
-    assert menu_action(workspace.settings_menu, "branch", "__mixed__").isVisible()
-    qtbot.keyClick(workspace.settings_menu, Qt.Key.Key_Escape)
+    panel.branch.showPopup()
+    assert panel.branch.currentText() == "多种样式"
+    assert not any(button.isChecked() for button in panel.branch.popup_menu.buttons.values())
+    qtbot.keyClick(panel.branch.popup_menu, Qt.Key.Key_Escape)
     assert canvas.engine.document == before and canvas.engine.revision == revision
     # 全局入口即使再次选择根节点已有的样式，也必须覆盖其他节点的局部差异。
     choose(panel.branch, "round")
@@ -208,7 +233,8 @@ def test_settings_popup_preserves_text_draft_and_normal_focus_still_commits(work
     workspace.show_settings_menu()
     QApplication.processEvents()
     assert canvas.editor is not None and canvas.engine.document == before
-    assert not menu_action(workspace.settings_menu, "theme", "dark").isEnabled()
+    assert not workspace.settings.theme.isEnabled()
+    assert all(action.isEnabled() for action in workspace.settings_menu.actions())
     workspace.settings_menu.close()
     QApplication.processEvents()
     QApplication.processEvents()
@@ -252,7 +278,11 @@ def test_extension_options_and_capabilities_survive_changes(workspace):
         algorithm_id="settings-test", direction="left", compact=True, options={"保留": 1}
     )
     assert not panel.direction.model().item(panel.direction.findData("down")).isEnabled()
-    assert not menu_action(workspace.settings_menu, "direction", "down").isEnabled()
+    panel.direction.showPopup()
+    assert not next(action for action in panel.direction.popup_menu.actions()
+                    if action.data() == "down").isEnabled()
+    panel.direction.hidePopup()
+    assert not panel.horizontal.isEnabled() and not panel.vertical.isEnabled()
     unsupported = ConfigurableLayout()
     unsupported.info = LayoutInfo(
         "unsupported", "不支持全局布局设置", LayoutConfig(algorithm_id="unsupported")
@@ -262,8 +292,8 @@ def test_extension_options_and_capabilities_survive_changes(workspace):
     assert not panel.direction.isEnabled() and not panel.compact.isEnabled() and not panel.branch.isEnabled()
     assert panel.theme.isEnabled() and panel.wheel.isEnabled()
     assert "不支持" in panel.branch.toolTip()
-    assert not menu_action(workspace.settings_menu, "branch", "arrow").isEnabled()
-    assert "不支持" in menu_action(workspace.settings_menu, "branch", "arrow").toolTip()
+    panel.branch.showPopup()
+    assert not panel.branch.popup_menu.isVisible()
 
 
 def test_custom_theme_and_external_sync_do_not_write_defaults(workspace):
@@ -274,8 +304,7 @@ def test_custom_theme_and_external_sync_do_not_write_defaults(workspace):
     canvas.engine.set_theme(custom)
     before, revision = canvas.engine.document, canvas.engine.revision
     assert panel.theme.currentData() == "custom"
-    assert menu_action(workspace.settings_menu, "theme", "custom").isChecked()
-    assert not menu_action(workspace.settings_menu, "theme", "custom").isEnabled()
+    assert not panel.theme.model().item(panel.theme.findData("custom")).isEnabled()
     panel.sync()
     panel.set_theme(custom)
     workspace.settings_menu.close()
@@ -288,12 +317,13 @@ def test_custom_theme_and_external_sync_do_not_write_defaults(workspace):
 
 
 @pytest.mark.parametrize("transition", ["cancel", "hide", "replace", "readonly", "editing", "dispose"])
-def test_stale_global_menu_cannot_commit(workspace, transition):
-    canvas = workspace.canvas
-    workspace.show_settings_menu()
-    menu = workspace.settings_menu
+def test_stale_global_branch_popup_cannot_commit(workspace, transition):
+    """迁入侧栏的连接线网格在上下文失效后，旧按钮不得写入新文档。"""
+    canvas, picker = workspace.canvas, workspace.settings.branch
+    picker.showPopup()
+    menu = picker.popup_menu
     assert menu.isVisible()
-    stale = menu_action(menu, "branch", "arrow")
+    stale = menu.buttons[BranchStyle.ARROW]
     if transition == "cancel":
         menu.close()
         QApplication.processEvents()
@@ -309,47 +339,72 @@ def test_stale_global_menu_cannot_commit(workspace, transition):
         workspace.dispose()
     assert not menu.isVisible()
     before, revision = canvas.engine.document, canvas.engine.revision
+    stale.click()
+    assert canvas.engine.document == before and canvas.engine.revision == revision
+
+
+@pytest.mark.parametrize("transition", ["cancel", "hide", "replace", "readonly", "editing", "dispose"])
+def test_stale_wheel_menu_cannot_change_preference(workspace, transition):
+    """滚轮菜单虽然不写文档，也必须在退出或上下文失效时拒绝旧动作。"""
+    canvas = workspace.canvas
+    workspace.show_settings_menu()
+    menu = workspace.settings_menu
+    stale = menu_action(menu, "zoom")
+    if transition == "cancel":
+        menu.close()
+        QApplication.processEvents()
+    elif transition == "hide":
+        workspace.hide()
+    elif transition == "replace":
+        canvas.engine.replace_document(MindMapDocument.new("另一份导图"))
+    elif transition == "readonly":
+        canvas.set_editable(False)
+    elif transition == "editing":
+        canvas.begin_edit(canvas.engine.root_id)
+    else:
+        workspace.dispose()
+    assert not menu.isVisible()
+    before, revision = canvas.engine.document, canvas.engine.revision
     stale.trigger()
+    assert canvas.wheel_mode == "scroll"
     assert canvas.engine.document == before and canvas.engine.revision == revision
 
 
 def test_menu_values_follow_history_capabilities_and_theme(workspace):
     canvas, menu = workspace.canvas, workspace.settings_menu
     workspace.show_settings_menu()
-    assert menu_action(menu, "direction", "right").isChecked()
-    menu_action(menu, "direction", "left").trigger()
-    assert menu_action(menu, "direction", "left").isChecked()
+    assert workspace.settings.direction.currentData() == "right"
+    choose(workspace.settings.direction, "left")
+    assert workspace.settings.direction.currentData() == "left"
     canvas.engine.undo()
-    assert menu_action(menu, "direction", "right").isChecked()
+    assert workspace.settings.direction.currentData() == "right"
     canvas.engine.set_theme(Theme.dark())
-    assert menu_action(menu, "theme", "dark").isChecked()
+    assert workspace.settings.theme.currentData() == "dark"
     canvas.set_editable(False)
-    assert not menu_action(menu, "direction", "left").isEnabled()
-    assert menu_action(menu, "wheel", "zoom").isEnabled()
+    assert not workspace.settings.direction.isEnabled()
+    assert menu_action(menu, "zoom").isEnabled()
 
 
-def test_parent_menu_summaries_follow_changes_history_and_mixed_state(workspace):
-    """上级摘要直接反映当前配置，查看、悬停及外部同步均不引入额外历史。"""
+def test_sidebar_values_and_wheel_title_follow_history_and_mixed_state(workspace):
+    """侧栏展示文档值，滚轮菜单只展示本机偏好，外部同步不产生额外历史。"""
     canvas, menu = workspace.canvas, workspace.settings_menu
 
-    def title(key):
-        return menu_action(menu, key, "right" if key == "direction" else None).parent().title()
-
-    assert title("direction") == "布局方向：向右"
-    assert menu_action(menu, "compact").text() == "紧凑布局：未启用"
+    assert workspace.settings.direction.currentText() == "向右"
+    assert not any(action.objectName() == "settings_compact" for action in menu.actions())
     choose(workspace.settings.direction, "left")
-    assert title("direction") == "布局方向：向左"
+    assert workspace.settings.direction.currentText() == "向左"
     canvas.engine.undo()
-    assert title("direction") == "布局方向：向右"
+    assert workspace.settings.direction.currentText() == "向右"
     canvas.set_wheel_mode("zoom")
-    wheel = menu_action(menu, "wheel", "zoom")
+    wheel = menu_action(menu, "zoom")
     assert wheel.parent().title() == "滚轮行为：缩放"
     canvas.engine.set_branch_style([workspace.ids[0]], "arrow", scope="level")
-    assert title("branch") == "连接线样式：多种样式"
+    assert workspace.settings.branch.currentText() == "多种样式"
     custom = Theme.dark()
     custom.accent = "#ff9933"
     canvas.engine.set_theme(custom)
-    assert menu_action(menu, "theme", "custom").parent().title() == "导图主题：自定义"
+    assert workspace.settings.theme.currentText() == "自定义"
+    assert [action.text() for action in menu.actions()] == ["上下滚动", "缩放"]
 
 
 @pytest.mark.parametrize("dark", [False, True])
@@ -358,10 +413,11 @@ def test_selected_and_hover_rows_have_distinct_pixels_and_right_checkmark(worksp
     canvas = workspace.canvas
     canvas.engine.set_theme(Theme.dark() if dark else Theme())
     before, revision = canvas.engine.document, canvas.engine.revision
-    workspace.show_settings_menu()
-    selected = menu_action(workspace.settings_menu, "direction", "right")
-    hovered = menu_action(workspace.settings_menu, "direction", "left")
-    idle = menu_action(workspace.settings_menu, "direction", "both")
+    picker = workspace.settings.direction
+    picker.showPopup()
+    selected = next(action for action in picker.popup_menu.actions() if action.data() == "right")
+    hovered = next(action for action in picker.popup_menu.actions() if action.data() == "left")
+    idle = next(action for action in picker.popup_menu.actions() if action.data() == "both")
     menu = selected.parent()
     menu.popup(QPoint(250, 60))
     QApplication.processEvents()

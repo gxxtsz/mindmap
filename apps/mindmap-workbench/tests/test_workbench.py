@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 from mindmap_core import (
+    BranchStyle,
     FormatInfo,
     FormatRegistry,
     LayoutConfig,
@@ -15,9 +16,9 @@ from mindmap_core import (
 )
 from mindmap_docking import DockPosition, DockTarget, ViewMode
 from mindmap_formats import load_document, save_document
-from mindmap_layouts import TreeLayout
+from mindmap_layouts import TreeLayout, resolve_tree_spacing
 from mindmap_workbench.shell_adapter import build_window
-from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QImage
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QToolButton
 
@@ -65,7 +66,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     """明暗主题下点击左上角主菜单，核对设置子菜单中的三组平铺选项。"""
     window.manager.set_theme(theme_name)
     expected = [
-        "导图设置", None, "浅色", "深色", "紧凑模式", None,
+        "滚轮行为：上下滚动", None, "浅色", "深色", "紧凑模式", None,
         "显示停靠栏", "始终显示标题按钮", None, "宽屏布局", "左侧并排", "右侧并排",
     ]
     popped = []
@@ -92,7 +93,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     QTimer.singleShot(0, inspect_menu)
     qtbot.mouseClick(window.title_bar.menu, Qt.MouseButton.LeftButton)
     assert popped == [expected]
-    assert set(window.manager.specs) == {"outline", "properties"}
+    assert set(window.manager.specs) == {"outline", "properties", "map_settings"}
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
     assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected
@@ -144,28 +145,176 @@ def test_grouped_menu_theme_actions_update_theme(window, label, theme_name):
     menu.deleteLater()
 
 
-def test_settings_shortcut_and_real_menu_click_preserve_properties(window, qtbot):
-    """Alt+3 与真实子菜单点击沿用整图事务，且不隐藏节点属性。"""
+def test_settings_shortcut_and_real_menu_click_switch_right_panel(window, qtbot):
+    """Alt+3 打开布局侧栏，真实结构菜单点击沿用整图事务。"""
     window.activateWindow()
     window.canvas.view.setFocus()
     QApplication.processEvents()
     qtbot.keyClick(window.canvas.view, Qt.Key.Key_3, Qt.KeyboardModifier.AltModifier)
-    menu = window.settings_menu
-    assert menu.isVisible() and window.panels.properties.isVisible()
-    directions = next(action.menu() for action in menu.actions() if action.menu() and action.menu().objectName() == "settings_direction")
-    directions.popup(menu.mapToGlobal(QPoint(menu.width(), 0)))
+    assert window.panels.settings.isVisible() and not window.panels.properties.isVisible()
+    window.panels.settings.direction.showPopup()
+    directions = window.panels.settings.direction.popup_menu
     action = next(action for action in directions.actions() if action.data() == "left")
     qtbot.mouseClick(directions, Qt.MouseButton.LeftButton, pos=directions.actionGeometry(action).center())
     assert window.engine.document.layout.direction == "left"
-    assert window.manager.states["properties"].visible
+    assert window.manager.states["map_settings"].visible
     assert window.engine.undo() and window.engine.document.layout.direction == "right"
+
+
+def test_settings_sidebar_readonly_and_inline_edit_preserve_document(window, qtbot):
+    """菜单只提供滚轮，侧栏查看不提交正文，受限状态的布局和外观控件均禁用。"""
+    before, revision = window.engine.document, window.engine.revision
+    window.show_settings_menu()
+    menu = window.settings_menu
+    assert [action.text() for action in menu.actions()] == ["上下滚动", "缩放"]
+    menu.close()
+    window.show_settings_panel()
+    assert window.panels.settings.isVisible() and not window.panels.properties.isVisible()
+    assert window.panels.settings.branch.isVisible() and window.panels.settings.theme.isVisible()
+    assert list(window.panels.settings.sections) == ["导图布局", "导图外观"]
+    assert window.engine.document == before and window.engine.revision == revision
+    window.canvas.begin_edit(window.engine.root_id)
+    window.canvas.editor.setPlainText("尚未提交的正文草稿")
+    window.show_settings_panel()
+    assert window.canvas.is_editing and window.engine.document == before
+    assert not window.panels.settings.direction.isEnabled()
+    assert not window.panels.settings.horizontal.isEnabled()
+    assert not window.panels.settings.branch.isEnabled() and not window.panels.settings.theme.isEnabled()
+    window.canvas.finish_edit(commit=False)
+    window.canvas.set_editable(False)
+    assert not window.panels.settings.vertical.isEnabled()
+    assert all(not button.isEnabled() for button in window.panels.settings.preset_buttons)
+    assert not window.panels.settings.branch.isEnabled() and not window.panels.settings.theme.isEnabled()
+    window.show_settings_menu()
+    assert menu.actions()[0].isEnabled()
+    menu.close()
+    window.canvas.set_editable(True)
+    assert window.panels.settings.horizontal.isEnabled()
+    assert window.engine.document == before and window.engine.revision == revision
+
+
+def test_sidebar_appearance_real_selection_history_autosave_and_sessions(window, tmp_path, qtbot):
+    """真实侧栏弹层应用于当前导图，可撤销、重做、自动保存并随分屏切换归属。"""
+    first = window.active_session
+    first.engine.add_child(first.engine.root_id, "子主题")
+    window.show_settings_panel()
+    panel = first.panels.settings
+    panel.branch.showPopup()
+    qtbot.mouseClick(panel.branch.popup_menu.buttons[BranchStyle.ARROW], Qt.MouseButton.LeftButton)
+    assert all(node.style["branch"]["kind"] == "arrow" for node in first.engine.document.nodes.values())
+    assert "覆盖已有局部连接线样式" in panel.branch.toolTip()
+    before = first.engine.document
+    panel.theme.showPopup()
+    view = panel.theme.view()
+    index = panel.theme.model().index(panel.theme.findData("dark"), 0)
+    qtbot.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=view.visualRect(index).center())
+    after = first.engine.document
+    assert after.theme == Theme.dark() and window.manager.theme.name == "light"
+    assert first.engine.undo() and first.engine.document == before
+    assert first.engine.redo() and first.engine.document == after
+    revision = first.engine.revision
+    panel.theme.showPopup()
+    qtbot.keyClick(panel.theme.view(), Qt.Key.Key_Return)
+    assert first.engine.revision == revision
+    assert window.new_document(tmp_path / "独立外观.mindmap")
+    second = window.active_session
+    assert second.panels.settings.branch.currentData() == "round"
+    assert second.panels.settings.theme.currentData() == "light"
+    qtbot.waitUntil(lambda: not first.engine.is_dirty, timeout=3000)
+    assert load_document(first.files.path) == after
+    window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
+    first.canvas.view.setFocus()
+    qtbot.waitUntil(lambda: window.active_session is first)
+    assert window._settings_stack.currentWidget() is panel
+    assert panel.branch.currentData() == "arrow" and panel.theme.currentData() == "dark"
+    panel.branch.showPopup()
+    stale = panel.branch.popup_menu.buttons[BranchStyle.LINE]
+    window.manager.activate_document(second.id)
+    assert not panel.branch.popup_menu.isVisible()
+    stale.click()
+    assert first.engine.document == after and second.engine.document.theme == Theme()
+    reopened = load_document(first.files.path)
+    first.engine.replace_document(reopened)
+    assert panel.branch.currentData() == "arrow" and panel.theme.currentData() == "dark"
+
+
+def test_layout_settings_follow_sessions_flush_and_autosave(window, tmp_path, qtbot):
+    """切换标签先提交原导图间距，自动保存归属原文件，分屏焦点同步正确面板。"""
+    first = window.active_session
+    window.show_settings_panel()
+    first.panels.settings.horizontal.setValue(91.5)
+    first.panels.settings.vertical.setValue(33.5)
+    assert first.panels.settings.timer.isActive()
+    assert window.new_document(tmp_path / "第二份导图.mindmap")
+    second = window.active_session
+    assert first is not second
+    assert resolve_tree_spacing(first.engine.document.layout) == (91.5, 33.5)
+    assert second.engine.document.layout.options == {}
+    assert window._settings_stack.currentWidget() is second.panels.settings
+    assert second.panels.settings.horizontal.value() == 64
+    qtbot.waitUntil(lambda: not first.engine.is_dirty, timeout=3000)
+    assert resolve_tree_spacing(load_document(first.files.path).layout) == (91.5, 33.5)
+    assert load_document(second.files.path).layout.options == {}
+    window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
+    first.canvas.view.setFocus()
+    qtbot.waitUntil(lambda: window.active_session is first)
+    assert window._settings_stack.currentWidget() is first.panels.settings
+    first.panels.settings.preset_buttons[2].click()
+    assert window.save()
+    assert resolve_tree_spacing(load_document(first.files.path).layout) == (96, 36)
+    assert second.engine.document.layout.options == {}
+
+
+def test_layout_sidebar_restores_geometry_and_default_layout(window, qtbot):
+    """新面板独立持久化，恢复默认布局后仍回到节点属性且保留文档配置。"""
+    window.show_settings_panel()
+    window.panels.settings.horizontal.setValue(80)
+    window.panels.settings.vertical.setValue(30)
+    assert window.save()
+    snapshot = window.manager.capture_layout()
+    snapshot["hosts"]["main"]["region_sizes"]["dock"]["right"] = 410
+    window.manager.restore_layout(snapshot)
+    assert window.manager.states["map_settings"].visible
+    window.manager.save_session()
+    path, directory = window.files.path, window.manager.storage_dir
+    assert window.close()
+    restored = build_window(storage_dir=directory)
+    qtbot.addWidget(restored)
+    try:
+        restored.show()
+        QApplication.processEvents()
+        assert restored.files.path == path
+        assert restored.manager.states["map_settings"].visible
+        assert restored.panels.settings.isVisible() and not restored.panels.properties.isVisible()
+        assert restored.host.region_sizes["dock"]["right"] == 410
+        assert resolve_tree_spacing(restored.engine.document.layout) == (80, 30)
+        restored.manager.restore_default_layout()
+        assert restored.manager.states["properties"].visible
+        assert not restored.manager.states["map_settings"].visible
+        assert resolve_tree_spacing(restored.engine.document.layout) == (80, 30)
+    finally:
+        restored.close()
+
+
+def test_settings_menu_survives_temporary_main_menu_deletion(window):
+    """临时主菜单释放后，借用的设置菜单仍可同步并提交布局与滚轮修改。"""
+    temporary = window.main_menu()
+    temporary.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    window.show_settings_menu()
+    wheel = window.settings_menu
+    next(action for action in wheel.actions() if action.data() == "zoom").trigger()
+    assert window.canvas.wheel_mode == "zoom"
+    window.panels.settings.horizontal.setValue(80)
+    window.panels.flush_pending_edits()
+    assert resolve_tree_spacing(window.engine.document.layout) == (80, 22)
 
 
 def test_menu_wheel_preference_survives_restart_without_document_changes(window, qtbot):
     """通过菜单改变本机滚轮偏好，重启后恢复但不写入文档和撤销历史。"""
     before, revision = window.engine.document, window.engine.revision
     window.show_settings_menu()
-    wheel = next(action.menu() for action in window.settings_menu.actions() if action.menu() and action.menu().objectName() == "settings_wheel")
+    wheel = window.settings_menu
     next(action for action in wheel.actions() if action.data() == "zoom").trigger()
     window.settings_menu.close()
     assert window.canvas.wheel_mode == "zoom"
@@ -180,6 +329,20 @@ def test_menu_wheel_preference_survives_restart_without_document_changes(window,
         assert "settings" not in restored.manager.specs
     finally:
         restored.close()
+
+
+def test_empty_settings_menu_keeps_disabled_wheel_and_application_options(window):
+    """关闭全部导图后只禁用滚轮占位，应用主题和布局选项仍可使用。"""
+    assert window.manager.close_document(window.active_session.id)
+    menu = window.appearance_menu()
+    wheel = menu.actions()[0]
+    assert wheel.text() == "滚轮行为" and wheel.menu() is window.settings_menu
+    assert not wheel.isEnabled() and "没有打开" in wheel.toolTip()
+    assert next(action for action in menu.actions() if action.text() == "深色").isEnabled()
+    assert not window.settings_action.isEnabled()
+    assert not any(action.text().startswith(("导图设置", "导图布局", "连接线样式", "导图主题"))
+                   for action in menu.actions())
+    menu.deleteLater()
 
 
 def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):

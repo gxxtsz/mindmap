@@ -165,7 +165,9 @@ class BranchStyleMenu(QMenu):
             button.setAccessibleName(kind.label)
             button.installEventFilter(self)
             button.entered.connect(lambda value=kind: self.preview_requested.emit(value))
-            button.left.connect(self.preview_finished.emit)
+            # 使用 Qt 原生的信号转发，避免把 SignalInstance.emit 注册为临时
+            # Python 槽；弹层曾取得焦点后随宿主销毁时，临时槽可能已失去元类型。
+            button.left.connect(self.preview_finished)
             button.clicked.connect(lambda checked=False, value=kind: self.style_selected.emit(value))
             grid.addWidget(button, index // 4, index % 4)
             self.buttons[kind] = button
@@ -179,13 +181,13 @@ class BranchStyleMenu(QMenu):
             self.reset.setFixedHeight(28)
             self.reset.setIconSize(QSize(18, 18))
         self.reset.entered.connect(lambda: self.preview_requested.emit(None))
-        self.reset.left.connect(self.preview_finished.emit)
+        self.reset.left.connect(self.preview_finished)
         self.reset.clicked.connect(lambda: self.style_selected.emit(None))
         outer.addWidget(self.reset)
         action = QWidgetAction(self)
         action.setDefaultWidget(content)
         self.addAction(action)
-        self.aboutToHide.connect(self.preview_finished.emit)
+        self.aboutToHide.connect(self.preview_finished)
 
     def sync(self, kinds: set[BranchStyle | None], scope: str, theme: Theme) -> None:
         """根据正式选择同步混合状态、图标和主题，悬停不改变真实勾选项。"""

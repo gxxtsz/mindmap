@@ -17,6 +17,17 @@ class SettingsMenu(QMenu):
     activeAction 只表示鼠标悬停或键盘定位，不参与判断配置是否已选中。
     """
 
+    def __init__(self, *args, compact: bool = False, **kwargs):
+        """保留 QMenu 构造方式，compact 仅为布局选择器启用紧凑菜单。
+
+        普通设置菜单保持原有尺寸；紧凑菜单采用较小行高和独立图文间距，
+        并关闭系统投影，避免短选项菜单在侧栏外形成大面积阴影。
+        """
+        super().__init__(*args, **kwargs)
+        self._compact = compact
+        if compact:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.NoDropShadowWindowHint)
+
     def set_colors(self, colors: UiColors) -> None:
         """依据宿主界面底色适配明暗主题；本地色板不影响导图主题或其他菜单。"""
         dark = QColor(colors.surface).lightnessF() < 0.5
@@ -29,7 +40,8 @@ class SettingsMenu(QMenu):
         # 预留左侧图标和右侧勾选／箭头空间，Qt 仍负责菜单几何、屏幕避让和命中。
         self.setStyleSheet(
             menu_styles(self._colors)
-            + "QMenu::item { padding: 8px 38px 8px 44px; min-height: 18px; }"
+            + ("QMenu::item { height: 28px; min-height: 28px; padding: 0 28px 0 40px; }"
+               if self._compact else "QMenu::item { padding: 8px 38px 8px 44px; min-height: 18px; }")
         )
         apply_ui_palette(self, self._colors)
         self.update()
@@ -57,25 +69,27 @@ class SettingsMenu(QMenu):
             painter.drawRoundedRect(row, 4, 4)
             foreground = QColor(colors.text if action.isEnabled() else colors.muted)
             marker = QColor(colors.accent if action.isEnabled() else colors.muted)
-            if checked:
+            if checked and not self._compact:
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(marker)
                 painter.drawRoundedRect(QRectF(rect.left() + 5, rect.top() + 7, 3, rect.height() - 14), 1.5, 1.5)
             if not action.icon().isNull():
                 mode = QIcon.Mode.Normal if action.isEnabled() else QIcon.Mode.Disabled
                 action.icon().paint(
-                    painter, QRect(rect.left() + 14, rect.center().y() - 10, 20, 20),
+                    painter,
+                    QRect(rect.left() + 10, rect.center().y() - 8, 24, 16) if self._compact
+                    else QRect(rect.left() + 14, rect.center().y() - 10, 20, 20),
                     Qt.AlignmentFlag.AlignCenter, mode, QIcon.State.Off,
                 )
             font = QFont(action.font())
             font.setBold(checked)
             painter.setFont(font)
             painter.setPen(foreground)
-            text_rect = rect.adjusted(44, 0, -36, 0)
+            text_rect = rect.adjusted(40, 0, -28, 0) if self._compact else rect.adjusted(44, 0, -36, 0)
             text = painter.fontMetrics().elidedText(action.text(), Qt.TextElideMode.ElideRight, text_rect.width())
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
             # 使用矢量线段绘制勾选和箭头，不依赖字体是否包含特殊字符，高 DPI 下也清晰。
-            x, y = rect.right() - 20, rect.center().y()
+            x, y = rect.right() - (14 if self._compact else 20), rect.center().y()
             painter.setPen(QPen(marker if checked else foreground, 2,
                                 Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             if action.menu() is not None:

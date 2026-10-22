@@ -123,6 +123,7 @@ version = "0.1.0"
 source = { editable = "packages/qt/mindmap-qt-panels" }
 dependencies = [
     { name = "mindmap-core" },
+    { name = "mindmap-layouts" },
     { name = "mindmap-qt-ui" },
     { name = "pyside6" },
 ]
@@ -130,6 +131,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mindmap-core", editable = "packages/engine/mindmap-core" },
+    { name = "mindmap-layouts", editable = "packages/engine/mindmap-layouts" },
     { name = "mindmap-qt-ui", editable = "packages/qt/mindmap-qt-ui" },
     { name = "pyside6", specifier = ">=6.9,<7" },
 ]

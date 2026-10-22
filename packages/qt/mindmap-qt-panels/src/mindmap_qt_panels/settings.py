@@ -1,13 +1,15 @@
-"""共用导图设置：菜单与兼容表单共享提交、校验及状态同步逻辑。"""
+"""当前导图的布局、外观侧栏与独立滚轮菜单，共享输入生命周期。"""
 
 from __future__ import annotations
 
 from dataclasses import replace
 
 from mindmap_core import MindMapError, Theme, apply_branch_style
+from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_ui.branch_styles import populate_branch_combo
 from mindmap_qt_ui.icons import toolbar_icon
-from mindmap_qt_ui.property_controls import MIXED, BranchPicker
+from mindmap_qt_ui.layout_controls import LayoutPicker, SpacingSpinBox
+from mindmap_qt_ui.property_controls import MIXED, BranchPicker, FlowLayout
 from mindmap_qt_ui.settings_menu import SettingsMenu
 from mindmap_qt_ui.ui_style import (
     ComboBox,
@@ -22,12 +24,16 @@ from mindmap_qt_ui.ui_style import (
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QFormLayout,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QScrollArea,
+    QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,11 +48,20 @@ class GlobalSettingsPanel(QWidget):
     选项先验证候选文档，再调用公开引擎操作，遵守历史、前置钩子和原子回滚规则。
     """
 
+    SPACING_PRESETS = (("紧凑", (32.0, 10.0)), ("适中", (64.0, 22.0)), ("宽松", (96.0, 36.0)))
+
     def __init__(self, canvas: PanelHost, parent=None):
         super().__init__(parent)
         self.canvas = canvas
         self._loading = False
         self._disposed = False
+        self._applying = False
+        self._pending = {}
+        self._generation = canvas.engine.document_generation
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(400)
+        self.timer.timeout.connect(self.flush)
         self._theme_signature = None
         self._ui_colors_override = None
         self._menus = {}
@@ -68,30 +83,73 @@ class GlobalSettingsPanel(QWidget):
         self.scroll.setWidget(self.page)
         outer.addWidget(self.scroll)
 
+        # 滚轮属于宿主的本机偏好，紧凑布尔值只保留兼容字段接口；两者均不
+        # 占用侧栏。隐藏容器持有兼容控件，避免它们成为无主的顶层窗口。
+        self._menu_fields = QWidget(self)
+        self._menu_fields.hide()
         self.wheel = self._combo("滚轮行为", (("上下滚动", "scroll"), ("缩放", "zoom")))
         self.wheel.setToolTip("普通滚轮的行为；Ctrl＋滚轮始终缩放")
-        self._section("滚轮").addRow("滚轮行为", self.wheel)
-        layout = self._section("布局")
-        self.direction = self._combo(
-            "布局方向", (("双向", "both"), ("向右", "right"), ("向左", "left"), ("向下", "down"))
-        )
-        layout.addRow("布局方向", self.direction)
+        layout = self._section("导图布局")
+        self.direction = LayoutPicker()
+        structure = QWidget()
+        structure_row = QHBoxLayout(structure)
+        structure_row.setContentsMargins(0, 0, 0, 0)
+        structure_row.addWidget(QLabel("布局结构"))
+        structure_row.addStretch(1)
+        structure_row.addWidget(self.direction)
+        layout.addRow(structure)
+        layout.addRow(QLabel("主题间距"))
+        presets = QWidget()
+        preset_layout = FlowLayout(presets)
+        self.preset_group = QButtonGroup(self)
+        self.preset_buttons = []
+        for text, gaps in self.SPACING_PRESETS:
+            button = QToolButton(presets)
+            button.setText(text)
+            button.setProperty("spacing_preset", True)
+            button.setCheckable(True)
+            button.setMinimumSize(76, 34)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setAccessibleName("主题间距：" + text)
+            button.setToolTip(f"父子间距 {gaps[0]:g}，同级间距 {gaps[1]:g}")
+            self.preset_group.addButton(button)
+            self.preset_buttons.append(button)
+            preset_layout.addWidget(button)
+            button.clicked.connect(lambda checked=False, values=gaps:
+                                   self._change("spacing", dict(zip(("level_gap", "sibling_gap"), values))))
+        layout.addRow(presets)
+        numbers = QWidget()
+        number_layout = FlowLayout(numbers)
+        for axis, text in (("horizontal", "水平"), ("vertical", "竖直")):
+            cell = QWidget(numbers)
+            cell.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            row = QHBoxLayout(cell)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            row.addWidget(QLabel(text))
+            field = SpacingSpinBox(cell)
+            field.setAccessibleName(text + "主题间距")
+            setattr(self, axis, field)
+            row.addWidget(field)
+            number_layout.addWidget(cell)
+            field.valueChanged.connect(lambda value, name=axis: self._number_changed(name, value))
+            field.editingFinished.connect(self.flush)
+            field.composition_finished.connect(self._resume_input)
+        layout.addRow(numbers)
         self.compact = QCheckBox("启用紧凑布局")
         self.compact.setAccessibleName("紧凑布局")
-        layout.addRow(self.compact)
+        appearance = self._section("导图外观")
         self.branch = BranchPicker()
         self.branch.setObjectName("global_branch_style")
-        self.branch.setAccessibleName("全局分支样式")
-        branches = self._section("分支")
-        branches.addRow("连接线样式", self.branch)
-        hint = QLabel("应用于整张导图，覆盖已有局部分支样式。")
-        hint.setWordWrap(True)
-        hint.setProperty("settings_hint", True)
-        branches.addRow(hint)
-        self.theme = self._combo("主题", (("浅色", "light"), ("深色", "dark"), ("自定义", "custom")))
+        self.branch.setAccessibleName("整图连接线样式")
+        self._add_choice_row(appearance, "连接线样式", self.branch)
+        self.theme = self._combo("导图主题", (("浅色", "light"), ("深色", "dark"), ("自定义", "custom")))
+        self.theme.setFixedWidth(120)
+        self._add_choice_row(appearance, "导图主题", self.theme)
         # 自定义主题只用于反映已有文档；用户必须明确选择内置主题才能替换它。
         self.theme.model().item(self.theme.findData("custom")).setEnabled(False)
-        self._section("外观").addRow("主题", self.theme)
+        for field in (self.wheel, self.compact):
+            field.setParent(self._menu_fields)
         self.body.addStretch(1)
 
         for key in ("wheel", "direction", "branch", "theme"):
@@ -101,67 +159,40 @@ class GlobalSettingsPanel(QWidget):
             )
         # clicked 只响应用户输入，快照同步 setChecked 不会反向提交文档。
         self.compact.clicked.connect(lambda checked: self._change("compact", checked))
-        canvas.document_changing.connect(self._close_popups)
+        canvas.document_changing.connect(self._document_changing)
         canvas.document_changed.connect(self.sync)
         canvas.wheel_mode_changed.connect(self.sync)
-        canvas.editable_changed.connect(self.sync)
-        canvas.editing_changed.connect(self.sync)
-        canvas.editable_changed.connect(self._close_popups)
-        canvas.editing_changed.connect(self._close_popups)
+        canvas.editable_changed.connect(self._mode_changed)
+        canvas.editing_changed.connect(self._mode_changed)
         self.sync()
 
     def create_menu(self, parent=None) -> QMenu:
-        """为宿主创建独立的“导图设置”菜单，不创建停靠窗口或第二份配置。
+        """创建可直接加入宿主“设置”的滚轮菜单，不包含导图内容设置。
 
-        菜单由传入的 QWidget（缺省为本对象）拥有；宿主可将其加入齿轮菜单，
-        或调用 popup() 展开。保留原表单接口供已有集成访问，所有菜单动作仍走
-        同一提交边界。每次打开绑定当前文档代次，关闭或替换后拒绝迟到事件。
+        保留原调用签名和 QWidget 所有权约定：parent 缺省为本对象，宿主可
+        直接 addMenu()，也可 popup()。菜单标题展示当前滚轮行为，选项与公开
+        wheel 字段共用模型；打开时绑定文档代次，关闭或替换后拒绝迟到动作。
         """
-        menu = SettingsMenu("导图设置", parent or self)
-        menu.setObjectName("mindmap_settings_menu")
+        menu = SettingsMenu("滚轮行为", parent or self)
+        menu.setObjectName("settings_wheel")
         menu.setToolTipsVisible(True)
-        record = {"actions": {}, "active": False, "epoch": 0, "generation": None}
+        record = {"active": False, "epoch": 0, "generation": None}
         self._menus[menu] = record
-        for key, title in (("wheel", "滚轮行为"), ("direction", "布局方向"),
-                           ("compact", "紧凑布局"), ("branch", "连接线样式"), ("theme", "导图主题")):
-            options = []
-            record["actions"][key] = options
-            if key == "compact":
-                action = menu.addAction(title)
-                action.setCheckable(True)
-                action.setObjectName("settings_compact")
-                options.append(action)
-                action.triggered.connect(lambda checked: self._menu_change(menu, "compact", checked))
-                continue
-            field = getattr(self, key)
-            sub = SettingsMenu(title, menu)
-            sub.setProperty("settings_label", title)
-            menu.addMenu(sub)
-            sub.setObjectName("settings_" + key)
-            sub.setToolTipsVisible(True)
-            group = QActionGroup(sub)
-            group.setExclusive(True)
-            # 混合状态只用于展示，不是可提交的连接线类型。
-            if key == "branch":
-                mixed = sub.addAction("多种样式")
-                mixed.setData("__mixed__")
-                options.append(mixed)
-            for index in range(field.count()):
-                value = field.itemData(index)
-                if value == "__mixed__":
-                    continue
-                action = sub.addAction(field.itemIcon(index), field.itemText(index))
-                action.setData(value)
-                action.setCheckable(True)
-                group.addAction(action)
-                options.append(action)
-                action.triggered.connect(
-                    lambda checked=False, name=key, selected=value: self._menu_change(menu, name, selected)
-                )
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        for index in range(self.wheel.count()):
+            value = self.wheel.itemData(index)
+            action = menu.addAction(self.wheel.itemIcon(index), self.wheel.itemText(index))
+            action.setData(value)
+            action.setCheckable(True)
+            group.addAction(action)
+            action.triggered.connect(
+                lambda checked=False, selected=value: self._menu_change(menu, selected)
+            )
         menu.aboutToShow.connect(lambda: self._open_menu(menu))
         menu.aboutToHide.connect(lambda: self._defer_menu_close(menu))
         menu.destroyed.connect(lambda: self._menus.pop(menu, None))
-        self._sync_menu(menu, record)
+        self._sync_menu(menu)
         return menu
 
     def _open_menu(self, menu):
@@ -185,48 +216,47 @@ class GlobalSettingsPanel(QWidget):
 
         QTimer.singleShot(0, self, finish)
 
-    def _menu_change(self, menu, key, value):
-        """菜单提交复用原表单校验；显式失效、已销毁或来自旧文档的动作均忽略。"""
+    def _menu_change(self, menu, value):
+        """只提交滚轮偏好；显式失效、已销毁或来自旧文档的动作均忽略。"""
         record = self._menus.get(menu)
         if (record is None or not record["active"] or self._disposed
                 or record["generation"] != self.canvas.engine.document_generation):
             return
-        self._change(key, value)
+        self._change("wheel", value)
 
-    def _sync_menu(self, menu, record):
-        """只同步动作展示，避免 setChecked 反向提交；禁用原因与表单保持一致。"""
+    def _sync_menu(self, menu):
+        """从滚轮模型同步标题、图标和勾选，查看菜单不触发偏好或文档写入。"""
         colors = ui_colors(self._ui_colors_override or self.canvas.document_view.theme)
         menu.set_colors(colors)
-        for key, actions in record["actions"].items():
-            field = getattr(self, key)
-            tip = field.toolTip()
-            if key == "branch" and field.isEnabled():
-                tip += "；应用于整张导图，覆盖已有局部分支样式。"
-            if key == "compact":
-                actions[0].setChecked(field.isChecked())
-                actions[0].setText("紧凑布局：" + ("已启用" if field.isChecked() else "未启用"))
-                actions[0].setEnabled(field.isEnabled())
-                actions[0].setToolTip(tip)
-                continue
-            sub = actions[0].parent()
-            # 上级菜单直接展示正式值；混合分支、自定义主题也沿用表单中的中文摘要。
-            sub.setTitle(f"{sub.property('settings_label')}：{field.currentText()}")
-            sub.menuAction().setEnabled(field.isEnabled())
-            sub.menuAction().setToolTip(tip)
-            sub.set_colors(colors)
-            for action in actions:
-                value = action.data()
-                index = field.findData(value)
-                action.setChecked(value == field.currentData())
-                font = sub.font()
-                font.setBold(action.isChecked())
-                action.setFont(font)
-                action.setEnabled(field.isEnabled() and index >= 0 and field.model().item(index).isEnabled())
-                action.setToolTip(tip)
-                if value == "__mixed__":
-                    action.setVisible(field.currentData() == "__mixed__")
-                elif index >= 0:
-                    action.setIcon(field.itemIcon(index))
+        field = self.wheel
+        menu.setTitle(f"滚轮行为：{field.currentText()}")
+        menu.menuAction().setEnabled(field.isEnabled())
+        menu.menuAction().setToolTip(field.toolTip())
+        # 不长期缓存 QAction 的 Python 包装对象；临时主菜单释放后，Qt 仍
+        # 拥有动作，但 PySide 可能重建包装对象，逐次读取可以安全继续同步。
+        for action in menu.actions():
+            value = action.data()
+            index = field.findData(value)
+            action.setChecked(value == field.currentData())
+            font = menu.font()
+            font.setBold(action.isChecked())
+            action.setFont(font)
+            action.setEnabled(field.isEnabled() and index >= 0 and field.model().item(index).isEnabled())
+            action.setToolTip(field.toolTip())
+            if index >= 0:
+                action.setIcon(field.itemIcon(index))
+
+    @staticmethod
+    def _add_choice_row(form, text, field):
+        """标签在左、选择器靠右；窄侧栏由表单自动换行，避免挤压控件内容。"""
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch(1)
+        row.addWidget(field)
+        label = QLabel(text)
+        label.setBuddy(field)
+        form.addRow(label, holder)
 
     @staticmethod
     def _combo(label, options):
@@ -268,12 +298,100 @@ class GlobalSettingsPanel(QWidget):
         """用户明确选择才提交；失败或无效的迟到事件都从正式状态恢复控件显示。"""
         if self._loading or self._disposed:
             return
-        field = getattr(self, key)
+        field = self.horizontal if key == "spacing" else getattr(self, key)
+        # 离散选择先提交已完成的数值草稿；本轮提交期间屏蔽递归 flush 和自身通知。
+        self.flush()
+        self._applying = True
         try:
             if field.isEnabled():
                 self.canvas.call(lambda: self._commit(key, value))
         finally:
+            self._applying = False
             self.sync()
+
+    @property
+    def composing(self) -> bool:
+        """汇总数值控件的输入法候选，供宿主保存、关闭时等待用户完成。"""
+        return not self._disposed and any(field.composing for field in (self.horizontal, self.vertical))
+
+    def _number_changed(self, axis, value):
+        """缓存逻辑方向的间距，防抖期间不建立文档副本或长期占用引擎事务。"""
+        field = getattr(self, axis)
+        if self._loading or self._disposed or self._applying or not field.isEnabled():
+            return
+        down = self.canvas.document_view.layout.direction == "down"
+        key = "sibling_gap" if (axis == "horizontal") == down else "level_gap"
+        self._pending[key] = value
+        self._generation = self.canvas.engine.document_generation
+        self._sync_presets()
+        if not self.composing:
+            self.timer.start()
+
+    def _resume_input(self):
+        if self._pending and not self.composing:
+            self.timer.start()
+
+    def discard_pending(self) -> None:
+        """撤销、替换文档或释放组件时取消数值草稿，禁止旧输入延迟写回。"""
+        self.timer.stop()
+        self._pending.clear()
+        loading, self._loading = self._loading, True
+        try:
+            for field in (self.horizontal, self.vertical):
+                field.discard_composition()
+        finally:
+            self._loading = loading
+
+    def flush(self) -> None:
+        """提交当前导图的有效间距，一轮连续输入只形成一次撤销记录。
+
+        保存、失焦及防抖共用此入口；候选未完成、文档已替换或权限改变时不提交。
+        _applying 防止 edits_flush_requested 再次进入本对象，同时允许节点属性
+        先写回自己的有效输入，随后以最新快照构造布局候选。
+        """
+        if self._disposed or self._applying or self.composing:
+            return
+        self.timer.stop()
+        if not self._pending:
+            return
+        if (self._generation != self.canvas.engine.document_generation
+                or not self.canvas.editable or self.canvas.is_editing):
+            self.discard_pending()
+            self.sync()
+            return
+        pending, self._pending = self._pending, {}
+        self._applying = True
+        try:
+            if all(field.hasAcceptableInput() for field in (self.horizontal, self.vertical)):
+                self.canvas.call(lambda: self._commit("spacing", pending))
+        finally:
+            self._applying = False
+            self.sync()
+
+    def _document_changing(self, event):
+        if event.kind == "saved":
+            return
+        if not self._applying:
+            self.discard_pending()
+        self._close_popups()
+
+    def _mode_changed(self, *_):
+        self.discard_pending()
+        self._close_popups()
+        self.sync()
+
+    def _sync_presets(self):
+        """由有效间距及当前草稿推导预设，避免显示舍入将自定义值误判成预设。"""
+        config = self.canvas.document_view.layout
+        gaps = None
+        if config.algorithm_id == "tree":
+            values = dict(zip(("level_gap", "sibling_gap"), resolve_tree_spacing(config)))
+            values.update(self._pending)
+            gaps = values["level_gap"], values["sibling_gap"]
+        self.preset_group.setExclusive(False)
+        for button, (_, values) in zip(self.preset_buttons, self.SPACING_PRESETS):
+            button.setChecked(gaps == values)
+        self.preset_group.setExclusive(True)
 
     def _commit(self, key, value):
         """整图操作始终使用根节点，不读取当前选择、聚焦节点或属性面板的局部范围。"""
@@ -282,7 +400,7 @@ class GlobalSettingsPanel(QWidget):
             return
         engine = self.canvas.engine
         generation = engine.document_generation
-        # 设置菜单与属性面板可以同时显示；先提交原节点有效草稿，避免全局修改的
+        # 独立宿主可以同时展示设置与属性面板；先提交原节点有效草稿，避免全局修改的
         # document_changing 通知将其丢弃。随后重新读取快照，保留刚提交的节点属性。
         self.canvas.edits_flush_requested.emit()
         if self._disposed or generation != engine.document_generation:
@@ -300,6 +418,17 @@ class GlobalSettingsPanel(QWidget):
             if not info.supports_compact:
                 raise MindMapError("当前布局算法不支持紧凑布局")
             candidate.layout = replace(document.layout, compact=value)
+        elif key == "spacing":
+            if document.layout.algorithm_id != "tree":
+                raise MindMapError("当前布局算法不支持主题间距")
+            current = resolve_tree_spacing(document.layout)
+            options = dict(zip(("level_gap", "sibling_gap"), current))
+            options.update(value)
+            if tuple(options.values()) == current:
+                return
+            # 两个参数始终成对写入，方向切换不改变疏密；compact 仅保留兼容标记。
+            candidate.layout = replace(document.layout, options=options,
+                                       compact=tuple(options.values()) == (32.0, 10.0))
         elif key == "theme":
             if value not in ("light", "dark"):
                 raise MindMapError("请选择浅色或深色主题")
@@ -316,11 +445,12 @@ class GlobalSettingsPanel(QWidget):
         labels = {
             "direction": "修改全局布局方向",
             "compact": "修改紧凑布局",
+            "spacing": "修改全局主题间距",
             "theme": "切换主题",
             "branch": "统一全局分支样式",
         }
         with engine.transaction(labels[key]):
-            if key in ("direction", "compact"):
+            if key in ("direction", "compact", "spacing"):
                 engine.set_layout(candidate.layout)
             elif key == "theme":
                 engine.set_theme(candidate.theme)
@@ -329,7 +459,7 @@ class GlobalSettingsPanel(QWidget):
 
     def sync(self, *events):
         """从正式状态同步值、混合状态及布局能力；不创建默认配置或触发用户选择信号。"""
-        if self._disposed or (events and getattr(events[0], "kind", None) == "saved"):
+        if self._disposed or self._applying or (events and getattr(events[0], "kind", None) == "saved"):
             return
         # 仅同步控件，复用提交后的界面快照；修改设置时另行建立候选文档。
         document = self.canvas.document_view
@@ -340,8 +470,25 @@ class GlobalSettingsPanel(QWidget):
             self.set_theme(document.theme)
             with QSignalBlocker(self.wheel), QSignalBlocker(self.direction), QSignalBlocker(self.compact):
                 self.wheel.setCurrentIndex(self.wheel.findData(self.canvas.wheel_mode))
-                self.direction.setCurrentIndex(self.direction.findData(document.layout.direction))
+                self.direction.set_value(document.layout.direction)
                 self.compact.setChecked(document.layout.compact)
+            spacing_supported = document.layout.algorithm_id == "tree"
+            if spacing_supported and not self._pending:
+                gaps = resolve_tree_spacing(document.layout)
+                down = document.layout.direction == "down"
+                for field, value, minimum in (
+                    (self.horizontal, gaps[1] if down else gaps[0], 4 if down else 24),
+                    (self.vertical, gaps[0] if down else gaps[1], 24 if down else 4),
+                ):
+                    with QSignalBlocker(field):
+                        field.setRange(minimum, 500)
+                        field.setValue(value)
+            self._sync_presets()
+            if not spacing_supported:
+                self.preset_group.setExclusive(False)
+                for button in self.preset_buttons:
+                    button.setChecked(False)
+                self.preset_group.setExclusive(True)
             for index in range(self.direction.count()):
                 self.direction.model().item(index).setEnabled(
                     self.direction.itemData(index) in info.directions
@@ -363,7 +510,11 @@ class GlobalSettingsPanel(QWidget):
                 (self.direction, bool(info.directions), "布局方向"),
                 (self.compact, info.supports_compact, "紧凑布局"),
                 (self.branch, info.supports_branch_styles, "分支连接线样式"),
-                (self.theme, True, "主题"),
+                (self.theme, True, "导图主题"),
+                (self.horizontal, spacing_supported, "水平主题间距"),
+                (self.vertical, spacing_supported, "竖直主题间距"),
+                *((button, spacing_supported, f"{name}：父子间距 {gaps[0]:g}，同级间距 {gaps[1]:g}")
+                  for button, (name, gaps) in zip(self.preset_buttons, self.SPACING_PRESETS)),
             ):
                 field.setEnabled(editable and supported)
                 field.setToolTip(
@@ -373,19 +524,21 @@ class GlobalSettingsPanel(QWidget):
                     if self.canvas.is_editing
                     else "只读模式不能修改导图设置"
                     if not self.canvas.editable
-                    else self.branch.currentText()
+                    else self.branch.currentText() + "；应用于整张导图，覆盖已有局部连接线样式。"
                     if field is self.branch
+                    else f"布局结构：{self.direction.currentText()}" if field is self.direction
+                    else label + "（导图逻辑像素）" if field in (self.horizontal, self.vertical)
                     else label
                 )
         finally:
             self._loading = False
-        for menu, record in self._menus.items():
-            self._sync_menu(menu, record)
+        for menu in self._menus:
+            self._sync_menu(menu)
 
     def set_ui_colors(self, colors: UiColors | None) -> None:
         """设置独立界面色板；None 恢复宿主文档主题，不提交任何设置或历史。
 
-        非 UiColors 参数抛出 TypeError；菜单及兼容表单共用这一个公开外观入口。
+        非 UiColors 参数抛出 TypeError；滚轮菜单与布局、外观侧栏共用此配色入口。
         """
         if colors is not None and not isinstance(colors, UiColors):
             raise TypeError("界面色板必须为 UiColors 或 None")
@@ -407,16 +560,21 @@ class GlobalSettingsPanel(QWidget):
             f"QWidget#global_settings_panel, QWidget#global_settings_page, QScrollArea, "
             f"QScrollArea > QWidget > QWidget {{ background: {surface}; }}"
             'QLabel[settings_heading="true"] { font-size: 15px; font-weight: bold; }'
-            f'QLabel[settings_hint="true"] {{ color: {colors.muted}; }}'
             f"QFrame#settings_separator {{ background: {colors.border}; }}"
             + control_styles(colors)
+            + f'QToolButton[spacing_preset="true"] {{ background: {colors.field}; '
+              f'border: 1px solid {colors.border}; border-radius: 6px; padding: 4px 8px; }}'
+            + f'QToolButton[spacing_preset="true"]:hover {{ background: {colors.hover}; }}'
+            + f'QToolButton[spacing_preset="true"]:checked {{ background: {colors.selected}; '
+              f'border-color: {colors.accent}; }}'
+            + f'QToolButton[spacing_preset="true"]:disabled {{ color: {colors.muted}; }}'
             + menu_styles(colors)
             + scrollbar_styles(colors)
         )
         apply_ui_palette(self, colors, window=surface)
+        self.direction.set_theme(theme)
         for field, icons in (
             (self.wheel, ("wheel_scroll", "wheel_zoom")),
-            (self.direction, ("layout_both", "layout_right", "layout_left", "layout_down")),
             (self.theme, ("sun", "moon", "palette")),
         ):
             for index, icon in enumerate(icons):
@@ -428,8 +586,8 @@ class GlobalSettingsPanel(QWidget):
             self.branch.clear()
             populate_branch_combo(self.branch, theme)
             self.branch.set_value(current)
-        for menu, record in self._menus.items():
-            self._sync_menu(menu, record)
+        for menu in self._menus:
+            self._sync_menu(menu)
 
     def close_popups(self) -> None:
         """关闭本设置对象拥有的全部菜单，供宿主在标签切换及退出前主动收束。
@@ -455,4 +613,5 @@ class GlobalSettingsPanel(QWidget):
     def dispose(self):
         """主动结束顶层弹层；工作区销毁后收到的剩余状态通知不再访问画布。"""
         self._disposed = True
+        self.discard_pending()
         self._close_popups()

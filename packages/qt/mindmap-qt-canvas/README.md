@@ -33,6 +33,8 @@ finally:
 `MindMapFileController(canvas, panels, dialog_parent=None, *, writer=...)` 保持原签名。
 第二参数仅要求提供 `flush_pending_edits()`，无侧栏时可以为空实现，不要求安装面板包。
 退出宿主前调用 `dispose()` 解除引擎订阅并取消未完成下载；该方法可重复调用。
+折叠按钮由 Qt 的父图元关系管理，只通过弱引用借用所属节点；删除、折叠或替换导图时，
+移出场景的节点可立即释放，不依赖循环垃圾回收，也不会被外部保留的按钮包装对象拖延销毁。
 
 ## 交互与嵌入接口
 

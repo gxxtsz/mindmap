@@ -20,7 +20,7 @@ DEPENDENCIES = {
     "mindmap-qt-render": {"mindmap-core"},
     "mindmap-qt-ui": {"mindmap-core", "mindmap-layouts", "mindmap-qt-render"},
     "mindmap-qt-canvas": {"mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-qt-render", "mindmap-qt-ui"},
-    "mindmap-qt-panels": {"mindmap-core", "mindmap-qt-ui"},
+    "mindmap-qt-panels": {"mindmap-core", "mindmap-layouts", "mindmap-qt-ui"},
     "mindmap-docking": set(), "mindmap-shell": {"mindmap-docking"},
     "mindmap-workbench": EXPECTED - {"mindmap-workbench"},
 }

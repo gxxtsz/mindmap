@@ -14,6 +14,7 @@ from math import isfinite
 from mindmap_core import MindMapDocument, MindMapError, Point, Rect
 
 from .persistent import PersistentMap
+from .spacing import resolve_tree_spacing
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +111,7 @@ class IncrementalTreeGeometry:
         self.root = document.root_id
         self.direction = document.layout.direction
         self.down = self.direction == "down"
-        self.gap_x, self.gap_y = (32.0, 10.0) if document.layout.compact else (64.0, 22.0)
+        self.gap_x, self.gap_y = resolve_tree_spacing(document.layout)
         self.children = {key: tuple(node.children) for key, node in document.nodes.items()}
         self.expanded = {key: node.expanded for key, node in document.nodes.items()}
         self.hints = {key: node.direction for key, node in document.nodes.items()}

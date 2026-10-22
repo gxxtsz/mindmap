@@ -47,6 +47,7 @@ def test_virtual_scene_matches_complete_scene_pixels(qtbot, direction, wide):
     document.layout.direction = direction
     document.theme = Theme.dark() if wide else Theme()
     if wide:
+        document.layout.options = {"level_gap": 101.5, "sibling_gap": 37.5}
         document.theme.palette = ["#883578cc", "#88289b79", "#88b076c2", "#88cf8b38"]
     registry = LayoutRegistry()
     registry.register(LegacyTree(), copy_inputs=False)
@@ -82,6 +83,7 @@ def test_virtual_scene_matches_complete_scene_pixels(qtbot, direction, wide):
 def test_virtual_drop_query_matches_complete_fixed_index(direction, scale):
     document, keys = make_document()
     document.layout.direction = direction
+    document.layout.options = {"level_gap": 75.5, "sibling_gap": 15.5}
     sizes = {key: (120 + index % 4 * 10, 38 + index % 3 * 4)
              for index, key in enumerate(keys)}
     full_layout = TreeLayout().layout(document, sizes)
@@ -116,6 +118,7 @@ def test_virtual_drop_query_matches_complete_fixed_index(direction, scale):
 
 def test_offscreen_selection_history_and_complete_export(qtbot, tmp_path):
     document, keys = make_document()
+    document.layout.options = {"level_gap": 48.5, "sibling_gap": 13.5}
     canvas = MindMapWidget(MindMapEngine(document))
     qtbot.addWidget(canvas)
     canvas.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)

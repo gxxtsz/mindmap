@@ -89,17 +89,21 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             startup_messages.append(f"最近文件与退出会话记录无效，已忽略：{error}")
         self._outline_stack = QStackedWidget(manager.parking)
         self._properties_stack = QStackedWidget(manager.parking)
-        for stack in (self._outline_stack, self._properties_stack):
+        self._settings_stack = QStackedWidget(manager.parking)
+        for stack in (self._outline_stack, self._properties_stack, self._settings_stack):
             message = QLabel("没有打开的导图")
             message.setAlignment(Qt.AlignmentFlag.AlignCenter)
             stack.addWidget(message)
         self._depth_action = QAction("显示层级", self)
-        self._empty_settings_menu = QMenu("导图设置", self)
+        # 空文档时仍保留同一级的滚轮入口，禁用占位避免创建临时画布或改写偏好。
+        self._empty_settings_menu = QMenu("滚轮行为", self)
+        self._empty_settings_menu.menuAction().setToolTip("没有打开的导图")
         self._empty_settings_menu.setEnabled(False)
         self.sessions = MindMapSessionManager(self)
         for identifier, title, stack, icon, position, shortcut in (
             ("outline", "大纲", self._outline_stack, "outline", DockPosition.LEFT_TOP, "Alt+1"),
             ("properties", "节点属性", self._properties_stack, "properties", DockPosition.RIGHT_TOP, "Alt+2"),
+            ("map_settings", "导图设置", self._settings_stack, "settings", DockPosition.RIGHT_TOP, ""),
         ):
             manager.register_tool_window(ToolWindowSpec(
                 identifier, title, lambda content=stack: content, icon, position, shortcut,
@@ -107,7 +111,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ))
         self.host.editor.set_empty_widget_factory(lambda: _WelcomePage(self))
         self._register_file_actions()
-        self.settings_action = manager.register_action("app.settings", "导图设置", self.show_settings_menu,
+        self.settings_action = manager.register_action("app.settings", "导图设置", self.show_settings_panel,
                                                        shortcut="Alt+3", icon="settings")
         self.read_only_action = QAction("只读模式", self, checkable=True)
         self.read_only_action.toggled.connect(self._set_read_only)
@@ -120,6 +124,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         manager.restore_layout(layout)
         manager.set_default_layout()
         self._properties_visible = True
+        self._settings_visible = False
         manager.layout_changed.connect(self._layout_changed)
         if restore:
             failures = self.sessions.restore_documents(self.document_state.open_documents,
@@ -255,11 +260,12 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         """仅切换堆叠页和动作，不重建业务面板，不改变其他会话的选择和滚动位置。"""
         self._outline_stack.setCurrentWidget(session.panels.outline) if session else self._outline_stack.setCurrentIndex(0)
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
+        self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
         self._sync_depth_action()
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
         # 关闭活动标签到下一标签的短暂空绑定不暂停，只有关闭全部导图才回欢迎页。
-        self.manager.set_tools_suspended(("outline", "properties"), not bool(len(self.sessions)))
+        self.manager.set_tools_suspended(("outline", "properties", "map_settings"), not bool(len(self.sessions)))
 
     def _set_read_only(self, checked):
         if self.canvas:
@@ -273,11 +279,22 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.manager.activate("properties")
 
     def show_settings_menu(self):
+        """直接展开当前会话的滚轮选项，保留既有宿主调用入口。"""
         if self.active_session and not self._disposed:
             button = self.title_bar.menu
             self.settings_menu.popup(button.mapToGlobal(QPoint(0, button.height())))
 
+    def show_settings_panel(self):
+        """打开活动导图的布局及外观设置；不强制结束正文编辑或另建临时导图。
+
+        与节点属性复用右上停靠格，Alt+3 和侧边按钮解析同一活动会话。
+        focus=False 使快捷键查看设置时保留正文草稿，编辑期间控件维持禁用。
+        """
+        if self.active_session and not self._disposed:
+            self.manager.activate("map_settings", focus=False)
+
     def appearance_menu(self):
+        """将滚轮行为直接放在设置顶部；导图布局和外观统一通过侧栏调整。"""
         menu = super().appearance_menu()
         menu.setTitle("设置")
         if hasattr(self, "_empty_settings_menu"):
@@ -396,7 +413,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             for session in self.sessions.values():
                 session.canvas.set_ui_colors(colors)
                 session.panels.set_ui_colors(colors)
-            for stack in (self._outline_stack, self._properties_stack):
+            for stack in (self._outline_stack, self._properties_stack, self._settings_stack):
                 palette = stack.palette()
                 palette.setColor(QPalette.ColorRole.Window, self.manager.theme.color("tool-window-bg"))
                 stack.setPalette(palette)
@@ -413,6 +430,10 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         if getattr(self, "_properties_visible", visible) and not visible and self.panels:
             self.panels.flush_pending_edits()
         self._properties_visible = visible
+        settings_visible = self.manager.states["map_settings"].visible
+        if getattr(self, "_settings_visible", settings_visible) and not settings_visible and self.panels:
+            self.panels.settings.flush()
+        self._settings_visible = settings_visible
         # 恢复布局会重建标签容器，文件路径和保存错误属于业务元信息，须重新附加。
         for session in self.sessions.values():
             self.sessions.sync(session)

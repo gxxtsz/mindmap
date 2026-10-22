@@ -250,7 +250,8 @@ class MindMapSession(QObject):
         self.settings_menu.deleteLater()
         self.panels.dispose()
         for stack, page in ((self.owner.window._outline_stack, self.panels.outline),
-                            (self.owner.window._properties_stack, self.panels.properties)):
+                            (self.owner.window._properties_stack, self.panels.properties),
+                            (self.owner.window._settings_stack, self.panels.settings)):
             stack.removeWidget(page)
             page.hide()
             page.deleteLater()
@@ -300,6 +301,7 @@ class MindMapSessionManager(QObject):
         self._known_paths[session.id] = session.files.path
         self.window._outline_stack.addWidget(session.panels.outline)
         self.window._properties_stack.addWidget(session.panels.properties)
+        self.window._settings_stack.addWidget(session.panels.settings)
         # 标签只显示不含末尾扩展名的文件名，完整路径仍由文件控制器保留。
         # 图标沿用应用配置的语义名称，由停靠层在主题切换时统一刷新。
         self.window.manager.register_document(DocumentSpec(

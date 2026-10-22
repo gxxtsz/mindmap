@@ -37,6 +37,8 @@ class MindMapPanels(QObject):
     def flush_pending_edits(self):
         """保存、导出和宿主关闭前，提交已完成的有效输入；输入法候选保持原语义。"""
         if not self._disposed:
+            # 布局提交会先请求属性草稿写回；先取走布局草稿可避免属性通知将其取消。
+            self.settings.flush()
             self.properties.flush()
 
     @property
@@ -46,7 +48,7 @@ class MindMapPanels(QObject):
         宿主在保存或关闭前查询，不需要了解属性表单的具体字段和输入控件。
         查询不会提交草稿、关闭弹层或改变焦点，画布输入状态由画布另行提供。
         """
-        return not self._disposed and self.properties.composing
+        return not self._disposed and (self.properties.composing or self.settings.composing)
 
     def close_popups(self) -> None:
         """统一关闭本组合拥有的临时弹层；不强制提交候选，也不修改导图。

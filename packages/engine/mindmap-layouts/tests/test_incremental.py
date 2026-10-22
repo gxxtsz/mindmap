@@ -33,10 +33,13 @@ def assert_rectangles(actual, expected):
 
 @pytest.mark.parametrize("direction", ["both", "right", "left", "down"])
 @pytest.mark.parametrize("compact", [False, True])
-def test_local_commands_match_full_layout_and_viewport(direction, compact):
+@pytest.mark.parametrize("gaps", [None, (41.5, 17.5), (24, 4), (500, 500)])
+def test_local_commands_match_full_layout_and_viewport(direction, compact, gaps):
     document, keys, sizes = make_tree()
     document.layout.direction = direction
     document.layout.compact = compact
+    if gaps is not None:
+        document.layout.options = dict(zip(("level_gap", "sibling_gap"), gaps))
     geometry = IncrementalTreeGeometry(document, sizes)
     randomizer = random.Random(703)
     layout = TreeLayout()
@@ -65,9 +68,21 @@ def test_local_commands_match_full_layout_and_viewport(direction, compact):
         assert_rectangles({selected: geometry.rectangle(selected)}, {selected: expected[selected]})
         center = expected[selected].center
         viewport = Rect(center[0] - 300, center[1] - 200, 600, 400)
-        assert_rectangles(geometry.query(viewport), {
+        expected_query = {
             key: rect for key, rect in expected.items() if rect.intersects(viewport)
-        })
+        }
+        actual_query = geometry.query(viewport)
+        # 小数尺寸经过完整遍历和同级前缀和重组后，贴边坐标可能相差一个浮点
+        # 尾数。仅允许与视口边缘相距不到几何比较容差的节点出现命中差异，
+        # 其余矩形和命中集合继续严格核对，避免将真实漏节点当成舍入误差。
+        boundary = actual_query.keys() ^ expected_query.keys()
+        for key in boundary:
+            rect = expected[key]
+            overlap = (min(rect.right, viewport.right) - max(rect.x, viewport.x),
+                       min(rect.bottom, viewport.bottom) - max(rect.y, viewport.y))
+            assert min(overlap) >= -1e-7 and min(map(abs, overlap)) < 1e-7, (turn, key, overlap)
+        assert_rectangles({key: rect for key, rect in actual_query.items() if key not in boundary},
+                          {key: rect for key, rect in expected_query.items() if key not in boundary})
 
 
 def test_wide_tree_skips_offscreen_siblings_and_updates_only_ancestors():

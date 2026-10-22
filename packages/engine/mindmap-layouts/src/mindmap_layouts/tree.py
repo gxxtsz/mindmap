@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from math import isfinite
 
 from mindmap_core import (
@@ -18,6 +19,7 @@ from mindmap_core import (
 )
 
 from .connectors import route_branches
+from .spacing import resolve_tree_spacing
 
 
 class TreeLayout:
@@ -37,12 +39,13 @@ class TreeLayout:
     )
 
     def validate_config(self, config: LayoutConfig) -> None:
-        """当前树布局没有专有选项，未知参数明确报错，避免静默忽略拼写错误。"""
+        """使用公开间距契约校验专有选项，未知参数仍明确报错。"""
         config.validate()
         if config.algorithm_id != self.info.id:
             raise MindMapError("树布局配置的算法标识无效")
-        if config.options:
-            raise MindMapError("树布局不支持额外布局选项")
+        # 既有子类可以声明自己的算法标识并继承树布局。只在间距解析副本上
+        # 适配内置标识，保留扩展的正式配置和原有继承行为。
+        resolve_tree_spacing(replace(config, algorithm_id="tree"))
 
     def layout(
         self,
@@ -59,7 +62,7 @@ class TreeLayout:
         if root not in document.nodes:
             raise MindMapError("聚焦节点不存在")
         down = document.layout.direction == "down"
-        gap_x, gap_y = (32.0, 10.0) if document.layout.compact else (64.0, 22.0)
+        gap_x, gap_y = resolve_tree_spacing(replace(document.layout, algorithm_id="tree"))
 
         def size(key: str, text: str = "") -> Point:
             width, height = measurements.get(key, (max(64, min(280, 24 + len(text) * 8)), 36))
@@ -93,6 +96,7 @@ class TreeLayout:
         request = (
             document.layout.direction,
             document.layout.compact,
+            gap_x, gap_y,
             tuple(document.root.children),
             tuple(document.theme.palette),
             document.theme.accent,

@@ -1,9 +1,10 @@
 """外侧折叠按钮的显示、真实事件路由、直接子节点计数与静态导出回归。"""
 
 import gc
+from weakref import ref
 
 import pytest
-from mindmap_core import LayoutConfig, MindMapEngine, Theme
+from mindmap_core import LayoutConfig, MindMapDocument, MindMapEngine, Theme
 from mindmap_qt_canvas import MindMapWidget
 from mindmap_qt_canvas.items import FoldControlItem
 from mindmap_qt_render import NodeVisual
@@ -248,6 +249,30 @@ def test_pending_hide_is_safe_after_canvas_disposal(canvas, qtbot):
     assert not widget.view._fold_hide_timer.isActive()
     qtbot.wait(230)
     assert not widget.node_items[a].fold_control.isVisible()
+
+
+@pytest.mark.parametrize("transition", ["remove", "collapse", "replace"])
+def test_removed_node_is_not_kept_alive_by_external_fold_control(canvas, transition):
+    """保留按钮包装对象不会延长父图元寿命，场景移除后立即完成 Qt 父子析构。
+
+    旧实现的按钮强引用父节点，父节点又持有按钮；父子双向持有让图元滞留到
+    循环垃圾回收，可能恰好在下一次 QGraphicsObject 构造的虚函数回调内析构。
+    本例保留外部按钮引用，使该问题不依赖随机 GC 时机也能稳定暴露。
+    """
+    widget, target, _, _ = canvas
+    widget.select_nodes([widget.engine.root_id])
+    node_ref = ref(widget.node_items[target])
+    control = widget.node_items[target].fold_control
+    if transition == "remove":
+        widget.engine.remove_nodes([target])
+    elif transition == "collapse":
+        widget.engine.set_expanded(widget.engine.root_id, False)
+    else:
+        widget.engine.replace_document(MindMapDocument.new("替换后的导图"))
+    assert target not in widget.node_items
+    assert node_ref() is None
+    assert not isValid(control)
+    assert control.node_item is None and not control.can_activate()
 
 
 def test_repeated_canvas_destruction_clears_hover_timer_before_qt_objects_are_collected(qtbot):
