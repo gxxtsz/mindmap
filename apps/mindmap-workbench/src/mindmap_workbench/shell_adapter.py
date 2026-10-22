@@ -13,6 +13,8 @@ from PySide6.QtCore import QLibraryInfo, QPoint, QSettings, QSignalBlocker, Qt, 
 from PySide6.QtGui import QAction, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
+from .document_state import DocumentState
+from .recent_files import RecentFilesButton
 from .sessions import MindMapSessionManager
 
 
@@ -79,6 +81,12 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         super().__init__(AppSpec("mindmap-workbench", "原生思维导图", subtitle="思维导图工作台",
                                 storage_dir=storage_dir, theme=manager.theme), manager=manager)
         self.preferences = QSettings(str(manager.storage_dir / "preferences.ini"), QSettings.Format.IniFormat)
+        self.document_state = DocumentState(manager.storage_dir / "documents-v1.json")
+        startup_messages = []
+        try:
+            self.document_state.load()
+        except (OSError, ValueError, TypeError) as error:
+            startup_messages.append(f"最近文件与退出会话记录无效，已忽略：{error}")
         self._outline_stack = QStackedWidget(manager.parking)
         self._properties_stack = QStackedWidget(manager.parking)
         for stack in (self._outline_stack, self._properties_stack):
@@ -103,6 +111,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                                                        shortcut="Alt+3", icon="settings")
         self.read_only_action = QAction("只读模式", self, checkable=True)
         self.read_only_action.toggled.connect(self._set_read_only)
+        self.recent_files_button = RecentFilesButton(self)
+        self.set_title_bar_navigation(self.recent_files_button)
         manager.activate("properties", focus=False)
         layout = manager.capture_layout()
         for sizes in layout["hosts"]["main"]["region_sizes"].values():
@@ -112,9 +122,20 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._properties_visible = True
         manager.layout_changed.connect(self._layout_changed)
         if restore:
+            failures = self.sessions.restore_documents(self.document_state.open_documents,
+                                                      self.document_state.active_id)
+            restored_active = self.sessions.active_id
+            # 必须先注册文件，再按相同会话标识恢复外壳；反向顺序会把旧文档 token
+            # 作为未知项过滤，导致全部文件挤进同一个标签组。
             manager.load_session()
+            if restored_active:
+                manager.activate_document(restored_active)
+            if failures:
+                startup_messages.append("部分导图未能恢复：" + "；".join(failures))
         self.refresh_theme()
-        self._bind_session(None)
+        self._bind_session(self.active_session)
+        if startup_messages:
+            self.show_status_message("；".join(startup_messages))
 
     @property
     def active_session(self):
@@ -286,6 +307,22 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         else:
             self.setWindowTitle("原生思维导图")
             self.status_label.setText("  新建导图或打开文件以开始")
+        if hasattr(self, "recent_files_button"):
+            self.recent_files_button.refresh_document()
+
+    def _remember_path(self, path):
+        """文件操作成功后更新历史；配置写入失败只提示，不把已成功打开的文件报成失败。"""
+        try:
+            self.document_state.remember(path)
+        except OSError as error:
+            self.show_status_message(f"最近文件未能保存：{error}")
+
+    def clear_recent_files(self):
+        """清空最近文件，退出快照及运行中的全部会话继续保留。"""
+        try:
+            self.document_state.clear_recent()
+        except OSError as error:
+            self.show_status_message(f"最近文件未能保存：{error}")
 
     def new_document(self, path=None):
         """选择路径并成功首次保存后新增会话，现有会话保持不变。"""
@@ -310,6 +347,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         # 停止计时器。不能在打开对话框前停掉已经排队的自动保存。
         result = session.files.save(save_as=True) if save_as else session.flush()
         self.sessions.sync(session)
+        if result and save_as:
+            self._remember_path(session.files.path)
         return result
 
     def save_all(self):
@@ -350,6 +389,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def refresh_theme(self):
         """对所有会话同步界面色板，导图内容和自动保存计时不因外壳主题变化而修改。"""
         super().refresh_theme()
+        if hasattr(self, "recent_files_button"):
+            self.recent_files_button.refresh_theme()
         if hasattr(self, "sessions"):
             colors = ui_colors_from_shell(self.manager.theme)
             for session in self.sessions.values():
@@ -392,12 +433,25 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         super().hideEvent(event)
 
     def closeEvent(self, event):
+        if self._disposed:
+            event.accept()
+            return
         # 先按视觉标签顺序保存全部文件，任何失败均不让基类关闭或删除停靠页面。
-        if not self.manager.closing and not self.sessions.save_all():
+        # 正式启动器在事件循环退出后也可能先关闭停靠管理器；此时仍须完成业务保存。
+        if not self.sessions.save_all():
             event.ignore()
             return
         super().closeEvent(event)
         if event.isAccepted():
+            # 基类已完成全部关闭检查及布局保存，但 Qt 延迟删除尚未执行。此处仍能
+            # 读取真实标签树和活动项；dispose 后会话集合清空，不能再生成退出快照。
+            try:
+                self.document_state.save_session([
+                    {"id": session.id, "path": str(session.files.path)}
+                    for session in self.sessions.ordered()
+                ], self.sessions.active_id)
+            except OSError as error:
+                self.show_status_message(f"退出会话未能保存：{error}")
             self.dispose()
 
 

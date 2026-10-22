@@ -190,6 +190,8 @@ def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
     snapshot["tools"].append(legacy)
     snapshot["active"] = "settings"
     window.close()
+    # 模拟旧版只有外壳布局、没有独立文档记录的配置；旧标签标识不能单独重开文件。
+    window.document_state.store.path.unlink()
     window.manager.layout_store.save({
         "schema_version": 1, "current_layout": "旧布局", "session": snapshot,
         "layouts": {"旧布局": snapshot},

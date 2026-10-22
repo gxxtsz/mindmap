@@ -507,6 +507,7 @@ def test_bound_non_native_path_cannot_bypass_save_validation(empty_window, tmp_p
     session = create(window, tmp_path / "原路径.mindmap")
     original_path = session.files.path
     original = original_path.read_bytes()
+    recent = list(window.document_state.recent_files)
     if dirty:
         session.engine.update_node(session.engine.root_id, text="等待保存")
     target = tmp_path / "非法绑定.json"
@@ -520,6 +521,7 @@ def test_bound_non_native_path_cannot_bypass_save_validation(empty_window, tmp_p
         assert "仅支持保存为 .mindmap 文件" in session.last_error
         assert target.read_bytes() == b"untouched" and original_path.read_bytes() == original
         assert window.active_session is session and len(window.sessions) == 1
+        assert window.document_state.recent_files == recent
     finally:
         # 恢复测试故意破坏的绑定，避免退出时的保存检查阻止测试窗口销毁。
         session.files.path = original_path
@@ -898,7 +900,7 @@ def test_exit_failure_keeps_all_targets_and_success_releases_resources(empty_win
     assert not isValid(first.canvas) and not isValid(second.panels.properties)
 
 
-def test_layout_restore_preserves_live_documents_and_restart_only_shell(empty_window, tmp_path, qtbot):
+def test_layout_restore_preserves_live_documents_and_restart_reopens_files(empty_window, tmp_path, qtbot):
     window = empty_window
     first = create(window, tmp_path / "甲.mindmap")
     snapshot = window.manager.capture_layout()
@@ -930,8 +932,11 @@ def test_layout_restore_preserves_live_documents_and_restart_only_shell(empty_wi
     assert window.close()
     restarted = build_window(storage_dir=storage)
     qtbot.addWidget(restarted)
-    assert restarted.active_session is None and restarted.manager.documents == {}
-    assert all(group.count() == 0 for group in restarted.host.editor.groups)
+    assert restarted.active_session.id == first.id
+    assert set(restarted.manager.documents) == {first.id, second.id}
+    assert restarted.sessions.get(first.id).files.path == first.files.path
+    assert restarted.sessions.get(second.id).files.path == second.files.path
+    assert all(restarted.host.editor.find_token(session.id) for session in (first, second))
     restarted.close()
 
 

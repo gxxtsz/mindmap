@@ -175,6 +175,7 @@ class _TitleBar(QWidget):
         self.menu.setAccessibleName("主菜单")
         self.menu.clicked.connect(self.show_menu)
         self.box.addWidget(self.menu)
+        self.navigation = None
         self.box.addStretch(1)
         self.action_buttons = []
         for spec in window._action_specs:
@@ -342,6 +343,32 @@ class WorkbenchWindow(QMainWindow):
     def action(self, action_id):
         """取得业务或停靠系统的共享动作，用于启用状态、图标和快捷键设置。"""
         return self.manager.actions[action_id]
+
+    def set_title_bar_navigation(self, widget: QWidget | None) -> None:
+        """设置紧邻主菜单右侧的业务导航控件，传入 None 清空该插槽。
+
+        插槽接管控件的父子所有权，替换时隐藏并延迟销毁旧控件；重复设置同一
+        实例不做任何操作。调用方负责控件的尺寸及业务行为，外壳仅提供位置，
+        不读取文件、保存业务状态或改变右侧工具动作与窗口按钮的排列。
+        """
+        if widget is not None and not isinstance(widget, QWidget):
+            raise TypeError("顶栏导航必须是 QWidget 或 None")
+        bar = self.title_bar
+        if widget is bar.navigation:
+            return
+        if widget is not None and (widget is bar or widget.isAncestorOf(bar)):
+            raise ValueError("顶栏导航不能包含标题栏自身")
+        previous = bar.navigation
+        if previous is not None:
+            bar.box.removeWidget(previous)
+            previous.hide()
+            previous.deleteLater()
+        bar.navigation = widget
+        if widget is not None:
+            # 插入到主菜单与伸缩留白之间；不能使用末尾索引，否则会落入业务动作区。
+            widget.setParent(bar)
+            bar.box.insertWidget(bar.box.indexOf(bar.menu) + 1, widget)
+            widget.show()
 
     @Slot()
     def refresh_theme(self):

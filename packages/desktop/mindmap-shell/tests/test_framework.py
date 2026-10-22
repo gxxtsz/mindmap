@@ -6,6 +6,8 @@
 
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow
 from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtWidgets import QLineEdit, QToolButton
+from shiboken6 import isValid
 
 
 def test_workbench_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path):
@@ -26,3 +28,27 @@ def test_workbench_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path
     assert calls == [1]
     window.manager.shutdown()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_navigation_slot_inserts_replaces_and_releases_owned_widgets(qtbot, tmp_path):
+    """导航始终位于菜单之后，替换或清空释放旧控件，右侧动作及窗口按钮不被重排。"""
+    window = WorkbenchWindow(AppSpec("navigation-test", "导航验收", storage_dir=tmp_path))
+    qtbot.addWidget(window)
+    window.show()
+    first = QToolButton()
+    first.setText("业务导航")
+    window.set_title_bar_navigation(first)
+    bar = window.title_bar
+    assert first.parentWidget() is bar and first.isVisible()
+    assert bar.box.indexOf(first) == bar.box.indexOf(bar.menu) + 1
+    window.set_title_bar_navigation(first)
+    assert isValid(first) and bar.navigation is first
+    second = QLineEdit("替换导航")
+    window.set_title_bar_navigation(second)
+    assert not first.isVisible() and bar.navigation is second
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(first)
+    window.set_title_bar_navigation(None)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(second) and bar.navigation is None
+    assert bar.box.itemAt(bar.box.count() - 1).layout() is bar.window_controls

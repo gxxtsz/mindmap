@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -19,6 +18,7 @@ from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from .background_save import save_snapshot
+from .document_state import path_key
 
 # 延迟启动一个独立进程，避免编码、深拷贝及垃圾回收持有 GUI 的解释器锁。
 _SAVE_POOL = None
@@ -47,18 +47,14 @@ def _discard_save_pool(executor):
         executor.shutdown(wait=False, cancel_futures=True)
 
 
-def path_key(path):
-    """比较真实绝对路径；Windows 忽略大小写，解析软链接后避免同一文件重复编辑。"""
-    return os.path.normcase(str(Path(path).resolve()))
-
-
 class MindMapSession(QObject):
     """一份导图拥有全部编辑和文件状态，自动保存只读取已提交的引擎快照。"""
 
-    def __init__(self, owner):
+    def __init__(self, owner, *, session_id=None):
+        """普通文件创建新标识，启动恢复使用已校验的旧标识接回原来的分屏标签。"""
         super().__init__(owner)
         self.owner = owner
-        self.id = "mindmap." + uuid4().hex
+        self.id = session_id or "mindmap." + uuid4().hex
         self.engine = MindMapEngine()
         self.canvas = MindMapWidget(self.engine, toolbar=False, view_controls=True, embedded=True,
                                     layout_registry=owner.window.layout_registry,
@@ -108,6 +104,7 @@ class MindMapSession(QObject):
                 self.timer.start()
         else:
             self.timer.stop()
+        self.owner._saved_path(self)
         self.owner.sync(self)
 
     def _failed(self, message):
@@ -270,6 +267,7 @@ class MindMapSessionManager(QObject):
         super().__init__(window)
         self.window = window
         self._sessions = {}
+        self._known_paths = {}
         self.active_id = ""
         self._switching = False
         window.manager.document_activated.connect(self._activate)
@@ -296,9 +294,10 @@ class MindMapSessionManager(QObject):
         return next((item for item in self.values() if item.files.path is not None
                      and path_key(item.files.path) == key), None)
 
-    def _install(self, session):
+    def _install(self, session, *, remember=True):
         """初次加载或保存完整成功后才注册界面，避免出现空路径和半初始化的标签。"""
         self._sessions[session.id] = session
+        self._known_paths[session.id] = session.files.path
         self.window._outline_stack.addWidget(session.panels.outline)
         self.window._properties_stack.addWidget(session.panels.properties)
         # 标签只显示不含末尾扩展名的文件名，完整路径仍由文件控制器保留。
@@ -310,6 +309,8 @@ class MindMapSessionManager(QObject):
         self.window.manager.set_document_actions(session.id, [session.canvas.action("undo"), session.canvas.action("redo")])
         self.sync(session)
         self.window.manager.activate_document(session.id)
+        if remember:
+            self.window._remember_path(session.files.path)
 
     def new_document(self, path=None):
         """新建先选择路径并完成第一次写入；取消或失败仅清理候选会话。"""
@@ -332,23 +333,47 @@ class MindMapSessionManager(QObject):
 
     def open_path(self, path):
         """仅打开原生导图；先校验再查重，额外格式不能借已有会话绕过打开限制。"""
+        return self._open_path(path)
+
+    def _open_path(self, path, *, session_id=None, remember=True):
+        """共用文件校验和安装流程；仅启动恢复传入旧标识并禁止历史重排。"""
         source = MindMapFileController.validate_open_path(path)
         existing = self.find_path(source)
         if existing is not None:
             self.window.manager.activate_document(existing.id)
+            if remember:
+                self.window._remember_path(existing.files.path)
             return True
-        candidate = MindMapSession(self)
+        candidate = MindMapSession(self, session_id=session_id)
         try:
             if not candidate.files.open_path(source.resolve()):
                 candidate.dispose()
                 candidate.canvas.deleteLater()
                 return False
-            self._install(candidate)
+            self._install(candidate, remember=remember)
             return True
         except Exception:
             candidate.dispose()
             candidate.canvas.deleteLater()
             raise
+
+    def restore_documents(self, documents, active_id):
+        """逐份重建退出时的导图，单份失败不影响其他文件，返回供窗口汇总的错误。
+
+        记录顺序已经是视觉标签顺序；安装时复用会话 ID，随后由外壳恢复分屏树。
+        提前选中原活动项，避免布局恢复时把最后加载的文件误当成活动标签。
+        """
+        failures = []
+        for item in documents:
+            try:
+                if not self._open_path(item["path"], session_id=item["id"], remember=False):
+                    failures.append(f"{Path(item['path']).name}：未能打开导图")
+            except (MindMapError, OSError, ValueError) as error:
+                failures.append(f"{Path(item['path']).name}：{error}")
+        selected = self.get(active_id) or next(iter(self.values()), None)
+        if selected is not None:
+            self.window.manager.activate_document(selected.id)
+        return failures
 
     def open_dialog(self):
         """空白页也可直接选择原生导图；固定筛选，不再构造扩展格式或导入入口。"""
@@ -397,6 +422,18 @@ class MindMapSessionManager(QObject):
         self.window.show_status_message("全部导图已保存")
         return True
 
+    def _saved_path(self, session):
+        """仅在保存成功通知后记录改绑路径；外部错误改绑或保存失败不能污染历史。
+
+        初次加载及首次保存尚未安装会话，由安装流程记入历史。已安装会话的另存为
+        可能直接通过文件控制器调用，因此在成功事件边界检测，而不是依赖窗口动作。
+        """
+        if session.id not in self._sessions or session.disposed:
+            return
+        if self._known_paths.get(session.id) != session.files.path:
+            self._known_paths[session.id] = session.files.path
+            self.window._remember_path(session.files.path)
+
     def sync(self, session):
         """同步标签显示和文件状态；保存或另存为后使用当前路径，悬停提示保留完整路径。"""
         if session.id not in self._sessions or session.disposed:
@@ -416,6 +453,7 @@ class MindMapSessionManager(QObject):
 
     def _closed(self, session):
         self._sessions.pop(session.id, None)
+        self._known_paths.pop(session.id, None)
         if self.active_id == session.id:
             self.active_id = ""
             self.window._bind_session(None)
@@ -429,4 +467,5 @@ class MindMapSessionManager(QObject):
         for session in self.values():
             session.dispose()
         self._sessions.clear()
+        self._known_paths.clear()
         self.active_id = ""

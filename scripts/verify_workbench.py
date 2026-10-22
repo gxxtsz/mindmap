@@ -16,7 +16,7 @@ def child(scale, platform):
     from mindmap_core import Theme
     from mindmap_docking import ViewMode
     from mindmap_workbench.shell_adapter import build_window
-    from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
+    from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt, QTimer
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -97,6 +97,52 @@ def child(scale, platform):
             assert exports.grab().save(str(output / (name + "-export-menu.png")))
             exports.close()
             main_menu.deleteLater()
+            # 最近文件菜单使用独立弹出窗口，分别抓取菜单和最小尺寸顶栏，核验三档
+            # 缩放下文件名、当前项标记、入口位置和窗口控制按钮之间仍保留足够空间。
+            recent_button = window.recent_files_button
+            recent_menu = recent_button.menu()
+
+            def recent_background():
+                """从父级顶栏的实际合成像素读取背景，兼容透明按钮和高 DPI 截图。"""
+                image = window.title_bar.grab().toImage()
+                point = recent_button.mapTo(window.title_bar, QPoint(4, recent_button.height() // 2))
+                ratio = image.devicePixelRatio()
+                return image.pixelColor(int((point.x() + 0.5) * ratio), int((point.y() + 0.5) * ratio))
+
+            QTest.mouseMove(recent_button, recent_button.rect().center())
+            app.processEvents()
+            checks["最近文件入口仅文字"] = (recent_button.icon().isNull()
+                and recent_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextOnly)
+            checks["最近文件入口悬停灰底"] = recent_background() == window.manager.theme.color("window-control-bg-hovered")
+            assert window.title_bar.grab().save(str(output / (name + "-recent-hover.png")))
+            QTest.mouseMove(window.title_bar, QPoint(window.width() // 2, window.title_bar.height() // 2))
+            app.processEvents()
+            checks["最近文件入口默认透明"] = recent_background() == window.manager.theme.color("main-window-titlebar-bg")
+            assert window.title_bar.grab().save(str(output / (name + "-recent-idle.png")))
+            recent_menu.popup(recent_button.mapToGlobal(recent_button.rect().bottomLeft()))
+            app.processEvents()
+            checks["最近文件入口展开保持灰底"] = recent_background() == window.manager.theme.color("window-control-bg-hovered")
+            assert window.title_bar.grab().save(str(output / (name + "-recent-open.png")))
+            recent_actions = [action for action in recent_menu.actions() if action.data()]
+            checks["最近文件目录与当前项"] = (
+                [action.data() for action in recent_actions] == [str(secondary.files.path), str(primary.files.path)]
+                and recent_actions[1].isChecked() and not recent_actions[0].isChecked()
+                and all(action.toolTip() == action.data() for action in recent_actions)
+            )
+            assert recent_menu.grab().save(str(output / (name + "-recent-files.png")))
+            recent_menu.close()
+            app.processEvents()
+            checks["最近文件入口收起恢复透明"] = recent_background() == window.manager.theme.color("main-window-titlebar-bg")
+            window.resize(860, 540)
+            app.processEvents()
+            checks["最小窗口最近文件入口"] = (
+                window.title_bar.menu.geometry().right() < recent_button.x()
+                and recent_button.geometry().right() < window.title_bar.minimize.x()
+                and window.title_bar.rect().contains(recent_button.geometry())
+            )
+            assert window.grab().save(str(output / (name + "-recent-minimum.png")))
+            window.resize(1440, 960)
+            app.processEvents()
             # 通过真正的另存为入口打开 Qt 文件对话框，抓取明暗主题和唯一筛选。
             # 验收专用包装关闭系统原生对话框，便于同一进程读到控件并自动取消；
             # 产品仍使用原来的静态入口和系统默认选择，不改用户路径及导图内容。
