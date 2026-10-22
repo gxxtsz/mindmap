@@ -26,6 +26,8 @@ uv build --package mindmap-docking
 `editor_header_height`／`compact_editor_header_height` 控制标签行高度，默认32／28逻辑像素。
 业务文档控件应自行铺满正文；需要跟随外壳底色时由宿主显式传递，框架不改写业务数据。
 
+侧栏按钮单击切换面板显隐，已展开的面板即使焦点在画布或其他工具中也会立即收起；再次点击复用原内容打开。
+使用 Tab 导航到侧栏按钮后按空格同样切换显隐；工具快捷键仍先聚焦已打开的非活动面板，再次触发才收起。
 侧栏活动工具采用蓝底白色图标，已打开但未活动的工具采用柔和蓝底和蓝色图标，普通悬停保留灰底。
 状态色由 `ToolWindow.Button.selectedBackground`／`selectedForeground` 和
 `ToolWindow.Button.inactiveBackground`／`inactiveForeground` 分别控制，可通过 `ThemeTokens` 覆盖；

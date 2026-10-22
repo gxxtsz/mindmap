@@ -73,8 +73,17 @@ class StripeButton(_StripeEntryButton):
         self.clicked.connect(self._toggle)
 
     def _toggle(self):
-        if not self._dragged:
-            self.manager.toggle(self.tool_id)
+        """按面板显隐切换入口；焦点位置不影响一次点击的收起行为。
+
+        快捷键继续通过 manager.toggle 先聚焦已打开的非活动面板；侧栏入口则
+        直接隐藏已显示的面板，避免用户从画布返回时必须先激活、再点击收起。
+        拖放后的点击和暂时不可用的工具仍不执行切换，显隐及内容生命周期由管理器负责。
+        """
+        if not self._dragged and self.manager.is_tool_available(self.tool_id):
+            if self.manager.states[self.tool_id].visible:
+                self.manager.hide(self.tool_id)
+            else:
+                self.manager.activate(self.tool_id)
         self._dragged = False
 
     def mousePressEvent(self, event):

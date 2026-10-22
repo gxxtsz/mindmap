@@ -52,6 +52,87 @@ def assert_no_overlap(rail):
         assert all(not rect.intersects(other) for other in rectangles[index + 1:])
 
 
+@pytest.mark.parametrize("position", list(DockPosition))
+@pytest.mark.parametrize("focus_owner", ["panel", "editor", "other_tool"])
+def test_stripe_click_closes_open_panel_regardless_of_focus(docking, qtbot, position, focus_owner):
+    """六个停靠位置的入口均按显隐切换；焦点离开面板后也必须单击收起。"""
+    manager, host = docking.manager, docking.host
+    docking.register("target", position)
+    other_position = DockPosition.RIGHT_TOP if position != DockPosition.RIGHT_TOP else DockPosition.LEFT_TOP
+    docking.register("other", other_position)
+    manager.refresh()
+    rail = host.left_rail if position in POSITIONS["left"] else host.right_rail
+    button = rail._buttons["target"]
+
+    # 从真实按钮打开，随后将焦点移到画布或另一个工具，复现已经展开但不活动的状态。
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    panel = manager.panel("target")
+    content = panel.content
+    content.setPlainText("再次打开时保留内容")
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is content)
+    if focus_owner == "editor":
+        docking.document.setFocus()
+        qtbot.waitUntil(lambda: manager.active_id == "")
+    elif focus_owner == "other_tool":
+        manager.activate("other")
+        qtbot.waitUntil(lambda: QApplication.focusWidget() is manager.panel("other").content)
+        qtbot.waitUntil(lambda: manager.active_id == "other")
+    assert manager.states["target"].visible and panel.isVisible() and button.isChecked()
+
+    # 按下与释放之间处理焦点回调，确保一次完整鼠标操作不会只激活面板或重新打开。
+    qtbot.mousePress(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    qtbot.mouseRelease(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    assert not manager.states["target"].visible
+    assert not panel.isVisible()
+    assert not host.zones[position].isVisible()
+    assert not button.isChecked()
+    if focus_owner == "other_tool":
+        assert manager.states["other"].visible
+
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is content)
+    assert manager.states["target"].visible and panel.isVisible() and button.isChecked()
+    assert manager.panel("target").content is content
+    assert content.toPlainText() == "再次打开时保留内容"
+    assert docking.calls["target"] == 1
+
+
+def test_stripe_keyboard_activation_closes_open_panel(docking, qtbot):
+    """Tab 导航到入口后空格同样单次收起，不依赖工具是否仍为活动项。"""
+    manager = docking.manager
+    manager.activate("alpha")
+    button = docking.host.left_rail._buttons["alpha"]
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is button and manager.active_id == "")
+    assert manager.states["alpha"].visible and button.isChecked()
+
+    qtbot.keyClick(button, Qt.Key.Key_Space)
+    QApplication.processEvents()
+    assert not manager.states["alpha"].visible
+    assert not manager.panel("alpha").isVisible()
+    assert not button.isChecked()
+
+
+def test_tool_shortcut_action_still_focuses_open_panel_before_hiding(docking, qtbot):
+    """快捷键动作仍先聚焦非活动面板，再次触发才隐藏，区别于侧栏显隐入口。"""
+    manager = docking.manager
+    manager.activate("alpha")
+    content = manager.panel("alpha").content
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is content)
+    docking.document.setFocus()
+    qtbot.waitUntil(lambda: manager.active_id == "")
+
+    action = manager.actions["tool:alpha"]
+    action.trigger()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is content and manager.active_id == "alpha")
+    assert manager.states["alpha"].visible
+    action.trigger()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is docking.document)
+    assert not manager.states["alpha"].visible
+
+
 @pytest.mark.parametrize("side", POSITIONS)
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("compact", [False, True])

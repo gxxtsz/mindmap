@@ -1,4 +1,4 @@
-# 主题资源按原始字节校验摘要，统一换行符，避免 Windows 检出时改变校验结果。
-packages/mindmap-docking/src/mindmap_docking/resources/*.json text eol=lf
-# 新增图标固定为摘要生成时的 LF，避免 Windows 检出后改变文件字节。
-packages/mindmap-docking/src/mindmap_docking/resources/icons/save-all.svg text eol=lf
+# 主题、资源清单与图标按原始字节校验摘要，统一使用 LF，覆盖自动换行配置。
+# 路径跟随桌面包目录；所有现有及新增的 JSON、SVG 都必须保持检出和打包字节一致。
+packages/desktop/mindmap-docking/src/mindmap_docking/resources/*.json text eol=lf
+packages/desktop/mindmap-docking/src/mindmap_docking/resources/icons/*.svg text eol=lf
