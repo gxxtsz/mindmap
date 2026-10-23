@@ -14,6 +14,7 @@ from mindmap_core import (
 from mindmap_layouts import TreeLayout
 from mindmap_qt_canvas import MindMapWidget
 from mindmap_qt_canvas.dragging import _DropResolver
+from mindmap_qt_render import rendering
 from mindmap_qt_render.rendering import branch_path
 from PySide6.QtCore import QAbstractAnimation, QBuffer, QEvent, QIODevice, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QFocusEvent, QImage, QMouseEvent
@@ -925,7 +926,7 @@ def test_all_branch_styles_animate_only_after_drop_and_preserve_final_geometry(c
 
 
 @pytest.mark.parametrize("dark", [False, True])
-def test_ghost_contains_images_long_text_and_does_not_leak_to_export(canvas, tmp_path, dark):
+def test_ghost_contains_images_long_text_and_does_not_leak_to_export(canvas, tmp_path, monkeypatch, dark):
     widget, (a, b, c, x, *_rest) = canvas
     image = QImage(60, 40, QImage.Format.Format_ARGB32)
     image.fill(QColor("#f02020"))
@@ -933,6 +934,10 @@ def test_ghost_contains_images_long_text_and_does_not_leak_to_export(canvas, tmp
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
     assert image.save(buffer, "PNG")
     widget.engine.attach_image(x, bytes(buffer.data()), width=80)
+    widget.engine.create_detail_page(x)
+    leaf = widget.engine.get_node(x).children[0]
+    widget.engine.create_detail_page(leaf)
+    widget.engine.create_submap(leaf)
     widget.engine.update_node(a, text="包含长文本的中文主题\n第二行说明")
     if dark:
         widget.engine.set_theme(Theme.dark())
@@ -945,9 +950,19 @@ def test_ghost_contains_images_long_text_and_does_not_leak_to_export(canvas, tmp
     actual = tmp_path / "拖动期间.svg"
     widget.export(actual)
     assert actual.read_bytes() == expected.read_bytes()
+    page_icons = []
+    original = rendering.paint_page_icon
+
+    def painted(painter, kind, rect, color):
+        page_icons.append((kind, painter.opacity()))
+        original(painter, kind, rect, color)
+
+    monkeypatch.setattr(rendering, "paint_page_icon", painted)
     # 实际渲染预览，覆盖 QPainter 文字、图片、分支及落点图层的组合。
     rendered = widget.view.viewport().grab().toImage()
     assert not rendered.isNull()
+    # 半透明拖动图层同样保留附页标记；交互按钮本身不会进入影像。
+    assert {kind for kind, opacity in page_icons if opacity < 1} == {"detail", "submap"}
     assert x in control._ghost_nodes and control._base.visuals[x].image is not None
     child_rect = control._ghost_nodes[x]
     center = control._base.visuals[x].image_rect.center()

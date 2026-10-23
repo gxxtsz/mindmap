@@ -6,12 +6,18 @@ from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 
 
 class NodeItem(QGraphicsObject):
-    """显示一个节点；controls 仅控制折叠标记绘制，不注册任何编辑或文档修改行为。"""
+    """显示静态节点；折叠标记和页面图标分别控制，不注册编辑或文档修改行为。"""
 
-    def __init__(self, node, visual, theme, *, controls=False):
+    def __init__(self, node, visual, theme, *, controls=False, page_controls=True):
+        """借用节点及只读视觉；page_controls 默认绘制已计入尺寸的页面图标。
+
+        controls 沿用既有的外侧折叠标记开关；交互画布另有页面按钮子图元，
+        因而将 page_controls 关闭以免重复绘制。两个开关都不改变节点测量。
+        """
         super().__init__()
         self.node, self.visual, self.theme = node, visual, theme
         self.controls = bool(controls)
+        self.page_controls = bool(page_controls)
         self.editing = False
         self.setZValue(5)
         self.setFlags(
@@ -57,5 +63,6 @@ class NodeItem(QGraphicsObject):
             selected=self.isSelected(),
             editing=self.editing,
             controls=self.controls,
+            page_controls=self.page_controls,
             accent=self.theme.accent,
         )

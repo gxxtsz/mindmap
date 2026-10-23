@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from mindmap_core import Theme
+from mindmap_qt_render import page_icon_body
 from PySide6.QtCore import QByteArray, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
@@ -52,8 +53,10 @@ class IconMenuOptionButton(QToolButton):
 
 # 所有图形共用 24×24 坐标、两单位描边和圆角端点；只保留界面实际引用的图形。
 _SVG_BODIES = {
-    # 子导图与返回上级共用原创矢量图形，不依赖系统字体是否提供页面符号。
-    "submap": '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 9h8m-8 5h8"/>',
+    # 页面类型与节点、矢量导出复用相同图形体，主题和高 DPI 状态仍由本工厂管理。
+    "main": page_icon_body("main"),
+    "detail": page_icon_body("detail"),
+    "submap": page_icon_body("submap"),
     "page_up": '<path d="M12 21V4m-6 6 6-6 6 6"/>',
     "panel_menu": '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
     "panel_hide": '<path d="M5 12h14"/>',

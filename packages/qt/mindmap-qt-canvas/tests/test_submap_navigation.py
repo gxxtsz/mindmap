@@ -1,10 +1,12 @@
 """子导图路径、页内编辑隔离、视图恢复与原生交互验收。"""
 
 import pytest
-from mindmap_core import MindMapEngine, MindMapError, Theme
+from mindmap_core import MindMapEngine, MindMapError, PathEntry, Theme
 from mindmap_qt_canvas import MindMapWidget
+from mindmap_qt_canvas.navigation import PathNavigation
 from mindmap_qt_canvas.widget import VIRTUALIZATION_NODE_LIMIT
 from mindmap_qt_panels import MindMapPanels
+from mindmap_qt_ui.ui_style import ui_colors
 from PySide6.QtCore import QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QInputMethodEvent
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QToolButton
@@ -303,7 +305,9 @@ def test_page_path_stays_short_for_deep_branches_and_selection(workspace, monkey
         buttons = [button for button in bar.findChildren(QToolButton) if button.isVisible()]
         assert not any(button.text() == "…" for button in buttons)
         pages = [button for button in buttons if button is not bar.back_button]
-        assert len(pages) == len(expected_ids) and all(button.icon().isNull() for button in pages)
+        assert len(pages) == len(expected_ids) and all(not button.icon().isNull() for button in pages)
+        assert [button.property("page_kind") for button in pages] == ["main"] + ["submap"] * (len(pages) - 1)
+        assert all(button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon for button in pages)
         assert not bar.back_button.icon().isNull()
         assert [bool(button.property("last")) for button in pages] == [False] * (len(pages) - 1) + [True]
         badges = [label.text() for label in bar.findChildren(QLabel) if label.isVisible()]
@@ -385,11 +389,42 @@ def test_long_page_path_menu_keeps_every_hidden_page_clickable(workspace):
     for page, root, text in hidden:
         canvas.navigate_to(last)
         action = next(action for action in hidden_actions() if action.text() == text)
-        assert action.icon().isNull()
+        assert not action.icon().isNull()
         action.trigger()
         assert canvas.current_page_id == page and canvas.selected_node_ids() == [root]
     assert canvas.engine.revision == revision and not canvas.engine.is_dirty
     assert not errors
+
+
+@pytest.mark.parametrize("width", [260, 420])
+@pytest.mark.parametrize("selection_count", [0, 2])
+def test_breadcrumb_icons_fit_narrow_width_and_optional_type_mapping(qtbot, width, selection_count):
+    """图标纳入真实控件布局；新映射可更新同一组路径，旧调用仍有默认图标。"""
+    bar = PathNavigation()
+    qtbot.addWidget(bar)
+    bar.resize(width, 36)
+    bar.set_ui_colors(ui_colors(Theme.dark()))
+    entries = [PathEntry(None, "主根", "主导图名称", True)] + [
+        PathEntry(f"页面{index}", f"根{index}", "很长的页面名称" * 3, True) for index in range(8)]
+    bar.set_path(entries, page_id=entries[-1].page_id, selection_count=selection_count)
+    assert bar.page_kinds[entries[-1].page_id] == "submap"
+    kinds = {entry.page_id: "main" if entry.page_id is None else "submap" for entry in entries}
+    kinds[entries[-1].page_id] = "detail"
+    bar.set_path(entries, page_id=entries[-1].page_id, selection_count=selection_count, page_kinds=kinds)
+    bar.show()
+    QApplication.processEvents()
+    QApplication.processEvents()
+    widgets = [bar.row.itemAt(index).widget() for index in range(bar.row.count())
+               if bar.row.itemAt(index).widget() is not None]
+    for widget in widgets:
+        assert bar.rect().contains(widget.geometry())
+    for left, right in zip(widgets, widgets[1:]):
+        assert not left.geometry().intersects(right.geometry())
+    current = next(button for button in bar.findChildren(QToolButton)
+                   if button.isVisible() and button.property("last"))
+    assert current.property("page_kind") == "detail" and not current.icon().isNull()
+    assert current.toolTip() == entries[-1].text
+    assert bar.full_path == " › ".join(entry.text for entry in entries)
 
 
 def test_delete_submap_confirmation_preserves_entry_and_undo(workspace, monkeypatch):

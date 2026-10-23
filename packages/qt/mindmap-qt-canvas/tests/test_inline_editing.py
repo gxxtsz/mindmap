@@ -214,6 +214,41 @@ def test_decorations_follow_wrapped_text_without_mutating_shared_visual(canvas, 
     assert widget.node_items[child].visual is base
 
 
+@pytest.mark.parametrize("text", ["短", "长标题与页面入口保持独立" * 12])
+def test_inline_editing_keeps_both_internal_controls_and_commits_same_geometry(canvas, text):
+    """长短草稿与正式测量共用页面按钮几何，候选和编辑状态不允许切页。"""
+    widget, branch = canvas
+    child = widget.engine.add_child(branch, "初始标题")
+    widget.engine.create_detail_page(child)
+    widget.engine.create_submap(child)
+    widget.engine.update_node(child, style={"width": 120, "font_size": 7})
+    widget.begin_edit(child)
+    widget.editor.setPlainText(text)
+    assert_editor_fits(widget)
+
+    def assert_controls_fit():
+        item = widget.node_items[child]
+        body = QRectF(0, 0, item.visual.width, item.visual.height)
+        editor = widget.editor.mapRectToItem(item, widget.editor.boundingRect())
+        for control in (item.detail_page_control, item.submap_control):
+            assert body.contains(control.boundingRect())
+            assert not editor.intersects(control.boundingRect())
+            assert not control.can_activate()
+
+    assert_controls_fit()
+    widget.scene.sendEvent(widget.editor, QInputMethodEvent("输入法候选" * 10, []))
+    assert widget.is_composing
+    assert_controls_fit()
+    widget.scene.sendEvent(widget.editor, QInputMethodEvent())
+    preview = widget.node_items[child].visual
+    widget.finish_edit(commit=True)
+    actual = widget.node_items[child].visual
+    assert (actual.width, actual.height) == pytest.approx((preview.width, preview.height))
+    assert actual.text_position == preview.text_position
+    for kind in ("detail", "submap"):
+        assert actual.page_control_rect(kind) == preview.page_control_rect(kind)
+
+
 def test_custom_layout_and_navigation_temporary_display_support_preview(canvas, qtbot):
     widget, child = canvas
     widget.engine.set_expanded(widget.engine.root_id, False)

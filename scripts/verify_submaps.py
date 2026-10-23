@@ -16,7 +16,7 @@ def child(scale, platform):
     from mindmap_core import MindMapError
     from mindmap_formats import load_document
     from mindmap_workbench.shell_adapter import build_window
-    from PySide6.QtCore import QCoreApplication, QEvent, QPointF
+    from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRectF
     from PySide6.QtWidgets import QApplication, QToolButton
 
     app = QApplication([])
@@ -91,6 +91,7 @@ def child(scale, platform):
                     actions = overflow.menu().actions()
                     checks["长路径仅收起页面"] = bool(actions) and all(
                         entry.page_root for entry in canvas.path_navigation.entries)
+                    checks["省略菜单保留页面类型图标"] = all(not action.icon().isNull() for action in actions)
                     assert window.grab().save(str(output / (label + "-long-path.png")))
                     target_page, target_root = targets[actions[0].text()]
                     actions[0].trigger()
@@ -120,8 +121,10 @@ def child(scale, platform):
                     canvas.editor.setPlainText("新节点")
                     app.processEvents()
                     short_visual = canvas.node_items[owner].visual
-                    checks["短文字编辑无多余宽度"] = (canvas.editor.textWidth() < 100
-                                                       and short_visual.width == canvas.editor.textWidth() + 28)
+                    # 内嵌页面入口是实际内容；正文原来的宽度规则仍保持不变。
+                    checks["短文字编辑仅增加页面入口宽度"] = (
+                        canvas.editor.textWidth() < 100
+                        and short_visual.width == canvas.editor.textWidth() + 28 + short_visual.page_controls_width)
                     assert window.grab().save(str(output / (label + "-editing-short.png")))
                     canvas.editor.setPlainText("长文本在节点内部自动换行，圆角高亮与连接线随内容调整。" * 6)
                     app.processEvents()
@@ -150,6 +153,11 @@ def child(scale, platform):
                         and item.submap_control.toolTip() == "进入子导图")
                     checks["两类入口互不重叠"] = not item.detail_page_control.boundingRect().intersects(
                         item.submap_control.boundingRect())
+                    checks["页面入口全部位于节点内部"] = all(
+                        QRectF(0, 0, node_item.visual.width, node_item.visual.height).contains(control.boundingRect())
+                        for node_item in canvas.node_items.values()
+                        for control in (node_item.detail_page_control, node_item.submap_control)
+                        if control.isVisible())
                     item = canvas.node_items[branch]
                     checks["详情入口避让折叠按钮"] = not item.detail_page_control.boundingRect().intersects(
                         item.fold_control.button_rect())
@@ -158,6 +166,11 @@ def child(scale, platform):
                     engine.add_child(canvas.document_view.root_id, "业务规则与补充说明")
                     app.processEvents()
                     checks["详情路径有明确标识"] = canvas.path_navigation.full_path.endswith("整数与进制 · 详情")
+                    page_buttons = [button for button in canvas.path_navigation.findChildren(QToolButton)
+                                    if button.isVisible() and button.property("page_kind")]
+                    checks["面包屑图标匹配页面类型"] = (
+                        [button.property("page_kind") for button in page_buttons] == ["main", "detail"]
+                        and all(not button.icon().isNull() for button in page_buttons))
                     checks["详情页隐藏创建入口"] = not canvas.action("create_submap").isVisible() and not (
                         canvas.action("create_detail_page").isVisible())
                     rejected = 0

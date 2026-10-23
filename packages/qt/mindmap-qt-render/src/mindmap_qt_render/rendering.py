@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mindmap_core import BranchPath, Curve, MindMapDocument, MindMapError, Node, Theme
@@ -26,6 +26,14 @@ from PySide6.QtGui import (
     QTextOption,
 )
 from PySide6.QtWidgets import QApplication, QGraphicsPathItem
+
+from .page_icons import paint_page_icon
+
+PAGE_CONTROL_SIZE = 32.0
+PAGE_CONTROL_GAP = 2.0
+PAGE_CONTENT_GAP = 8.0
+PAGE_RIGHT_PADDING = 14.0
+PAGE_MIN_HEIGHT = 44.0
 
 
 def ensure_fonts() -> None:
@@ -109,6 +117,11 @@ def decode_image(data: bytes) -> tuple[QPixmap, str]:
 
 @dataclass
 class NodeVisual:
+    """以逻辑像素描述节点内容和内嵌入口；工厂发布后只读共享。
+
+    页面字段提供默认值以兼容旧构造；入口矩形由完整宽高计算，不保存与
+    具体节点或页面 ID 绑定的控件。content_height 保留居中前的内容尺寸。
+    """
     width: float
     height: float
     text: QTextDocument
@@ -123,15 +136,72 @@ class NodeVisual:
     tag_font: QFont
     font: QFont
     has_children: bool
+    # 只保存页面类别，绝不把具体页面 ID 放入可跨节点共享的视觉缓存。
+    page_kinds: tuple[str, ...] = ()
+    page_icon_color: QColor | None = None
+    # 记录最小高度居中前的内容高度，使编辑草稿增减行数时能准确恢复留白。
+    content_height: float = 0.0
+
+    @property
+    def page_controls_width(self) -> float:
+        """返回入口增加的完整宽度；无入口时为零，原正文宽度不受影响。"""
+        count = len(self.page_kinds)
+        if not count:
+            return 0.0
+        return PAGE_CONTENT_GAP + count * PAGE_CONTROL_SIZE + (count - 1) * PAGE_CONTROL_GAP
+
+    @property
+    def content_offset(self) -> float:
+        """返回最小高度产生的垂直偏移，兼容未指定 content_height 的旧构造。"""
+        return (self.height - self.content_height) / 2 if self.content_height else 0.0
+
+    def with_content_size(self, width: float, height: float) -> NodeVisual:
+        """根据不含入口的内容尺寸生成新视觉，统一正式测量与原地编辑几何。
+
+        width、height 包含原有正文、图片、标签及其留白，但不含页面按钮。
+        返回值额外加入按钮区，并在有入口时保证至少 44 个逻辑像素的高度；
+        内容整体居中，原对象及共享的文字文档不被修改，偏移不会重复累加。
+        """
+        total_height = max(height, PAGE_MIN_HEIGHT) if self.page_kinds else height
+        offset = (total_height - height) / 2 - self.content_offset
+        return replace(
+            self, width=width + self.page_controls_width, height=total_height, content_height=height,
+            text_position=self.text_position + QPointF(0, offset),
+            image_rect=self.image_rect.translated(0, offset),
+            tags=[(value, rect.translated(0, offset)) for value, rect in self.tags],
+        )
+
+    def page_control_rect(self, kind: str) -> QRectF:
+        """返回节点内部的入口命中矩形；缺少该页面时返回空矩形。
+
+        页面顺序由 page_kinds 固定为详情、子导图；按钮为 32×32，间隔为 2，
+        最右侧保留 14 像素，与节点朝向无关。测量、绘制与命中共用此坐标。
+        """
+        if kind not in self.page_kinds:
+            return QRectF()
+        count = len(self.page_kinds)
+        strip = count * PAGE_CONTROL_SIZE + (count - 1) * PAGE_CONTROL_GAP
+        x = self.width - PAGE_RIGHT_PADDING - strip
+        x += self.page_kinds.index(kind) * (PAGE_CONTROL_SIZE + PAGE_CONTROL_GAP)
+        return QRectF(x, (self.height - PAGE_CONTROL_SIZE) / 2, PAGE_CONTROL_SIZE, PAGE_CONTROL_SIZE)
+
+    def paint_page_control(self, painter: QPainter, kind: str) -> None:
+        """在入口中心绘制 16×16 图形；不绘制悬停底色，也不注册导航行为。"""
+        rect = self.page_control_rect(kind)
+        if not rect.isEmpty():
+            paint_page_icon(painter, kind, rect.adjusted(8, 8, -8, -8),
+                            self.page_icon_color if self.page_icon_color is not None else self.text_color)
 
     def paint(
-        self, painter: QPainter, node: Node, *, selected=False, editing=False, controls=True, accent="#3478d5"
+        self, painter: QPainter, node: Node, *, selected=False, editing=False, controls=True,
+        page_controls=True, accent="#3478d5"
     ):
-        """绘制节点正文及可选的外侧折叠标记，不改变节点或文档。
+        """绘制节点正文、内嵌页面图标及可选的外侧折叠标记，不修改文档。
 
         controls 保留既有绘制接口；交互画布用独立子图元承载按钮，因此与导出、
         拖动影像一样传入 False。直接绘制时默认在右侧显示标记，调用方须将外侧
-        标记计入自己的绘图范围；正文测量尺寸不再包含旧按钮的额外留白。
+        标记计入自己的绘图范围。page_controls 独立控制内嵌页面图标，默认
+        开启以供静态导出与拖动影像复用；画布通过独立子图元绘制时传入 False。
         """
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         # 文本控件借用焦点或鼠标选区时，节点选择标记可能暂时变化；整个编辑
@@ -156,12 +226,16 @@ class NodeVisual:
         if node.note or node.hyperlink:
             painter.setPen(self.text_color)
             painter.drawText(
-                QRectF(12, self.height - 22, self.width - 30, 18),
+                QRectF(12, self.height - self.content_offset - 22,
+                       self.width - self.page_controls_width - 30, 18),
                 Qt.AlignmentFlag.AlignLeft,
                 ("≡ " if node.note else "") + ("↗" if node.hyperlink else ""),
             )
         if node.children and controls:
             self.paint_fold_control(painter, node)
+        if page_controls:
+            for kind in self.page_kinds:
+                self.paint_page_control(painter, kind)
 
     def fold_rect(self, direction: str = "right", *, child_count: int = 0) -> QRectF:
         """返回节点局部坐标中的外侧按钮矩形，不扩大正文的测量尺寸。
@@ -234,6 +308,8 @@ class VisualFactory:
             bool(node.children),
             bool(node.note),
             bool(node.hyperlink),
+            bool(node.detail_page_id),
+            bool(node.submap_id),
             is_root,
             repr(theme),
         )
@@ -317,7 +393,14 @@ class VisualFactory:
             tag_font,
             font,
             bool(node.children),
+            page_kinds=tuple(kind for kind, page in (("detail", node.detail_page_id), ("submap", node.submap_id))
+                             if page),
+            content_height=y + 12,
         )
+        # 普通底色使用强调色；根节点和自定义底色跟随正文色，避免蓝底蓝图标。
+        visual.page_icon_color = visual.text_color if is_root or node.style.get("background") else QColor(theme.accent)
+        if visual.page_kinds:
+            visual = visual.with_content_size(width, y + 12)
         self.cache[key] = visual
         self._node_visuals[node.id] = (key, visual)
         if len(self.cache) > 4096:

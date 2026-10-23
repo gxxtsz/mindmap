@@ -1,8 +1,16 @@
 """静态渲染只依赖核心协议；无需安装内置布局即可导出三种图形。"""
 
 import pytest
-from mindmap_core import LayoutConfig, LayoutInfo, LayoutRegistry, LayoutResult, MindMapDocument, Rect
-from mindmap_qt_render import export_document
+from mindmap_core import (
+    LayoutConfig,
+    LayoutInfo,
+    LayoutRegistry,
+    LayoutResult,
+    MindMapDocument,
+    MindMapEngine,
+    Rect,
+)
+from mindmap_qt_render import export_document, rendering
 
 
 class SingleNodeLayout:
@@ -35,3 +43,28 @@ def test_export_with_only_core_layout_protocol(qapp, tmp_path, suffix):
         assert data.startswith(b"%PDF")
     else:
         assert b"<svg" in data
+
+
+@pytest.mark.parametrize("suffix", ["png", "svg", "pdf"])
+def test_all_graphic_exports_draw_both_page_icons(qapp, tmp_path, monkeypatch, suffix):
+    """三种实际导出均调用共享矢量绘图，不创建交互控件或丢弃页面标记。"""
+    engine = MindMapEngine()
+    engine.create_detail_page(engine.root_id)
+    engine.create_submap(engine.root_id)
+    document = engine.document.page_view()
+    document.layout = LayoutConfig(algorithm_id="single")
+    registry = LayoutRegistry()
+    registry.register(SingleNodeLayout())
+    calls = []
+    original = rendering.paint_page_icon
+
+    def painted(painter, kind, rect, color):
+        calls.append((kind, rect.width(), rect.height()))
+        original(painter, kind, rect, color)
+
+    monkeypatch.setattr(rendering, "paint_page_icon", painted)
+    target = tmp_path / f"附页标记.{suffix}"
+    export_document(document, target, layout_registry=registry)
+    assert target.stat().st_size > 100
+    assert {kind for kind, _, _ in calls} == {"detail", "submap"}
+    assert all(width == height == 16 for _, width, height in calls)

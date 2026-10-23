@@ -1,6 +1,7 @@
 """页面路径控件与会话内视图恢复；所有导航均独立于内容事务和文件保存。"""
 
 from dataclasses import dataclass, replace
+from typing import Mapping
 
 from mindmap_core import ChangeEvent, MindMapError
 from mindmap_qt_ui.icons import toolbar_icon
@@ -23,6 +24,7 @@ class PathNavigation(QWidget):
         self.setFixedHeight(36)
         self.setMinimumWidth(0)
         self.entries, self.selection_count = [], 0
+        self.page_kinds = {}
         self._signature = None
         self._colors = None
         self.row = QHBoxLayout(self)
@@ -45,13 +47,22 @@ class PathNavigation(QWidget):
         """完整页面路径不受省略布局影响，供提示、复制及无障碍描述使用。"""
         return " › ".join(entry.text for entry in self.entries)
 
-    def set_path(self, entries, *, page_id=None, selection_count=0):
-        """接收导航层筛选的页面根路径，仅在页面内容或选择数量变化时重建控件。"""
-        signature = (tuple(entries), page_id, selection_count)
+    def set_path(self, entries, *, page_id=None, selection_count=0,
+                 page_kinds: Mapping[str | None, str] | None = None):
+        """同步页面根路径、类型图标和选择数量，不修改引擎路径对象。
+
+        page_kinds 将页面 ID 映射到 main、submap、detail，由导航层从文档查询。
+        省略时兼容旧调用：None 使用主导图图标，其余使用子导图图标。映射仅
+        用于显示，不参与路径文字、复制内容或跳转依据；类型变化同样触发重建。
+        """
+        entries = list(entries)
+        kinds = {entry.page_id: (page_kinds or {}).get(
+            entry.page_id, "main" if entry.page_id is None else "submap") for entry in entries}
+        signature = (tuple(entries), tuple(kinds.items()), page_id, selection_count)
         if signature == self._signature:
             return
         self._signature = signature
-        self.entries, self.selection_count = list(entries), selection_count
+        self.entries, self.selection_count, self.page_kinds = entries, selection_count, kinds
         self.back_button.setEnabled(page_id is not None)
         self.setToolTip(self.full_path)
         self.setAccessibleDescription(self.full_path)
@@ -92,6 +103,7 @@ class PathNavigation(QWidget):
         menu.deleteLater()
 
     def _rebuild(self):
+        """按图标加文字的实际宽度重排；长路径只收起中间页面，不丢失类型和跳转。"""
         # 重排只改变本控件布局，不改变路径内容；清理旧控件可避免频繁选择造成堆积。
         while self.row.count() > 1:
             item = self.row.takeAt(1)
@@ -101,9 +113,11 @@ class PathNavigation(QWidget):
         if not self.entries:
             self.row.addStretch()
             return
+        colors = self._colors or ui_colors()
         metrics = self.fontMetrics()
-        # 页面项统一使用纯文字，仅保留文字按钮内边距，不再为页面图标预留宽度。
-        widths = [min(180, metrics.horizontalAdvance(entry.text.replace("\n", " ")) + 14)
+        # 预留 16 像素图标、4 像素间隔及原文字内边距；省略文字时同样扣除。
+        icon_space = 20
+        widths = [min(180, metrics.horizontalAdvance(entry.text.replace("\n", " ")) + 14 + icon_space)
                   for entry in self.entries]
         available = max(70, self.width() - 65 - (80 if self.selection_count > 1 else 0))
         indices = list(range(len(self.entries)))
@@ -115,6 +129,13 @@ class PathNavigation(QWidget):
                 used += widths[start] + 14
             hidden = list(range(1, start))
             indices = [0, None, *range(start, len(self.entries))]
+        # 两端加省略按钮也放不下时，将所有祖先放入菜单，仍保留当前页。
+        if len(indices) > 1 and available < 166:
+            hidden = list(range(len(self.entries) - 1))
+            indices = [None, len(self.entries) - 1]
+        page_count = len(indices) - (1 if hidden else 0)
+        page_budget = available - 14 * (len(indices) - 1) - (30 if hidden else 0)
+        page_width = max(32, page_budget // max(1, page_count))
         for offset, index in enumerate(indices):
             if offset:
                 separator = QLabel("›", self)
@@ -129,6 +150,8 @@ class PathNavigation(QWidget):
                 for hidden_index in hidden:
                     entry = self.entries[hidden_index]
                     action = menu.addAction(entry.text)
+                    kind = self.page_kinds[entry.page_id]
+                    action.setIcon(toolbar_icon(kind, colors.muted, colors.border, colors.accent))
                     action.triggered.connect(lambda checked=False, item=entry:
                                              self.navigate_requested.emit(item.page_id, item.node_id))
                 button.setMenu(menu)
@@ -136,10 +159,15 @@ class PathNavigation(QWidget):
                 button.setFixedWidth(30)
             else:
                 entry = self.entries[index]
-                width = min(widths[index], max(40, available // 2))
+                width = min(widths[index], page_width)
                 text = entry.text.replace("\n", " ")
-                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-                button.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, width - 12))
+                kind = self.page_kinds[entry.page_id]
+                button.setProperty("page_kind", kind)
+                button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+                button.setIconSize(QSize(16, 16))
+                color = colors.accent if index == len(self.entries) - 1 else colors.muted
+                button.setIcon(toolbar_icon(kind, color, colors.border, colors.accent))
+                button.setText(metrics.elidedText(text, Qt.TextElideMode.ElideRight, width - 12 - icon_space))
                 button.setFixedWidth(width)
                 button.setToolTip(entry.text)
                 button.setAccessibleName(entry.text)
@@ -387,5 +415,7 @@ class PageNavigationMixin:
             "返回所属导图" if self.current_page_kind == "detail" else "返回上级导图")
         self.path_navigation.back_button.setAccessibleName(self.path_navigation.back_button.toolTip())
         self.path_navigation.set_path(pages, page_id=self._current_page_id,
-                                      selection_count=len(self.selected_node_ids()))
+                                      selection_count=len(self.selected_node_ids()),
+                                      page_kinds={entry.page_id: self._book_document.page_kind(entry.page_id)
+                                                  for entry in pages})
         self.path_navigation.set_ui_colors(ui_colors(self._ui_colors_override or self._document.theme))

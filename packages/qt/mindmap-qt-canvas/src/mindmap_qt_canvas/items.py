@@ -7,8 +7,8 @@ from weakref import ref
 
 from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFontMetricsF, QPainterPath, QPen, QTextCursor, QTextOption
+from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFontMetricsF, QPainterPath, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -175,39 +175,41 @@ class FoldControlItem(QGraphicsObject):
 
 
 class PageControlItem(QGraphicsObject):
-    """两类附属页面的常驻按钮；不改变正文测量，静态导出不创建此对象。"""
+    """节点内部右侧的页面按钮；复用正式视觉几何，静态导出只复用其图形。"""
 
     def __init__(self, node_item, *, kind="submap"):
+        """创建不抢焦点的页面入口；命中和导航由视图路由，子图元只维护悬停。"""
         super().__init__(node_item)
+        self.kind = kind
         self.field_name = "detail_page_id" if kind == "detail" else "submap_id"
         self.label = "查看详情页" if kind == "detail" else "进入子导图"
         self._node_item_ref = ref(node_item)
         self._rect = QRectF()
+        self.hovered = False
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(True)
         self.setZValue(2)
         self.setToolTip(self.label)
         self.sync()
 
     @property
     def node_item(self):
+        """借用仍有效的所属节点；页面切换后迟到的悬停事件不得访问已销毁对象。"""
         item = self._node_item_ref()
         return item if item is not None and isValid(item) else None
 
     def sync(self):
+        """跟随正式或编辑预览视觉更新内部命中矩形，不重新计算正文宽度。"""
         item = self.node_item
         if item is None:
             return
-        x = item.visual.width + 6
-        # 非叶子的详情入口排在折叠按钮之后；折叠计数变宽时同样跟随避让。
-        if item.node.children and item.fold_control is not None and item.fold_control.direction == "right":
-            x = item.fold_control.button_rect().right() + 6
-        if self.field_name == "submap_id" and item.node.detail_page_id:
-            x += 26
-        rect = QRectF(x, (item.visual.height - 22) / 2, 22, 22)
+        rect = item.visual.page_control_rect(self.kind)
         if rect != self._rect:
             self.prepareGeometryChange()
             self._rect = rect
         self.setVisible(bool(getattr(item.node, self.field_name)))
+        if not self.isVisible():
+            self.hovered = False
         self.update()
 
     def can_activate(self):
@@ -217,30 +219,34 @@ class PageControlItem(QGraphicsObject):
                     and item.owner.editor is None and not item.owner.view.node_drag.active)
 
     def boundingRect(self):
-        return self._rect
+        """返回与共享测量一致的 32×32 点击区域，始终位于所属节点内部。"""
+        return QRectF(self._rect)
+
+    def hoverEnterEvent(self, event):
+        """仅高亮当前入口，继续由画布维护节点悬停、折叠按钮和指针形状。"""
+        self.hovered = True
+        self.update()
+        event.accept()
+
+    def hoverLeaveEvent(self, event):
+        """移出时清除临时底色，不触碰选择、正文或文档修订。"""
+        self.hovered = False
+        self.update()
+        event.accept()
 
     def paint(self, painter, option, widget=None):
+        """绘制共享页面图形及可操作时的悬停底色，不使用画布底色覆盖节点。"""
         item = self.node_item
         if item is None:
             return
-        colors = item.owner._ui_colors
-        # 图标落在出线通道时以画布底色遮住线条，保持信息标记清晰可辨。
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(self.scene().backgroundBrush())
-        painter.drawRoundedRect(self._rect, 3, 3)
-        painter.setPen(QPen(QColor(colors.accent if colors else item.theme.accent), 1.3))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        if self.field_name == "detail_page_id":
-            circle = self._rect.adjusted(4, 4, -4, -4)
-            painter.drawEllipse(circle)
-            center = circle.center()
-            painter.drawLine(QPointF(center.x(), center.y()), QPointF(center.x(), center.y() + 3))
-            painter.drawPoint(QPointF(center.x(), center.y() - 3))
-            return
-        rect = self._rect.adjusted(5, 3, -5, -3)
-        painter.drawRoundedRect(rect, 2, 2)
-        painter.drawLine(rect.left() + 3, rect.top() + 6, rect.right() - 3, rect.top() + 6)
-        painter.drawLine(rect.left() + 3, rect.top() + 10, rect.right() - 3, rect.top() + 10)
+        if self.hovered and self.can_activate():
+            color = QColor(item.visual.page_icon_color if item.visual.page_icon_color is not None
+                           else item.visual.text_color)
+            color.setAlphaF(0.12)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(self._rect, 5, 5)
+        item.visual.paint_page_control(painter, self.kind)
 
 
 # 保留旧模块中的控件名字；两种图标由同一个具体 Qt 图元绘制并处理命中。
@@ -251,7 +257,7 @@ class NodeItem(StaticNodeItem):
     """保持原节点构造接口；有宿主时转发双击编辑，导出图元无需创建该交互对象。"""
 
     def __init__(self, node, visual, theme, owner=None):
-        super().__init__(node, visual, theme, controls=False)
+        super().__init__(node, visual, theme, controls=False, page_controls=owner is None)
         self.owner = owner
         self.hovered = False
         self._fold_hide_pending = False
@@ -277,7 +283,7 @@ class NodeItem(StaticNodeItem):
             self.fold_control.sync_visibility()
 
     def sync_fold_control(self) -> None:
-        """宿主同步实体及布局后更新外侧控件，保持正文边界与拖动几何独立。"""
+        """宿主同步实体及布局后更新内外侧控件，共用正式或草稿的测量边界。"""
         if self.owner is not None and self._fold_hide_pending and (not self.node.children or not self.node.expanded):
             self.owner.view._cancel_fold_hide(self)
         if self.fold_control is not None:
@@ -378,8 +384,11 @@ class NodeEditor(QGraphicsTextItem):
             node_width = max([width + 28, *(rect.right() + 14 for _, rect in tags)])
             if base.image is not None:
                 node_width = max(node_width, base.image_rect.right() + 14)
-            visual = replace(base, width=node_width, height=base.height + delta,
-                             text=self.document(), tags=tags)
+            # 页面按钮区与最小高度使用正式测量的同一入口；取消或缩短草稿时
+            # 减去旧的居中留白，避免按钮区被当作文字宽度或被反复追加。
+            visual = replace(base, text=self.document(), tags=tags).with_content_size(
+                node_width, (base.content_height or base.height) + delta,
+            )
             self.preview_visual = visual
             self.owner._update_edit_preview(self, force=force)
         finally:

@@ -1,12 +1,12 @@
 """详情页入口、视图恢复、受限粘贴及页面隔离的真实 Qt 交互验收。"""
 
 import pytest
-from mindmap_core import MindMapEngine, MindMapError, Theme
+from mindmap_core import LayoutConfig, MindMapEngine, MindMapError, Theme
 from mindmap_qt_canvas import MindMapWidget
 from mindmap_qt_panels import MindMapPanels
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QInputMethodEvent
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QToolButton
 
 
 @pytest.fixture
@@ -90,6 +90,108 @@ def test_coexisting_icons_enter_the_correct_page_and_details_hide_creation(detai
     assert canvas.action("create_submap").isVisible()
     assert canvas.action("enter_detail_page").isEnabled()
     QApplication.processEvents()
+    assert not errors
+
+
+@pytest.mark.parametrize("direction", ["right", "left", "down", "both"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_internal_page_controls_fit_every_layout_without_covering_neighbors(details, direction, compact):
+    """在实际布局中检查框内命中、正文隔离以及相邻节点，覆盖非叶子的详情入口。"""
+    canvas, _, branch, leaf, errors = details
+    canvas.engine.create_detail_page(canvas.engine.root_id)
+    canvas.engine.create_detail_page(branch)
+    canvas.engine.create_detail_page(leaf)
+    canvas.engine.create_submap(leaf)
+    canvas.engine.update_node(leaf, text="编译原理、链接与运行时" * 4, style={"width": 120})
+    canvas.engine.set_layout(LayoutConfig(direction=direction, compact=compact))
+    for item in canvas.node_items.values():
+        visual = item.visual
+        body = QRectF(0, 0, visual.width, visual.height)
+        text = QRectF(visual.text_position.x(), visual.text_position.y(),
+                      visual.text.size().width(), visual.text.size().height())
+        for control in (item.detail_page_control, item.submap_control):
+            if not control.isVisible():
+                continue
+            rect = control.boundingRect()
+            assert body.contains(rect) and not rect.intersects(text)
+            assert rect.width() == rect.height() == 32
+            assert not rect.intersects(item.fold_control.button_rect())
+            scene_rect = control.mapRectToScene(rect)
+            for other in canvas.node_items.values():
+                if other is not item:
+                    assert not scene_rect.intersects(other.sceneBoundingRect())
+    assert not errors
+
+
+def test_page_creation_removal_and_history_restore_measured_widths(details):
+    """页面存在状态必须使共享缓存失效，删除及历史操作重新使用正确宽度。"""
+    canvas, _, _, leaf, errors = details
+    base = canvas.node_items[leaf].visual
+    canvas.engine.create_detail_page(leaf)
+    single = canvas.node_items[leaf].visual
+    assert single.width == base.width + 40
+    canvas.engine.create_submap(leaf)
+    both = canvas.node_items[leaf].visual
+    assert both.width == base.width + 74
+    canvas.engine.remove_detail_page(leaf)
+    assert canvas.node_items[leaf].visual.page_kinds == ("submap",)
+    assert canvas.node_items[leaf].visual.width == single.width
+    canvas.engine.undo()
+    assert canvas.node_items[leaf].visual is both
+    canvas.engine.undo()
+    assert canvas.node_items[leaf].visual is single
+    canvas.engine.undo()
+    assert canvas.node_items[leaf].visual is base
+    canvas.engine.redo()
+    assert canvas.node_items[leaf].visual is single
+    assert not errors
+
+
+def test_full_button_area_hover_and_readonly_navigation_do_not_start_edit_or_drag(details, qtbot):
+    """图形周围的按钮留白也能导航；真实悬停高亮只影响当前入口。"""
+    canvas, _, _, leaf, errors = details
+    page = canvas.engine.create_detail_page(leaf)
+    canvas.engine.create_submap(leaf)
+    canvas.set_editable(False)
+    canvas.engine.mark_saved()
+    revision = canvas.engine.revision
+    control = canvas.node_items[leaf].detail_page_control
+    position = canvas.view.mapFromScene(control.mapToScene(control.boundingRect().topLeft() + QPointF(3, 3)))
+    qtbot.mouseMove(canvas.view.viewport(), position)
+    QApplication.processEvents()
+    assert control.hovered
+    assert not canvas.node_items[leaf].submap_control.hovered
+    assert canvas.view.viewport().cursor().shape() == Qt.CursorShape.PointingHandCursor
+    qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=position)
+    assert canvas.current_page_id == page and canvas.editor is None
+    assert not canvas.view.node_drag.active
+    assert canvas.engine.revision == revision and not canvas.engine.is_dirty
+    assert not errors
+
+
+def test_detail_breadcrumb_uses_type_icons_after_theme_change(details):
+    """详情页面包屑使用真实类型，保持原有完整路径文字并随主题刷新图标。"""
+    canvas, _, _, leaf, errors = details
+    submap = canvas.engine.create_submap(leaf)
+    root = canvas.engine.page_document(submap).root_id
+    page = canvas.engine.create_detail_page(root)
+    canvas.navigate_to(page)
+    QApplication.processEvents()
+
+    def buttons():
+        return [button for button in canvas.path_navigation.findChildren(QToolButton)
+                if button.isVisible() and button.property("page_kind")]
+
+    pages = buttons()
+    assert [button.property("page_kind") for button in pages] == ["main", "submap", "detail"]
+    assert all(not button.icon().isNull() for button in pages)
+    text = canvas.path_navigation.full_path
+    assert text.endswith(" · 详情")
+    keys = [button.icon().cacheKey() for button in pages]
+    canvas.engine.set_theme(Theme.dark(), page_id=page)
+    QApplication.processEvents()
+    assert [button.icon().cacheKey() for button in buttons()] != keys
+    assert canvas.path_navigation.full_path == text
     assert not errors
 
 
