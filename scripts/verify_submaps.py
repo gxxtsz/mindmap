@@ -110,6 +110,34 @@ def child(scale, platform):
                     checks["全部页面保存"] = load_document(window.files.path) == engine.document
                     checks["常驻页面图标"] = canvas.node_items[owner].submap_control.isVisible()
                     assert window.grab().save(str(output / (label + "-entry.png")))
+                    # 在实际工作台的主题、紧凑模式和缩放下验收原地编辑；只修改
+                    # 临时草稿，取消后页面名称、子图同步关系、布局及保存标记不变。
+                    original_layout = canvas.layout_result
+                    original_visual = canvas.node_items[owner].visual
+                    window.activateWindow()
+                    canvas.begin_edit(owner)
+                    canvas.editor.setPlainText("新节点")
+                    app.processEvents()
+                    short_visual = canvas.node_items[owner].visual
+                    checks["短文字编辑无多余宽度"] = (canvas.editor.textWidth() < 100
+                                                       and short_visual.width == canvas.editor.textWidth() + 28)
+                    assert window.grab().save(str(output / (label + "-editing-short.png")))
+                    canvas.editor.setPlainText("长文本在节点内部自动换行，圆角高亮与连接线随内容调整。" * 6)
+                    app.processEvents()
+                    item, editor = canvas.node_items[owner], canvas.editor
+                    visual = item.visual
+                    checks["长文字自动换行"] = (editor.textWidth() == 280
+                                                 and editor.document().begin().layout().lineCount() > 1)
+                    checks["编辑外框包含正文"] = (item.sceneBoundingRect().contains(editor.sceneBoundingRect())
+                                                    and visual.height > short_visual.height)
+                    checks["编辑保持节点高亮"] = item.editing and item.isSelected()
+                    checks["编辑外框保持屏内可见"] = canvas.view.mapToScene(
+                        canvas.view.viewport().rect()).boundingRect().contains(item.sceneBoundingRect())
+                    assert window.grab().save(str(output / (label + "-editing-wrapped.png")))
+                    canvas.finish_edit(commit=False)
+                    checks["取消编辑恢复正式尺寸"] = (canvas.layout_result is original_layout
+                                                        and canvas.node_items[owner].visual is original_visual
+                                                        and engine.revision == revision and not engine.is_dirty)
                     canvas.navigate_to(nested)
                     canvas.set_editable(False)
                     canvas.navigate_to(None, branch)

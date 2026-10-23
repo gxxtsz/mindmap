@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import ChainMap
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
@@ -816,6 +817,8 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             self._refreshing = False
         self.view.update_cursor()
         self._schedule_view_reset()
+        if self.editor is not None:
+            self.editor.sync_geometry(force=True)
 
     def _can_incremental(self):
         """由布局提供者判断优化能力；聚焦仍沿用完整布局，不绕过宿主注入入口。"""
@@ -909,19 +912,23 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             if key not in result.nodes:
                 self.scene.removeItem(self.node_items.pop(key))
         for key, rect in result.nodes.items():
+            # 原地编辑只覆盖当前节点的展示视觉；正式尺寸和共享缓存仍保留最后
+            # 一次提交的数据。虚拟化在滚动时重用图元，也必须保留这份草稿外观。
+            visual = (self.editor.preview_visual
+                      if self.editor is not None and key == self.editor.node_id else visuals[key])
             item = self.node_items.get(key)
             if item is None:
-                item = NodeItem(document.nodes[key], visuals[key], document.theme, self)
+                item = NodeItem(document.nodes[key], visual, document.theme, self)
                 self.scene.addItem(item)
                 self.node_items[key] = item
             elif (
-                item.visual is not visuals[key]
+                item.visual is not visual
                 or item.node.expanded != document.nodes[key].expanded
                 or item.node.note != document.nodes[key].note
                 or item.node.hyperlink != document.nodes[key].hyperlink
                 or item.theme.accent != document.theme.accent
             ):
-                item.update_content(document.nodes[key], visuals[key], document.theme)
+                item.update_content(document.nodes[key], visual, document.theme)
             else:
                 # 视觉未变也同步实体引用，正文导航等读取当前快照，但不使 Qt 几何失效。
                 item.node, item.theme = document.nodes[key], document.theme
@@ -1153,7 +1160,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self.view.update_navigation_rect(center=content.center())
 
     def begin_edit(self, node_id: str):
-        """开始原地编辑；一个编辑会话在提交时只生成一次引擎操作。"""
+        """开始无边框原地编辑，实时预览换行和尺寸，提交时只生成一次引擎操作。"""
         if not self.editable or node_id not in self.layout_result.nodes:
             return
         self.finish_edit(commit=True)
@@ -1164,14 +1171,68 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self.editor = NodeEditor(self, self.engine.get_node(node_id), item.visual)
         self.editor.setPos(item.pos() + item.visual.text_position)
         self.scene.addItem(self.editor)
+        self.editor.sync_geometry()
         self.editing_changed.emit(True)
         self.view.setFocus()
         self.editor.setFocus(Qt.FocusReason.OtherFocusReason)
         self._update_actions()
         self.view.update_cursor()
 
+    def _update_edit_preview(self, editor, *, force=False):
+        """用草稿尺寸试算显示布局，保留正式测量、增量索引及文档历史。
+
+        内置布局在独立持久化快照上只更新一个节点及其祖先；自定义布局仍走
+        注册表入口。节点尺寸没有变化时只替换视觉，不重复排布其他节点。
+        """
+        visual = editor.preview_visual
+        item = self.node_items[editor.node_id]
+        previous_size = item.visual.width, item.visual.height
+        item.update_content(self._document.nodes[editor.node_id], visual, self._document.theme)
+        item.sync_fold_control()
+        if force or previous_size != (visual.width, visual.height):
+            sizes = ChainMap({editor.node_id: (visual.width, visual.height)}, self._measurements)
+            if self._incremental_layout is not None:
+                result = self._incremental_layout.preview_measurements(self._document, sizes, (editor.node_id,))
+            else:
+                result = self.layout_registry.layout(self._document, sizes, focus_id=self.focus_id)
+            self._show_edit_layout(result)
+        editor.setPos(item.pos() + visual.text_position)
+        # 节点变宽后可能越出原视口；能放下时只做必要平移，保证整个编辑外框
+        # 可见。正文高于视口时跟随原生光标矩形，避免长文本把输入位置挤出屏幕。
+        scale = self.view.transform().m11()
+        bounds = item.sceneBoundingRect()
+        viewport = self.view.viewport().rect()
+        if bounds.width() * scale + 48 <= viewport.width() and bounds.height() * scale + 48 <= viewport.height():
+            self.view.ensureVisible(item, 24, 24)
+        else:
+            cursor = QRectF(editor.inputMethodQuery(Qt.InputMethodQuery.ImCursorRectangle))
+            self.view.ensureVisible(editor.mapRectToScene(cursor), 24, 24)
+
+    def _show_edit_layout(self, result):
+        """同步临时节点及连接线，保持倍率和视口中心；结束编辑时也复用此处恢复。
+
+        Qt 更新场景范围可能同步触发滚动回调，批量更新期间先屏蔽视口同步及
+        选择信号，避免混用新旧布局。大图仍只实例化屏内节点和正在编辑的节点。
+        """
+        center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
+        self.layout_result = result
+        blocked = self.scene.blockSignals(True)
+        self._refreshing = True
+        try:
+            bounds = result.bounds
+            self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
+            self.view.update_navigation_rect(center=center)
+            if self._virtualized:
+                self._sync_viewport(force=True)
+            else:
+                self._set_node_items(self._document, self._visuals, result)
+                self._set_branch_items(result)
+        finally:
+            self._refreshing = False
+            self.scene.blockSignals(blocked)
+
     def finish_edit(self, *, commit=True):
-        """提交或取消当前编辑。删除临时编辑器后再通知引擎，避免刷新重入。"""
+        """移除草稿并恢复正式几何后提交或取消；整次编辑只产生一条修改记录。"""
         editor = self.editor
         if editor is None:
             return
@@ -1183,6 +1244,8 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         if node_id in self.node_items:
             self.node_items[node_id].editing = False
             self.node_items[node_id].update()
+        if not self._disposed:
+            self._show_edit_layout(editor.base_layout)
         if commit and self.editable:
             self.call(lambda: self.engine.update_node(node_id, text=text))
         self._update_actions()

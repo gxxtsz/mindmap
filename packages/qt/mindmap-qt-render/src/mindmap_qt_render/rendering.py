@@ -134,8 +134,11 @@ class NodeVisual:
         标记计入自己的绘图范围；正文测量尺寸不再包含旧按钮的额外留白。
         """
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 文本控件借用焦点或鼠标选区时，节点选择标记可能暂时变化；整个编辑
+        # 会话仍保留同一条圆角高亮边框，不再依赖额外的文本焦点虚线表达状态。
+        highlighted = selected or editing
         painter.setPen(
-            QPen(QColor(accent) if selected else self.border, 2.5 if selected else self.border_width)
+            QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
         )
         painter.setBrush(self.background)
         painter.drawRoundedRect(QRectF(1, 1, self.width - 2, self.height - 2), 7, 7)

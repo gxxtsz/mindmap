@@ -1,6 +1,7 @@
 """正式增量服务与完整布局的坐标、连接线、历史及旧版本一致性。"""
 
 import random
+from collections import ChainMap
 
 import pytest
 from mindmap_core import BranchPath, BranchStyle, Curve, MindMapDocument, MindMapEngine, Node
@@ -46,6 +47,27 @@ def assert_layout(actual, expected):
         assert coordinates(got) == pytest.approx(coordinates(branch), abs=1e-7)
         if isinstance(branch, BranchPath):
             assert [command.op for command in got.commands] == [command.op for command in branch.commands]
+
+
+@pytest.mark.parametrize("direction", ["right", "left", "both", "down"])
+def test_measurement_preview_matches_full_layout_and_preserves_committed_versions(direction):
+    """反复预览单节点尺寸后，正式索引、旧结果和随后真实更新仍保持独立。"""
+    document, keys = make_document()
+    document.layout.direction = direction
+    sizes = {key: measure(node) for key, node in document.nodes.items()}
+    service = IncrementalTreeLayout(document, sizes)
+    original = TreeLayout().layout(document, sizes)
+    previous = service.result()
+    for width, height in ((250, 280), (64, 46), (400, 160)):
+        draft = ChainMap({keys[1]: (width, height)}, sizes)
+        preview = service.preview_measurements(document, draft, (keys[1],))
+        assert_layout(preview, TreeLayout().layout(document, draft))
+        assert_layout(service.result(), original)
+        assert_layout(previous, original)
+    sizes[keys[2]] = (360, 160)
+    service.update(document, sizes, (keys[2],))
+    assert_layout(service.result(), TreeLayout().layout(document, sizes))
+    assert_layout(previous, original)
 
 
 @pytest.mark.parametrize("direction", ["right", "left", "both", "down"])

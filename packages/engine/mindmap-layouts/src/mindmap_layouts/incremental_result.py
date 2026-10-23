@@ -313,3 +313,15 @@ class IncrementalTreeLayout:
         """常数成本冻结本次布局，节点、索引和路径缓存按需复用，旧结果保持稳定。"""
         return IncrementalLayoutResult(self.geometry.snapshot(), self.styles.fork(), self.palette,
                                        self.accent, self._route_cache, self._extrema, self._color_rows)
+
+    def preview_measurements(self, document, measurements, node_ids):
+        """在独立几何版本中试算节点尺寸，不改变正式布局、文档或已有结果。
+
+        document 必须仍是本服务对应的已提交文档，只允许 measurements 中给定
+        node_ids 的尺寸发生变化。原地文字编辑据此实时调整节点和连接线；持久化
+        索引仅沿受影响祖先更新，不能为每次按键复制文档或重新扫描整张导图。
+        """
+        geometry = self.geometry.snapshot()
+        geometry.sync(document, measurements, node_ids)
+        return IncrementalLayoutResult(geometry, self.styles.fork(), self.palette, self.accent,
+                                       self._route_cache, self._extrema, self._color_rows)

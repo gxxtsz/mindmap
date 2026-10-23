@@ -1,0 +1,298 @@
+"""无边框原地编辑的真实排版、草稿隔离、输入法及大图回归。"""
+
+import pytest
+from mindmap_core import LayoutConfig, LayoutRegistry, MindMapDocument, MindMapEngine, Node, Theme
+from mindmap_layouts import TreeLayout
+from mindmap_qt_canvas import MindMapWidget
+from PySide6.QtCore import QBuffer, QIODevice, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QImage, QInputMethodEvent, QPainter, QTextCursor
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionGraphicsItem
+
+
+@pytest.fixture
+def canvas(qtbot):
+    """提供无历史的可见画布，所有草稿均在关闭前取消，避免跨用例的焦点回调。"""
+    engine = MindMapEngine()
+    child = engine.add_child(engine.root_id, "新节点")
+    engine.add_child(child, "后代")
+    engine.add_child(engine.root_id, "相邻节点")
+    engine.replace_document(engine.document)
+    widget = MindMapWidget(engine, toolbar=False)
+    qtbot.addWidget(widget)
+    widget.resize(1000, 700)
+    widget.show()
+    widget.activateWindow()
+    QApplication.processEvents()
+    yield widget, child
+    widget.finish_edit(commit=False)
+    widget.dispose()
+
+
+def assert_editor_fits(canvas):
+    """从实际图元坐标检查正文、圆角留白和布局尺寸，而非重复编辑器测量公式。"""
+    editor = canvas.editor
+    item = canvas.node_items[editor.node_id]
+    visual = item.visual
+    body = QRectF(item.pos(), item.pos() + QPointF(visual.width, visual.height))
+    text = editor.sceneBoundingRect()
+    assert body.adjusted(13, 11, -13, -11).contains(text)
+    assert editor.pos() == item.pos() + visual.text_position
+    rect = canvas.layout_result.nodes[editor.node_id]
+    assert (rect.width, rect.height) == pytest.approx((visual.width, visual.height))
+
+
+def test_short_text_uses_node_width_and_focus_does_not_draw_a_frame(canvas):
+    widget, child = canvas
+    widget.begin_edit(child)
+    editor = widget.editor
+    assert editor.textWidth() < 100
+    assert editor.hasFocus() and editor.textCursor().hasSelection()
+    assert widget.node_items[child].isSelected()
+    assert_editor_fits(widget)
+
+    def painted(focused):
+        image = QImage(320, 160, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.translate(10, 10)
+        option = QStyleOptionGraphicsItem()
+        option.exposedRect = editor.boundingRect()
+        if focused:
+            option.state |= QStyle.StateFlag.State_HasFocus
+        editor.paint(painter, option)
+        painter.end()
+        return bytes(image.constBits())
+
+    # 验证实际绘制像素：焦点标志不会增加第二个框，但键盘焦点与选区仍保留。
+    assert painted(True) == painted(False)
+    assert editor.hasFocus() and editor.textCursor().hasSelection()
+
+
+@pytest.mark.parametrize("text", ["中文长文本自动换行" * 10, "unbrokenword" * 20])
+@pytest.mark.parametrize("width", [120, 280])
+def test_draft_wraps_resizes_and_cancel_restores_geometry(canvas, text, width):
+    widget, child = canvas
+    widget.engine.update_node(child, style={"width": width})
+    widget.engine.replace_document(widget.engine.document)
+    before, revision = widget.engine.document, widget.engine.revision
+    layout = widget.layout_result
+    nodes, branches = dict(layout.nodes), dict(layout.branches)
+    sizes, visuals = dict(widget._measurements), dict(widget._visuals)
+    widget.begin_edit(child)
+    editor = widget.editor
+    editor.setPlainText(text)
+    assert editor.textWidth() == width
+    assert editor.document().begin().layout().lineCount() > 1
+    assert widget.node_items[child].visual.height > visuals[child].height
+    assert dict(widget.layout_result.branches) != branches
+    assert_editor_fits(widget)
+    assert widget.engine.document == before and widget.engine.revision == revision
+    assert not widget.engine.can_undo and not widget.engine.is_dirty
+    assert widget._measurements == sizes and widget._visuals == visuals
+    # 试算只能改变屏幕版本，正式索引和之前持有的布局快照仍与输入前一致。
+    assert dict(layout.nodes) == nodes and dict(layout.branches) == branches
+    assert dict(widget._incremental_layout.result().nodes) == nodes
+    editor.setPlainText("短")
+    assert editor.textWidth() < width
+    assert_editor_fits(widget)
+    widget.finish_edit(commit=False)
+    assert widget.layout_result is layout
+    assert dict(widget.layout_result.nodes) == nodes
+    assert dict(widget.layout_result.branches) == branches
+    assert widget.node_items[child].visual is visuals[child]
+    assert widget.engine.document == before and not widget.engine.can_undo
+
+
+def test_enter_commits_one_edit_and_undo_restores_size(canvas, qtbot):
+    widget, child = canvas
+    before = widget.engine.document
+    initial = widget.node_items[child].visual
+    widget.begin_edit(child)
+    text = "输入变长后节点自动调整大小，提交只产生一次修改。" * 5
+    widget.editor.setPlainText(text)
+    preview = widget.node_items[child].visual
+    qtbot.keyClick(widget.view.viewport(), Qt.Key.Key_Return)
+    assert widget.editor is None and widget.engine.get_node(child).text == text
+    actual = widget.node_items[child].visual
+    assert (actual.width, actual.height) == (preview.width, preview.height)
+    assert widget.engine.undo() and widget.engine.document == before
+    assert not widget.engine.can_undo
+    assert widget.node_items[child].visual is initial
+    assert widget.engine.redo() and widget.engine.get_node(child).text == text
+
+
+def test_editing_near_edge_pans_only_as_needed_and_tall_text_keeps_cursor_visible(canvas):
+    widget, child = canvas
+    widget.begin_edit(child)
+    editor = widget.editor
+    # 把编辑节点放在视口右边缘，模拟用户缩放和平移后直接进入原地编辑。
+    widget.view.centerOn(editor.pos() - QPointF(350, 0))
+    editor.setPlainText("靠近画布边缘的长文本应在输入时保持可见。" * 6)
+    visible = widget.view.mapToScene(widget.view.viewport().rect()).boundingRect()
+    assert visible.contains(widget.node_items[child].sceneBoundingRect())
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    cursor.insertText("\n超出视口的多行正文" * 80)
+    editor.setTextCursor(cursor)
+    cursor.insertText("继续输入")
+    editor.setTextCursor(cursor)
+    visible = widget.view.mapToScene(widget.view.viewport().rect()).boundingRect()
+    caret = QRectF(editor.inputMethodQuery(Qt.InputMethodQuery.ImCursorRectangle))
+    assert visible.contains(editor.mapRectToScene(caret))
+
+
+def test_shift_enter_empty_text_and_readonly_cancel(canvas, qtbot):
+    widget, child = canvas
+    before = widget.engine.document
+    visual = widget.node_items[child].visual
+    widget.begin_edit(child)
+    widget.editor.setPlainText("第一行")
+    cursor = widget.editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    widget.editor.setTextCursor(cursor)
+    qtbot.keyClick(widget.view.viewport(), Qt.Key.Key_Return, Qt.KeyboardModifier.ShiftModifier)
+    assert widget.editor is not None and widget.editor.toPlainText().endswith("\n")
+    assert_editor_fits(widget)
+    widget.editor.setPlainText("")
+    assert_editor_fits(widget)
+    widget.set_editable(False)
+    assert widget.editor is None and widget.node_items[child].visual is visual
+    assert widget.engine.document == before
+
+
+def test_ime_preedit_resizes_without_committing_and_escape_restores(canvas, qtbot):
+    widget, child = canvas
+    widget.engine.update_node(child, style={"width": 120})
+    widget.engine.replace_document(widget.engine.document)
+    before = widget.engine.document
+    original = widget.node_items[child].visual
+    widget.begin_edit(child)
+    editor = widget.editor
+    editor.setPlainText("😀")
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.MoveOperation.End)
+    editor.setTextCursor(cursor)
+    widget.scene.sendEvent(editor, QInputMethodEvent("zhongwen" * 12, []))
+    assert editor.composing and editor.toPlainText() == "😀"
+    assert editor.textWidth() == 120
+    assert widget.node_items[child].visual.height > original.height
+    assert_editor_fits(widget)
+    assert widget.engine.document == before
+    widget.scene.sendEvent(editor, QInputMethodEvent())
+    assert not editor.composing
+    qtbot.keyClick(widget.view.viewport(), Qt.Key.Key_Escape)
+    assert widget.editor is None and widget.node_items[child].visual is original
+    assert widget.engine.document == before and not widget.engine.can_undo
+
+
+@pytest.mark.parametrize("markdown", [False, True])
+def test_decorations_follow_wrapped_text_without_mutating_shared_visual(canvas, markdown):
+    widget, child = canvas
+    image = QImage(100, 60, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#d58242"))
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert image.save(buffer, "PNG")
+    widget.engine.attach_image(child, bytes(buffer.data()))
+    widget.engine.update_node(child, tags=["标签一", "标签二"], note="备注",
+                              text_format="markdown" if markdown else "plain")
+    before = widget.engine.document
+    base = widget.node_items[child].visual
+    tag_rects = [QRectF(rect) for _, rect in base.tags]
+    widget.begin_edit(child)
+    editor = widget.editor
+    editor.setPlainText("**Markdown 源码与普通文字均在原节点内编辑**" * 10)
+    assert_editor_fits(widget)
+    preview = widget.node_items[child].visual
+    assert preview.image_rect == base.image_rect and preview.image is base.image
+    assert all(rect.top() > preview.text_position.y() + editor.document().size().height()
+               for _, rect in preview.tags)
+    assert all(rect.bottom() < preview.height - 20 for _, rect in preview.tags)
+    assert [rect for _, rect in base.tags] == tag_rects
+    assert widget.engine.document == before
+    widget.finish_edit(commit=False)
+    assert widget.node_items[child].visual is base
+
+
+def test_custom_layout_and_navigation_temporary_display_support_preview(canvas, qtbot):
+    widget, child = canvas
+    widget.engine.set_expanded(widget.engine.root_id, False)
+    widget.navigate_to(None, child)
+    assert widget.focus_id == child
+    before = widget.engine.document
+    widget.begin_edit(child)
+    widget.editor.setPlainText("导航临时显示范围内的长文本" * 12)
+    assert_editor_fits(widget)
+    widget.finish_edit(commit=False)
+    assert widget.focus_id == child and widget.engine.document == before
+
+    class TrackingLayout(TreeLayout):
+        """保留第三方布局的正式注册入口，避免临时排版绕过宿主算法。"""
+
+        def __init__(self):
+            self.calls = 0
+
+        def layout(self, *args, **kwargs):
+            self.calls += 1
+            return super().layout(*args, **kwargs)
+
+    registry = LayoutRegistry()
+    layout = TrackingLayout()
+    registry.register(layout)
+    other = MindMapWidget(layout_registry=registry)
+    qtbot.addWidget(other)
+    try:
+        other.begin_edit(other.engine.root_id)
+        calls = layout.calls
+        other.editor.setPlainText("自定义布局同样调整节点和连接线" * 10)
+        assert layout.calls > calls
+        assert_editor_fits(other)
+    finally:
+        other.finish_edit(commit=False)
+        other.dispose()
+
+
+def test_virtual_canvas_keeps_draft_during_pan_without_scanning_document(qtbot, monkeypatch):
+    document = MindMapDocument.new("大图编辑")
+    document.layout = LayoutConfig(direction="right")
+    document.theme = Theme.dark()
+    for index in range(1100):
+        node = Node(f"主题 {index}")
+        document.nodes[node.id] = node
+        document.root.children.append(node.id)
+    widget = MindMapWidget(MindMapEngine(document), toolbar=False)
+    qtbot.addWidget(widget)
+    widget.resize(900, 600)
+    widget.show()
+    QApplication.processEvents()
+    child = document.root.children[550]
+
+    class NoScanNodes(dict):
+        """逐次按键只能查询所需节点；误用整页遍历立即使回归失败。"""
+
+        def __iter__(self):
+            raise AssertionError("输入期间不应扫描整页节点")
+
+        def items(self):
+            raise AssertionError("输入期间不应扫描整页节点")
+
+        def values(self):
+            raise AssertionError("输入期间不应扫描整页节点")
+
+    try:
+        assert widget._virtualized
+        widget.select_nodes([child])
+        widget.view.centerOn(QPointF(*widget.layout_result.nodes[child].center))
+        widget.begin_edit(child)
+        monkeypatch.setattr(widget._document, "nodes", NoScanNodes(widget._document.nodes))
+        widget.editor.setPlainText("大图中的长文本实时换行" * 10)
+        assert_editor_fits(widget)
+        preview = widget.node_items[child].visual
+        widget.view.verticalScrollBar().setValue(widget.view.verticalScrollBar().value() + 500)
+        assert widget.node_items[child].visual is preview
+        assert widget.editor is not None and len(widget.node_items) < 200
+        widget.finish_edit(commit=False)
+        assert widget.engine.document == document
+    finally:
+        widget.finish_edit(commit=False)
+        widget.dispose()

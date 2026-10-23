@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from weakref import ref
 
 from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QPainterPath, QPen, QTextCursor
-from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject, QGraphicsTextItem
+from PySide6.QtGui import QColor, QFontMetricsF, QPainterPath, QPen, QTextCursor, QTextOption
+from PySide6.QtWidgets import (
+    QGraphicsItem,
+    QGraphicsObject,
+    QGraphicsTextItem,
+    QStyle,
+    QStyleOptionGraphicsItem,
+)
 from shiboken6 import isValid
 
 FOLD_HOVER_PADDING = 10.0
@@ -271,28 +278,93 @@ class NodeItem(StaticNodeItem):
 
 
 class NodeEditor(QGraphicsTextItem):
-    """单次编辑对应单个引擎命令；输入法预编辑期间 Enter 只交给输入法处理。"""
+    """无边框原地编辑器；草稿尺寸只影响画面，提交时才生成一次引擎命令。
+
+    编辑器复用节点的字体、正文位置和最大文本宽度，以真实文本布局调整圆角
+    外框。中文候选属于临时草稿，参与尺寸计算但不写入节点或撤销历史。
+    """
 
     def __init__(self, owner, node, visual):
         super().__init__()
         self.owner, self.node_id = owner, node.id
         self.composing = False
         self.finishing = False
+        self.base_layout = owner.layout_result
+        self._base_visual = visual
+        self.preview_visual = visual
+        self._max_width = float(node.style.get("width", 280))
+        self._preedit = ""
+        self._syncing_geometry = False
         self.setZValue(20)
         self.setFont(visual.font)
         self.setDefaultTextColor(visual.text_color)
         self.setPlainText(node.text)
         self.document().setDocumentMargin(0)
-        self.setTextWidth(max(100, visual.text.size().width()))
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDefaultTextOption(option)
+        self.setTextWidth(visual.text.textWidth())
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
         self.setCursor(Qt.CursorShape.IBeamCursor)
         cursor = self.textCursor()
         cursor.select(QTextCursor.SelectionType.Document)
         self.setTextCursor(cursor)
+        self.document().contentsChanged.connect(self.sync_geometry)
+        self.document().documentLayout().documentSizeChanged.connect(self.sync_geometry)
+
+    def paint(self, painter, option, widget=None):
+        """仅移除 Qt 默认的虚线焦点框，保留真实焦点、光标及文字选择绘制。
+
+        拷贝样式参数再清除绘制标记，避免影响其他图元；键盘和输入法仍由原生
+        文本控件处理。编辑状态统一由节点现有的蓝色圆角选中边框表达。
+        """
+        text_option = QStyleOptionGraphicsItem(option)
+        text_option.state &= ~QStyle.StateFlag.State_HasFocus
+        super().paint(painter, text_option, widget)
+
+    def sync_geometry(self, *_args, force=False):
+        """按当前正文及候选实时换行、调整节点，不复制或修改引擎中的文档。
+
+        setTextWidth 会同步发送文档尺寸信号，使用重入保护合并这轮测量。图片
+        保留位置，标签和备注跟随正文高度平移；共享的正式 NodeVisual 始终只读。
+        """
+        if (self._syncing_geometry or self.finishing or self.owner._disposed
+                or self.owner.editor is not self):
+            return
+        self._syncing_geometry = True
+        try:
+            text = self.toPlainText()
+            if self._preedit:
+                # QTextCursor 的位置按 UTF-16 计数，不能直接当成 Python 字符下标；
+                # 先换算位置，避免表情符号之后输入中文时把候选宽度算到错误行。
+                prefix = text.encode("utf-16-le")[:self.textCursor().position() * 2]
+                position = len(prefix.decode("utf-16-le"))
+                text = text[:position] + self._preedit + text[position:]
+            metrics = QFontMetricsF(self.font())
+            natural = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=40)
+            width = max(36, min(self._max_width, natural + 3))
+            if self.textWidth() != width:
+                self.setTextWidth(width)
+            base = self._base_visual
+            height = max(metrics.height(), self.document().size().height())
+            delta = height - max(metrics.height(), base.text.size().height())
+            tags = [(value, rect.translated(0, delta)) for value, rect in base.tags]
+            node_width = max([width + 28, *(rect.right() + 14 for _, rect in tags)])
+            if base.image is not None:
+                node_width = max(node_width, base.image_rect.right() + 14)
+            visual = replace(base, width=node_width, height=base.height + delta,
+                             text=self.document(), tags=tags)
+            self.preview_visual = visual
+            self.owner._update_edit_preview(self, force=force)
+        finally:
+            self._syncing_geometry = False
 
     def inputMethodEvent(self, event):
-        self.composing = bool(event.preeditString())
+        self._preedit = event.preeditString()
+        self.composing = bool(self._preedit)
         super().inputMethodEvent(event)
+        # 只有候选改变时不一定发出正文变更信号，仍需按预编辑布局更新外框。
+        self.sync_geometry()
 
     def keyPressEvent(self, event):
         if self.composing and event.key() in (
