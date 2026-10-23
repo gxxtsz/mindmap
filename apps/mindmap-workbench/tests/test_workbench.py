@@ -175,8 +175,7 @@ def test_settings_sidebar_readonly_and_inline_edit_preserve_document(window, qtb
     qtbot.mouseClick(wheel, Qt.MouseButton.LeftButton)
     assert window.canvas.editor is editor and editor.toPlainText() == "尚未提交的正文草稿"
     assert window.canvas.wheel_mode == "zoom"
-    assert not window._status_controls.buttons["fit"].isEnabled()
-    assert not window._status_controls.buttons["center"].isEnabled()
+    assert all(not window._status_controls.buttons[key].isEnabled() for key in ("fit", "reset_zoom", "center"))
     window.show_settings_panel()
     assert window.canvas.is_editing and window.engine.document == before
     assert not window.panels.settings.direction.isEnabled()
@@ -184,6 +183,7 @@ def test_settings_sidebar_readonly_and_inline_edit_preserve_document(window, qtb
     assert not window.panels.settings.branch.isEnabled() and not window.panels.settings.theme.isEnabled()
     window.canvas.finish_edit(commit=False)
     window.canvas.set_editable(False)
+    assert all(window._status_controls.buttons[key].isEnabled() for key in ("fit", "reset_zoom", "center"))
     assert not window.panels.settings.vertical.isEnabled()
     assert all(not button.isEnabled() for button in window.panels.settings.preset_buttons)
     assert not window.panels.settings.branch.isEnabled() and not window.panels.settings.theme.isEnabled()
@@ -360,6 +360,7 @@ def test_empty_status_controls_are_disabled_and_application_options_remain(windo
     assert controls.buttons["wheel_mode"].icon().cacheKey() == old_icon
     assert window.new_document(tmp_path / "重新绑定.mindmap")
     assert controls.buttons["fit"].defaultAction() is window.canvas.action("fit")
+    assert controls.buttons["reset_zoom"].defaultAction() is window.canvas.action("reset_zoom")
     assert all(button.isEnabled() for button in controls.buttons.values())
     qtbot.mouseClick(controls.buttons["wheel_mode"], Qt.MouseButton.LeftButton)
     assert window.canvas.wheel_mode == "zoom"
@@ -650,14 +651,15 @@ def test_status_controls_follow_window_theme_and_stay_out_of_export(window, qtbo
     buttons = controls.buttons
     assert canvas._view_controls is None
     assert buttons["fit"].defaultAction() is canvas.action("fit")
+    assert buttons["reset_zoom"].defaultAction() is canvas.action("reset_zoom")
     assert buttons["center"].defaultAction() is canvas.action("center")
-    version = next(label for label in window.status.findChildren(QLabel) if "思维导图工作台 ·" in label.text())
+    assert list(buttons) == ["fit", "reset_zoom", "center", "wheel_mode"]
+    assert not any("思维导图工作台" in label.text() for label in window.status.findChildren(QLabel))
     document, revision = window.engine.document, window.engine.revision
     for size in ((1200, 800), (860, 540), (1440, 900)):
         window.resize(*size)
         QApplication.processEvents()
         assert controls.isVisible() and window.status.rect().contains(controls.geometry())
-        assert controls.x() >= version.geometry().right()
         # 文档正文从标签栏下方直接开始，隐藏工具栏没有残留高度。
     assert canvas.path_navigation.mapTo(canvas, QPoint(0, 0)).y() == 0
     assert canvas._view_card.mapTo(canvas, QPoint(0, 0)).y() == canvas.path_navigation.height()
@@ -692,29 +694,60 @@ def test_status_controls_follow_window_theme_and_stay_out_of_export(window, qtbo
             assert window.engine.document == document and window.engine.revision == revision
 
 
+@pytest.mark.parametrize("scale", [0.1, 0.4, 2.0, 4.0])
+def test_status_reset_zoom_preserves_view_and_document(window, qtbot, scale):
+    """真实点击恢复原始尺寸并保留查看位置，重复操作不修改文档、选择和历史。"""
+    canvas, view = window.canvas, window.canvas.view
+    button = window._status_controls.buttons["reset_zoom"]
+    assert button.toolTip() == "恢复默认尺寸（100%）"
+    assert button.accessibleName() == "恢复默认尺寸"
+    assert not canvas.action("reset_zoom").shortcuts()
+    canvas.select_nodes([canvas.engine.root_id])
+    view.zoom(scale / view.transform().m11())
+    root = QPointF(*canvas.layout_result.nodes[canvas.engine.root_id].center)
+    view.update_navigation_rect(center=root + QPointF(100, -80))
+    center = view.mapToScene(view.viewport().rect()).boundingRect().center()
+    document, revision = window.engine.document, window.engine.revision
+    selected = canvas.selected_node_ids()
+    history = window.engine.can_undo, window.engine.can_redo
+    for _ in range(2):
+        qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+        QApplication.processEvents()
+        assert view.transform().m11() == pytest.approx(1.0)
+        actual = view.mapToScene(view.viewport().rect()).boundingRect().center()
+        assert (actual - center).manhattanLength() < 2
+        assert (actual - root).manhattanLength() > 100
+        assert canvas.selected_node_ids() == selected
+        assert window.engine.document == document and window.engine.revision == revision
+        assert (window.engine.can_undo, window.engine.can_redo) == history
+        assert not window.files.is_dirty
+
+
 def test_status_controls_route_buttons_and_shortcuts_to_active_split(window, qtbot, tmp_path, monkeypatch):
     """分屏与标签反复切换后按钮只执行一次活动会话动作，原快捷键仍在画布生效。"""
     first = window.active_session
     assert window.new_document(tmp_path / "分屏按钮.mindmap")
     second = window.active_session
     window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
-    fit_calls, center_calls = [], []
+    fit_calls, reset_calls, center_calls = [], [], []
     for session in (first, second):
         monkeypatch.setattr(session.canvas, "fit_to_view", lambda selected=session: fit_calls.append(selected.id))
+        monkeypatch.setattr(session.canvas, "reset_zoom", lambda selected=session: reset_calls.append(selected.id))
         monkeypatch.setattr(session.canvas, "center_root", lambda selected=session: center_calls.append(selected.id))
     controls = window._status_controls
     window.activateWindow()
     expected = []
-    for session in (first, second, first):
+    for index, session in enumerate((first, second, first), start=1):
         session.canvas.view.setFocus()
         qtbot.waitUntil(lambda: window.active_session is session)
-        for key in ("fit", "center"):
+        for key in ("fit", "reset_zoom", "center"):
             assert controls.buttons[key].actions() == [session.canvas.action(key)]
             qtbot.mouseClick(controls.buttons[key], Qt.MouseButton.LeftButton)
         qtbot.keyClick(session.canvas.view, Qt.Key.Key_0, Qt.KeyboardModifier.ControlModifier)
         qtbot.keyClick(session.canvas.view, Qt.Key.Key_Home)
         expected.extend([session.id, session.id])
         assert fit_calls == center_calls == expected
+        assert reset_calls == [first.id, second.id, first.id][:index]
     qtbot.mouseClick(controls.buttons["wheel_mode"], Qt.MouseButton.LeftButton)
     assert first.canvas.wheel_mode == second.canvas.wheel_mode == "zoom"
     assert window.preferences.value("view/wheel_mode") == "zoom"

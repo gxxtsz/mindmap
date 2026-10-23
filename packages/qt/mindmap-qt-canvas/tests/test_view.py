@@ -314,6 +314,59 @@ def test_zoom_limits_zero_input_and_edit_commit(canvas):
     assert widget.wheel_mode == "scroll" and widget.action("wheel_mode").isEnabled()
 
 
+@pytest.mark.parametrize("entry", ["interface", "action"])
+@pytest.mark.parametrize("scale", [0.1, 0.4, 1.0, 2.0, 4.0])
+def test_reset_zoom_preserves_center_selection_and_history(canvas, scale, entry):
+    """接口与动作均恢复 100%，保留非根节点的查看位置、选择及已有撤销重做状态。"""
+    widget, a, b = canvas
+    view = widget.view
+    widget.engine.set_expanded(a, False)
+    widget.engine.add_child(b, "保留重做记录")
+    widget.engine.undo()
+    widget.engine.mark_saved()
+    widget.select_nodes([b])
+    view.zoom(scale / view.transform().m11())
+    root = QPointF(*widget.layout_result.nodes[widget.engine.root_id].center)
+    view.update_navigation_rect(center=root + QPointF(100, -80))
+    center = view.mapToScene(view.viewport().rect()).boundingRect().center()
+    document, revision = widget.engine.document, widget.engine.revision
+    history = widget.engine.can_undo, widget.engine.can_redo
+    # 只读文档同样允许视图操作，恢复尺寸不能清空已有的重做分支。
+    widget.set_editable(False)
+    assert widget.action("reset_zoom").isEnabled()
+    for _ in range(2):
+        if entry == "interface":
+            widget.reset_zoom()
+        else:
+            widget.action("reset_zoom").trigger()
+        assert view.transform().m11() == pytest.approx(1.0)
+        assert view.transform().m22() == pytest.approx(1.0)
+        actual = view.mapToScene(view.viewport().rect()).boundingRect().center()
+        assert (actual - center).manhattanLength() < 2
+        assert widget.selected_node_ids() == [b]
+        assert widget.engine.document == document and widget.engine.revision == revision
+        assert (widget.engine.can_undo, widget.engine.can_redo) == history
+        assert not widget.engine.is_dirty
+
+
+@pytest.mark.parametrize("edge", ["minimum", "maximum"])
+@pytest.mark.parametrize("scale", [0.1, 4.0])
+def test_reset_zoom_at_boundary_keeps_view_inside_navigation_range(canvas, scale, edge):
+    """边界位置恢复尺寸后沿用有限的导航范围，缩小时的屏外中心被钳制到最近边界。"""
+    widget, _, _ = canvas
+    view = widget.view
+    view.zoom(scale / view.transform().m11())
+    bars = view.horizontalScrollBar(), view.verticalScrollBar()
+    for bar in bars:
+        bar.setValue(getattr(bar, edge)())
+    widget.reset_zoom()
+    assert view.transform().m11() == pytest.approx(1.0)
+    visible = view.mapToScene(view.viewport().rect()).boundingRect()
+    assert view.sceneRect().adjusted(-2, -2, 2, 2).contains(visible)
+    if scale < 1:
+        assert all(bar.value() == getattr(bar, edge)() for bar in bars)
+
+
 @pytest.mark.parametrize("scale", [0.12, 0.3, 1.0, 3.8])
 @pytest.mark.parametrize("angle", [120, -120])
 def test_zoom_keeps_cursor_anchor_across_scale_range(canvas, scale, angle):

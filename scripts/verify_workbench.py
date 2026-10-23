@@ -82,7 +82,10 @@ def child(scale, platform):
                 "空文档按钮原位禁用": welcome_controls_disabled,
                 "画布没有导航浮条": all(session.canvas._view_controls is None for session in (primary, secondary)),
                 "状态栏导航入口": controls.isVisible() and window.status.rect().contains(controls.geometry())
-                and list(controls.buttons) == ["fit", "center", "wheel_mode"],
+                and list(controls.buttons) == ["fit", "reset_zoom", "center", "wheel_mode"],
+                "状态栏没有品牌版本文字": not any(
+                    "思维导图工作台" in label.text() for label in window.status.findChildren(QLabel)
+                ),
             }
             # 真实菜单保留固定原生打开和保存；扩展编解码器不能增加文件格式入口。
             main_menu = window.main_menu()
@@ -254,16 +257,36 @@ def child(scale, platform):
                     checks["滚轮通过图标表示模式"] = wheel_button.icon().cacheKey() != initial_icon
             checks["滚轮单击双向切换"] = all(toggles)
             checks["切换滚轮不改文档"] = window.engine.document == document and window.engine.revision == revision
-            version_label = next(label for label in window.status.findChildren(QLabel)
-                                 if "思维导图工作台 ·" in label.text())
+            reset_button = controls.buttons["reset_zoom"]
+            checks["恢复尺寸按钮有图标和中文提示"] = (
+                not reset_button.icon().isNull() and reset_button.toolTip() == "恢复默认尺寸（100%）"
+                and reset_button.accessibleName() == "恢复默认尺寸"
+            )
             for compact in (True, False):
                 window.manager.set_option("compact", compact)
                 window.show_status_message("验证临时状态消息不会覆盖右侧按钮。" * 30)
                 app.processEvents()
+                mode_name = "紧凑" if compact else "普通"
+                # 在每种主题、栏高及实际显示倍率下真实点击，核验恢复尺寸不跳回根节点。
+                view = window.canvas.view
+                view.zoom((2.0 if compact else 0.4) / view.transform().m11())
+                root_center = QPointF(*window.canvas.layout_result.nodes[window.engine.root_id].center)
+                view.update_navigation_rect(center=root_center + QPointF(100, -80))
+                center = view.mapToScene(view.viewport().rect()).boundingRect().center()
+                reset_checks = []
+                for _ in range(2):
+                    QTest.mouseClick(reset_button, Qt.MouseButton.LeftButton)
+                    app.processEvents()
+                    actual = view.mapToScene(view.viewport().rect()).boundingRect().center()
+                    reset_checks.append(abs(view.transform().m11() - 1.0) < 1e-9
+                                        and (actual - center).manhattanLength() < 2)
+                checks[f"{mode_name}模式恢复100%并保留位置"] = all(reset_checks)
+                checks[f"{mode_name}模式恢复尺寸不改文档"] = (
+                    window.engine.document == document and window.engine.revision == revision
+                )
                 checks[f"状态栏{'紧凑' if compact else '普通'}模式无裁切"] = (
                     window.status.height() == (24 if compact else 28)
                     and window.status.rect().contains(controls.geometry())
-                    and controls.x() > version_label.geometry().right()
                     and all(button.isVisible() and controls.rect().contains(button.geometry())
                             for button in controls.buttons.values())
                 )

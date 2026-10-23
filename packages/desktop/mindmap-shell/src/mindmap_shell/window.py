@@ -309,7 +309,6 @@ class WorkbenchWindow(QMainWindow):
         self.status = self.statusBar()
         self.status_label = QLabel("  " + spec.status_text)
         self.status.addWidget(self.status_label, 1)
-        self.status.addPermanentWidget(QLabel("  思维导图工作台 · " + spec.version + "  "))
         self.manager.message.connect(self.show_status_message)
         self.manager.theme_changed.connect(self.refresh_theme)
         self.manager.tool_failed.connect(self.report_tool_error)

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 class _StatusViewControls(QWidget):
     """由主窗口持有的一组常驻按钮，切换文档时只替换动作及状态订阅。
 
-    适应窗口和回到中心直接借用画布动作，快捷键仍由原画布注册；滚轮按钮
+    适应窗口、恢复默认尺寸和回到中心直接借用画布动作，快捷键仍由原画布注册；滚轮按钮
     独立调用公开偏好接口，避免借用带菜单的动作后出现下拉箭头或弹出入口。
     """
 
@@ -22,7 +22,9 @@ class _StatusViewControls(QWidget):
         self._bound_actions = []
         self._colors = None
         self.buttons = {}
-        self._labels = {"fit": "适应窗口", "center": "回到中心", "wheel_mode": "滚轮行为"}
+        self._labels = {
+            "fit": "适应窗口", "reset_zoom": "恢复默认尺寸", "center": "回到中心", "wheel_mode": "滚轮行为",
+        }
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 0, 2, 0)
         layout.setSpacing(2)
@@ -51,7 +53,7 @@ class _StatusViewControls(QWidget):
         for action in self._bound_actions:
             action.changed.disconnect(self._sync_actions)
         self._bound_actions.clear()
-        for key in ("fit", "center"):
+        for key in ("fit", "reset_zoom", "center"):
             button = self.buttons[key]
             previous = button.defaultAction()
             if previous is not None:

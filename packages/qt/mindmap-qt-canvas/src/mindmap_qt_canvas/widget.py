@@ -480,6 +480,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             ("zoom_in", "放大", "Ctrl+=", lambda w: w.view.zoom(1.2), False),
             ("zoom_out", "缩小", "Ctrl+-", lambda w: w.view.zoom(1 / 1.2), False),
             ("fit", "适应窗口", "Ctrl+0", lambda w: w.fit_to_view(), False),
+            ("reset_zoom", "恢复默认尺寸", None, lambda w: w.reset_zoom(), False),
             ("center", "回到中心", "Home", lambda w: w.center_root(), False),
             ("wheel_mode", "滚轮行为", None, lambda w: None, False),
             ("wheel_scroll", "滚轮上下滚动", None, lambda w: w.set_wheel_mode("scroll"), False),
@@ -488,6 +489,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         ]
         for key, label, shortcut, callback, mutating in definitions:
             self.register_action(key, label, callback, shortcut=shortcut, mutating=mutating)
+        self._actions["reset_zoom"].setToolTip("恢复默认尺寸（100%）")
         self._custom_actions.clear()
         # 默认工具栏只保留历史和视图操作；添加子节点、编辑文字、节点属性及分支样式
         # 仍注册为组件动作，供快捷键、右键菜单和宿主菜单复用。未加入工具栏的动作
@@ -986,6 +988,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         # 菜单选项复用组件动作，并非工具栏的直接子动作，主题刷新时单独同步其图标。
         # 属性按钮移出工具栏后，编辑菜单和右键菜单仍沿用当前主题的属性图标。
         set_action_icon(self._actions["properties"], "properties", theme)
+        set_action_icon(self._actions["reset_zoom"], "reset_zoom", theme)
         self._sync_wheel_actions()
         self._sync_branch_actions()
         self.path_navigation.set_ui_colors(colors)
@@ -1146,6 +1149,21 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self.view.resetTransform()
         self.view.update_navigation_rect(center=root.sceneBoundingRect().center())
         self.view.update_cursor()
+
+    def reset_zoom(self) -> None:
+        """立即恢复到 100% 原始尺寸，围绕当前视口中心缩放，不主动居中根节点。
+
+        复用交互缩放入口，按当前倍率计算恢复因子，并在恢复后重算一屏导航余量；
+        当前查看位置超出新倍率下的可平移范围时，沿用视图已有的边界约束。
+        本接口只调整视图，不提交输入，不修改文档、选择、折叠状态或撤销历史。
+        已释放的画布忽略请求。对应动作在正文编辑期间禁用，只读状态下仍可使用。
+        """
+        if not self._disposed:
+            center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
+            self.view.zoom(1 / self.view.transform().m11())
+            # 交互入口使用整数视口锚点，低倍率下的半像素取整会放大为场景偏移；
+            # 恢复时以完整可见区域的浮点中心校正位置，再由导航范围钳制越界中心。
+            self.view.update_navigation_rect(center=center)
 
     def center_root(self):
         """将当前页根节点或导航临时显示的中心节点置于视口中央，保持用户的缩放比例。"""

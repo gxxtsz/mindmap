@@ -97,7 +97,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             stack.addWidget(message)
         self._depth_action = QAction("显示层级", self)
         self.sessions = MindMapSessionManager(self)
-        # 放在外壳已有版本文字之后；常驻区不会被临时状态消息遮挡。
+        # 视图按钮位于状态栏最右侧的常驻区，不会被临时状态消息遮挡。
         self._status_controls = _StatusViewControls(self.status)
         self.status.addPermanentWidget(self._status_controls)
         for identifier, title, stack, icon, position, shortcut in (
