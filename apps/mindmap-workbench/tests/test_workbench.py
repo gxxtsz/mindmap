@@ -61,6 +61,39 @@ def test_new_file_session_and_editable_framework(window):
                for button in bar.findChildren(QToolButton))
 
 
+@pytest.mark.parametrize("entry", ["button", "shortcut"])
+@pytest.mark.parametrize("restore_layout", [False, True])
+def test_properties_toggle_closes_visible_panel_without_focus(window, qtbot, entry, restore_layout):
+    """默认或恢复的属性侧栏在画布取得焦点后，首次切换即关闭，再次切换即打开。"""
+    manager = window.manager
+    if restore_layout:
+        manager.restore_layout(manager.capture_layout())
+    properties = window.panels.properties
+    button = window.host.right_rail._buttons["properties"]
+
+    def toggle():
+        """通过真实侧栏按钮或 Alt+2 触发共用的显隐逻辑。"""
+        if entry == "button":
+            qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+        else:
+            qtbot.keyClick(window, Qt.Key.Key_2, Qt.KeyboardModifier.AltModifier)
+        QApplication.processEvents()
+
+    window.activateWindow()
+    for _ in range(2):
+        window.canvas.view.setFocus()
+        QApplication.processEvents()
+        assert manager.active_id == ""
+        assert properties.isVisible() and button.isChecked()
+        toggle()
+        assert not manager.states["properties"].visible
+        assert not properties.isVisible() and window.host.right.isHidden() and not button.isChecked()
+        toggle()
+        assert manager.states["properties"].visible
+        assert properties.isVisible() and button.isChecked()
+        assert window.panels.properties is properties
+
+
 @pytest.mark.parametrize("theme_name", ["light", "dark"])
 def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtbot, theme_name):
     """明暗主题下点击左上角主菜单，核对设置子菜单中的三组平铺选项。"""

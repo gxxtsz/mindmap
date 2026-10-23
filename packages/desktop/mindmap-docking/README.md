@@ -61,6 +61,7 @@ finally:
 ## 公共能力
 
 - `ToolWindowSpec` 注册工具面板，内容工厂延迟创建且仅创建一次，关闭或迁移保留实例。
+- `toggle(id)` 与侧栏按钮、工具快捷键按显隐状态切换：面板已显示时一次操作即隐藏，无需先取得焦点；隐藏时显示并激活。`activate(id)` 用于显式显示并激活面板。
 - `set_tools_suspended(ids, suspended)` 根据业务上下文临时暂停或恢复工具，暂停时隐藏面板和入口并禁用快捷键，保留原有布局偏好；暂停状态不写入快照，布局恢复不会解除暂停。`is_tool_available(id)` 查询综合可用性。
 - `DocumentSpec` 注册文档，支持取消关闭、修改标记、主窗口内分屏及标签迁移；`dispose_on_close=False` 默认关闭后缓存重用，设为 `True` 则关闭后移除注册并延迟销毁控件。
 - `active_document_id`、`document_activated` 跟踪活动文档；`activate_document(id)` 只切换原标签和焦点，不移动分屏位置，侧栏焦点不覆盖活动文档。

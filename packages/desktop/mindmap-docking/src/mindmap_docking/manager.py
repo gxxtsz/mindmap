@@ -295,11 +295,16 @@ class DockManager(QObject):
             self.active_changed.emit(tool_id)
 
     def toggle(self, tool_id):
-        """活动窗口再次点击会隐藏；已显示但不活动的窗口先取得焦点。"""
+        """按面板的显隐状态切换：已显示时隐藏，隐藏时激活并取得焦点。
+
+        侧栏按钮与工具快捷键共用此接口；是否关闭只取决于 visible，不依赖
+        active_id。启动、恢复布局或返回画布后，面板仍可显示但没有焦点，
+        此时首次切换也应直接关闭。不可用或临时暂停的工具保持原状态。
+        """
         if not self.is_tool_available(tool_id):
             return
         state = self.states[tool_id]
-        if state.visible and self.active_id == tool_id:
+        if state.visible:
             self.hide(tool_id)
         else:
             self.activate(tool_id)
