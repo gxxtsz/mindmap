@@ -2,12 +2,23 @@
 
 from uuid import uuid4
 
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QTabBar, QTabWidget, QToolBar, QWidget
 
 from .controls import DockSplitter, IconButton, _CardCorners
 from .models import DockTarget
+
+
+class _EditorReparentFocusGuard(QObject):
+    """仅屏蔽分割层级调整期间的临时失焦，避免业务输入框误提交当前草稿。
+
+    过滤器只在同步重挂当前焦点控件的祖先时安装，恢复焦点后立即移除；正常
+    的用户切换、关闭和输入法事件继续由业务控件处理，不绑定任何具体编辑器。
+    """
+
+    def eventFilter(self, watched, event):
+        return event.type() == QEvent.Type.FocusOut
 
 
 class _EditorCloseButton(IconButton):
@@ -156,8 +167,11 @@ class EditorTabBar(QTabBar):
         menu.addAction("关闭", lambda: self.group.close_token(token))
         menu.addAction("关闭其他标签", lambda: self.group.close_others(token))
         menu.addSeparator()
-        menu.addAction("向右拆分", lambda: self.group.area.split_token(token, Qt.Orientation.Horizontal))
-        menu.addAction("向下拆分", lambda: self.group.area.split_token(token, Qt.Orientation.Vertical))
+        # 拆分会迁移当前标签，只有同组还存在其他页面时才有两个有效分屏。
+        menu.addAction("向右拆分", lambda: self.group.area.split_token(
+            token, Qt.Orientation.Horizontal)).setEnabled(self.group.count() > 1)
+        menu.addAction("向下拆分", lambda: self.group.area.split_token(
+            token, Qt.Orientation.Vertical)).setEnabled(self.group.count() > 1)
         menu.exec(event.globalPos())
 
 
@@ -400,10 +414,77 @@ class EditorArea(QWidget):
         return group
 
     def set_empty_widget_factory(self, factory):
-        """为已有及后续新建、布局恢复生成的空分组提供独立空白页。"""
+        """为空分组提供独立占位页；操作结束后仅在整个编辑区为空时保留一组。"""
         self._empty_widget_factory = factory
         for group in self.groups:
             group.set_empty_widget(factory)
+
+    def _prune_empty_groups(self):
+        """在关闭、迁移或恢复完成后回收空分屏，保留唯一的欢迎页承载组。
+
+        调用前必须已将业务控件迁入目标组或停车容器；标签移除信号以及工具
+        刷新中途会出现临时空组，不能在这些时机回收。只销毁空容器和多余的
+        分割器，保留所有剩余页面、分组标识及相邻分屏的相对尺寸。布局信号
+        与持久化仍由调用方在完整操作结束时统一处理。
+        """
+        retained = next((group for group in self.groups if group.count()), self.groups[0])
+        removed_ids = set()
+        for group in list(self.groups):
+            if group.count() or group is retained:
+                continue
+            parent = group.parentWidget()
+            sizes = parent.sizes()
+            sizes.pop(parent.indexOf(group))
+            self.groups.remove(group)
+            removed_ids.add(group.group_id)
+            group.hide()
+            group.setParent(self.manager.parking)
+            group.deleteLater()
+            parent.setSizes(sizes)
+
+        def collapse(splitter):
+            """自底向上提升唯一子节点，避免空分支或单子分支残留无效手柄。"""
+            for branch in [splitter.widget(index) for index in range(splitter.count())]:
+                if not isinstance(branch, DockSplitter):
+                    continue
+                collapse(branch)
+                if branch.count() > 1:
+                    continue
+                index = splitter.indexOf(branch)
+                sizes = splitter.sizes()
+                remaining = branch.widget(0) if branch.count() else None
+                focus = QApplication.focusWidget()
+                restore_focus = focus is not None and branch.isAncestorOf(focus)
+                guard = _EditorReparentFocusGuard() if restore_focus else None
+                if guard is not None:
+                    focus.installEventFilter(guard)
+                try:
+                    if remaining is not None:
+                        # 先交还内容归属，再销毁外层分割器，避免 Qt 级联删除仍在使用的组。
+                        splitter.replaceWidget(index, remaining)
+                    branch.hide()
+                    branch.setParent(self.manager.parking)
+                    branch.deleteLater()
+                    if remaining is not None:
+                        remaining.show()
+                    else:
+                        sizes.pop(index)
+                    # 替换单子分支不改变其在父层所占份额，其他分屏的比例继续保留。
+                    splitter.setSizes(sizes)
+                finally:
+                    if guard is not None:
+                        # 单纯恢复键盘焦点不足以保留原地草稿，须在保护期间完成恢复。
+                        focus.setFocus(Qt.FocusReason.OtherFocusReason)
+                        focus.removeEventFilter(guard)
+
+        collapse(self.root)
+        # 隐藏工具可能记住刚被回收的组；更新返回位置，确保重新打开及快照引用有效。
+        for state in self.manager.states.values():
+            if state.host_id == self.host.host_id and state.editor_group in removed_ids:
+                state.editor_group = retained.group_id
+        for state in self.manager._pending_tool_states.values():
+            if state.get("host_id") == self.host.host_id and state.get("editor_group") in removed_ids:
+                state["editor_group"] = retained.group_id
 
     def group(self, group_id=""):
         return next((group for group in self.groups if group.group_id == group_id), self.groups[0])
@@ -417,10 +498,13 @@ class EditorArea(QWidget):
         return None
 
     def split_token(self, token, orientation):
+        """把同组标签移到新分屏；唯一标签保持原位，避免生成随即需要回收的空组。"""
         location = self.find_token(token)
         if not location:
             return
         original, index = location
+        if original.count() < 2:
+            return
         parent = original.parentWidget()
         while not isinstance(parent, DockSplitter):
             parent = parent.parentWidget()

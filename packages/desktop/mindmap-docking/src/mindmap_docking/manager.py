@@ -486,6 +486,8 @@ class DockManager(QObject):
                             if group.tabBar().tabData(index) == token:
                                 group.setCurrentIndex(index)
                                 break
+                # 工具全部重挂并恢复选中项后，才能区分临时空组与真正失去标签的分屏。
+                host.editor._prune_empty_groups()
         finally:
             self.refreshing = False
         self.layout_changed.emit()
@@ -824,6 +826,9 @@ class DockManager(QObject):
                     doc["widget"].deleteLater()
         finally:
             self._closing_documents = False
+        # 所有关闭检查和业务控件暂存均已完成，再释放空分屏并选择剩余文档。
+        for host in self.hosts.values():
+            host.editor._prune_empty_groups()
         self._select_remaining_document()
         self.schedule_save()
         return True
@@ -882,6 +887,8 @@ class DockManager(QObject):
         doc["host_id"] = host_id
         self.hosts[host_id].editor.group(group_id).add_token(document_id, doc["widget"], doc["title"], self.theme.icon(doc["icon"], 16), index)
         self.set_document_modified(document_id, doc["modified"])
+        # 页面已进入目标容器，源组为空时可安全回收，不会中断迁移或销毁文档内容。
+        self.hosts[host_id].editor._prune_empty_groups()
         self.schedule_save()
 
     def capture_layout(self):

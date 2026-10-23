@@ -358,6 +358,65 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     assert not window._depth_action.isVisible()
 
 
+def test_closing_split_sessions_keeps_one_usable_welcome_page(empty_window, tmp_path, qtbot, monkeypatch):
+    """真实工作台收起空分屏时完成自动保存和释放，最后的欢迎页仍可直接新建导图。"""
+    window, area = empty_window, empty_window.host.editor
+    first = create(window, tmp_path / "左侧.mindmap")
+    second = create(window, tmp_path / "右侧.mindmap")
+    area.split_token(second.id, Qt.Orientation.Horizontal)
+    third = create(window, tmp_path / "下侧.mindmap")
+    area.split_token(third.id, Qt.Orientation.Vertical)
+    last_group = area.find_token(third.id)[0]
+    for session in (first, second, third):
+        session.engine.update_node(session.engine.root_id, text="关闭前保存：" + session.files.path.stem)
+
+    for session, remaining in ((second, 2), (first, 1), (third, 1)):
+        assert window.manager.close_document(session.id)
+        assert len(area.groups) == remaining
+        assert session.disposed
+        assert load_document(session.files.path).root.text == "关闭前保存：" + session.files.path.stem
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QApplication.processEvents()
+    assert area.groups == [last_group] and last_group.empty_widget.isVisible()
+    assert last_group.count() == 0 and window.active_session is None
+    assert not window.manager.documents and not len(window.sessions)
+    assert window.host.left.isHidden() and window.host.right.isHidden()
+    assert all(not isValid(session.canvas) for session in (first, second, third))
+
+    target = tmp_path / "欢迎页重新新建.mindmap"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    button = next(button for button in last_group.empty_widget.findChildren(QPushButton)
+                  if button.text() == "新建导图")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert area.groups == [last_group] and last_group.count() == 1
+    assert window.active_session.files.path == target
+    assert last_group.currentWidget() is window.active_session.canvas
+    assert not last_group.empty_widget.isVisible()
+
+
+def test_closing_neighbor_split_preserves_inline_draft(empty_window, tmp_path, qtbot):
+    """合并相邻空分屏不结束当前导图的原地文字编辑，也不提前提交草稿。"""
+    window = empty_window
+    first = create(window, tmp_path / "继续编辑.mindmap")
+    second = create(window, tmp_path / "关闭相邻.mindmap")
+    window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
+    window.manager.activate_document(first.id)
+    first.canvas.begin_edit(first.engine.root_id)
+    editor = first.canvas.editor
+    editor.setPlainText("尚未提交的草稿")
+    qtbot.waitUntil(first.canvas.view.hasFocus)
+    assert window.manager.close_document(second.id)
+    QApplication.processEvents()
+    assert first.canvas.view.hasFocus() and first.canvas.editor is editor
+    assert editor.toPlainText() == "尚未提交的草稿"
+    assert first.engine.document.root.text == "中心主题"
+    assert window.active_session is first and len(window.host.editor.groups) == 1
+    # 临时保护应在合并结束时解除，随后正常切换到工具仍须按失焦规则提交草稿。
+    window.manager.activate("outline")
+    qtbot.waitUntil(lambda: first.canvas.editor is None)
+    assert first.engine.document.root.text == "尚未提交的草稿"
+
+
 def test_empty_start_preserves_sidebar_layout_across_restart(empty_window, tmp_path, qtbot):
     """有导图时保存的侧栏布局在空启动时暂停，重新打开导图后恢复原位置与宽度。"""
     window = empty_window

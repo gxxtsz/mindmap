@@ -65,7 +65,7 @@ finally:
 - `DocumentSpec` 注册文档，支持取消关闭、修改标记、主窗口内分屏及标签迁移；`dispose_on_close=False` 默认关闭后缓存重用，设为 `True` 则关闭后移除注册并延迟销毁控件。
 - `active_document_id`、`document_activated` 跟踪活动文档；`activate_document(id)` 只切换原标签和焦点，不移动分屏位置，侧栏焦点不覆盖活动文档。
 - `close_documents(ids)` 先检查全部目标，全部通过后才移除页面；`on_closed` 可停止业务计时器和订阅。
-- `host.editor.set_empty_widget_factory(factory)` 给每个空分组创建独立页面，空白页不占用标签、文档标识或快照。
+- `host.editor.set_empty_widget_factory(factory)` 为空分组创建独立页面；整个编辑区无标签时只保留一个欢迎页，空白页不占用标签、文档标识或快照。
 - `group.empty_widget` 只读取得该组已有的空白页或 None；宿主可调用业务页的公开刷新方法，归属与显隐仍由分组管理。
 - `DockPosition`、`DockTarget`、`ViewMode` 描述停靠位置、移动目标与显示模式；宿主仅允许 `main`，模式仅保留固定停靠、取消固定停靠和主窗口内临时展开。
 - `set_document_actions(document_id, actions)` 在当前文档标签栏右侧复用已有 `QAction`；空序列清除入口。
@@ -77,6 +77,10 @@ finally:
 
 文档动作继续由业务持有，必须在清除入口或注销文档前保持有效。按钮自动跟随动作的启用状态、提示和图标，
 切换标签、分屏、迁移和重开时自动同步，不复制动作或另外注册快捷键。
+关闭或移走分屏的最后一个标签后，该分屏自动收起，剩余区域接管空出的空间；嵌套布局中的多余分割层级同时合并。
+合并过程保留当前输入焦点和未提交的文字草稿。
+关闭整个编辑区的最后一个标签时保留单个空白页，继续提供宿主配置的新建和打开入口。关闭被业务拒绝时保留原布局。
+同组只有一个标签时不再提供拆分操作。恢复历史布局时也会清理空分屏和失效文档留下的占位，文档与工具的内容实例继续保留。
 参数、异常、所有权和生命周期说明见[公共模型](src/mindmap_docking/models.py)、
 [管理器](src/mindmap_docking/manager.py)、[扩展协议](src/mindmap_docking/storage.py)。
 
