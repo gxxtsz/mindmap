@@ -335,7 +335,7 @@ def test_async_image_download_uses_gui_commit(canvas, png_bytes, qtbot):
         worker.join(timeout=2)
 
 
-def test_theme_focus_and_custom_actions(canvas):
+def test_theme_and_custom_actions(canvas):
     widget, a, _ = canvas
     called = []
     action = widget.register_action(
@@ -345,15 +345,13 @@ def test_theme_focus_and_custom_actions(canvas):
     action.trigger()
     assert called == [a]
     widget.engine.set_theme(Theme.dark())
-    widget.focus_node(a)
-    assert widget.engine.root_id not in widget.node_items
+    assert widget.engine.document.theme == Theme.dark()
     assert widget.layout_result.bounds.width > 0
-    widget.focus_node(None)
     assert widget.engine.root_id in widget.node_items
 
 
 def test_removed_actions_and_shortcuts_are_absent(canvas, monkeypatch, qtbot):
-    """编辑入口和右键菜单不注册旧动作，按旧快捷键不会启动编辑或改写节点。"""
+    """删除的功能不再注册动作或占用快捷键，空闲 Escape 不改变选择与视口。"""
     widget, a, b = canvas
     widget.select_nodes([a, b])
     menu_actions = []
@@ -367,12 +365,24 @@ def test_removed_actions_and_shortcuts_are_absent(canvas, monkeypatch, qtbot):
     widget.context_menu(widget.mapToGlobal(QPoint(20, 20)))
     actions = widget.actions() + menu_actions
     assert menu_actions
-    assert not {"relation", "summary"} & widget._actions.keys()
-    assert not {"Ctrl+L", "Ctrl+G"} & {key.toString() for action in actions for key in action.shortcuts()}
+    assert not {"relation", "summary", "focus", "unfocus"} & widget._actions.keys()
+    assert not hasattr(widget, "focus_node")
+    assert not {"Ctrl+L", "Ctrl+G", "Ctrl+F", "Esc"} & {
+        key.toString() for action in actions for key in action.shortcuts()
+    }
     assert all("概要" not in action.text() and "连接两个" not in action.text() for action in actions)
+    assert not {"聚焦此分支", "返回完整导图"} & {action.text() for action in menu_actions}
+    assert not menu_actions[0].isSeparator() and not menu_actions[-1].isSeparator()
+    assert not any(left.isSeparator() and right.isSeparator()
+                   for left, right in zip(menu_actions, menu_actions[1:]))
     before, revision = widget.engine.document, widget.engine.revision
+    transform = widget.view.transform()
+    center = widget.view.mapToScene(widget.view.viewport().rect()).boundingRect().center()
     widget.view.setFocus()
-    for key in (Qt.Key.Key_L, Qt.Key.Key_G):
+    for key in (Qt.Key.Key_L, Qt.Key.Key_G, Qt.Key.Key_F):
         qtbot.keyClick(widget.view, key, Qt.KeyboardModifier.ControlModifier)
+    qtbot.keyClick(widget.view, Qt.Key.Key_Escape)
     assert widget.engine.document == before and widget.engine.revision == revision
     assert widget.selected_node_ids() == [a, b] and widget.editor is None
+    assert widget.view.transform() == transform
+    assert widget.view.mapToScene(widget.view.viewport().rect()).boundingRect().center() == center

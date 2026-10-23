@@ -207,12 +207,13 @@ def test_export_flushes_valid_pending_and_contains_no_workspace_state(workspace,
     assert canvas.engine.document.metadata == {}
 
 
-def test_outline_reveal_collapsed_outside_focus_and_undo(workspace):
+def test_outline_reveal_collapsed_outside_navigation_and_undo(workspace):
     canvas, engine = workspace.canvas, workspace.canvas.engine
     a, b, leaf = workspace.ids
     engine.set_expanded(a, False)
+    engine.set_expanded(engine.root_id, False)
     engine.replace_document(engine.document)
-    canvas.focus_node(b)
+    canvas.navigate_to(None, b)
     zoom = canvas.view.transform().m11()
     workspace.panels.reveal_nodes([leaf])
     assert canvas.focus_id is None

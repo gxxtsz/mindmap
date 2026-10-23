@@ -504,7 +504,8 @@ def test_resize_and_refresh_preserve_view_center(canvas):
         assert (actual - center).manhattanLength() < 2 / scale
 
 
-def test_fit_focus_and_center_use_content_instead_of_navigation_margin(canvas):
+def test_fit_and_center_use_content_instead_of_navigation_margin(canvas):
+    """整页与导航临时显示均按实际内容适配，居中保持倍率，不计入平移余量。"""
     widget, a, b = canvas
     view = widget.view
     with widget.engine.transaction("构造适应窗口的大导图"):
@@ -512,15 +513,17 @@ def test_fit_focus_and_center_use_content_instead_of_navigation_margin(canvas):
             widget.engine.add_child(a, f"完整展示的节点 {index}")
     view.horizontalScrollBar().setValue(view.horizontalScrollBar().maximum())
     view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
-    for focus in (None, b, None):
-        widget.focus_node(focus)
+    for target in (widget.engine.root_id, b, widget.engine.root_id):
+        widget.engine.set_expanded(widget.engine.root_id, target != b)
+        widget.navigate_to(None, target)
+        widget.fit_to_view()
         visible = view.mapToScene(view.viewport().rect()).boundingRect()
         assert visible.contains(widget.scene.sceneRect())
         assert widget.scene.sceneRect().width() < view.sceneRect().width()
         scale = view.transform().m11()
         widget.center_root()
         center = view.mapToScene(view.viewport().rect()).boundingRect().center()
-        node_center = widget.node_items[focus or widget.engine.root_id].sceneBoundingRect().center()
+        node_center = widget.node_items[target].sceneBoundingRect().center()
         assert (center - node_center).manhattanLength() < 2 / scale
         assert view.transform().m11() == scale
 
@@ -542,10 +545,10 @@ def test_fit_capped_zoom_keeps_asymmetric_content_fully_visible(canvas, directio
 
 
 @pytest.mark.parametrize("direction", ["left", "right", "down"])
-@pytest.mark.parametrize("entry", ["method", "button", "shortcut", "focus"])
+@pytest.mark.parametrize("entry", ["method", "button", "shortcut"])
 def test_fit_minimum_zoom_keeps_oversized_content_centered(oversized_canvas, qtbot, direction, entry):
     """超宽、超高内容通过各适配入口都停在 10%，重复操作保持内容中心及导航余量。"""
-    widget, a, _ = oversized_canvas
+    widget, _, _ = oversized_canvas
     widget.engine.set_layout(LayoutConfig(direction=direction))
     view = widget.view
     document, revision = widget.engine.document, widget.engine.revision
@@ -557,10 +560,8 @@ def test_fit_minimum_zoom_keeps_oversized_content_centered(oversized_canvas, qtb
             widget.fit_to_view()
         elif entry == "button":
             qtbot.mouseClick(widget.toolbar.widgetForAction(widget.action("fit")), Qt.MouseButton.LeftButton)
-        elif entry == "shortcut":
-            qtbot.keyClick(view, Qt.Key.Key_0, Qt.KeyboardModifier.ControlModifier)
         else:
-            widget.focus_node(a)
+            qtbot.keyClick(view, Qt.Key.Key_0, Qt.KeyboardModifier.ControlModifier)
 
         content = widget.scene.sceneRect()
         # 确认真正触及下限；达到下限后允许内容超出视口，不能以完整展示为由继续缩小。

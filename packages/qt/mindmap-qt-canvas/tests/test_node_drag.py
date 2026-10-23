@@ -611,8 +611,7 @@ def test_interruptions_keep_target_folded_and_stop_timers(canvas, qtbot, interru
     widget.engine.replace_document(widget.engine.document)
     end = body(widget, b)
     before = widget.engine.document
-    actions = []
-    widget.action("unfocus").triggered.connect(lambda: actions.append(1))
+    navigation_center = widget.focus_id
     control = begin(widget, a)
     mouse(widget, QEvent.Type.MouseMove, end)
     assert hidden not in widget.node_items and not widget.node_items[b].node.expanded
@@ -631,7 +630,8 @@ def test_interruptions_keep_target_folded_and_stop_timers(canvas, qtbot, interru
         widget.dispose()
     else:
         mouse(widget, QEvent.Type.MouseMove, end, Qt.MouseButton.NoButton)
-    assert widget.engine.document == before and not widget.engine.can_undo and not actions
+    assert widget.engine.document == before and not widget.engine.can_undo
+    assert widget.focus_id == navigation_center
     assert not control.active and hidden not in widget.node_items
     assert_clean(widget)
 
@@ -708,11 +708,11 @@ def test_folded_target_expands_only_after_drop_and_undo_redo_restores_state(canv
     assert_clean(widget)
 
 
-def test_focused_drop_keeps_ancestors_outside_focus_folded(canvas):
+def test_navigation_drop_keeps_hidden_ancestors_folded(canvas):
     widget, (a, b, c, x, y, *_rest) = canvas
-    target = widget.engine.add_child(x, "聚焦范围内的目标")
+    target = widget.engine.add_child(x, "临时显示范围内的目标")
     widget.engine.set_expanded(a, False)
-    widget.focus_node(x)
+    widget.navigate_to(None, x)
     before = widget.engine.document
     end = body(widget, target)
     begin(widget, y)
@@ -876,12 +876,13 @@ def test_edge_scroll_moves_view_without_moving_document_and_stops_outside(canvas
     assert_clean(widget)
 
 
-def test_root_and_focus_center_never_start_drag(canvas):
+def test_page_root_and_navigation_center_never_start_drag(canvas):
     widget, (a, b, c, x, *_rest) = canvas
     begin(widget, widget.engine.root_id)
     assert not widget.view.node_drag.active
     widget.view.cancel_interaction()
-    widget.focus_node(a)
+    widget.engine.set_expanded(widget.engine.root_id, False)
+    widget.navigate_to(None, a)
     begin(widget, a)
     assert not widget.view.node_drag.active
     assert widget.view.press_node is None

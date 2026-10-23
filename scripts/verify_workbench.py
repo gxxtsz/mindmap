@@ -90,6 +90,17 @@ def child(scale, platform):
             checks["视图菜单无重复入口"] = not any(
                 action.text() in {"适应窗口", "回到中心"} for action in view_menu.actions()
             )
+            # 对实际工作台菜单和画布快捷键验收，避免宿主仍保留已删除的聚焦入口。
+            checks["视图菜单无分支聚焦入口"] = not any(
+                action.text() in {"聚焦此分支", "返回完整导图"} for action in view_menu.actions()
+            )
+            checks["画布不占用聚焦快捷键"] = not {"Ctrl+F", "Esc"} & {
+                shortcut.toString() for action in window.canvas.actions() for shortcut in action.shortcuts()
+            }
+            view_menu.popup(window.title_bar.menu.mapToGlobal(window.title_bar.menu.rect().bottomLeft()))
+            app.processEvents()
+            assert view_menu.grab().save(str(output / (name + "-view-menu.png")))
+            view_menu.close()
             file_menu = main_menu.actions()[0].menu()
             checks["仅打开原生导图"] = (file_menu.actions()[1].text() == "打开…"
                 and window.files.format_filters("open") == "思维导图 (*.mindmap)")

@@ -104,7 +104,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert all(action.isEnabled() for action in exports.actions())
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
     assert view.actions() == [window.canvas.action(key) for key in (
-        "zoom_in", "zoom_out", "focus", "unfocus", "expand_all", "collapse_all",
+        "zoom_in", "zoom_out", "expand_all", "collapse_all",
     )] + [window.read_only_action]
     assert not hasattr(window, "show_document")
     assert window.manager.states["properties"].visible
@@ -1103,15 +1103,18 @@ def test_optional_ui_palette_restores_document_defaults(window):
         window.panels.set_ui_colors("dark")
 
 
-def test_escape_keeps_canvas_cancel_and_unfocus_semantics(window, qtbot):
+def test_escape_keeps_canvas_cancel_without_changing_navigation(window, qtbot):
+    """空闲 Escape 保留导航临时显示，编辑时仍取消草稿，侧栏焦点流转继续可用。"""
     canvas, engine = window.canvas, window.engine
     child = engine.add_child(engine.root_id, "分支主题")
-    canvas.focus_node(child)
+    engine.set_expanded(engine.root_id, False)
+    canvas.navigate_to(None, child)
     window.activateWindow()
     canvas.view.setFocus()
     QApplication.processEvents()
     qtbot.keyClick(canvas.view, Qt.Key.Key_Escape)
-    assert canvas.focus_id is None
+    assert canvas.focus_id == child and canvas.selected_node_ids() == [child]
+    canvas.navigate_to(None, engine.root_id)
     original = engine.document.root.text
     canvas.begin_edit(engine.root_id)
     canvas.editor.setPlainText("应当取消的草稿")

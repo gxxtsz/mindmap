@@ -110,7 +110,7 @@ def test_scope_mixed_selection_and_new_node_style(canvas):
 
 
 @pytest.mark.parametrize(
-    "transition", ["selection", "document", "layout", "readonly", "edit", "dispose", "focus", "undo"]
+    "transition", ["selection", "document", "layout", "readonly", "edit", "dispose", "navigation", "undo"]
 )
 def test_preview_cancelled_on_state_change(canvas, transition):
     widget, first, children = canvas
@@ -126,8 +126,8 @@ def test_preview_cancelled_on_state_change(canvas, transition):
         widget.set_editable(False)
     elif transition == "edit":
         widget.begin_edit(first)
-    elif transition == "focus":
-        widget.focus_node(first)
+    elif transition == "navigation":
+        widget.navigate_to(None, children[0])
     elif transition == "undo":
         widget.engine.undo()
     else:
@@ -150,13 +150,16 @@ def test_saved_notification_preserves_preview_and_menu(canvas):
     widget.branch_menu.close()
 
 
-def test_no_selection_uses_focused_topic_or_root(canvas):
+def test_no_selection_uses_navigation_center_or_page_root(canvas):
+    """无选择时以导航临时显示的主题为作用中心，不能误改隐藏的页面根主题。"""
     widget, first, children = canvas
     widget.select_nodes([])
     widget.set_branch_style("round", scope="level")
     assert widget.engine.document.root.style["branch"]["kind"] == "round"
     assert "branch" not in widget.engine.get_node(first).style
-    widget.focus_node(first)
+    widget.engine.set_expanded(widget.engine.root_id, False)
+    widget.navigate_to(None, first)
+    assert widget.focus_id == first
     widget.select_nodes([])
     widget.set_branch_style("arrow", scope="level")
     assert widget.engine.get_node(first).style["branch"]["kind"] == "arrow"

@@ -646,11 +646,12 @@ def test_cli_explicit_file_creates_session_with_empty_startup(tmp_path):
 def test_tab_and_split_focus_route_independent_panels_history_and_views(empty_window, tmp_path, qtbot):
     window = empty_window
     first = create(window, tmp_path / "甲.mindmap")
-    # 初始定位在显示布局完成后执行，先完成首次显示再模拟用户的聚焦及缩放操作。
+    # 初始定位在显示布局完成后执行，先完成首次显示再模拟导航定位及缩放操作。
     first.canvas.view.scale(0.4, 0.4)
     qtbot.waitUntil(lambda: assert_initial_canvas(first.canvas))
-    first.engine.add_child(first.engine.root_id, "甲的分支")
-    first.canvas.focus_node(first.engine.root_id)
+    branch = first.engine.add_child(first.engine.root_id, "甲的分支")
+    first.engine.set_expanded(first.engine.root_id, False)
+    first.canvas.navigate_to(None, branch)
     first.canvas.view.scale(1.3, 1.3)
     first.canvas.set_editable(False)
     transform = first.canvas.view.transform()
@@ -673,7 +674,7 @@ def test_tab_and_split_focus_route_independent_panels_history_and_views(empty_wi
     window.manager.activate_document(first.id)
     assert second.engine.document.root.style["font_size"] == 26
     assert first.engine.document.root.style.get("font_size") != 26
-    assert first.canvas.view.transform() == transform and first.canvas.focus_id == first.engine.root_id
+    assert first.canvas.view.transform() == transform and first.canvas.focus_id == branch
     assert first.engine.can_undo and not first.canvas.editable
     window.manager.activate_document(second.id)
     menu = window.main_menu()

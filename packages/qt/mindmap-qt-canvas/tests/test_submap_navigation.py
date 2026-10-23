@@ -30,7 +30,7 @@ def workspace(qtbot):
     canvas.dispose()
 
 
-def test_nested_page_navigation_restores_zoom_center_selection_and_focus(workspace):
+def test_nested_page_navigation_restores_zoom_center_selection_and_temporary_display(workspace):
     canvas, panels, branch, owner, errors = workspace
     canvas.select_nodes([owner])
     canvas.view.zoom(1.3)
@@ -44,8 +44,9 @@ def test_nested_page_navigation_restores_zoom_center_selection_and_focus(workspa
     assert set(canvas.document_view.nodes) == {canvas.document_view.root_id}
     root = canvas.document_view.root_id
     child = canvas.engine.add_child(root, "十进制")
-    canvas.select_nodes([child])
-    canvas.focus_node(child)
+    canvas.engine.set_expanded(root, False)
+    canvas.navigate_to(first, child)
+    assert canvas.focus_id == child
     canvas.view.zoom(1.5)
     first_scale = canvas.view.transform().m11()
     second = canvas.create_submap()
@@ -68,6 +69,37 @@ def test_nested_page_navigation_restores_zoom_center_selection_and_focus(workspa
     assert canvas.engine.revision == revision and not canvas.engine.is_dirty
     assert panels.outline.tree_model.document.nodes.keys() == canvas.document_view.nodes.keys()
     assert not errors
+
+
+@pytest.mark.parametrize("editable", [True, False], ids=["可编辑", "只读"])
+def test_hidden_target_navigation_and_idle_escape_preserve_document(workspace, qtbot, editable):
+    """临时显示折叠目标不依赖已删除的动作，Escape 与旧快捷键都不退出导航现场。"""
+    canvas, panels, branch, owner, errors = workspace
+    canvas.engine.set_expanded(branch, False)
+    canvas.engine.mark_saved()
+    before, revision = canvas.engine.document, canvas.engine.revision
+    canvas.set_editable(editable)
+    canvas.view.setFocus()
+    scale = canvas.view.transform().m11()
+    canvas.navigate_to(None, owner)
+    assert canvas.focus_id == owner and canvas.selected_node_ids() == [owner]
+    assert canvas.view.transform().m11() == scale
+    transform = canvas.view.transform()
+    center = canvas.view.mapToScene(canvas.view.viewport().rect()).boundingRect().center()
+    for key, modifiers in ((Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier),
+                           (Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)):
+        qtbot.keyClick(canvas.view, key, modifiers)
+        assert canvas.focus_id == owner and canvas.selected_node_ids() == [owner]
+        assert canvas.view.transform() == transform
+        assert canvas.view.mapToScene(canvas.view.viewport().rect()).boundingRect().center() == center
+    # 点击当前页路径即可重新显示页根，不需要恢复已删除的“返回完整导图”动作。
+    root = next(button for button in canvas.path_navigation.findChildren(QToolButton)
+                if button.isVisible() and button.accessibleName() == "中心主题")
+    qtbot.mouseClick(root, Qt.MouseButton.LeftButton)
+    assert canvas.focus_id is None and canvas.selected_node_ids() == [canvas.engine.root_id]
+    assert owner not in canvas.layout_result.nodes and not canvas.engine.get_node(branch).expanded
+    assert canvas.engine.document == before and canvas.engine.revision == revision
+    assert not canvas.engine.is_dirty and not errors
 
 
 def test_breadcrumb_click_and_global_undo_switch_to_operation_page(workspace, qtbot):

@@ -158,7 +158,10 @@ class PathNavigation(QWidget):
 
 @dataclass
 class PageViewState:
-    """当前会话的视图快照，只记录临时显示状态，不复制节点内容或折叠字段。"""
+    """当前会话的视图快照；focus_id 仅保存导航临时显示范围，不提供手动聚焦入口。
+
+    快照只记录显示状态，不复制节点内容或改写折叠字段，也不进入文档撤销历史。
+    """
 
     transform: QTransform
     center: QPointF
@@ -255,7 +258,11 @@ class PageNavigationMixin:
         self.page_changed.emit(page_id)
 
     def navigate_to(self, page_id, node_id=None):
-        """路径跳转先恢复目标页现场，再选中指定节点；隐蔽目标用临时聚焦展示。"""
+        """先恢复目标页现场，再定位节点；被折叠隐藏的目标只临时显示，不改写文档。
+
+        focus_id 只为导航保留：先退出旧的临时范围，仍不可见时才以目标为显示中心。
+        导航不会自动适应窗口，也不新增手动进入或退出分支显示范围的菜单与快捷键。
+        """
         self._prepare_page_navigation()
         if node_id is not None and self.engine.node_page_id(node_id) != page_id:
             raise MindMapError("路径节点与目标页面不一致")

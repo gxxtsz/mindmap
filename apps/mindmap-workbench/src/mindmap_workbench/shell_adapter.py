@@ -376,7 +376,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         for title, keys in (
             ("编辑", ("undo", "redo", "add_child", "add_sibling", "insert_parent", "edit", "properties",
                     "delete", "copy", "cut", "paste", "image", "image_url")),
-            ("视图", ("zoom_in", "zoom_out", "focus", "unfocus", "expand_all", "collapse_all")),
+            ("视图", ("zoom_in", "zoom_out", "expand_all", "collapse_all")),
         ):
             section = QMenu(title, menu)
             for key in keys:

@@ -467,8 +467,6 @@ class MindMapWidget(PageNavigationMixin, QWidget):
                 True,
             ),
             ("hyperlink", "打开超链接", None, lambda w: w.open_hyperlink(), False),
-            ("focus", "聚焦此分支", "Ctrl+F", lambda w: w.focus_node(w.current_node_id()), False),
-            ("unfocus", "返回完整导图", "Escape", lambda w: w.focus_node(None), False),
             ("create_submap", "创建子导图", None, lambda w: w.create_submap(), True),
             ("enter_submap", "进入子导图", None, lambda w: w.enter_submap(), False),
             ("delete_submap", "删除子导图…", None, lambda w: w.delete_submap(), True),
@@ -592,7 +590,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         return sorted(selected, key=self._node_order.__getitem__)
 
     def current_node_id(self) -> str:
-        """取得首个选中节点；无选择时使用聚焦节点，再回退到文档根节点。
+        """取得首个选中节点；无选择时使用导航临时显示的节点，再回退到当前页根节点。
 
         仅查询界面状态，不强制展开节点、不改变选择，也不创建历史记录。
         """
@@ -1126,7 +1124,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self.view.update_cursor()
 
     def center_root(self):
-        """将根节点或当前聚焦节点置于视口中央，保持用户的缩放比例。"""
+        """将当前页根节点或导航临时显示的中心节点置于视口中央，保持用户的缩放比例。"""
         key = self.focus_id or self._document.root_id
         rect = self.layout_result.nodes.get(key)
         if not self._disposed and rect is not None:
@@ -1137,7 +1135,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
 
         先提交正在编辑的节点，再按更新后的布局计算。达到最小倍率时保留内容
         中心居中，允许超大导图的边缘超出视口，由用户平移查看，不继续缩小。
-        按钮、快捷键和分支聚焦均复用此入口，与交互缩放共用同一最小倍率。
+        按钮和快捷键均复用此入口，与交互缩放共用同一最小倍率。
         """
         self.finish_edit(commit=True)
         rect = self.layout_result.bounds
@@ -1153,16 +1151,6 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         # 按最终倍率重新换算一屏导航余量。触及任一倍率限制后仍居中内容范围，
         # 不能改为居中根节点，否则单向布局会偏向一端，重复适配也无法正确定位。
         self.view.update_navigation_rect(center=content.center())
-
-    def focus_node(self, node_id: str | None):
-        """临时聚焦分支，恢复时不会改动原文档的折叠状态。"""
-        self.finish_edit(commit=True)
-        if node_id is not None:
-            self.engine.get_node(node_id)
-        self.focus_id = node_id
-        self.refresh()
-        self.select_nodes([node_id or self._document.root_id])
-        self.fit_to_view()
 
     def begin_edit(self, node_id: str):
         """开始原地编辑；一个编辑会话在提交时只生成一次引擎操作。"""
@@ -1500,7 +1488,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             ("copy", "cut", "paste", "undo", "redo"),
             ("move_up", "move_down", "fold", "expand_all", "collapse_all"),
             ("image", "image_url", "remove_image", "hyperlink"),
-            ("focus", "unfocus", "fit", "center"),
+            ("fit", "center"),
         ]
         for group in groups:
             if menu.actions():

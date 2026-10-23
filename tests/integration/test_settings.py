@@ -112,14 +112,15 @@ def test_document_settings_history_save_and_reopen(workspace, qtbot, tmp_path, k
         assert getattr(panel, key).currentData() == value
 
 
-def test_global_branch_covers_folded_and_unfocused_nodes_and_new_nodes(workspace, qtbot):
+def test_global_branch_covers_folded_and_navigation_hidden_nodes_and_new_nodes(workspace, qtbot):
     canvas, panel, engine = workspace.canvas, workspace.settings, workspace.canvas.engine
     first, second, leaf = workspace.ids
     engine.update_node(first, style={"font_size": 20, "扩展": {"保留": True}})
     engine.set_branch_style([second], "arrow")
     engine.set_expanded(first, False)
+    engine.set_expanded(engine.root_id, False)
     engine.replace_document(engine.document)
-    canvas.focus_node(second)
+    canvas.navigate_to(None, second)
     canvas.select_nodes([second])
     before, revision, selected = engine.document, engine.revision, canvas.selected_node_ids()
     choose(panel.branch, "round")

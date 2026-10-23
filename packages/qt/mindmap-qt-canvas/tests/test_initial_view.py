@@ -85,10 +85,13 @@ def test_first_show_uses_actual_size_and_original_scale(canvas_factory, qtbot, d
 
 
 @pytest.mark.parametrize("operation", ["new", "open"])
-def test_file_replacement_resets_old_zoom_and_focus(files, qtbot, tmp_path, operation):
-    """新建和打开都摆脱旧倍率及分支聚焦，不产生额外历史或文档修改。"""
+def test_file_replacement_resets_old_zoom_and_navigation(files, qtbot, tmp_path, operation):
+    """新建和打开都摆脱旧倍率及临时导航状态，不产生额外历史或文档修改。"""
     widget = files.canvas
-    widget.focus_node(widget.engine.document.root.children[-1])
+    branch = widget.engine.document.root.children[0]
+    hidden = widget.engine.get_node(branch).children[0]
+    widget.navigate_to(None, hidden)
+    assert widget.focus_id == hidden
     widget.view.zoom(0.4 / widget.view.transform().m11())
     source = tmp_path / "新打开.mindmap"
     document = sample_document(direction="left", text="新文档根主题")

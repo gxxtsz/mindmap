@@ -65,8 +65,8 @@ class MindMapView(QGraphicsView):
         return self.node_drag.ghost
 
     def event(self, event):
-        # QAction 会在 keyPressEvent 前解析 Escape；必须先认领快捷键，否则现有
-        # “返回完整导图”动作会改变聚焦范围，无法只取消当前手势。
+        # 拖动期间先认领 Escape，保证 keyPressEvent 可以取消当前手势；即使宿主
+        # 另行注册了同名快捷键，也不应在手势尚未取消时触发宿主动作或改变视图。
         if (
             event.type() == QEvent.Type.ShortcutOverride
             and event.key() == Qt.Key.Key_Escape
