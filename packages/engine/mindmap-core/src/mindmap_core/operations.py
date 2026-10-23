@@ -7,7 +7,7 @@ from dataclasses import fields
 
 from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
-from .models import Asset, MindMapDocument, Node, new_id
+from .models import Asset, MindMapDocument, MindMapPage, Node, new_id
 from .transactions import DocumentState
 
 
@@ -34,15 +34,16 @@ class DocumentEditor:
 
     def side(self, node_id: str) -> str:
         """沿父链找到一级分支，仅扫描一级分支确定方向，不遍历其后代。"""
-        root = self.document.root_id
+        page = self._state.page(node_id)
+        root = page.root_id
         current = node_id
         while current != root and self._state.parents.get(current) != root:
             current = self._state.parents[current]
-        side = self.document.layout.direction
+        side = page.layout.direction
         if side != "both":
             return side
         counts = {"left": 0, "right": 0}
-        for child in self.document.root.children:
+        for child in self.node(root).children:
             side = self.node(child).direction or min(counts, key=counts.get)
             counts[side] += 1
             if child == current:
@@ -76,6 +77,7 @@ class DocumentEditor:
         """新增子节点并返回 ID；index 为插入位置，省略时追加。"""
 
         parent = self.edit(parent_id)
+        self.require_plain_parent(parent)
         node = Node(text)
         self._inherit_branch(node, parent)
         self._state.put_node(node)
@@ -134,24 +136,79 @@ class DocumentEditor:
     def update_node(self, node_id: str, **patch) -> None:
         """修改节点内容或样式；id 和 children 只能由结构操作维护，禁止直接改写。"""
 
-        allowed = {item.name for item in fields(Node)} - {"id", "children"}
+        allowed = {item.name for item in fields(Node)} - {"id", "children", "submap_id"}
         if patch.keys() - allowed:
             raise MindMapError("包含不可直接修改的节点字段")
         node = self.edit(node_id)
         for key, value in patch.items():
             setattr(node, key, deepcopy(value))
+        if "text" in patch:
+            # 根节点与入口构成名称别名链；仅沿相关边传播，不扫描全部页面。
+            pending, seen = [node_id], {node_id}
+            while pending:
+                current = self.node(pending.pop())
+                linked = []
+                if current.submap_id:
+                    linked.append(self.document.submaps[current.submap_id].root_id)
+                page_id = self._state.root_pages.get(current.id)
+                if page_id is not None:
+                    linked.append(self.document.submaps[page_id].owner_id)
+                for key in linked:
+                    if key not in seen:
+                        seen.add(key)
+                        self.edit(key).text = patch["text"]
+                        pending.append(key)
+
+    @staticmethod
+    def require_plain_parent(node):
+        """所有产生普通父子关系的入口共用此约束，不能借粘贴或拖动绕过。"""
+        if node.submap_id:
+            raise MindMapError("此节点已有子导图，请进入子导图添加内容")
+
+    def create_submap(self, node_id):
+        """叶子入口创建独立根节点和页面；名称、配置及页面引用原子提交。"""
+        owner = self.node(node_id)
+        if owner.children or owner.submap_id:
+            raise MindMapError("只有尚无子导图的叶子节点可以创建子导图")
+        source = self._state.page(node_id)
+        root = Node(owner.text, style=deepcopy(owner.style))
+        key = new_id()
+        self._state.put_node(root)
+        self._state.set_page(key, MindMapPage(key, root.id, node_id, source.layout, source.theme))
+        self.edit(node_id).submap_id = key
+        return key
+
+    def remove_submap(self, node_id):
+        """保留入口，迭代删除拥有的全部页面与节点，资源由事务引用计数回收。"""
+        owner = self.node(node_id)
+        if not owner.submap_id:
+            raise MindMapError("此节点没有子导图")
+        root_id = self.document.submaps[owner.submap_id].root_id
+        keys = self.document.owned_descendants(root_id)
+        page_ids = [self.node(key).submap_id for key in keys if self.node(key).submap_id]
+        page_ids.append(owner.submap_id)
+        self.edit(node_id).submap_id = None
+        for key in page_ids:
+            self._state.set_page(key, None)
+        for key in keys:
+            self._state.delete_node(key)
 
     def remove_nodes(self, node_ids) -> None:
         """删除选中子树；不再被节点使用的图片资源在同一事务中清理，可一起撤销恢复。"""
         node_ids = list(node_ids)
 
         roots = self.roots(node_ids)
-        if self.document.root_id in roots:
+        if any(key in self._state.root_pages for key in roots):
             raise MindMapError("根节点不能删除")
         parents = self._state.parents
         for node_id in roots:
             self.edit(parents[node_id]).children.remove(node_id)
-            for child in self.document.descendants(node_id):
+            keys = self.document.owned_descendants(node_id)
+            for child in keys:
+                page_id = self.node(child).submap_id
+                if page_id:
+                    self._state.set_page(page_id, None)
+            for child in keys:
                 self._state.delete_node(child)
 
     def move_nodes(self, node_ids, target_id: str, position: str = "inside") -> None:
@@ -162,7 +219,7 @@ class DocumentEditor:
         if not roots:
             return
         self.node(target_id)
-        if self.document.root_id in roots:
+        if any(key in self._state.root_pages for key in roots):
             raise MindMapError("根节点不能移动")
         parents = self._state.parents
         ancestor = target_id
@@ -173,9 +230,13 @@ class DocumentEditor:
             ancestor = parents.get(ancestor)
         if position not in ("inside", "before", "after"):
             raise MindMapError("不支持的移动位置")
-        if position != "inside" and target_id == self.document.root_id:
+        if position != "inside" and target_id in self._state.root_pages:
             raise MindMapError("不能移动为根节点的同级")
         parent_id = target_id if position == "inside" else parents[target_id]
+        self.require_plain_parent(self.node(parent_id))
+        target_page = self._state.page_id(parent_id)
+        if any(self._state.page_id(key) != target_page for key in roots):
+            raise MindMapError("跨页移动请使用剪切和粘贴")
         for node_id in roots:
             self.edit(parents[node_id]).children.remove(node_id)
         parent = self.edit(parent_id)
@@ -188,7 +249,7 @@ class DocumentEditor:
         parent.expanded = True
         for node_id in roots:
             self._state.set_parent(node_id, parent_id)
-        if parent_id == self.document.root_id and position != "inside":
+        if parent_id in self._state.root_pages and position != "inside":
             side = self.side(target_id)
             for node_id in roots:
                 self.edit(node_id).direction = side if side in ("left", "right") else None
@@ -214,20 +275,26 @@ class DocumentEditor:
         roots = self.roots(node_ids)
         if not roots:
             raise MindMapError("请选择需要复制的节点")
-        selected = {x for root in roots for x in self.document.descendants(root)}
+        if len({self._state.page_id(key) for key in roots}) != 1:
+            raise MindMapError("不能同时复制不同页面的节点")
+        selected = {x for root in roots for x in self.document.owned_descendants(root)}
         fragment = MindMapDocument.new("剪贴板")
         fragment.root.children = roots.copy()
         fragment.nodes.update({x: deepcopy(self.node(x)) for x in selected})
         # 根级自动分配方向会因复制范围改变；记录原分支方向，保持复制后的节点朝向。
-        sides = self.document.branch_sides()
         for root in roots:
-            fragment.nodes[root].direction = sides[root] if sides[root] in ("left", "right") else None
+            side = self.side(root)
+            fragment.nodes[root].direction = side if side in ("left", "right") else None
+        fragment.submaps = {page.id: deepcopy(page) for key in selected
+                            if (page_id := self.node(key).submap_id)
+                            for page in [self.document.submaps[page_id]]}
         fragment.assets = {
             node.image_id: self.document.assets[node.image_id]
             for node in fragment.nodes.values()
             if node.image_id
         }
-        fragment.layout = deepcopy(self.document.layout)
+        source = self._state.page(roots[0])
+        fragment.layout, fragment.theme = deepcopy(source.layout), deepcopy(source.theme)
         fragment.validate()
         return fragment
 
@@ -237,11 +304,18 @@ class DocumentEditor:
 
         fragment.validate()
         parent = self.edit(parent_id)
+        if fragment.root.children:
+            self.require_plain_parent(parent)
         mapping = {node_id: new_id() for node_id in fragment.nodes if node_id != fragment.root_id}
+        page_mapping = {key: new_id() for key in fragment.submaps}
         for node_id, new in mapping.items():
             node = deepcopy(fragment.nodes[node_id])
             node.id, node.children = new, [mapping[x] for x in node.children]
+            node.submap_id = page_mapping.get(node.submap_id)
             self._state.put_node(node)
+        for key, page in fragment.submaps.items():
+            self._state.set_page(page_mapping[key], MindMapPage(
+                page_mapping[key], mapping[page.root_id], mapping[page.owner_id], page.layout, page.theme))
         roots = [mapping[x] for x in fragment.root.children]
         parent.children.extend(roots)
         parent.expanded = True

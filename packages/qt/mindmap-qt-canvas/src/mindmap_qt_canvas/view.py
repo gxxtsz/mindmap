@@ -10,7 +10,14 @@ from PySide6.QtWidgets import QApplication, QGraphicsView
 from shiboken6 import isValid
 
 from .dragging import NodeDragController
-from .items import FOLD_HIDE_DELAY, FOLD_HOVER_PADDING, FoldControlItem, NodeEditor, NodeItem
+from .items import (
+    FOLD_HIDE_DELAY,
+    FOLD_HOVER_PADDING,
+    FoldControlItem,
+    NodeEditor,
+    NodeItem,
+    SubmapControlItem,
+)
 
 # 交互缩放与“适应窗口”共用 10% 下限，避免自动适配绕过交互入口的倍率限制。
 MIN_ZOOM = 0.1
@@ -252,7 +259,7 @@ class MindMapView(QGraphicsView):
         inside = position is not None and self.viewport().rect().contains(position)
         if inside:
             hit = self.itemAt(position)
-        hovered = hit.node_item if isinstance(hit, FoldControlItem) else hit
+        hovered = hit.node_item if isinstance(hit, (FoldControlItem, SubmapControlItem)) else hit
         if inside:
             if not isinstance(hovered, (NodeItem, NodeEditor)) and not self.panning and self.drag_ghost is None:
                 hovered = self._fold_hover_at(position)
@@ -276,11 +283,14 @@ class MindMapView(QGraphicsView):
             shape = Qt.CursorShape.ArrowCursor
             if isinstance(item, NodeEditor):
                 shape = Qt.CursorShape.IBeamCursor
+            elif isinstance(item, SubmapControlItem):
+                if item.can_activate():
+                    shape = Qt.CursorShape.PointingHandCursor
             elif isinstance(item, FoldControlItem):
                 if item.can_activate() and item.contains_button(self.mapToScene(position)):
                     shape = Qt.CursorShape.PointingHandCursor
             elif isinstance(item, NodeItem) and self.owner.editable and self.owner.editor is None:
-                if item.node.id not in (self.owner.engine.root_id, self.owner.focus_id):
+                if item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id):
                     shape = Qt.CursorShape.OpenHandCursor
         self.viewport().setCursor(shape)
 
@@ -333,6 +343,13 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         item = self.itemAt(event.position().toPoint())
+        if isinstance(item, SubmapControlItem) and event.button() == Qt.MouseButton.LeftButton:
+            if item.can_activate():
+                key = item.node_item.node.id
+                self.owner.call(lambda: self.owner.enter_submap(key))
+            self._fold_pressed = True
+            event.accept()
+            return
         if isinstance(item, FoldControlItem) and event.button() == Qt.MouseButton.LeftButton:
             if item.can_activate() and item.contains_button(self.mapToScene(event.position().toPoint())):
                 node = item.node_item.node
@@ -352,7 +369,7 @@ class MindMapView(QGraphicsView):
             if (
                 self.owner.editable
                 and self.owner.editor is None
-                and item.node.id not in (self.owner.engine.root_id, self.owner.focus_id)
+                and item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id)
             ):
                 self.press_node = item.node.id
                 self.press_position = event.position().toPoint()
@@ -447,7 +464,8 @@ class MindMapView(QGraphicsView):
 
     def mouseDoubleClickEvent(self, event):
         """按钮双击仍按独立点击处理，不把事件交给正文的双击编辑入口。"""
-        if isinstance(self.itemAt(event.position().toPoint()), FoldControlItem):
+        if self._fold_pressed or isinstance(self.itemAt(event.position().toPoint()),
+                                           (FoldControlItem, SubmapControlItem)):
             self.mousePressEvent(event)
         else:
             super().mouseDoubleClickEvent(event)
@@ -465,7 +483,7 @@ class MindMapView(QGraphicsView):
     def _show_context_menu(self, position, global_position):
         """仅在确定为点击后选择菜单目标，右键拖动始终保留原有选择。"""
         item = self.itemAt(position)
-        if isinstance(item, FoldControlItem):
+        if isinstance(item, (FoldControlItem, SubmapControlItem)):
             item = item.node_item
         if item is not None and isinstance(item, NodeItem) and not item.isSelected():
             self.owner.select_nodes([item.node.id])

@@ -17,7 +17,7 @@ from .extensions import (
 )
 from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point, Rect
 from .history import ChangeSet
-from .models import Asset, MindMapDocument, Node, Theme
+from .models import Asset, MindMapDocument, MindMapPage, MindMapPageView, Node, PathEntry, Theme
 
 __all__ = [
     "Asset",
@@ -39,11 +39,14 @@ __all__ = [
     "LayoutResult",
     "MindMapDocument",
     "MindMapEngine",
+    "MindMapPage",
+    "MindMapPageView",
     "SaveSnapshot",
     "MindMapError",
     "Node",
     "OperationRejected",
     "PathCommand",
+    "PathEntry",
     "Point",
     "Rect",
     "Theme",

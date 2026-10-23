@@ -66,6 +66,7 @@ class Node:
     image_id: str | None = None
     image_width: float = 160.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    submap_id: str | None = None
 
     def __deepcopy__(self, memo: dict) -> Node:
         """建立隔离节点副本，跳过不可变标量的通用序列化重建开销。
@@ -120,6 +121,31 @@ class Asset:
 
 
 @dataclass
+class MindMapPage:
+    """独立子导图的页面记录。
+
+    页面只保存根节点、入口和外观配置；节点与资源统一放在文档表中。
+    页面之间仅通过字符串 ID 关联，因此任意深度的嵌套都不会形成递归对象。
+    """
+
+    id: str
+    root_id: str
+    owner_id: str
+    layout: LayoutConfig = field(default_factory=LayoutConfig)
+    theme: Theme = field(default_factory=Theme)
+
+
+@dataclass(frozen=True)
+class PathEntry:
+    """可点击路径项；页面和节点 ID 是跳转依据，标题只用于显示。"""
+
+    page_id: str | None
+    node_id: str
+    text: str
+    page_root: bool = False
+
+
+@dataclass
 class MindMapDocument:
     """完整文档。节点树以根标识和邻接表表达，支持深层树的非递归读写。"""
 
@@ -129,6 +155,7 @@ class MindMapDocument:
     layout: LayoutConfig = field(default_factory=LayoutConfig)
     theme: Theme = field(default_factory=Theme)
     metadata: dict[str, Any] = field(default_factory=dict)
+    submaps: dict[str, MindMapPage] = field(default_factory=dict)
 
     @classmethod
     def new(cls, text: str = "中心主题") -> MindMapDocument:
@@ -172,8 +199,40 @@ class MindMapDocument:
         result[self.root_id] = self.layout.direction if self.layout.direction != "both" else "right"
         return result
 
+    def page_view(self, page_id: str | None = None) -> MindMapPageView:
+        """借用一页的节点与配置，供布局、渲染和面板只读使用。
+
+        返回对象不拥有整份文档，不能作为文件保存；调用方不得修改借用的实体。
+        主导图使用 None 标识。子导图引用保留在节点上，页内校验不跨页展开。
+        """
+        page = self if page_id is None else self.submaps[page_id]
+        nodes = {key: self.nodes[key] for key in self.descendants(page.root_id)}
+        assets = {node.image_id: self.assets[node.image_id] for node in nodes.values() if node.image_id}
+        return MindMapPageView(page.root_id, nodes, assets, page.layout, page.theme, self.metadata)
+
+    def owned_descendants(self, node_id: str) -> list[str]:
+        """迭代取得分支及其拥有的全部子导图节点，用于删除和完整复制。"""
+        result, stack = [], [node_id]
+        while stack:
+            key = stack.pop()
+            node = self.nodes[key]
+            result.append(key)
+            stack.extend(reversed(node.children))
+            if node.submap_id:
+                stack.append(self.submaps[node.submap_id].root_id)
+        return result
+
     def validate(self) -> None:
         """验证完整文档；规则由独立校验模块维护，失败时不改变当前对象。"""
         from .validation import validate_document
 
         validate_document(self)
+
+
+class MindMapPageView(MindMapDocument):
+    """具有既有布局文档接口的单页读模型；外部页面引用由完整文档负责校验。"""
+
+    def validate(self) -> None:
+        from .validation import validate_document
+
+        validate_document(self, page_only=True)

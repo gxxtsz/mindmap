@@ -1,4 +1,4 @@
-"""当前版本的文档结构映射；不依赖任何布局实现，不提供旧数据迁移。"""
+"""原生文档结构映射；写入版本 3，兼容读取版本 2 的单页文档。"""
 
 from __future__ import annotations
 
@@ -8,9 +8,18 @@ import re
 from copy import deepcopy
 from dataclasses import asdict
 
-from mindmap_core import Asset, LayoutConfig, MindMapDocument, MindMapError, Node, Theme
+from mindmap_core import (
+    Asset,
+    LayoutConfig,
+    MindMapDocument,
+    MindMapError,
+    MindMapPage,
+    MindMapPageView,
+    Node,
+    Theme,
+)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
@@ -19,6 +28,8 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
     """
+    if isinstance(document, MindMapPageView):
+        raise MindMapError("单页读模型不能保存为完整文件，请使用引擎的完整文档快照")
     document.validate()
     assets = []
     for asset in document.assets.values():
@@ -37,19 +48,22 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
         "layout": asdict(document.layout),
         "theme": asdict(document.theme),
         "metadata": deepcopy(document.metadata),
+        "submaps": [asdict(page) for page in document.submaps.values()],
     }
 
 
 def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindMapDocument:
-    """只解析当前版本，完成树、字段、布局配置和资源校验后返回独立文档。"""
+    """读取当前多页格式或版本 2 单页格式，校验全部引用后返回独立文档。"""
     try:
         if not isinstance(data, dict) or data.get("format") != "mindmap":
             raise MindMapError("不是本项目的思维导图文档")
         data = deepcopy(data)
-        if type(data.get("schema_version")) is not int or data["schema_version"] != SCHEMA_VERSION:
+        if type(data.get("schema_version")) is not int or data["schema_version"] not in (2, SCHEMA_VERSION):
             raise MindMapError("不支持的文档格式版本")
 
         allowed = {"format", "schema_version", "root_id", "nodes", "assets", "layout", "theme", "metadata"}
+        if data["schema_version"] == SCHEMA_VERSION:
+            allowed.add("submaps")
         if data.keys() - allowed:
             raise MindMapError("文档包含未知字段，请使用当前文件格式")
         if "layout" not in data or not isinstance(data["layout"], dict):
@@ -90,6 +104,16 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
             else:
                 raise MindMapError(f"图片资源缺失：{key}")
             assets[key] = Asset(key, content, record["media_type"])
+        def page_factory(**record):
+            if set(record) != {"id", "root_id", "owner_id", "layout", "theme"}:
+                raise MindMapError("子导图字段不完整或包含未知字段")
+            if not isinstance(record["layout"], dict) or set(record["layout"]) != {
+                "algorithm_id", "direction", "compact", "options"
+            }:
+                raise MindMapError("子导图布局配置无效")
+            return MindMapPage(record["id"], record["root_id"], record["owner_id"],
+                               LayoutConfig(**record["layout"]), Theme(**record["theme"]))
+
         document = MindMapDocument(
             root_id=data["root_id"],
             nodes=entities("nodes", Node),
@@ -97,6 +121,7 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
             layout=LayoutConfig(**data["layout"]),
             theme=Theme(**data.get("theme", {})),
             metadata=data.get("metadata", {}),
+            submaps=entities("submaps", page_factory),
         )
         document.validate()
         return document

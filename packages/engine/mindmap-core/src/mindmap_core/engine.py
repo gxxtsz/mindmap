@@ -12,7 +12,7 @@ from .config import LayoutConfig
 from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent, EventDispatcher
 from .history import HistoryManager
-from .models import MindMapDocument, Node, Theme
+from .models import MindMapDocument, Node, PathEntry, Theme
 from .operations import DocumentEditor
 from .transactions import DocumentState, TransactionManager
 
@@ -104,6 +104,53 @@ class MindMapEngine:
         self._editor.node(node_id)
         return self._state.parents.get(node_id)
 
+    def node_page_id(self, node_id: str) -> str | None:
+        """查询节点的页内归属；主导图返回 None，不跨越入口边界。"""
+        self._editor.node(node_id)
+        return self._state.page_id(node_id)
+
+    def page_document(self, page_id: str | None = None) -> MindMapDocument:
+        """返回独立单页快照；只用于当前页布局、渲染、面板和图形导出。"""
+        try:
+            return deepcopy(self._state.document.page_view(page_id))
+        except KeyError as exc:
+            raise MindMapError("子导图不存在") from exc
+
+    def node_path(self, node_id: str) -> list[PathEntry]:
+        """迭代构造全局祖先路径，入口与子图根合并，保留每一级页面根的跳转项。
+
+        空页面的根也可能拥有子导图，此时相邻页面根虽然同名，仍分别保留，
+        避免深层根节点链失去返回入口。所有关联均使用 ID，不能按标题去重。
+        """
+        self._editor.node(node_id)
+        result = []
+        key = node_id
+        while True:
+            page_id = self._state.page_id(key)
+            page = self._state.document if page_id is None else self._state.document.submaps[page_id]
+            local = []
+            while True:
+                node = self._editor.node(key)
+                local.append(PathEntry(page_id, key, node.text, key == page.root_id))
+                if key == page.root_id:
+                    break
+                key = self._state.parents[key]
+            result[0:0] = list(reversed(local))
+            if page_id is None:
+                break
+            owner = page.owner_id
+            parent_page = self._state.page(owner)
+            key = owner if owner == parent_page.root_id else self._state.parents[owner]
+        return result
+
+    def create_submap(self, node_id: str) -> str:
+        """创建一张独立子导图并返回页面 ID；实际进入页面由界面负责。"""
+        return self._execute("create_submap", self._editor.create_submap, node_id=node_id)
+
+    def remove_submap(self, node_id: str) -> None:
+        """删除入口拥有的全部子导图，一次撤销可完整恢复，入口节点保持原位。"""
+        self._execute("remove_submap", self._editor.remove_submap, node_id=node_id)
+
     def subscribe(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:
         """订阅已提交状态并返回取消函数，监听器异常不会撤销提交。
 
@@ -156,6 +203,13 @@ class MindMapEngine:
     def _execute(self, name: str, action: Callable, **parameters):
         self._guard(name, parameters)
         with self.transaction(name):
+            journal = self._state.journal
+            if not journal.has_origin:
+                key = parameters.get("node_id") or parameters.get("parent_id") or parameters.get("target_id")
+                ids = parameters.get("node_ids")
+                key = key or (ids[0] if ids else None)
+                journal.page_id = self._state.page_id(key) if key is not None else parameters.get("page_id")
+                journal.has_origin = True
             return action(**parameters)
 
     def _finalize(self, journal) -> None:
@@ -216,6 +270,7 @@ class MindMapEngine:
         source = self._state.document
         document = copy(source)
         document.nodes, document.assets = source.nodes.copy(), source.assets.copy()
+        document.submaps = source.submaps.copy()
         document.layout, document.theme = deepcopy(source.layout), deepcopy(source.theme)
         document.metadata = deepcopy(source.metadata)
         return SaveSnapshot(document, self._snapshot_owner, self.document_generation, self._history._state)
@@ -315,21 +370,31 @@ class MindMapEngine:
             "set_expanded", self._editor.set_expanded, node_id=node_id, expanded=expanded, recursive=recursive
         )
 
-    def set_layout(self, config: LayoutConfig) -> None:
+    def set_layout(self, config: LayoutConfig, *, page_id: str | None = None) -> None:
         """保存独立布局配置；核心仅校验结构，宿主在界面使用前校验具体算法。"""
 
-        def action(config):
-            self._state.set_setting("layout", config)
+        def action(config, page_id):
+            if page_id is None:
+                self._state.set_setting("layout", config)
+            else:
+                page = deepcopy(self._state.document.submaps[page_id])
+                page.layout = deepcopy(config)
+                self._state.set_page(page_id, page)
 
-        self._execute("set_layout", action, config=config)
+        self._execute("set_layout", action, config=config, page_id=page_id)
 
-    def set_theme(self, theme: Theme) -> None:
+    def set_theme(self, theme: Theme, *, page_id: str | None = None) -> None:
         """保存主题副本，避免多个文档共享可变主题。"""
 
-        def action(theme):
-            self._state.set_setting("theme", theme)
+        def action(theme, page_id):
+            if page_id is None:
+                self._state.set_setting("theme", theme)
+            else:
+                page = deepcopy(self._state.document.submaps[page_id])
+                page.theme = deepcopy(theme)
+                self._state.set_page(page_id, page)
 
-        self._execute("set_theme", action, theme=theme)
+        self._execute("set_theme", action, theme=theme, page_id=page_id)
 
     def attach_image(self, node_id: str, data: bytes, media_type: str = "image/png", *, width=160) -> str:
         """导入并关联图片；相同字节按内容哈希去重，关联和清理一并进入历史。"""

@@ -260,6 +260,8 @@ def child(scale, platform):
             window.status.clearMessage()
             window.activateWindow()
             window.canvas.view.setFocus()
+            # 离屏平台的窗口激活由事件循环完成，先处理焦点事件再发真实快捷键。
+            app.processEvents()
             QTest.keyClick(window.canvas.view, Qt.Key.Key_3, Qt.KeyboardModifier.AltModifier)
             app.processEvents()
             settings = window.panels.settings

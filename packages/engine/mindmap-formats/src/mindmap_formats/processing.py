@@ -2,7 +2,16 @@
 
 from dataclasses import fields
 
-from mindmap_core import Asset, FormatRegistry, LayoutConfig, MindMapDocument, MindMapError, Node, Theme
+from mindmap_core import (
+    Asset,
+    FormatRegistry,
+    LayoutConfig,
+    MindMapDocument,
+    MindMapError,
+    MindMapPage,
+    Node,
+    Theme,
+)
 
 from .mindmap import MindmapCodec
 
@@ -44,4 +53,7 @@ def can_process_snapshot(document: MindMapDocument) -> bool:
             and type(document.theme) is Theme
             and all(type(node) is Node and vars(node).keys() == _NODE_FIELDS
                     for node in document.nodes.values())
+            and all(type(page) is MindMapPage and type(page.layout) is LayoutConfig and type(page.theme) is Theme
+                    and vars(page).keys() == {"id", "root_id", "owner_id", "layout", "theme"}
+                    for page in document.submaps.values())
             and all(type(asset) is Asset for asset in document.assets.values()))

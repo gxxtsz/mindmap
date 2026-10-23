@@ -384,7 +384,11 @@ class _DropResolver:
     def _append_node_targets(self, regions):
         """按正式节点顺序生成正文和两侧排序候选，小图和大图共用同一套落区语义。"""
         for key, rect in regions:
+            # 子导图入口可以作为同级排序参照，但不能出现接入普通子节点的落区。
+            has_submap = bool(self.document.nodes[key].submap_id)
             if key == self.center_id:
+                if has_submap:
+                    continue
                 sides = (
                     ("left", "right")
                     if self.document.layout.direction == "both" and key == self.document.root_id
@@ -408,9 +412,10 @@ class _DropResolver:
                     )
                 continue
             parent, index = self.parents[key], self.rows[key]
-            self.targets.append(
-                _Target(self._proposal(key, len(self.remaining[key])), key, "inside", QRectF(rect))
-            )
+            if not has_submap:
+                self.targets.append(
+                    _Target(self._proposal(key, len(self.remaining[key])), key, "inside", QRectF(rect))
+                )
             for position in ("before", "after"):
                 before = position == "before"
                 zone = (
@@ -507,6 +512,7 @@ class _DropResolver:
         返回值的第二项表示明确进入某个操作区，可立即切换意图；只有外侧距离
         吸附才沿用退出滞回。拖动影像、短条和文字均不参与此只读命中计算。
         """
+        self.blocked_submap = None
         if self._virtual:
             self._virtual_targets(point, scale)
         elif self._gap_index is not None:
@@ -520,6 +526,10 @@ class _DropResolver:
             choices = self._inside_targets.get(direct)
             if choices:
                 return min(choices, key=lambda target: _distance(point, target.region)), True
+            if self.document.nodes[direct].submap_id:
+                # 明确落在子导图入口正文时直接拒绝，禁止再吸附到附近的同级插入区。
+                self.blocked_submap = direct
+                return None, True
         if any(rect.contains(point) for _, rect in self._source_index.nearby(point)):
             return None, True
         # 中心主题向外延伸的一级分支落区保留，包括双向布局尚无主题的一侧。
@@ -901,6 +911,10 @@ class NodeDragController(QObject):
             candidate, direct = current, False
         else:
             candidate, direct = self._resolver.resolve(point, scale) if inside else (None, True)
+            blocked = getattr(self._resolver, "blocked_submap", None) if inside else None
+            if blocked is not None and blocked != getattr(self, "_blocked_submap", None):
+                self.owner.error_occurred.emit("此节点已有子导图，请进入子导图添加内容")
+            self._blocked_submap = blocked
         # 明确进入正文或排序区时立即按当前意图切换；只有离开所有明确落区后的
         # 外侧吸附使用 36 像素退出距离。旧排序锁定不能跨进正文继续提交同级移动。
         if (
@@ -1097,11 +1111,11 @@ class NodeDragController(QObject):
             return False
         if not self.owner._can_incremental() or self.owner._incremental_layout is None:
             # 第三方布局可能拒绝合法结构，保留独立候选及原有隔离契约。
-            scratch = MindMapEngine(drop.document)
+            scratch = MindMapEngine(self.owner.engine.document)
             changed_ids = []
             scratch.subscribe(lambda event: changed_ids.extend(event.node_ids))
             _apply_move(scratch, drop.proposal, drop.document)
-            candidate = scratch.document
+            candidate = scratch.page_document(self.owner.current_page_id)
             _, sizes = self.owner.factory.measure(
                 candidate, changed_node_ids=changed_ids,
                 previous_document=drop.document, previous_visuals=self.owner._visuals,
@@ -1112,6 +1126,8 @@ class NodeDragController(QObject):
             # 不建立临时引擎或整图副本，也不提前执行宿主钩子和发布历史事件。
             with self.owner.engine.preview_operation() as (candidate, touched):
                 _apply_move(self.owner.engine, drop.proposal, drop.document)
+                if self.owner.current_page_id is not None or candidate.submaps:
+                    candidate = candidate.page_view(self.owner.current_page_id)
                 changed_sizes = {}
                 for key in touched:
                     node = candidate.nodes.get(key)
@@ -1158,6 +1174,7 @@ class NodeDragController(QObject):
         layer, self.ghost = self.ghost, None
         self.owner.scene.removeItem(layer)
         self.target = None
+        self._blocked_submap = None
         if not self.owner._disposed:
             # 拖动期间只改变源图元透明度，取消无需重建图元、重排或恢复折叠快照。
             for key in self.owner.node_items:

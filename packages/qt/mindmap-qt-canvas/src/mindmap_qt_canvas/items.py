@@ -7,7 +7,7 @@ from weakref import ref
 from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QPainterPath, QTextCursor
+from PySide6.QtGui import QColor, QPainterPath, QPen, QTextCursor
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject, QGraphicsTextItem
 from shiboken6 import isValid
 
@@ -167,6 +167,56 @@ class FoldControlItem(QGraphicsObject):
         )
 
 
+class SubmapControlItem(QGraphicsObject):
+    """叶子入口的常驻页面按钮；仅画布创建，静态渲染与导出不包含此控件。"""
+
+    def __init__(self, node_item):
+        super().__init__(node_item)
+        self._node_item_ref = ref(node_item)
+        self._rect = QRectF()
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setZValue(2)
+        self.setToolTip("进入子导图")
+        self.sync()
+
+    @property
+    def node_item(self):
+        item = self._node_item_ref()
+        return item if item is not None and isValid(item) else None
+
+    def sync(self):
+        item = self.node_item
+        if item is None:
+            return
+        rect = QRectF(item.visual.width + 6, (item.visual.height - 22) / 2, 22, 22)
+        if rect != self._rect:
+            self.prepareGeometryChange()
+            self._rect = rect
+        self.setVisible(bool(item.node.submap_id))
+        self.update()
+
+    def can_activate(self):
+        """只读仍允许导航；文字编辑、拖动和销毁期间的迟到点击保持原位。"""
+        item = self.node_item
+        return bool(item and item.owner and not item.owner._disposed and item.node.submap_id
+                    and item.owner.editor is None and not item.owner.view.node_drag.active)
+
+    def boundingRect(self):
+        return self._rect
+
+    def paint(self, painter, option, widget=None):
+        item = self.node_item
+        if item is None:
+            return
+        colors = item.owner._ui_colors
+        painter.setPen(QPen(QColor(colors.accent if colors else item.theme.accent), 1.3))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        rect = self._rect.adjusted(5, 3, -5, -3)
+        painter.drawRoundedRect(rect, 2, 2)
+        painter.drawLine(rect.left() + 3, rect.top() + 6, rect.right() - 3, rect.top() + 6)
+        painter.drawLine(rect.left() + 3, rect.top() + 10, rect.right() - 3, rect.top() + 10)
+
+
 class NodeItem(StaticNodeItem):
     """保持原节点构造接口；有宿主时转发双击编辑，导出图元无需创建该交互对象。"""
 
@@ -176,6 +226,7 @@ class NodeItem(StaticNodeItem):
         self.hovered = False
         self._fold_hide_pending = False
         self.fold_control = FoldControlItem(self) if owner is not None else None
+        self.submap_control = SubmapControlItem(self) if owner is not None else None
 
     def set_hovered(self, hovered: bool, *, immediate: bool = False) -> None:
         """进入立即显示，离开延迟 200 毫秒隐藏；再次进入取消待执行的隐藏。
@@ -200,6 +251,8 @@ class NodeItem(StaticNodeItem):
             self.owner.view._cancel_fold_hide(self)
         if self.fold_control is not None:
             self.fold_control.sync()
+        if self.submap_control is not None:
+            self.submap_control.sync()
 
     def itemChange(self, change, value):
         result = super().itemChange(change, value)

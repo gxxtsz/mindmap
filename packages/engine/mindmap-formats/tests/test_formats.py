@@ -41,7 +41,7 @@ def test_roundtrip_assets_and_metadata(tmp_path, suffix):
     else:
         with zipfile.ZipFile(target) as archive:
             stored = json.loads(archive.read("document.json"))
-    assert stored["schema_version"] == 2
+    assert stored["schema_version"] == 3
     assert "relations" not in stored and "summaries" not in stored
 
 
@@ -70,8 +70,8 @@ def test_imported_outline_uses_round_connections_at_every_depth():
 
 @pytest.mark.parametrize("kind", list(BranchStyle))
 @pytest.mark.parametrize("suffix", [".mindmap", ".json"])
-def test_branch_styles_keep_version_two_and_roundtrip(tmp_path, kind, suffix):
-    """新增样式只占用既有 style 字典，原生包和 JSON 均不升级文件版本。"""
+def test_branch_styles_keep_current_version_and_roundtrip(tmp_path, kind, suffix):
+    """分支样式在当前版本原生包及 JSON 中完整保留。"""
     engine = MindMapEngine(example())
     engine.set_branch_style([engine.root_id], kind)
     first = engine.document.root.children[0]
@@ -83,7 +83,7 @@ def test_branch_styles_keep_version_two_and_roundtrip(tmp_path, kind, suffix):
     assert loaded == document
     assert "branch" not in loaded.nodes[first].style
     assert loaded.root.style["branch"] == {"kind": kind.value}
-    assert to_dict(loaded)["schema_version"] == 2
+    assert to_dict(loaded)["schema_version"] == 3
 
 
 @pytest.mark.parametrize("branch", [{"kind": "未知"}, {}, None, {"kind": 8}])

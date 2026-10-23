@@ -1,0 +1,151 @@
+"""在独立进程核验子导图、路径栏、紧凑模式与三档缩放，并生成中文报告和截图。"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def child(scale, platform):
+    """每档缩放使用独立 QApplication，避免运行中改变 Qt 缩放基线。"""
+    from mindmap_formats import load_document
+    from mindmap_workbench.shell_adapter import build_window
+    from PySide6.QtCore import QCoreApplication, QEvent, QPointF
+    from PySide6.QtWidgets import QApplication, QToolButton
+
+    app = QApplication([])
+    output = ROOT / ".artifacts/submaps" / platform / f"{scale:g}x"
+    output.mkdir(parents=True, exist_ok=True)
+    results = []
+    with TemporaryDirectory(prefix="mindmap-submap-") as temporary:
+        for theme in ("light", "dark"):
+            for compact in (False, True):
+                label = theme + ("-compact" if compact else "-normal")
+                window = build_window(storage_dir=Path(temporary) / label, theme=theme, restore=False)
+                try:
+                    window.manager.set_option("compact", compact)
+                    window.resize(1360, 880)
+                    window.show()
+                    app.processEvents()
+                    assert window.new_document(Path(temporary) / (label + ".mindmap"))
+                    canvas, engine = window.canvas, window.engine
+                    engine.update_node(engine.root_id, text="编程学习笔记")
+                    branch = engine.add_child(engine.root_id, "数据类型")
+                    owner = engine.add_child(branch, "整数与进制")
+                    engine.add_child(engine.root_id, "算法与数据结构")
+                    canvas.select_nodes([owner])
+                    canvas.view.zoom(1.25)
+                    canvas.view.update_navigation_rect(center=QPointF(180, 80))
+                    center = canvas.view.mapToScene(canvas.view.viewport().rect()).boundingRect().center()
+                    original_scale = canvas.view.transform().m11()
+                    page = canvas.create_submap()
+                    app.processEvents()
+                    root = canvas.document_view.root_id
+                    integer = engine.add_child(root, "整数的表示")
+                    decimal = engine.add_child(root, "十进制整数")
+                    engine.add_child(integer, "有符号与无符号")
+                    engine.add_child(integer, "取值范围")
+                    canvas.select_nodes([decimal])
+                    app.processEvents()
+                    assert window.grab().save(str(output / (label + "-page.png")))
+                    nested = canvas.create_submap()
+                    app.processEvents()
+                    key = engine.add_child(canvas.document_view.root_id, "进制转换方法")
+                    canvas.select_nodes([key])
+                    app.processEvents()
+                    expected = "编程学习笔记 › 整数与进制 › 十进制整数"
+                    checks = {
+                        "实际缩放正确": abs(window.devicePixelRatioF() - scale) < 0.01,
+                        "页面与路径栏可见": canvas.path_navigation.isVisible()
+                        and canvas.path_navigation.height() == 36,
+                        "完整页面路径": canvas.path_navigation.full_path == expected,
+                        "只显示当前页": len(canvas.document_view.nodes) == 2,
+                        "侧栏属于当前页": window.panels.outline.tree_model.document.root_id
+                        == canvas.document_view.root_id,
+                        "同一文件标签": len(window.sessions) == 1,
+                    }
+                    assert window.grab().save(str(output / (label + "-nested.png")))
+                    for index in range(12):
+                        key = engine.add_child(key, f"详细知识点 {index + 1}")
+                    canvas.select_nodes([key])
+                    app.processEvents()
+                    checks["普通分支不延长路径"] = canvas.path_navigation.full_path == expected
+                    # 页面链才会触发路径省略；普通分支再深，也不能混入页面菜单。
+                    targets = {entry.text: (entry.page_id, entry.node_id)
+                               for entry in canvas.path_navigation.entries}
+                    for index in range(12):
+                        key = engine.add_child(canvas.document_view.root_id, f"进制转换专题 {index + 1}")
+                        canvas.select_nodes([key])
+                        child_page = canvas.create_submap()
+                        targets[canvas.document_view.root.text] = (child_page, canvas.document_view.root_id)
+                    deepest = canvas.current_page_id
+                    app.processEvents()
+                    overflow = next(button for button in canvas.path_navigation.findChildren(QToolButton)
+                                    if button.isVisible() and button.text() == "…")
+                    actions = overflow.menu().actions()
+                    checks["长路径仅收起页面"] = bool(actions) and all(
+                        entry.page_root for entry in canvas.path_navigation.entries)
+                    assert window.grab().save(str(output / (label + "-long-path.png")))
+                    target_page, target_root = targets[actions[0].text()]
+                    actions[0].trigger()
+                    checks["隐藏页面点击跳转"] = (canvas.current_page_id == target_page
+                                            and canvas.selected_node_ids() == [target_root])
+                    canvas.navigate_to(deepest)
+                    assert window.save_all()
+                    revision = engine.revision
+                    canvas.navigate_to(nested)
+                    canvas.return_to_parent_page()
+                    checks["返回一级页面"] = canvas.current_page_id == page
+                    canvas.return_to_parent_page()
+                    restored = canvas.view.mapToScene(canvas.view.viewport().rect()).boundingRect().center()
+                    checks["恢复原视图"] = (canvas.view.transform().m11() == original_scale
+                                             and (center - restored).manhattanLength() < 3 / original_scale
+                                             and canvas.selected_node_ids() == [owner])
+                    checks["导航不修改内容"] = engine.revision == revision and not engine.is_dirty
+                    checks["全部页面保存"] = load_document(window.files.path) == engine.document
+                    checks["常驻页面图标"] = canvas.node_items[owner].submap_control.isVisible()
+                    assert window.grab().save(str(output / (label + "-entry.png")))
+                    canvas.navigate_to(nested)
+                    canvas.set_editable(False)
+                    canvas.navigate_to(None, branch)
+                    checks["只读路径跳转"] = canvas.current_page_id is None
+                    results.append({"主题": theme, "紧凑模式": compact, "缩放": scale,
+                                    "检查": checks, "通过": all(checks.values())})
+                finally:
+                    window.close()
+                    window.deleteLater()
+                    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+                    app.processEvents()
+    (output / "report.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if all(item["通过"] for item in results) else 1
+
+
+def main():
+    parser = argparse.ArgumentParser(description="子导图三档缩放与主题视觉验收")
+    parser.add_argument("--child", type=float)
+    parser.add_argument("--platform", default="offscreen")
+    options = parser.parse_args()
+    if options.child:
+        return child(options.child, options.platform)
+    passed = True
+    for scale in (1, 1.5, 2):
+        environment = dict(os.environ, QT_QPA_PLATFORM=options.platform, QT_SCALE_FACTOR=str(scale),
+                           QT_SCALE_FACTOR_ROUNDING_POLICY="PassThrough", PYTHONIOENCODING="utf-8")
+        environment.pop("QT_SCREEN_SCALE_FACTORS", None)
+        result = subprocess.run([sys.executable, __file__, "--child", str(scale), "--platform", options.platform],
+                                cwd=ROOT, env=environment, capture_output=True, timeout=90,
+                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        passed &= result.returncode == 0
+        print(f"{options.platform} / {scale:g}x：{'通过' if result.returncode == 0 else '失败'}", flush=True)
+        if result.returncode:
+            print(result.stderr.decode("utf-8", errors="replace")[-3000:])
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

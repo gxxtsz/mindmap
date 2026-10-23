@@ -638,7 +638,8 @@ def test_status_controls_follow_window_theme_and_stay_out_of_export(window, qtbo
         assert controls.isVisible() and window.status.rect().contains(controls.geometry())
         assert controls.x() >= version.geometry().right()
         # 文档正文从标签栏下方直接开始，隐藏工具栏没有残留高度。
-        assert canvas._view_card.mapTo(canvas, QPoint(0, 0)).y() == 0
+    assert canvas.path_navigation.mapTo(canvas, QPoint(0, 0)).y() == 0
+    assert canvas._view_card.mapTo(canvas, QPoint(0, 0)).y() == canvas.path_navigation.height()
     canvas.view.zoom(1.3)
     qtbot.mouseClick(buttons["fit"], Qt.MouseButton.LeftButton)
     scale = canvas.view.transform().m11()

@@ -9,6 +9,8 @@ from types import MappingProxyType
 
 from mindmap_core import (
     BranchStyle,
+    ChangeEvent,
+    ChangeSet,
     FormatRegistry,
     LayoutConfig,
     LayoutRegistry,
@@ -56,6 +58,7 @@ from PySide6.QtWidgets import (
 
 from .clipboard import EDRAW_CLIPBOARD_MIME, read_edraw_clipboard
 from .items import NodeEditor, NodeItem
+from .navigation import PageNavigationMixin
 from .view import MIN_ZOOM, MindMapView
 from .view_controls import _ViewControls
 
@@ -63,7 +66,7 @@ CLIPBOARD_MIME = "application/x-python-mindmap+json"
 VIRTUALIZATION_NODE_LIMIT = 1000
 
 
-class MindMapWidget(QWidget):
+class MindMapWidget(PageNavigationMixin, QWidget):
     """原生画布组件。
 
     宿主先创建 QApplication，再将本组件加入任意布局。engine 可省略，此时创建
@@ -83,6 +86,7 @@ class MindMapWidget(QWidget):
     document_changing = Signal(object)
     edits_flush_requested = Signal()
     branch_scope_changed = Signal(str)
+    page_changed = Signal(object)
 
     def __init__(
         self,
@@ -139,6 +143,7 @@ class MindMapWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.toolbar)
+        self._init_page_navigation(layout)
         # 圆角只属于界面承载层；视口与场景仍是原生矩形，导出不读取卡片外观。
         self._view_card = CardFrame(self.view, self, rounded=not embedded)
         layout.addWidget(self._view_card)
@@ -159,7 +164,9 @@ class MindMapWidget(QWidget):
         self._virtualized = False
         self._viewport_signature = None
         self._selection_undo, self._selection_redo = [], []
-        self._document = self.engine.document
+        self._book_document = self.engine.document
+        self._document = self._book_document.page_view()
+        self._page_chain = [None]
         self._node_parents = self._document.parents()
         self._node_order = None
         self._actions = {}
@@ -178,7 +185,7 @@ class MindMapWidget(QWidget):
         unsubscribe = self._unsubscribe
         self.destroyed.connect(lambda: unsubscribe())
         self.refresh()
-        self.select_nodes([self.engine.root_id])
+        self.select_nodes([self._document.root_id])
         self.reset_view()
 
     def dispose(self):
@@ -280,7 +287,7 @@ class MindMapWidget(QWidget):
         focus = self.focus_id
         outside_focus = bool(focus) and any(key not in set(document.descendants(focus)) for key in ids)
         if collapsed and not self._can_incremental():
-            candidate = self.engine.document
+            candidate = self.engine.page_document(self._current_page_id)
             for key in collapsed:
                 candidate.nodes[key].expanded = True
             self.validate_document(candidate)
@@ -440,7 +447,7 @@ class MindMapWidget(QWidget):
                 "expand_all",
                 "展开全部",
                 None,
-                lambda w: w.engine.set_expanded(w.engine.root_id, True, recursive=True),
+                lambda w: w.engine.set_expanded(w.document_view.root_id, True, recursive=True),
                 True,
             ),
             (
@@ -462,6 +469,9 @@ class MindMapWidget(QWidget):
             ("hyperlink", "打开超链接", None, lambda w: w.open_hyperlink(), False),
             ("focus", "聚焦此分支", "Ctrl+F", lambda w: w.focus_node(w.current_node_id()), False),
             ("unfocus", "返回完整导图", "Escape", lambda w: w.focus_node(None), False),
+            ("create_submap", "创建子导图", None, lambda w: w.create_submap(), True),
+            ("enter_submap", "进入子导图", None, lambda w: w.enter_submap(), False),
+            ("delete_submap", "删除子导图…", None, lambda w: w.delete_submap(), True),
             ("zoom_in", "放大", "Ctrl+=", lambda w: w.view.zoom(1.2), False),
             ("zoom_out", "缩小", "Ctrl+-", lambda w: w.view.zoom(1 / 1.2), False),
             ("fit", "适应窗口", "Ctrl+0", lambda w: w.fit_to_view(), False),
@@ -542,6 +552,15 @@ class MindMapWidget(QWidget):
             and self.layout_registry.info(self._document.layout.algorithm_id).supports_branch_styles
         )
         self._sync_branch_actions()
+        node = self._document.nodes.get(self.current_node_id())
+        single = len(self.selected_node_ids()) <= 1
+        self._actions["create_submap"].setEnabled(bool(
+            self.editable and not editing and single and node and not node.children and not node.submap_id))
+        self._actions["create_submap"].setToolTip("仅没有普通子节点和子导图的叶子节点可创建")
+        self._actions["enter_submap"].setEnabled(bool(not editing and single and node and node.submap_id))
+        self._actions["delete_submap"].setEnabled(bool(
+            self.editable and not editing and single and node and node.submap_id))
+        self._sync_navigation()
 
     def set_editable(self, editable: bool) -> None:
         """切换只读模式，取消尚未提交的文本编辑与下载后续写入。"""
@@ -578,7 +597,7 @@ class MindMapWidget(QWidget):
         仅查询界面状态，不强制展开节点、不改变选择，也不创建历史记录。
         """
         ids = self.selected_node_ids()
-        return ids[0] if ids else self.focus_id or self.engine.root_id
+        return ids[0] if ids else self.focus_id or self._document.root_id
 
     def select_nodes(self, node_ids) -> None:
         """替换节点选择；折叠或聚焦之外的节点不会强制展开。"""
@@ -605,6 +624,17 @@ class MindMapWidget(QWidget):
         self.selection_changed.emit(self.selected_node_ids())
 
     def _engine_changed(self, event):
+        """引擎已提交而读模型尚未同步时，暂停路径查询，避免访问刚删除的旧选择。"""
+        if self._disposed:
+            return
+        self._applying_engine_event = True
+        try:
+            self._apply_engine_event(event)
+        finally:
+            self._applying_engine_event = False
+        self._sync_navigation()
+
+    def _apply_engine_event(self, event):
         if self._disposed:
             return
         # 在画布刷新引发选择信号之前通知宿主，防止旧侧栏输入被提交到新文档或撤销状态。
@@ -613,14 +643,35 @@ class MindMapWidget(QWidget):
             # 自动保存只更新保存标记，不触发文档替换通知，不打断菜单或未完成输入。
             self.document_changing.emit(event)
             self._cancel_branch_menu()
+            self._cache_page_view()
             before = self.selected_node_ids()
             old_parents = {key: self._node_parents.get(key) for key in before}
+            old_layout, old_theme = self._document.layout, self._document.theme
             if self.editor is not None:
                 self.finish_edit(commit=False)
             changes = event.changes
+            switched = False
+            local_changes = None
             if changes is not None:
                 index = 1 if event.forward else 0
                 delta = changes.collections.get("nodes", {})
+                changes.apply(self._book_document, forward=event.forward)
+                target_page = self._current_page_id
+                if event.kind in ("undo", "redo"):
+                    target_page = changes.page_id
+                if target_page is not None and target_page not in self._book_document.submaps:
+                    target_page = next((page for page in reversed(self._page_chain)
+                                        if page is None or page in self._book_document.submaps), None)
+                if target_page != self._current_page_id:
+                    self._switch_page(target_page, notify=False, cache=False)
+                    switched = True
+                    before = self.selected_node_ids()
+                    old_parents = {key: self._node_parents.get(key) for key in before}
+                # 全局差量只合并属于当前页的节点；其他页的新增节点不能漏进画布或大纲。
+                local_delta = {key: pair for key, pair in delta.items()
+                               if key in self._document.nodes or (pair[index] is not None
+                                   and self.engine.node_page_id(key) == self._current_page_id)}
+                delta = local_delta
                 new_ids = [key for key, pair in delta.items()
                            if pair[1 - index] is None and pair[index] is not None]
                 for key, pair in delta.items():
@@ -632,16 +683,37 @@ class MindMapWidget(QWidget):
                                 self._node_parents.pop(child)
                     if pair[index] is None:
                         self._node_parents.pop(key, None)
-                changes.apply(self._document, forward=event.forward)
+                for key, pair in delta.items():
+                    if pair[index] is None:
+                        self._document.nodes.pop(key, None)
+                    else:
+                        self._document.nodes[key] = self._book_document.nodes[key]
+                source = (self._book_document if self._current_page_id is None
+                          else self._book_document.submaps[self._current_page_id])
+                self._document.layout, self._document.theme = source.layout, source.theme
+                self._document.assets = self._book_document.assets
+                self._document.metadata = self._book_document.metadata
                 for key, pair in delta.items():
                     node = pair[index]
                     old = pair[1 - index]
                     if node is not None and (old is None or old.children != node.children):
                         for child in node.children:
                             self._node_parents[child] = key
-                self._measure_dirty = None if "theme" in changes.settings else event.node_ids
+                self._measure_dirty = None if old_theme != source.theme or switched else tuple(delta)
+                if not switched:
+                    settings = {}
+                    for name, old, new in (("layout", old_layout, source.layout),
+                                           ("theme", old_theme, source.theme)):
+                        if old != new:
+                            settings[name] = (old, new) if event.forward else (new, old)
+                    local_changes = ChangeSet({"nodes": delta, "assets": changes.collections.get("assets", {})},
+                                              settings, self._current_page_id)
             else:
-                self._document = self.engine.document
+                self._book_document = self.engine.document
+                self._current_page_id = None
+                self._page_states.clear()
+                self._page_chain = [None]
+                self._document = self._book_document.page_view()
                 self._node_parents = self._document.parents()
                 new_ids = []
                 self._measure_dirty = None
@@ -656,12 +728,12 @@ class MindMapWidget(QWidget):
                 ]
             if not after:
                 after = [old_parents[key] for key in before if old_parents.get(key) in self._document.nodes]
-                after = after or [self.engine.root_id]
+                after = after or [self._document.root_id]
             if event.kind == "reset":
                 self.focus_id = None
                 self._selection_undo.clear()
                 self._selection_redo.clear()
-                after = [self.engine.root_id]
+                after = [self._document.root_id]
             elif event.kind == "undo" and self._selection_undo:
                 selection = self._selection_undo.pop()
                 self._selection_redo.append(selection)
@@ -677,7 +749,10 @@ class MindMapWidget(QWidget):
             if self.focus_id not in self._document.nodes:
                 self.focus_id = None
             self.refresh()
+            after = [key for key in after if key in self._document.nodes]
             self.select_nodes(after)
+            event = ChangeEvent(event.operation, tuple(local_changes.node_ids) if local_changes else (),
+                                event.revision, event.kind, local_changes, event.forward)
         self._update_actions()
         self.history_changed.emit(self.engine.can_undo, self.engine.can_redo, self.engine.is_dirty)
         self.document_changed.emit(event)
@@ -891,6 +966,7 @@ class MindMapWidget(QWidget):
         set_action_icon(self._actions["properties"], "properties", theme)
         self._sync_wheel_actions()
         self._sync_branch_actions()
+        self.path_navigation.set_ui_colors(colors)
 
     def _branch_selection(self) -> list[str]:
         return self.selected_node_ids() or [self.current_node_id()]
@@ -977,7 +1053,7 @@ class MindMapWidget(QWidget):
         self._ensure_editable()
         if self.editor is not None:
             raise MindMapError("请先结束文字编辑再设置分支样式")
-        if not self.layout_registry.info(self.engine.document.layout.algorithm_id).supports_branch_styles:
+        if not self.layout_registry.info(self._document.layout.algorithm_id).supports_branch_styles:
             raise MindMapError("当前布局算法不支持分支连接线样式")
 
     def preview_branch_style(self, kind: BranchStyle | str | None, *, scope="subtree") -> None:
@@ -988,7 +1064,7 @@ class MindMapWidget(QWidget):
         """
         if self._disposed or not self._actions["branch_style"].isEnabled():
             return
-        candidate = self.engine.document
+        candidate = self.engine.page_document(self._current_page_id)
         apply_branch_style(candidate, self._branch_selection(), kind, scope=scope)
         result = self.layout_registry.layout(candidate, self._measurements, focus_id=self.focus_id)
         self._preview_layout = result
@@ -1003,7 +1079,7 @@ class MindMapWidget(QWidget):
         """
         self._ensure_branch_editable()
         ids = self._branch_selection()
-        candidate = self.engine.document
+        candidate = self.engine.page_document(self._current_page_id)
         apply_branch_style(candidate, ids, kind, scope=scope)
         self.layout_registry.layout(candidate, self._measurements, focus_id=self.focus_id)
         self._cancel_branch_menu()
@@ -1039,7 +1115,7 @@ class MindMapWidget(QWidget):
         if (self._disposed or not self._view_reset_pending or not self.view.isVisible()
                 or self.view.viewport().size().isEmpty() or self._refreshing):
             return
-        root = self.node_items.get(self.engine.root_id)
+        root = self.node_items.get(self._document.root_id)
         if root is None or root.sceneBoundingRect().isEmpty():
             return
         # 先消费请求，再恢复倍率，防止变换引发的尺寸事件重复排程。导航余量必须
@@ -1051,7 +1127,7 @@ class MindMapWidget(QWidget):
 
     def center_root(self):
         """将根节点或当前聚焦节点置于视口中央，保持用户的缩放比例。"""
-        key = self.focus_id or self.engine.root_id
+        key = self.focus_id or self._document.root_id
         rect = self.layout_result.nodes.get(key)
         if not self._disposed and rect is not None:
             self.view.update_navigation_rect(center=QRectF(rect.x, rect.y, rect.width, rect.height).center())
@@ -1085,7 +1161,7 @@ class MindMapWidget(QWidget):
             self.engine.get_node(node_id)
         self.focus_id = node_id
         self.refresh()
-        self.select_nodes([node_id or self.engine.root_id])
+        self.select_nodes([node_id or self._document.root_id])
         self.fit_to_view()
 
     def begin_edit(self, node_id: str):
@@ -1191,7 +1267,7 @@ class MindMapWidget(QWidget):
         剪贴板编码失败时不会执行删除；正式删除使用引擎的历史与资源清理规则。
         """
         self._ensure_editable()
-        if self.engine.root_id in self.selected_node_ids():
+        if self._document.root_id in self.selected_node_ids():
             raise MindMapError("不能剪切根节点")
         self.copy()
         self.engine.remove_nodes(self.selected_node_ids())
@@ -1301,7 +1377,7 @@ class MindMapWidget(QWidget):
             parents=self._document.parents(),
         )
         if result is not None:
-            candidate = self.engine.document
+            candidate = self.engine.page_document(self._current_page_id)
             for name, value in result.patch.items():
                 setattr(candidate.nodes[key], name, deepcopy(value))
             if result.branch_changed:
@@ -1387,7 +1463,7 @@ class MindMapWidget(QWidget):
         # 导出读取正式文档；宿主可在快照建立前提交侧栏内已完成的有效输入。
         self.edits_flush_requested.emit()
         export_document(
-            self.engine.document,
+            self.engine.page_document(self._current_page_id),
             path,
             layout_registry=self.layout_registry,
             expand_all=expand_all,
@@ -1397,17 +1473,20 @@ class MindMapWidget(QWidget):
     def set_layout(self, config: LayoutConfig) -> None:
         """在提交前试算新布局，缺失算法、非法参数或计算失败均不产生部分修改。"""
         self._ensure_editable()
-        candidate = self.engine.document
+        candidate = self.engine.page_document(self._current_page_id)
         candidate.layout = config
         self.validate_document(candidate)
-        self.engine.set_layout(config)
+        self.engine.set_layout(config, page_id=self._current_page_id)
 
     def validate_document(self, document: MindMapDocument) -> None:
         """替换前验证算法、图片、测量与布局结果，失败时当前引擎和画布不变。"""
         document.validate()
-        self.layout_registry.validate_config(document.layout)
-        _, sizes = self.factory.measure(document)
-        self.layout_registry.layout(document, sizes)
+        # 完整文件装载时逐页校验；页内候选仍只测量当前页，禁止混排所有页面节点。
+        pages = [document.page_view()] + [document.page_view(key) for key in document.submaps]
+        for page in pages:
+            self.layout_registry.validate_config(page.layout)
+            _, sizes = self.factory.measure(page)
+            self.layout_registry.layout(page, sizes)
 
     def context_menu(self, global_position):
         """在指定全局位置显示复用内置及扩展 QAction 的右键菜单。
@@ -1417,6 +1496,7 @@ class MindMapWidget(QWidget):
         menu = QMenu(self)
         groups = [
             ("add_child", "add_sibling", "insert_parent", "edit", "properties", "delete"),
+            ("create_submap", "enter_submap", "delete_submap"),
             ("copy", "cut", "paste", "undo", "redo"),
             ("move_up", "move_down", "fold", "expand_all", "collapse_all"),
             ("image", "image_url", "remove_image", "hyperlink"),

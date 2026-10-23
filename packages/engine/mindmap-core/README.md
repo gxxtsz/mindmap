@@ -1,5 +1,22 @@
 # mindmap-core
 
+## 独立子导图
+
+`MindMapDocument.submaps` 使用扁平页面表，`Node.submap_id` 关联独立子导图；
+节点与图片资源保存在整份文档中，页面只保存入口、根节点及独立布局、主题。
+主导图保持既有接口，页面标识使用 `None` 表示主导图。
+
+`engine.create_submap(node_id)` 仅允许尚无普通子节点及子导图的叶子节点，返回页面 ID。
+`engine.remove_submap(node_id)` 保留入口，删除其拥有的全部页面；两种操作均支持
+统一事务和整体撤销。入口与根节点名称由 `update_node` 在一个事务内沿别名链同步。
+入口不能再接普通子节点，新增、粘贴和移动统一校验；每页根节点均禁止删除或移动。
+
+`engine.page_document(page_id)` 返回隔离的单页布局读模型，`node_page_id(node_id)`
+返回页内归属，`node_path(node_id)` 返回包含页面和节点 ID 的完整可点击路径。
+`set_layout` 与 `set_theme` 接受可选关键字参数 `page_id`，省略时仍修改主导图。
+`engine.document` 和保存快照始终包含全部页面，历史变化集的 `page_id` 表示操作所属页。
+普通分支遍历不跨页，完整复制与删除通过迭代的 `owned_descendants` 遍历所有附属页面。
+
 思维导图核心，包含模型、校验、编辑操作、事务、差异历史、事件、共享几何类型与扩展协议。
 仅使用 Python 3.12+ 标准库，不导入布局实现、文档格式、默认组合包或 Qt。
 

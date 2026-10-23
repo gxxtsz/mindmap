@@ -349,13 +349,14 @@ class OutlinePanel(QTreeView):
         try:
             previous = set(self._expanded_ids)
             scroll = self.verticalScrollBar().value()
+            page_changed = self.tree_model.document.root_id != self.canvas.document_view.root_id
             if event.changes is not None:
                 changed, fresh = self.tree_model.apply_changes(event)
             else:
                 changed = self.tree_model.replace_document(self.canvas.document_view)
                 fresh = set()
             # reset 即使结构完全相同，也代表整份导图替换，必须重新应用预设。
-            if event.kind == "reset":
+            if event.kind in ("reset", "navigation") or page_changed:
                 self._expanded_ids.clear()
                 self._apply_display_depth()
                 self.verticalScrollBar().setValue(scroll)

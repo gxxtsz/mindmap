@@ -25,6 +25,7 @@ class DocumentState:
         """已完整校验的新文档建立一次索引，仅在装载或替换文档时调用。"""
         self.document = document
         self.parents = document.parents()
+        self.root_pages = {document.root_id: None, **{p.root_id: p.id for p in document.submaps.values()}}
         self.asset_counts = Counter(node.image_id for node in document.nodes.values() if node.image_id)
         self.unused_assets = set(document.assets) - self.asset_counts.keys()
 
@@ -71,6 +72,33 @@ class DocumentState:
         self.journal.settings.setdefault(name, getattr(self.document, name))
         setattr(self.document, name, deepcopy(value))
 
+    def page_id(self, node_id):
+        """只沿当前节点的页内父链查询归属，不扫描其他页面或建立整图快照。"""
+        while node_id in self.parents:
+            node_id = self.parents[node_id]
+        if node_id not in self.root_pages:
+            raise MindMapError("节点不属于有效页面")
+        return self.root_pages[node_id]
+
+    def page(self, node_id):
+        """返回节点所属页面的内部配置，调用方只能通过日志接口修改。"""
+        page_id = self.page_id(node_id)
+        return self.document if page_id is None else self.document.submaps[page_id]
+
+    def set_page(self, key, page):
+        """以写时复制方式替换页面记录，同时即时维护根索引供嵌套事务查询。"""
+        old = self.document.submaps.get(key)
+        self.journal.submaps.setdefault(key, old)
+        if old is not None:
+            self.root_pages.pop(old.root_id, None)
+        if page is None:
+            self.document.submaps.pop(key, None)
+        else:
+            if page.root_id in self.root_pages:
+                raise MindMapError("页面根节点重复")
+            self.document.submaps[key] = deepcopy(page)
+            self.root_pages[page.root_id] = key
+
     def update_indexes(self, changes, *, forward=True, parents=True):
         """按已验证变化集更新索引；历史重放先删除旧边再添加新边，避免换父次序问题。
 
@@ -79,6 +107,15 @@ class DocumentState:
         """
         index = 1 if forward else 0
         nodes = changes.collections.get("nodes", {})
+        pages = changes.collections.get("submaps", {})
+        for pair in pages.values():
+            old = pair[1 - index]
+            if old is not None:
+                self.root_pages.pop(old.root_id, None)
+        for pair in pages.values():
+            page = pair[index]
+            if page is not None:
+                self.root_pages[page.root_id] = page.id
         if parents:
             for key, pair in nodes.items():
                 old = pair[1 - index]
@@ -113,13 +150,15 @@ class TransactionJournal:
 
     def __init__(self, state):
         self.state = state
-        self.nodes, self.assets, self.settings, self.parents = {}, {}, {}, {}
+        self.nodes, self.assets, self.submaps, self.settings, self.parents = {}, {}, {}, {}, {}
+        self.page_id = None
+        self.has_origin = False
 
     def changes(self):
         """仅比较登记实体；历史拥有独立前后值，后续编辑不能污染历史。"""
         document = self.state.document
         collections = {}
-        for name in ("nodes", "assets"):
+        for name in ("nodes", "assets", "submaps"):
             current = getattr(document, name)
             delta = {
                 key: (deepcopy(old), deepcopy(current.get(key)))
@@ -131,12 +170,18 @@ class TransactionJournal:
             key: (deepcopy(old), deepcopy(getattr(document, key)))
             for key, old in self.settings.items() if old != getattr(document, key)
         }
-        return ChangeSet(collections, settings)
+        return ChangeSet(collections, settings, self.page_id)
 
     def rollback(self):
         """原实体未被修改，直接恢复实体及父索引，无需再次深拷贝整图。"""
         document = self.state.document
-        for name in ("nodes", "assets"):
+        for key, old in self.submaps.items():
+            current = document.submaps.get(key)
+            if current is not None:
+                self.state.root_pages.pop(current.root_id, None)
+            if old is not None:
+                self.state.root_pages[old.root_id] = old.id
+        for name in ("nodes", "assets", "submaps"):
             target = getattr(document, name)
             for key, old in getattr(self, name).items():
                 if old is None:

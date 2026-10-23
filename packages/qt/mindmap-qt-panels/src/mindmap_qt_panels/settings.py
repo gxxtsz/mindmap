@@ -407,8 +407,9 @@ class GlobalSettingsPanel(QWidget):
             return
         if not self.canvas.editable or self.canvas.is_editing:
             raise MindMapError("请先结束文字编辑并退出只读模式再修改导图设置")
-        document = engine.document
-        candidate = engine.document
+        page_id = getattr(self.canvas, "current_page_id", None)
+        document = engine.page_document(page_id)
+        candidate = engine.page_document(page_id)
         info = self.canvas.layout_registry.info(document.layout.algorithm_id)
         if key == "direction":
             if value not in info.directions:
@@ -451,9 +452,9 @@ class GlobalSettingsPanel(QWidget):
         }
         with engine.transaction(labels[key]):
             if key in ("direction", "compact", "spacing"):
-                engine.set_layout(candidate.layout)
+                engine.set_layout(candidate.layout, page_id=page_id)
             elif key == "theme":
-                engine.set_theme(candidate.theme)
+                engine.set_theme(candidate.theme, page_id=page_id)
             else:
                 engine.set_branch_style([document.root_id], value, scope="subtree")
 

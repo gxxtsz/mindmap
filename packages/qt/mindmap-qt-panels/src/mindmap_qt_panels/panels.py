@@ -33,6 +33,10 @@ class MindMapPanels(QObject):
         self.settings = GlobalSettingsPanel(canvas, self._parking)
         self.outline.nodes_selected.connect(self._outline_selected)
         canvas.edits_flush_requested.connect(self.flush_pending_edits)
+        # 新版画布可在切页前检查全部面板的输入法状态；旧的独立宿主无需增加接口。
+        register_guard = getattr(canvas, "register_navigation_guard", None)
+        self._remove_navigation_guard = (
+            register_guard(lambda: not self.is_composing) if register_guard else lambda: None)
 
     def flush_pending_edits(self):
         """保存、导出和宿主关闭前，提交已完成的有效输入；输入法候选保持原语义。"""
@@ -72,6 +76,8 @@ class MindMapPanels(QObject):
         if self._disposed:
             return
         self._disposed = True
+        self._remove_navigation_guard()
+        self._remove_navigation_guard = lambda: None
         # 属性控制器先取消草稿，再关闭自己的弹层，避免销毁时的失焦提交旧输入。
         self.properties.dispose()
         self.settings.dispose()

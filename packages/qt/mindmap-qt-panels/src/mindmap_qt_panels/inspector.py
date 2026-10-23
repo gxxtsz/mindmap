@@ -147,7 +147,7 @@ class NodePropertiesPanel(NodePropertiesForm):
         ):
             self.discard_pending()
             return
-        document = engine.document
+        document = engine.page_document(getattr(self.canvas, "current_page_id", None))
         if any(key not in document.nodes for key in self._ids):
             self.discard_pending()
             return

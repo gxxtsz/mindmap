@@ -9,7 +9,7 @@ from typing import Any
 from .errors import MindMapError
 from .models import MindMapDocument, new_id
 
-_COLLECTIONS = ("nodes", "assets")
+_COLLECTIONS = ("nodes", "assets", "submaps")
 
 
 @dataclass
@@ -18,6 +18,8 @@ class ChangeSet:
 
     collections: dict[str, dict[str, tuple[Any, Any]]] = field(default_factory=dict)
     settings: dict[str, tuple[Any, Any]] = field(default_factory=dict)
+    # 操作所属页面随内容历史保存；界面据此跨页展示撤销结果，导航自身不产生历史。
+    page_id: str | None = None
 
     @classmethod
     def between(cls, before: MindMapDocument, after: MindMapDocument) -> ChangeSet:

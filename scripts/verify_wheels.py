@@ -67,6 +67,14 @@ files = MindMapFileController(canvas, Inputs())
 files.path = Path("canvas.mindmap")
 assert files.save()
 assert files.open_path("canvas.mindmap")
+canvas.select_nodes([node])
+page = canvas.create_submap()
+assert canvas.current_page_id == page
+canvas.engine.add_child(canvas.document_view.root_id, "安装后的子导图内容")
+assert files.save()
+canvas.return_to_parent_page()
+assert canvas.current_page_id is None
+canvas.enter_submap(node)
 canvas.export("canvas.png")
 canvas.dispose()
 canvas.close()
@@ -244,10 +252,22 @@ assert window.open_path(primary.files.path) and window.active_session is primary
 assert len(window.sessions) == 2
 window.manager.restore_default_layout()
 assert len(window.sessions) == 2 and window.active_session is primary
+owner = primary.engine.add_child(primary.engine.root_id, "发行子导图入口")
+primary.canvas.select_nodes([owner])
+page = primary.canvas.create_submap()
+key = primary.engine.add_child(primary.canvas.document_view.root_id, "发行子导图内容")
+primary.canvas.select_nodes([key])
+assert [(entry.page_id, entry.node_id) for entry in primary.canvas.path_navigation.entries] == [
+    (None, primary.engine.root_id), (page, primary.canvas.document_view.root_id)]
+assert all(entry.page_root for entry in primary.canvas.path_navigation.entries)
+assert window.save_all()
+assert page in load_document(primary.files.path).submaps
+primary.canvas.return_to_parent_page()
+assert primary.canvas.current_page_id is None
 window.close()
 assert primary.disposed and secondary.disposed and not len(window.sessions)
 print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台文件与导出": True, "多导图与自动保存边界": True,
-                  "仅打开和保存原生导图": True,
+                  "仅打开和保存原生导图": True, "子导图与页面路径": True,
                   "编辑与撤销重做": True, "图片与分支样式": True, "侧栏属性与工作区": True,
                   "已验证运行依赖": {item.metadata["Name"]: item.version for item in distributions()}}))
 
@@ -267,6 +287,15 @@ with engine.preview_operation() as (candidate, touched):
     engine.add_child(child, "只试算")
     assert child in touched
 assert engine.document == before
+page = engine.create_submap(child)
+root = engine.page_document(page).root_id
+engine.update_node(root, text="入口根节点同步")
+assert engine.get_node(child).text == "入口根节点同步"
+engine.document.validate()
+assert engine.undo()
+engine.remove_submap(child)
+assert engine.get_node(child).submap_id is None
+assert engine.undo() and page in engine.document.submaps
 
 ''',
     "mindmap-layouts": r'''
@@ -281,9 +310,13 @@ assert len(result.nodes) == 2
 ''',
     "mindmap-formats": r'''
 
-from mindmap_core import MindMapDocument
+from mindmap_core import MindMapDocument, MindMapEngine
 from mindmap_formats import load_document, save_document, dumps, loads
 document = MindMapDocument.new("独立文件格式")
+engine = MindMapEngine(document)
+page = engine.create_submap(engine.root_id)
+engine.add_child(engine.page_document(page).root_id, "独立页面保存")
+document = engine.document
 save_document(document, "独立.mindmap")
 assert load_document("独立.mindmap") == document
 assert loads(dumps(document)) == document
@@ -380,7 +413,15 @@ def run():
         # 只清理本次创建的临时根，删除前重新检查解析后的绝对路径。
         resolved = temporary.resolve()
         if resolved.parent == temporary_parent and resolved.name.startswith("mindmap-wheel-check-"):
-            shutil.rmtree(resolved)
+            # PySide6 的 QML 附带文件可能超过 Windows 的传统路径长度限制。
+            # 先检查逻辑绝对路径仍是本次临时根，再添加仅改变路径解析方式的长路径前缀。
+            delete_target = str(resolved)
+            if os.name == "nt":
+                if delete_target.startswith("\\\\"):
+                    delete_target = "\\\\?\\UNC\\" + delete_target[2:]
+                else:
+                    delete_target = "\\\\?\\" + delete_target
+            shutil.rmtree(delete_target)
 
 
 if __name__ == "__main__":

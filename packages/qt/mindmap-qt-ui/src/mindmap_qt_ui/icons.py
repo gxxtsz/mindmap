@@ -52,6 +52,9 @@ class IconMenuOptionButton(QToolButton):
 
 # 所有图形共用 24×24 坐标、两单位描边和圆角端点；只保留界面实际引用的图形。
 _SVG_BODIES = {
+    # 子导图与返回上级共用原创矢量图形，不依赖系统字体是否提供页面符号。
+    "submap": '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 9h8m-8 5h8"/>',
+    "page_up": '<path d="M12 21V4m-6 6 6-6 6 6"/>',
     "panel_menu": '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
     "panel_hide": '<path d="M5 12h14"/>',
     # 逐级缩进的横线配向下箭头表示展开层级，避免用数字和大下拉箭头挤占标题栏。
