@@ -29,11 +29,15 @@ from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 
 from .page_icons import paint_page_icon
 
+# 节点内容区上下各保留 8 个逻辑像素；正式测量、编辑草稿与导出共用此留白。
+_NODE_VERTICAL_PADDING = 8.0
+
 PAGE_CONTROL_SIZE = 32.0
 PAGE_CONTROL_GAP = 2.0
 PAGE_CONTENT_GAP = 8.0
 PAGE_RIGHT_PADDING = 14.0
-PAGE_MIN_HEIGHT = 44.0
+# 保留 32×32 的入口命中区域，上下各留 2 个逻辑像素，适配更紧凑的节点。
+PAGE_MIN_HEIGHT = 36.0
 
 
 def ensure_fonts() -> None:
@@ -159,7 +163,7 @@ class NodeVisual:
         """根据不含入口的内容尺寸生成新视觉，统一正式测量与原地编辑几何。
 
         width、height 包含原有正文、图片、标签及其留白，但不含页面按钮。
-        返回值额外加入按钮区，并在有入口时保证至少 44 个逻辑像素的高度；
+        返回值额外加入按钮区，并在有入口时保证至少 36 个逻辑像素的高度；
         内容整体居中，原对象及共享的文字文档不被修改，偏移不会重复累加。
         """
         total_height = max(height, PAGE_MIN_HEIGHT) if self.page_kinds else height
@@ -294,6 +298,8 @@ class VisualFactory:
 
         document 提供图片资源，is_root 决定根节点的默认字号及粗体。正文、图片和
         有效外观未变时复用原视觉；分支样式不影响节点尺寸，不使文字测量缓存失效。
+        内容区上下各保留 8 个逻辑像素，图片、标签和备注继续按实际内容撑高；
+        附页入口需要的最小高度及居中偏移统一由 with_content_size 处理。
         宿主先创建 QApplication，并在 GUI 线程使用返回的文字文档和图片对象。
         """
         key = (
@@ -335,7 +341,7 @@ class VisualFactory:
             text_width = max(120, min(max_width, natural + 3))
         text_document = make_text(text, font, text_width, markdown=node.text_format == "markdown")
         image, image_rect = None, QRectF()
-        y = 12.0
+        y = _NODE_VERTICAL_PADDING
         width = text_width + 28
         if node.image_id:
             if node.image_id not in self.pixmaps:
@@ -371,9 +377,10 @@ class VisualFactory:
             y += 22
         if node.note or node.hyperlink:
             y += 20
+        content_height = y + _NODE_VERTICAL_PADDING
         visual = NodeVisual(
             width,
-            y + 12,
+            content_height,
             text_document,
             text_position,
             QColor(
@@ -395,12 +402,12 @@ class VisualFactory:
             bool(node.children),
             page_kinds=tuple(kind for kind, page in (("detail", node.detail_page_id), ("submap", node.submap_id))
                              if page),
-            content_height=y + 12,
+            content_height=content_height,
         )
         # 普通底色使用强调色；根节点和自定义底色跟随正文色，避免蓝底蓝图标。
         visual.page_icon_color = visual.text_color if is_root or node.style.get("background") else QColor(theme.accent)
         if visual.page_kinds:
-            visual = visual.with_content_size(width, y + 12)
+            visual = visual.with_content_size(width, content_height)
         self.cache[key] = visual
         self._node_visuals[node.id] = (key, visual)
         if len(self.cache) > 4096:

@@ -48,7 +48,7 @@ def test_page_strip_reserves_space_without_squeezing_content(qapp, kinds, extra,
         assert all(not rect.intersects(bounds) for bounds in content)
     if rects:
         assert rects[-1].right() == visual.width - 14
-        assert visual.height >= 44
+        assert visual.height >= 36
     if len(rects) == 2:
         assert rects[0].right() + 2 == rects[1].left()
     assert visual.page_control_rect("main").isEmpty()
@@ -71,7 +71,7 @@ def test_page_icons_stay_visible_and_can_be_disabled_independently(qapp, theme, 
     visual = VisualFactory().visual(node, theme, document, is_root=is_root)
     expected = visual.text_color if is_root or custom else QColor(theme.accent)
     assert visual.page_icon_color == expected
-    assert visual.height >= 44
+    assert visual.height == 36
 
     def painted(enabled):
         image = QImage(int(visual.width + 1), int(visual.height + 1), QImage.Format.Format_ARGB32)
@@ -85,7 +85,7 @@ def test_page_icons_stay_visible_and_can_be_disabled_independently(qapp, theme, 
     for kind in visual.page_kinds:
         rect = visual.page_control_rect(kind).adjusted(8, 8, -8, -8).toAlignedRect()
         assert with_icons.copy(rect) != without_icons.copy(rect)
-    assert visual.text_position.y() >= 12
+    assert visual.text_position.y() >= 8
 
 
 def test_shared_page_icon_rejects_unknown_type():

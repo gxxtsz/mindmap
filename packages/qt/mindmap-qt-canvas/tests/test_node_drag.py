@@ -415,7 +415,9 @@ def test_full_body_and_external_sorting_can_switch_immediately_on_small_nodes(ca
     for fraction in (0.1, 0.9):
         mouse(widget, QEvent.Type.MouseMove, body(widget, b, fraction))
         assert control.target.position == "inside" and control.target.proposal.parent_id == b
-    end = sorting(widget, b, "before", distance=6)
+    # 小倍率下靠近 b 的外缘取点，避免间隙中点经视口取整后更靠近 a，
+    # 导致相同插入位置被正确显示为“插到 a 后面”，干扰本例对提示切换的断言。
+    end = sorting(widget, b, "before", distance=min(6, 6 * scale))
     mouse(widget, QEvent.Type.MouseMove, end)
     assert control.target is not None and control.target.position == "before"
     assert control._hint_text() == "↑ 插到前面"

@@ -35,7 +35,7 @@ def assert_editor_fits(canvas):
     visual = item.visual
     body = QRectF(item.pos(), item.pos() + QPointF(visual.width, visual.height))
     text = editor.sceneBoundingRect()
-    assert body.adjusted(13, 11, -13, -11).contains(text)
+    assert body.adjusted(13, 7, -13, -7).contains(text)
     assert editor.pos() == item.pos() + visual.text_position
     rect = canvas.layout_result.nodes[editor.node_id]
     assert (rect.width, rect.height) == pytest.approx((visual.width, visual.height))

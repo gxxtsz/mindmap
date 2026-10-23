@@ -26,6 +26,8 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 `VisualFactory` 维护文字及图片缓存，返回的 `NodeVisual` 只读共享。
 `NodeItem` 是静态图元，不持有编辑宿主；交互节点和文本编辑器属于画布包。
 节点正文不再为内部折叠按钮预留额外宽度，图片与标签按相同规则测量。
+节点内容区上下各保留 8 个逻辑像素，多行文字、图片、标签和备注按实际内容撑高；
+根节点、普通节点、原地编辑、拖动影像与图形导出共用相同的测量规则。
 `NodeVisual.fold_rect(direction="right", child_count=0)` 返回独立的外侧按钮矩形，
 支持右、左、下三种方向；零表示展开减号，正数用于测量完整的直接子节点计数。
 `paint_fold_control()` 与 `paint(..., controls=True)` 保留静态绘制入口，圆框、符号和数字跟随节点边框。
@@ -33,7 +35,7 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 详情页与子导图标记位于节点内部右侧，按详情、子导图排列，正式导出及拖动影像保留这些静态标记。
 每个按钮占 32×32、图形占 16×16，按钮间隔 2、正文到按钮区间隔 8、右侧留白 14；有入口时节点
-最小高度为 44，单位均为 Qt 逻辑像素。`VisualFactory` 将页面存在状态纳入缓存键，测量时额外加入
+最小高度为 36，单位均为 Qt 逻辑像素。`VisualFactory` 将页面存在状态纳入缓存键，测量时额外加入
 按钮区，不改变原有正文换行宽度；图标和命中矩形均使用 `NodeVisual.page_control_rect(kind)`。
 `NodeVisual.page_kinds` 仅保存页面类别，不持有页面 ID；`with_content_size(width, height)` 接收
 不含按钮区的原内容尺寸并返回新的只读视觉，供原地编辑复用，保证长短草稿不会重复追加按钮留白。
