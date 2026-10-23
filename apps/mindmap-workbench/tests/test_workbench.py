@@ -42,6 +42,23 @@ def window(qtbot, tmp_path):
     widget.close()
 
 
+def test_pin_keeps_open_documents_and_active_session(window, qtbot, tmp_path):
+    """置顶属于窗口操作，多导图的会话实例、活动项、历史与磁盘内容均保持原样。"""
+    assert window.new_document(tmp_path / "第二张.mindmap")
+    sessions = list(window.sessions.values())
+    active = window.active_session
+    documents = [session.engine.document for session in sessions]
+    contents = [session.files.path.read_bytes() for session in sessions]
+    for _ in range(2):
+        qtbot.mouseClick(window.title_bar.pin, Qt.MouseButton.LeftButton)
+        QApplication.processEvents()
+        assert list(window.sessions.values()) == sessions and window.active_session is active
+        for session, document, content in zip(sessions, documents, contents):
+            assert session.engine.document == document
+            assert not session.engine.can_undo and not session.files.is_dirty
+            assert session.files.path.read_bytes() == content
+
+
 def test_new_file_session_and_editable_framework(window):
     assert len(window.engine.document.nodes) == 1
     assert window.engine.document.root.style["branch"] == {"kind": "round"}

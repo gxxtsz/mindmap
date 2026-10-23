@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
 @pytest.fixture
 def control_window(qtbot, tmp_path):
-    """创建独立配置的按钮验收窗口；真实桌面时将三个按钮完整放入可用屏幕。"""
+    """创建独立配置的按钮验收窗口；真实桌面时将四个按钮完整放入可用屏幕。"""
     window = WorkbenchWindow(AppSpec("window-controls-test", "窗口按钮验收", storage_dir=tmp_path))
     window.manager.add_document("editor", "测试文档", QLineEdit("编辑区域"))
     available = QApplication.primaryScreen().availableGeometry()
@@ -48,9 +48,9 @@ def send_qt_hover(button, hovered):
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("compact", [False, True])
-@pytest.mark.parametrize("role", ["minimize", "maximize", "close"])
+@pytest.mark.parametrize("role", ["pin", "minimize", "maximize", "close"])
 def test_qt_window_button_feedback(control_window, qtbot, theme, compact, role):
-    """三类按钮的默认、悬浮、按下与移出颜色可区分，交互过程不改变几何尺寸。"""
+    """四类按钮的默认、悬浮、按下与移出颜色可区分，交互过程不改变几何尺寸。"""
     window = control_window
     window.manager.set_theme(theme)
     window.manager.set_option("compact", compact)
@@ -74,6 +74,150 @@ def test_qt_window_button_feedback(control_window, qtbot, theme, compact, role):
     assert button_background(button) == background
     assert button.geometry() == original
     assert not window.isMaximized() and not window.isMinimized()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_pin_button_toggles_actual_flag_and_selected_feedback(control_window, qtbot, theme, compact):
+    """点击切换实际窗口层级；选中、悬浮及按下均有像素反馈，刷新主题不重复发信号。"""
+    window = control_window
+    window.manager.set_theme(theme)
+    window.manager.set_option("compact", compact)
+    button = window.title_bar.pin
+    original = window.geometry()
+    changes = []
+    window.always_on_top_changed.connect(changes.append)
+    assert not window.is_always_on_top() and not button.isChecked()
+    assert button.toolTip() == button.accessibleName() == "置顶窗口"
+
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    assert window.is_always_on_top() and button.isChecked()
+    assert button.toolTip() == button.accessibleName() == "取消置顶"
+    assert window.isVisible() and window.geometry() == original and changes == [True]
+    for current_theme in ("dark" if theme == "light" else "light", theme):
+        window.manager.set_theme(current_theme)
+        send_qt_hover(button, False)
+        assert button_background(button) == window.manager.theme.color("toolbar-selected-bg-active")
+        # QIcon 非空不代表 SVG 真正画出像素；选中态使用的颜色也必须能被 SVG 解析。
+        icon_image = button.icon().pixmap(button.iconSize()).toImage()
+        assert any(icon_image.pixelColor(x, y).alpha()
+                   for y in range(icon_image.height()) for x in range(icon_image.width()))
+        send_qt_hover(button, True)
+        assert button_background(button) == window.manager.theme.color("window-control-bg-hovered")
+        qtbot.mousePress(button, Qt.MouseButton.LeftButton)
+        assert button_background(button) == window.manager.theme.color("window-control-bg-pressed")
+        qtbot.mouseRelease(button, Qt.MouseButton.LeftButton, pos=QPoint(-5, -5))
+        assert button.isChecked() and changes == [True]
+
+    window.set_always_on_top(True)
+    assert changes == [True]
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    QApplication.processEvents()
+    send_qt_hover(button, False)
+    assert not window.is_always_on_top() and not button.isChecked()
+    assert button.toolTip() == button.accessibleName() == "置顶窗口"
+    assert button_background(button) == window.manager.theme.color("main-window-titlebar-bg")
+    assert window.isVisible() and window.geometry() == original and changes == [True, False]
+
+
+@pytest.mark.parametrize("native_title_bar", [False, True])
+def test_pin_api_preserves_hidden_window_and_other_flags(qtbot, tmp_path, native_title_bar):
+    """首次显示前应用偏好始终保持隐藏，原生标题栏模式同样支持公开置顶接口。"""
+    window = WorkbenchWindow(AppSpec("hidden-pin-test", "置顶初始化验收", storage_dir=tmp_path,
+                                    native_title_bar=native_title_bar))
+    qtbot.addWidget(window)
+    geometry, flags = window.geometry(), window.windowFlags()
+    changes = []
+    window.always_on_top_changed.connect(changes.append)
+    for enabled in (True, True, False, False):
+        window.set_always_on_top(enabled)
+        assert window.is_always_on_top() == window.title_bar.pin.isChecked() == enabled
+        assert window.isHidden() and window.geometry() == geometry
+        assert window.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint == flags
+    assert changes == [True, False]
+    window.close()
+
+
+def test_pin_api_keeps_editor_focus_and_native_handle(control_window, qtbot):
+    """直接设置置顶不隐藏或重建窗口，正在编辑的输入控件继续持有焦点。"""
+    window = control_window
+    editor = window.manager.documents["editor"]["widget"]
+    editor.setFocus()
+    qtbot.waitUntil(editor.hasFocus)
+    hwnd = window.winId()
+    for enabled in (True, False):
+        window.set_always_on_top(enabled)
+        QApplication.processEvents()
+        assert editor.hasFocus() and window.winId() == hwnd
+        assert bool(window.windowHandle().flags() & Qt.WindowType.WindowStaysOnTopHint) == enabled
+
+
+@pytest.mark.parametrize("maximized", [False, True])
+def test_pin_preserves_previously_created_hidden_window(control_window, qtbot, maximized):
+    """已有原生句柄的窗口隐藏后切换置顶，系统也保持隐藏，重新显示和还原位置正确。"""
+    window = control_window
+    original = window.geometry()
+    if maximized:
+        window.showMaximized()
+        QApplication.processEvents()
+    window.hide()
+    for enabled in (True, False, True):
+        window.set_always_on_top(enabled)
+        QApplication.processEvents()
+        assert window.isHidden() and not window.windowHandle().isVisible()
+        if QApplication.platformName() == "windows":
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype = wintypes.BOOL
+            assert not user32.IsWindowVisible(int(window.winId()))
+    window.show()
+    QApplication.processEvents()
+    assert window.isMaximized() == maximized
+    window.showNormal()
+    QApplication.processEvents()
+    assert window.geometry() == original and window.is_always_on_top()
+
+
+@pytest.mark.parametrize("state", ["normal", "maximized", "minimized", "minimized_maximized", "fullscreen"])
+def test_pin_preserves_window_state_and_normal_geometry(control_window, qtbot, state):
+    """置顶切换保留当前状态及还原位置；最小化恢复后仍保持置顶。"""
+    window = control_window
+    original = window.geometry()
+    if state == "minimized_maximized":
+        window.showMaximized()
+    {"normal": window.showNormal, "maximized": window.showMaximized,
+     "minimized": window.showMinimized, "minimized_maximized": window.showMinimized,
+     "fullscreen": window.showFullScreen}[state]()
+    QApplication.processEvents()
+    previous_state = window.windowState()
+    for enabled in (True, False, True):
+        window.set_always_on_top(enabled)
+        QApplication.processEvents()
+        assert window.isVisible() and window.windowState() == previous_state
+        assert window.normalGeometry() == original
+        if state == "maximized":
+            assert window.geometry() == window.screen().availableGeometry()
+    window.showNormal()
+    QApplication.processEvents()
+    assert window.geometry() == original and window.is_always_on_top()
+    window.showMinimized()
+    window.showNormal()
+    QApplication.processEvents()
+    assert window.geometry() == original and window.is_always_on_top()
+
+
+def test_native_pin_updates_system_topmost_and_reenables_frame(native_control_window, qtbot):
+    """读取真实 HWND 的扩展样式，确保系统置顶生效且自绘边框仍支持缩放与贴靠。"""
+    window = native_control_window
+    for enabled in (True, False):
+        qtbot.mouseClick(window.title_bar.pin, Qt.MouseButton.LeftButton)
+        qtbot.waitUntil(lambda: window._native_frame is not None)
+        frame = window._native_frame
+        assert bool(frame.get_style(frame.hwnd, -20) & 0x00000008) == enabled  # WS_EX_TOPMOST
+        assert frame.get_style(frame.hwnd, -16) & 0x00040000  # WS_THICKFRAME
+        move_native_cursor(window.title_bar.maximize)
+        assert send_native_mouse(window, 0x0084) == 9  # HTMAXBUTTON
 
 
 @pytest.mark.parametrize("initial_theme", ["light", "dark"])

@@ -46,10 +46,11 @@ def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme
     assert group.tabBar().height() == (28 if compact else 32)
     bar = window.title_bar
     assert bar.menu.size() == QSize(32, 32)
-    for control in (bar.minimize, bar.maximize, bar.close):
+    for control in (bar.pin, bar.minimize, bar.maximize, bar.close):
         assert control.size() == QSize(40, 32)
         assert control.iconSize() == QSize(16, 16)
         assert bar.rect().contains(control.geometry())
+    assert bar.minimize.x() - bar.pin.geometry().right() - 1 == 2
     assert bar.maximize.x() - bar.minimize.geometry().right() - 1 == 2
     assert bar.close.x() - bar.maximize.geometry().right() - 1 == 2
     assert all(bar.rect().contains(button.geometry()) for button in bar.action_buttons)

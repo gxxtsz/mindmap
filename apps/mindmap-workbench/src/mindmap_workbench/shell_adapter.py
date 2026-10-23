@@ -82,6 +82,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         super().__init__(AppSpec("mindmap-workbench", "原生思维导图", subtitle="思维导图工作台",
                                 storage_dir=storage_dir, theme=manager.theme), manager=manager)
         self.preferences = QSettings(str(manager.storage_dir / "preferences.ini"), QSettings.Format.IniFormat)
+        # 置顶是本机窗口偏好，与是否恢复导图及布局无关；首次显示前应用，避免闪现。
+        # INI 重读可能返回字符串，不能直接 bool("false")；无效值统一视为关闭。
+        pinned = self.preferences.value("window/always_on_top", False)
+        self.set_always_on_top(pinned is True or isinstance(pinned, str) and pinned == "true")
+        self.always_on_top_changed.connect(self._save_always_on_top)
         self.document_state = DocumentState(manager.storage_dir / "documents-v1.json")
         startup_messages = []
         try:
@@ -186,6 +191,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ("quit", "退出", self.close, "Ctrl+Q", "exit"),
         ):
             self.add_action(ActionSpec("app." + identifier, title, callback, icon, shortcut, "文件", False))
+
+    def _save_always_on_top(self, enabled: bool) -> None:
+        """在窗口实际切换置顶后立即保存本机偏好，不改动导图及退出会话记录。"""
+        self.preferences.setValue("window/always_on_top", enabled)
+        self.preferences.sync()
 
     def _configure_session(self, session):
         """从本机偏好初始化新会话；绑定回调始终携带所属会话，不借用活动文档。"""

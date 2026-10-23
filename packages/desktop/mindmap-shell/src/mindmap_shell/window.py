@@ -3,7 +3,7 @@
 import sys
 
 from mindmap_docking import DockHost, DockManager
-from PySide6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer, Slot
+from PySide6.QtCore import QEvent, QPoint, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ._windows_frame import _create_windows_frame, _track_nonclient_mouse_leave
+from ._windows_frame import _create_windows_frame, _preserve_windows_placement, _track_nonclient_mouse_leave
 from .specs import ActionSpec, AppSpec
 
 
@@ -57,7 +57,7 @@ class _WindowControlButton(QToolButton):
         self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def refresh_theme(self):
-        """同步深浅主题及最大化状态；切换主题时保留当前悬停反馈。"""
+        """同步深浅主题、置顶及最大化状态；切换主题时保留当前悬停反馈。"""
         theme = self.title_bar.window.manager.theme
         hover = theme.color("window-control-bg-hovered")
         pressed = theme.color("window-control-bg-pressed")
@@ -66,12 +66,23 @@ class _WindowControlButton(QToolButton):
         self.setStyleSheet(f"""
             QToolButton {{ background:transparent; border:1px solid transparent;
                 border-radius:4px; padding:0; }}
+            QToolButton:checked {{ background:{theme.css('toolbar-selected-bg-active')};
+                border-color:{theme.css('control-brand-border')}; }}
             QToolButton[windowControlHovered="true"] {{ background:{hover.name()}; }}
             QToolButton:pressed {{ background:{pressed.name()}; }}
             QToolButton:focus {{ border-color:{theme.css('control-brand-border')}; }}
         """)
         if self.role == "maximize":
             label = "还原窗口" if self.title_bar.window.isMaximized() else "最大化窗口"
+            self.setToolTip(label)
+            self.setAccessibleName(label)
+        elif self.role == "pin":
+            pinned = self.title_bar.window.is_always_on_top()
+            # 实际窗口标志是唯一状态来源；主题刷新和启动恢复只同步外观，
+            # 阻断 toggled，避免重复改动原生窗口或反复写入用户偏好。
+            with QSignalBlocker(self):
+                self.setChecked(pinned)
+            label = "取消置顶" if pinned else "置顶窗口"
             self.setToolTip(label)
             self.setAccessibleName(label)
         self._refresh_icon()
@@ -125,7 +136,7 @@ class _WindowControlButton(QToolButton):
         self.set_native_hovered(hovered)
 
     def _refresh_icon(self):
-        """复用主题图标供应器，关闭按钮悬停时使用白色，正常状态使用正文色。"""
+        """复用主题图标；置顶选中时使用强调色，关闭悬停时使用白色。"""
         theme = self.title_bar.window.manager.theme
         name = self.role
         if name == "minimize":
@@ -133,6 +144,9 @@ class _WindowControlButton(QToolButton):
         elif name == "maximize" and self.title_bar.window.isMaximized():
             name = "restore"
         color = "#FFFFFF" if self.role == "close" and self._hovered else theme.color("text-default").name()
+        if self.role == "pin" and self.isChecked():
+            # SVG 供应器需要十六进制颜色；QSS 使用的 rgba(...) 会使 SVG 图形不可见。
+            color = theme.color("control-brand-border").name()
         self.setIcon(theme.icons.get_icon(name, color=color, size=self.iconSize().width()))
 
     def enterEvent(self, event):
@@ -187,6 +201,8 @@ class _TitleBar(QWidget):
         self.menu.setFixedSize(32, 32)
         self.menu.setIconSize(QSize(20, 20))
         self.menu.setStyleSheet("QToolButton { padding:0; }")
+        self.pin = _WindowControlButton(self, "pin")
+        self.pin.setCheckable(True)
         self.minimize = _WindowControlButton(self, "minimize")
         self.maximize = _WindowControlButton(self, "maximize")
         self.close = _WindowControlButton(self, "close")
@@ -197,13 +213,17 @@ class _TitleBar(QWidget):
         self.window_controls.setSpacing(2)
         self.box.addLayout(self.window_controls)
         for button, label, callback in [
+            (self.pin, "置顶窗口", window.set_always_on_top),
             (self.minimize, "最小化", window.showMinimized),
             (self.maximize, "最大化或还原", window.toggle_maximize),
             (self.close, "关闭窗口", window.close),
         ]:
             button.setToolTip(label)
             button.setAccessibleName(label)
-            button.clicked.connect(callback)
+            if button is self.pin:
+                button.toggled.connect(callback)
+            else:
+                button.clicked.connect(callback)
             button.setVisible(not window.spec.native_title_bar)
             self.window_controls.addWidget(button)
 
@@ -253,7 +273,7 @@ class _TitleBar(QWidget):
         self.setFixedHeight(32 + vertical * 2)
         self.logo.setPixmap(theme.icon(self.window.spec.icon, 20).pixmap(20, 20))
         self.menu.setIcon(theme.icon("menu"))
-        for button in (self.minimize, self.maximize, self.close):
+        for button in (self.pin, self.minimize, self.maximize, self.close):
             button.refresh_theme()
 
     def show_menu(self):
@@ -274,6 +294,9 @@ class WorkbenchWindow(QMainWindow):
     一个管理器仅承载一个主窗口，业务菜单与顶栏共享 QAction。
     传入 manager 时由调用方配置存储与主题；外壳不导入任何业务包。
     """
+
+    # 仅在实际置顶标志变化后通知宿主；持久化策略由业务层自行决定。
+    always_on_top_changed = Signal(bool)
 
     def __init__(self, spec: AppSpec, *, manager: DockManager | None = None, host_id="main"):
         flags = Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint
@@ -418,6 +441,7 @@ class WorkbenchWindow(QMainWindow):
     def showEvent(self, event):
         """窗口可见后安排同步装饰，保持 Qt 自身的显示与最大化流程完整。"""
         super().showEvent(event)
+        self._sync_always_on_top_window_flag()
         self._refresh_window_frame()
 
     def resizeEvent(self, event):
@@ -447,6 +471,45 @@ class WorkbenchWindow(QMainWindow):
     def toggle_maximize(self):
         self.showNormal() if self.isMaximized() else self.showMaximized()
         self.title_bar.refresh_theme()
+
+    def is_always_on_top(self) -> bool:
+        """读取主窗口的实际置顶标志，不依赖图钉按钮或另一份缓存状态。"""
+        return bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+
+    @Slot(bool)
+    def set_always_on_top(self, enabled: bool) -> None:
+        """在 GUI 线程设置主窗口置顶，并在状态改变后发送 always_on_top_changed。
+
+        重复设置相同状态不改动窗口，也不发送信号。可见窗口直接同步 QWindow
+        标志，保留几何、焦点及最大化／最小化状态；隐藏窗口将新标志留给后续
+        显示流程，避免提前显示。此接口不读写配置，由宿主负责持久化。
+        """
+        enabled = bool(enabled)
+        if enabled == self.is_always_on_top():
+            return
+        flag = Qt.WindowType.WindowStaysOnTopHint
+        flags = self.windowFlags() | flag if enabled else self.windowFlags() & ~flag
+        # overrideWindowFlags 只更新 QWidget 记录；可见时立即同步 QWindow，隐藏时
+        # 由 showEvent 在显示时同步。这样两层使用同一置顶标志，又不会像
+        # QWidget.setWindowFlag 一样隐藏或重建窗口，保留编辑焦点和系统贴靠位置。
+        self.overrideWindowFlags(flags)
+        self._sync_always_on_top_window_flag()
+        self.title_bar.pin.refresh_theme()
+        self._refresh_window_frame()
+        self.always_on_top_changed.emit(enabled)
+
+    def _sync_always_on_top_window_flag(self) -> None:
+        """将 QWidget 的置顶标志提交给可见原生窗口；隐藏窗口等到 showEvent 再同步。"""
+        handle = self.windowHandle()
+        flag = Qt.WindowType.WindowStaysOnTopHint
+        enabled = self.is_always_on_top()
+        if not self.isVisible() or handle is None or bool(handle.flags() & flag) == enabled:
+            return
+        # Qt 即使复用同一 HWND，也可能移除自绘窗口补回的 WS_THICKFRAME；
+        # 作废适配器，让后续装饰同步重新启用缩放样式、阴影和系统边框。
+        self._native_frame = None
+        with _preserve_windows_placement(int(handle.winId())):
+            handle.setFlag(flag, enabled)
 
     def main_menu(self):
         """根据动作声明动态构建菜单，业务菜单与内建工作区菜单共用动作实例。"""

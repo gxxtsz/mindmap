@@ -1,4 +1,4 @@
-"""为集成标题栏接入 Windows 系统阴影，不在 Qt 内容区预留投影边距。
+"""为集成标题栏接入 Windows 系统装饰，并保留窗口状态切换所需的原生记录。
 
 仅在真实 Windows 平台窗口上加载系统库；离屏测试和其他平台保持原有窗口行为。
 自绘标题栏及缩放命中仍由外壳负责，DWM 只负责窗口外部的合成效果。
@@ -7,6 +7,7 @@
 
 import ctypes
 import sys
+from contextlib import contextmanager
 from ctypes import wintypes
 
 from PySide6.QtWidgets import QApplication
@@ -34,6 +35,45 @@ class _TrackMouseEvent(ctypes.Structure):
         ("size", wintypes.DWORD), ("flags", wintypes.DWORD),
         ("hwnd", wintypes.HWND), ("hover_time", wintypes.DWORD),
     ]
+
+
+class _WindowPlacement(ctypes.Structure):
+    """保存系统窗口状态及还原区域；原样往返原生坐标，避免高 DPI 坐标转换误差。"""
+
+    _fields_ = [
+        ("length", wintypes.UINT), ("flags", wintypes.UINT), ("show_cmd", wintypes.UINT),
+        ("min_position", wintypes.POINT), ("max_position", wintypes.POINT),
+        ("normal_position", wintypes.RECT),
+    ]
+
+
+@contextmanager
+def _preserve_windows_placement(hwnd: int):
+    """更新 Qt 窗口标志时保留 Windows 最大化及其最小化后的系统还原信息。
+
+    QWindow.setFlag 不隐藏窗口，但 Windows 平台重新计算样式时仍可能丢失
+    最大化的还原区域；只为最大化及“从最大化进入最小化”的窗口还原原生记录。
+    普通窗口不重新提交显示状态，避免改变焦点；离屏和其他平台不加载系统库。
+    """
+    if sys.platform != "win32" or QApplication.platformName() != "windows":
+        yield
+        return
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    for name in ("GetWindowPlacement", "SetWindowPlacement"):
+        function = getattr(user32, name)
+        function.argtypes = [wintypes.HWND, ctypes.POINTER(_WindowPlacement)]
+        function.restype = wintypes.BOOL
+    placement = _WindowPlacement(length=ctypes.sizeof(_WindowPlacement))
+    if not user32.GetWindowPlacement(hwnd, ctypes.byref(placement)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    # GetWindowPlacement 的 showCmd 返回普通、最小化或最大化三种状态。
+    # SW_SHOWMAXIMIZED = 3；SW_SHOWMINIMIZED = 2；WPF_RESTORETOMAXIMIZED = 2。
+    restore = placement.show_cmd == 3 or placement.show_cmd == 2 and bool(placement.flags & 2)
+    try:
+        yield
+    finally:
+        if restore and not user32.SetWindowPlacement(hwnd, ctypes.byref(placement)):
+            raise ctypes.WinError(ctypes.get_last_error())
 
 
 def _track_nonclient_mouse_leave(hwnd: int) -> bool:
