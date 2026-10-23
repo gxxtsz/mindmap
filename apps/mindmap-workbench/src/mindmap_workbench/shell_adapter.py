@@ -199,8 +199,13 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         keep = self.preferences.value("clipboard/edraw_keep_children", True)
         if isinstance(keep, str) and keep in ("true", "false"):
             keep = keep == "true"
+        # 新配置独立校验；旧版 INI 没有此项时默认替换根节点，兼容原有粘贴行为。
+        replace_root = self.preferences.value("clipboard/edraw_replace_root", True)
+        if isinstance(replace_root, str) and replace_root in ("true", "false"):
+            replace_root = replace_root == "true"
         canvas.set_edraw_paste_options(mode if mode in ("append", "replace") else "append",
-                                     keep if isinstance(keep, bool) else True)
+                                     keep if isinstance(keep, bool) else True,
+                                     replace_root if isinstance(replace_root, bool) else True)
         canvas.wheel_mode_changed.connect(self._save_wheel_mode)
         canvas.edraw_paste_options_changed.connect(self._save_edraw_paste_options)
         panels.outline.display_depth_changed.connect(self._save_outline_depth)
@@ -223,16 +228,18 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self._updating_preferences = False
         self._sync_document()
 
-    def _save_edraw_paste_options(self, mode, keep_children):
+    def _save_edraw_paste_options(self, mode, keep_children, replace_root):
+        """保存画布成功粘贴后的三项偏好并同步所有会话；重入保护避免信号相互循环。"""
         if self._updating_preferences:
             return
         self._updating_preferences = True
         try:
             self.preferences.setValue("clipboard/edraw_mode", mode)
             self.preferences.setValue("clipboard/edraw_keep_children", keep_children)
+            self.preferences.setValue("clipboard/edraw_replace_root", replace_root)
             self.preferences.sync()
             for session in self.sessions.values():
-                session.canvas.set_edraw_paste_options(mode, keep_children)
+                session.canvas.set_edraw_paste_options(mode, keep_children, replace_root)
         finally:
             self._updating_preferences = False
 

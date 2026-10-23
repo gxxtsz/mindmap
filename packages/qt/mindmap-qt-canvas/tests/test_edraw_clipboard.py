@@ -29,6 +29,8 @@ XML = '''<?xml version="1.0" encoding="UTF-8"?><Clipboard Version="14.0.4" Page=
 FOREST = XML.replace(b'<Super V="101"/>', b'<Super V="999"/>').replace(
     b'<SubLevel V="104;102"/>', b""
 )
+LEAF = b'<Clipboard><Shapes><Shape Type="MainIdea" ID="1">' \
+       b'<Text><HtmlText>&lt;p&gt;Edraw&lt;/p&gt;</HtmlText></Text></Shape></Shapes></Clipboard>'
 
 
 @pytest.fixture
@@ -44,7 +46,7 @@ def canvas(qtbot, qapp):
     old_child = engine.add_child(target, "旧后代")
     engine.add_child(old_child, "旧孙节点")
     engine.update_node(target, style={"font_size": 19, "branch": {"kind": "round"}},
-                       tags=["原标签"], note="原备注", hyperlink="https://example.com")
+                       tags=["原标签"], note="原备注", hyperlink="https://example.com", text_format="markdown")
     engine.set_theme(Theme.dark())
     image = QImage(12, 10, QImage.Format.Format_ARGB32)
     image.fill(Qt.GlobalColor.red)
@@ -74,41 +76,51 @@ def set_clipboard(data=XML):
     QApplication.clipboard().setMimeData(mime)
 
 
-def choose(monkeypatch, mode="append", keep=True):
+def choose(monkeypatch, mode="append", keep=True, replace_root=True):
+    """替换交互结果以验证真实粘贴路径；省略新参数时沿用原有替换根节点行为。"""
     monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
-                        lambda *args, **kwargs: EdrawPasteOptions(mode, keep))
+                        lambda *args, **kwargs: EdrawPasteOptions(mode, keep, replace_root))
 
 
 @pytest.mark.parametrize("replace", [False, True])
 @pytest.mark.parametrize("keep", [False, True])
 @pytest.mark.parametrize("root_target", [False, True])
-def test_paste_transaction_styles_identity_and_selection(canvas, monkeypatch, replace, keep, root_target):
+@pytest.mark.parametrize("replace_root", [False, True])
+def test_paste_transaction_styles_identity_and_selection(
+    canvas, monkeypatch, replace, keep, root_target, replace_root
+):
+    """普通及中心主题的四种替换组合均保留标识和外观，正文格式与选项一致，历史只提交一次。"""
     widget, target, old_child = canvas
     if root_target:
         target = widget.engine.root_id
-        widget.engine.update_node(target, style={"branch": {"kind": "round"}})
+        widget.engine.update_node(target, style={"branch": {"kind": "round"}}, text_format="markdown")
         widget.engine.replace_document(widget.engine.document)
         widget.select_nodes([target])
     engine = widget.engine
     before = engine.document
     before_revision = engine.revision
     old = before.nodes[target]
-    choose(monkeypatch, "replace" if replace else "append", keep)
+    operations = []
+    engine.before_operation = lambda operation, args: operations.append(operation)
+    choose(monkeypatch, "replace" if replace else "append", keep, replace_root)
     set_clipboard()
     ids = widget.paste()
     result = engine.document
     assert engine.revision == before_revision + 1
     assert result.layout == before.layout and result.theme == before.theme
     assert widget.selected_node_ids() == ids
-    assert widget.edraw_paste_options == ("replace" if replace else "append", keep)
+    assert widget.edraw_paste_options == ("replace" if replace else "append", keep, replace_root)
+    assert ("update_node" in operations) == (replace and replace_root)
     if replace:
-        assert ids == [target] and result.nodes[target].text == "亿图根😀"
+        assert ids == [target] and result.nodes[target].text == ("亿图根😀" if replace_root else old.text)
         kept = old.children if keep else []
         children = result.nodes[target].children
         assert children[:len(kept)] == kept
         assert [result.nodes[key].text for key in children[len(kept):]] == ["来源一", "来源二\n第二行"]
         expected = deepcopy(old)
-        expected.text = "亿图根😀"
+        if replace_root:
+            expected.text = "亿图根😀"
+            expected.text_format = "plain"
         expected.children = children
         expected.expanded = True
         assert result.nodes[target] == expected
@@ -117,6 +129,7 @@ def test_paste_transaction_styles_identity_and_selection(canvas, monkeypatch, re
     else:
         assert len(ids) == 1 and ids[0] != target
         assert result.nodes[target].text == old.text
+        assert result.nodes[target].text_format == old.text_format
         assert result.nodes[target].children == [*old.children, *ids]
         assert result.nodes[ids[0]].text == "亿图根😀"
         assert old_child in result.nodes and result.assets == before.assets
@@ -133,14 +146,48 @@ def test_paste_transaction_styles_identity_and_selection(canvas, monkeypatch, re
 
 
 def test_multiple_roots_preserve_single_tree_preference(canvas, monkeypatch):
+    """多根来源强制追加时不保存任何单树选项，即使交互结果携带不同的后代及根节点开关。"""
     widget, target, _ = canvas
-    widget.set_edraw_paste_options("replace", False)
-    choose(monkeypatch, "append", False)
+    widget.set_edraw_paste_options("replace", False, False)
+    choose(monkeypatch, "append", True, True)
     set_clipboard(FOREST)
     ids = widget.paste()
     assert [widget.engine.get_node(key).text for key in ids] == ["亿图根😀", "来源二\n第二行", "来源一"]
     assert widget.engine.get_node(target).text == "原目标"
-    assert widget.edraw_paste_options == ("replace", False)
+    assert widget.edraw_paste_options == ("replace", False, False)
+
+
+@pytest.mark.parametrize("keep", [False, True])
+@pytest.mark.parametrize("replace_root", [False, True])
+def test_source_without_children_respects_both_choices(canvas, monkeypatch, keep, replace_root):
+    """仅有来源根时不创建多余节点；按开关更新正文和旧后代，完整空操作不生成历史。"""
+    widget, target, old_child = canvas
+    before = widget.engine.document
+    revision = widget.engine.revision
+    choose(monkeypatch, "replace", keep, replace_root)
+    set_clipboard(LEAF)
+    assert widget.paste() == [target]
+    result = widget.engine.document
+    expected = deepcopy(before.nodes[target])
+    if replace_root:
+        expected.text, expected.text_format = "Edraw", "plain"
+    if not keep:
+        expected.children = []
+    assert result.nodes[target] == expected
+    assert not (result.nodes.keys() - before.nodes.keys())
+    assert (old_child in result.nodes) == keep and bool(result.assets) == keep
+    assert widget.selected_node_ids() == [target]
+    assert widget.edraw_paste_options == ("replace", keep, replace_root)
+    changed = result != before
+    assert widget.engine.revision == revision + int(changed)
+    assert widget.engine.can_undo == changed
+    if changed:
+        widget.engine.undo()
+        assert widget.engine.document == before and widget.selected_node_ids() == [target]
+        widget.engine.redo()
+        assert widget.engine.document == result and widget.selected_node_ids() == [target]
+    else:
+        assert not widget.engine.is_dirty and not widget._selection_undo
 
 
 def snapshot(widget):
@@ -149,9 +196,10 @@ def snapshot(widget):
             deepcopy(widget._selection_undo), deepcopy(widget._selection_redo), widget.edraw_paste_options)
 
 
-def test_cancel_invalid_payload_and_hook_rejection_are_atomic(canvas, monkeypatch):
+@pytest.mark.parametrize("replace_root", [False, True])
+def test_cancel_invalid_payload_and_hook_rejection_are_atomic(canvas, monkeypatch, replace_root):
     widget, _, _ = canvas
-    widget.set_edraw_paste_options("replace", False)
+    widget.set_edraw_paste_options("replace", False, False)
     before = snapshot(widget)
     monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options", lambda *args, **kwargs: None)
     set_clipboard()
@@ -161,9 +209,21 @@ def test_cancel_invalid_payload_and_hook_rejection_are_atomic(canvas, monkeypatc
         widget.paste()
     assert snapshot(widget) == before
     set_clipboard()
-    choose(monkeypatch, "replace", False)
+    choose(monkeypatch, "replace", False, replace_root)
     widget.engine.before_operation = lambda operation, args: operation != "paste_fragment"
     with pytest.raises(MindMapError):
+        widget.paste()
+    assert snapshot(widget) == before
+
+
+@pytest.mark.parametrize("replace_root", [None, 0, 1, "false"])
+def test_invalid_root_choice_does_not_change_document_or_preferences(canvas, monkeypatch, replace_root):
+    """即使非界面调用者提供非法开关，也必须在修改文档前拒绝整个粘贴操作。"""
+    widget, _, _ = canvas
+    before = snapshot(widget)
+    choose(monkeypatch, "replace", False, replace_root)
+    set_clipboard()
+    with pytest.raises(MindMapError, match="选项无效"):
         widget.paste()
     assert snapshot(widget) == before
 
@@ -191,7 +251,7 @@ def test_document_change_during_dialog_is_not_overwritten(canvas, monkeypatch):
     with pytest.raises(MindMapError, match="已发生变化"):
         widget.paste()
     assert len(widget.engine.document.nodes) == 1 and not widget.engine.can_undo
-    assert widget.edraw_paste_options == ("append", True)
+    assert widget.edraw_paste_options == ("append", True, True)
 
 
 def test_native_json_priority_and_text_regression(canvas, monkeypatch):
@@ -277,14 +337,20 @@ def test_real_paste_shortcut_and_file_payload(canvas, qtbot, tmp_path):
 
 
 def test_options_validation_signal_and_document_independence(canvas):
+    """新参数严格要求布尔值，三参数变更仅发送一次，旧二参数设置默认替换根节点。"""
     widget, _, _ = canvas
     before = snapshot(widget)[:-1]
     changes = []
     widget.edraw_paste_options_changed.connect(lambda *values: changes.append(values))
     widget.set_edraw_paste_options("replace", False)
     widget.set_edraw_paste_options("replace", False)
-    assert changes == [("replace", False)] and snapshot(widget)[:-1] == before
-    for values in [("bad", True), ("append", 1), (None, False)]:
+    assert changes == [("replace", False, True)] and snapshot(widget)[:-1] == before
+    widget.set_edraw_paste_options("replace", False, False)
+    widget.set_edraw_paste_options("replace", False, False)
+    expected_changes = [("replace", False, True), ("replace", False, False)]
+    assert changes == expected_changes and snapshot(widget)[:-1] == before
+    for values in [("bad", True), ("append", 1), (None, False),
+                   ("replace", True, None), ("replace", True, 0), ("replace", True, "false")]:
         with pytest.raises(MindMapError):
             widget.set_edraw_paste_options(*values)
-    assert changes == [("replace", False)] and widget.edraw_paste_options == ("replace", False)
+    assert changes == expected_changes and widget.edraw_paste_options == ("replace", False, False)

@@ -503,8 +503,9 @@ def test_outline_invalid_preferences_use_default(qtbot, tmp_path, value):
     restored.close()
 
 
-def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatch, qtbot):
-    """真实粘贴保存两项偏好；取消不覆盖，重建工作台从相同配置目录恢复。"""
+@pytest.mark.parametrize("replace_root", [False, True])
+def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatch, qtbot, replace_root):
+    """真实粘贴保存三项偏好；取消或引擎拒绝不覆盖，重建工作台后恢复根节点选择。"""
     from mindmap_qt_canvas.clipboard import EDRAW_CLIPBOARD_MIME
     from mindmap_qt_ui.dialogs import EdrawPasteOptions
     from PySide6.QtCore import QMimeData
@@ -519,19 +520,34 @@ def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatc
                  b'<Text><HtmlText>&lt;p&gt;Edraw&lt;/p&gt;</HtmlText></Text></Shape></Shapes></Clipboard>')
     QApplication.clipboard().setMimeData(mime)
     try:
-        assert window.canvas.edraw_paste_options == ("append", True)
+        assert window.canvas.edraw_paste_options == ("append", True, True)
         monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
-                            lambda *args, **kwargs: EdrawPasteOptions("replace", False))
+                            lambda *args, **kwargs: EdrawPasteOptions("replace", False, replace_root))
         window.canvas.paste()
         assert window.preferences.value("clipboard/edraw_mode") == "replace"
         assert window.preferences.value("clipboard/edraw_keep_children", type=bool) is False
+        assert window.preferences.value("clipboard/edraw_replace_root", type=bool) is replace_root
+        expected = ("replace", False, replace_root)
+        preference_keys = ("clipboard/edraw_mode", "clipboard/edraw_keep_children", "clipboard/edraw_replace_root")
         monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options", lambda *args, **kwargs: None)
         assert window.canvas.paste() == []
+        assert window.canvas.edraw_paste_options == expected
+        assert tuple(window.preferences.value(key) for key in preference_keys) == expected
+        before = window.engine.document
+        monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+                            lambda *args, **kwargs: EdrawPasteOptions("append", True, not replace_root))
+        window.engine.before_operation = lambda operation, args: operation != "paste_fragment"
+        with pytest.raises(MindMapError):
+            window.canvas.paste()
+        window.engine.before_operation = None
+        assert window.engine.document == before
+        assert window.canvas.edraw_paste_options == expected
+        assert tuple(window.preferences.value(key) for key in preference_keys) == expected
         restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
         qtbot.addWidget(restored)
         try:
             assert restored.new_document(window.manager.storage_dir / "粘贴偏好.mindmap")
-            assert restored.canvas.edraw_paste_options == ("replace", False)
+            assert restored.canvas.edraw_paste_options == expected
             assert not restored.engine.is_dirty and not restored.engine.can_undo
             assert not restored.engine.document.metadata
         finally:
@@ -543,16 +559,21 @@ def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatc
             QApplication.clipboard().setMimeData(original)
 
 
-@pytest.mark.parametrize(("mode", "keep", "expected"), [
-    ("invalid", "invalid", ("append", True)),
-    (None, 17, ("append", True)),
-    ("replace", "false", ("replace", False)),
-    ("append", "true", ("append", True)),
+@pytest.mark.parametrize(("mode", "keep", "replace_root", "expected"), [
+    ("invalid", "invalid", "invalid", ("append", True, True)),
+    (None, 17, 17, ("append", True, True)),
+    ("replace", "false", None, ("replace", False, True)),
+    ("append", "true", "true", ("append", True, True)),
+    ("replace", False, "false", ("replace", False, False)),
+    ("replace", True, False, ("replace", True, False)),
+    ("append", True, 0, ("append", True, True)),
 ])
-def test_edraw_paste_preferences_validate_saved_values(window, qtbot, mode, keep, expected):
-    """兼容 INI 布尔值，损坏的方式和开关各自恢复默认，不影响导图或启动。"""
+def test_edraw_paste_preferences_validate_saved_values(window, qtbot, mode, keep, replace_root, expected):
+    """兼容旧 INI 缺项及布尔字符串，损坏的方式和两个开关各自恢复默认，不影响启动。"""
     window.preferences.setValue("clipboard/edraw_mode", mode)
     window.preferences.setValue("clipboard/edraw_keep_children", keep)
+    if replace_root is not None:
+        window.preferences.setValue("clipboard/edraw_replace_root", replace_root)
     window.preferences.sync()
     restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
     qtbot.addWidget(restored)

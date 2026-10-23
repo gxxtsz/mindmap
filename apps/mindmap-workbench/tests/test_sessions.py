@@ -766,14 +766,14 @@ def test_outline_depth_is_per_session_and_preferences_are_shared(empty_window, t
     assert second.panels.outline.display_depth == 4
     second.panels.outline.set_display_depth(1)
     second.canvas.set_wheel_mode("zoom")
-    second.canvas.set_edraw_paste_options("replace", False)
-    assert first.canvas.wheel_mode == "zoom" and first.canvas.edraw_paste_options == ("replace", False)
+    second.canvas.set_edraw_paste_options("replace", False, False)
+    assert first.canvas.wheel_mode == "zoom" and first.canvas.edraw_paste_options == ("replace", False, False)
     assert first.panels.outline.display_depth == 4
     window.manager.activate_document(first.id)
     assert window._depth_action.menu() is first.panels.outline.depth_menu
     third = create(window, tmp_path / "丙.mindmap")
     assert third.panels.outline.display_depth == 1
-    assert third.canvas.wheel_mode == "zoom" and third.canvas.edraw_paste_options == ("replace", False)
+    assert third.canvas.wheel_mode == "zoom" and third.canvas.edraw_paste_options == ("replace", False, False)
 
 
 def test_autosave_debounce_undo_redo_and_view_only_changes(empty_window, tmp_path, qtbot):

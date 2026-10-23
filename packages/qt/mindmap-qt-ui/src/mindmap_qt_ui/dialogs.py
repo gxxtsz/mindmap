@@ -34,10 +34,16 @@ class NodePropertiesResult:
 
 @dataclass(frozen=True)
 class EdrawPasteOptions:
-    """一次粘贴的用户选择；mode 为 append 或 replace，记忆和事务由调用者处理。"""
+    """一次粘贴的用户选择，记忆和事务由调用者处理。
+
+    mode 为 append 或 replace；keep_children 控制是否保留目标原有后代。
+    replace_root 仅在替换模式生效，根节点指当前选中的目标主题；False 时保留
+    目标文字及文字格式，仅导入来源根的子树。默认 True 兼容已有的二参数调用。
+    """
 
     mode: str
     keep_children: bool
+    replace_root: bool = True
 
 
 def _accent_text(accent):
@@ -129,12 +135,14 @@ class _PasteChoiceCard(QAbstractButton):
 
 
 def edraw_paste_options(
-    parent, *, target_text, root_count, node_count, mode="append", keep_children=True, theme=None
+    parent, *, target_text, root_count, node_count, mode="append", keep_children=True,
+    replace_root=True, theme=None
 ):
     """显示亿图粘贴选项，确认返回选项，取消返回 None；不会修改文档或本机偏好。
 
     多棵来源树只能追加，界面暂时禁用替换；调用者须保留先前的单树粘贴偏好。
-    追加模式隐藏并禁用后代处理选项，但保留内存中的选择，切回替换时继续恢复。
+    根节点与后代处理相互独立，replace_root 默认替换当前主题文字，关闭后仅导入子树。
+    追加模式隐藏并禁用这两组处理选项，但保留内存中的选择，切回替换时继续恢复。
     theme 接受当前组件的界面色板或导图主题，使独立画布及桌面宿主均保持局部配色。
     """
     dialog = QDialog(parent)
@@ -150,8 +158,8 @@ def edraw_paste_options(
     accent_text = _accent_text(colors.accent)
     dialog.setStyleSheet(
         dialog_styles(colors)
-        + 'QPushButton[edraw_history_choice="true"] { padding: 7px 12px; border-width: 2px; }'
-        + f'QPushButton[edraw_history_choice="true"]:checked {{ background: {colors.accent}; '
+        + 'QPushButton[edraw_paste_choice="true"] { padding: 7px 12px; border-width: 2px; }'
+        + f'QPushButton[edraw_paste_choice="true"]:checked {{ background: {colors.accent}; '
           f'color: {accent_text}; border-color: {colors.accent}; font-weight: 600; }}'
         + f'QPushButton#edraw_paste_confirm {{ background: {colors.accent}; color: {accent_text}; '
           f'border-color: {colors.accent}; font-weight: 600; }}'
@@ -172,7 +180,7 @@ def edraw_paste_options(
     append = _PasteChoiceCard("追加为子主题", "在目标节点下添加复制内容，保留现有内容。", colors, dialog)
     append.setObjectName("edraw_append")
     replace = _PasteChoiceCard(
-        "替换当前主题", "用复制内容替换目标节点，可选择保留原有后代。"
+        "替换当前主题", "用复制内容更新当前子树，可选择保留根节点和原有后代。"
         if root_count == 1 else "复制多个并列主题时不可替换，请选择追加。", colors, dialog,
     )
     replace.setObjectName("edraw_replace")
@@ -184,6 +192,34 @@ def edraw_paste_options(
     append.setChecked(not replace.isChecked())
     layout.addWidget(append)
     layout.addWidget(replace)
+    # 两组按钮各自互斥，根节点与原有后代的选择互不影响；复用文字按钮的高亮样式，
+    # 让状态在系统明暗主题及高 DPI 下均清晰可见，不依赖原生单选标记。
+    root_options = QWidget(dialog)
+    root_options.setObjectName("edraw_root_options")
+    root_layout = QVBoxLayout(root_options)
+    root_layout.setContentsMargins(0, 0, 0, 0)
+    root_layout.setSpacing(8)
+    root_layout.addWidget(QLabel("根节点如何处理（当前选中的主题）", root_options))
+    root_buttons = QHBoxLayout()
+    root_buttons.setSpacing(8)
+    root_group = QButtonGroup(dialog)
+    replace_root_button = QPushButton("替换根节点", root_options)
+    replace_root_button.setObjectName("edraw_replace_root")
+    replace_root_button.setAccessibleDescription("用复制内容的根主题文字替换当前主题文字。")
+    keep_root = QPushButton("保留根节点", root_options)
+    keep_root.setObjectName("edraw_keep_root")
+    keep_root.setAccessibleDescription("保留当前主题文字和格式，仅导入复制内容的子树。")
+    for button in (replace_root_button, keep_root):
+        button.setCheckable(True)
+        button.setAutoDefault(False)
+        button.setAccessibleName(button.text())
+        button.setProperty("edraw_paste_choice", True)
+        root_group.addButton(button)
+        root_buttons.addWidget(button)
+    replace_root_button.setChecked(replace_root)
+    keep_root.setChecked(not replace_root)
+    root_layout.addLayout(root_buttons)
+    layout.addWidget(root_options)
     descendants = QWidget(dialog)
     descendants.setObjectName("edraw_descendants")
     descendants_layout = QVBoxLayout(descendants)
@@ -200,13 +236,14 @@ def edraw_paste_options(
     for button in (keep, remove):
         button.setCheckable(True)
         button.setAutoDefault(False)
-        button.setProperty("edraw_history_choice", True)
+        button.setProperty("edraw_paste_choice", True)
         history_group.addButton(button)
         history_buttons.addWidget(button)
     keep.setChecked(keep_children)
     remove.setChecked(not keep_children)
     descendants_layout.addLayout(history_buttons)
     result_hint = QLabel(descendants)
+    result_hint.setObjectName("edraw_paste_result_hint")
     result_hint.setWordWrap(True)
     descendants_layout.addWidget(result_hint)
     layout.addWidget(descendants)
@@ -227,17 +264,23 @@ def edraw_paste_options(
     layout.addWidget(buttons)
 
     def sync_choices():
-        """隐藏不适用的后代选项并预告结果，不在切换粘贴方式时重置用户的选择。"""
+        """隐藏不适用的根节点和后代选项，组合预告结果，切换方式时保留两组选择。"""
         replacing = replace.isChecked()
+        root_options.setEnabled(replacing)
+        root_options.setVisible(replacing)
         descendants.setEnabled(replacing)
         descendants.setVisible(replacing)
         confirm.setText("替换粘贴" if replacing else "追加粘贴")
-        result_hint.setText("保留已有分支，新分支追加在后。" if keep.isChecked()
-                            else "移除已有分支，使用复制内容的子树；可通过撤销恢复。")
+        root_summary = ("使用复制内容替换当前主题文字。" if replace_root_button.isChecked()
+                        else "保留当前主题文字和格式，仅导入复制内容的子树。")
+        descendants_summary = ("保留已有分支，新分支追加在后。" if keep.isChecked()
+                               else "移除已有分支，使用复制内容的子树；可通过撤销恢复。")
+        result_hint.setText(root_summary + "\n" + descendants_summary)
         if dialog.isVisible():
             dialog.adjustSize()
 
     replace.toggled.connect(sync_choices)
+    replace_root_button.toggled.connect(sync_choices)
     keep.toggled.connect(sync_choices)
     sync_choices()
     # 显示前将初始焦点交给实际选中的粘贴方式，避免 Qt 默认聚焦首项，
@@ -245,7 +288,9 @@ def edraw_paste_options(
     modes.checkedButton().setFocus()
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
-    return EdrawPasteOptions("replace" if replace.isChecked() else "append", keep.isChecked())
+    return EdrawPasteOptions(
+        "replace" if replace.isChecked() else "append", keep.isChecked(), replace_root_button.isChecked()
+    )
 
 
 def node_properties(

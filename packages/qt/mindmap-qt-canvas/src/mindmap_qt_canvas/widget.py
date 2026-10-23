@@ -82,7 +82,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
     error_occurred = Signal(str)
     image_imported = Signal(str)
     wheel_mode_changed = Signal(str)
-    edraw_paste_options_changed = Signal(str, bool)
+    edraw_paste_options_changed = Signal(str, bool, bool)
     editable_changed = Signal(bool)
     editing_changed = Signal(bool)
     document_changing = Signal(object)
@@ -122,7 +122,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self.editable = editable
         self._properties_handler = None
         self._wheel_mode = "scroll"
-        self._edraw_paste_options = ("append", True)
+        self._edraw_paste_options = ("append", True, True)
         self.factory = VisualFactory()
         self.layout_registry = (
             layout_registry if layout_registry is not None else create_default_layout_registry()
@@ -401,24 +401,26 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         set_action_icon(action, f"wheel_{self._wheel_mode}", (self._ui_colors_override or self._document.theme))
 
     @property
-    def edraw_paste_options(self) -> tuple[str, bool]:
-        """返回亿图单树粘贴的默认方式及保留原后代开关，初始值为 (append, True)。
+    def edraw_paste_options(self) -> tuple[str, bool, bool]:
+        """返回亿图粘贴的方式、保留原后代及替换根节点开关，初始为 (append, True, True)。
 
         此值只属于当前组件，不进入导图文件或撤销历史。宿主可监听
-        edraw_paste_options_changed(str, bool) 保存，再通过 setter 恢复跨重启偏好。
-        每次亿图粘贴仍会询问用户，多根来源被限制为追加时不会覆盖单树偏好。
+        edraw_paste_options_changed(str, bool, bool) 保存，再通过 setter 恢复跨重启偏好。
+        根节点指当前选中的目标主题；每次亿图粘贴仍会询问，多根追加不会覆盖单树偏好。
         """
         return self._edraw_paste_options
 
-    def set_edraw_paste_options(self, mode: str, keep_children: bool) -> None:
+    def set_edraw_paste_options(self, mode: str, keep_children: bool, replace_root: bool = True) -> None:
         """设置亿图粘贴默认选项；非法值抛出 MindMapError，且不产生任何文档变化。
 
-        mode 仅允许 append、replace，keep_children 必须是布尔值。实际改变时才
-        发送信号，适合宿主 QSettings 持久化；恢复偏好不受只读或编辑状态限制。
+        mode 仅允许 append、replace，keep_children 和 replace_root 必须是布尔值。
+        replace_root 默认 True，已有二参数调用仍沿用替换目标正文的行为。实际改变时
+        才发送三参数信号，适合宿主 QSettings 持久化；恢复偏好不受只读或编辑状态限制。
         """
-        if mode not in ("append", "replace") or not isinstance(keep_children, bool):
-            raise MindMapError("亿图粘贴方式必须为 append 或 replace，保留后代选项必须为布尔值")
-        options = (mode, keep_children)
+        if (mode not in ("append", "replace") or not isinstance(keep_children, bool)
+                or not isinstance(replace_root, bool)):
+            raise MindMapError("亿图粘贴方式必须为 append 或 replace，保留后代及替换根节点选项必须为布尔值")
+        options = (mode, keep_children, replace_root)
         if options != self._edraw_paste_options:
             self._edraw_paste_options = options
             self.edraw_paste_options_changed.emit(*options)
@@ -1407,10 +1409,10 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         target = self.engine.get_node(target_id)
         generation, revision = self.engine.document_generation, self.engine.revision
         roots = fragment.root.children
-        mode, keep_children = self.edraw_paste_options
+        mode, keep_children, replace_root = self.edraw_paste_options
         choice = edraw_paste_options(
             self, target_text=target.text, root_count=len(roots), node_count=len(fragment.nodes) - 1,
-            mode=mode, keep_children=keep_children,
+            mode=mode, keep_children=keep_children, replace_root=replace_root,
             theme=self._ui_colors_override or self._document.theme,
         )
         if choice is None:
@@ -1421,7 +1423,8 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             self.engine.document_generation, self.engine.revision
         ):
             raise MindMapError("粘贴期间导图已发生变化，请重新粘贴")
-        if choice.mode not in ("append", "replace") or not isinstance(choice.keep_children, bool):
+        if (choice.mode not in ("append", "replace") or not isinstance(choice.keep_children, bool)
+                or not isinstance(choice.replace_root, bool)):
             raise MindMapError("亿图粘贴选项无效")
         if choice.mode == "replace" and len(roots) != 1:
             raise MindMapError("多个并列主题只能追加到选中节点下")
@@ -1437,7 +1440,10 @@ class MindMapWidget(PageNavigationMixin, QWidget):
                 source = fragment.nodes[roots[0]]
                 if not choice.keep_children:
                     self.engine.remove_nodes(target.children)
-                self.engine.update_node(target_id, text=source.text, text_format="plain")
+                # 保留根节点时完全跳过正文更新，保留文字格式，也避免触发附属页面的名称同步。
+                # 根节点选择只影响目标正文；后代删除、导入仍由独立选项控制并共用一次事务。
+                if choice.replace_root:
+                    self.engine.update_node(target_id, text=source.text, text_format="plain")
                 # paste_fragment 忽略片段根；把来源根作为合成根即可只插入它的后代。
                 # 目标 ID、同级位置和本项目属性始终保留；保留的旧后代排在新后代之前。
                 replacement = deepcopy(fragment)
@@ -1452,7 +1458,9 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         if self.engine.revision != revision and self._selection_undo:
             before, _ = self._selection_undo[-1]
             self._selection_undo[-1] = (before, list(ids))
-        self.set_edraw_paste_options(choice.mode if len(roots) == 1 else mode, choice.keep_children)
+        # 仅在单树粘贴完整成功后记忆三项选择；多根只能追加，不改写之前的替换偏好。
+        if len(roots) == 1:
+            self.set_edraw_paste_options(choice.mode, choice.keep_children, choice.replace_root)
         return ids
 
     def edit_properties(self):
