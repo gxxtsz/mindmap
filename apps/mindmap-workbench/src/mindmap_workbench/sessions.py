@@ -13,7 +13,7 @@ from mindmap_core import MindMapEngine, MindMapError
 from mindmap_docking import DocumentSpec
 from mindmap_formats import can_process_snapshot, save_document, supports_process_save
 from mindmap_qt_canvas import MindMapFileController, MindMapWidget
-from mindmap_qt_panels import MindMapPanels
+from mindmap_qt_panels import MindMapPanels, SubmapFavoritesPanel
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -62,6 +62,18 @@ class MindMapSession(QObject):
                                     format_registry=owner.window.format_registry)
         self.canvas.setFocusProxy(self.canvas.view)
         self.panels = MindMapPanels(self.canvas, self)
+        # 收藏面板单独接入会话，不扩大独立宿主的 PanelHost 必需接口；候选会话在
+        # 完成文件读取前先隐藏面板，安装后由共享停靠容器接管 QWidget 所有权。
+        self.favorites = SubmapFavoritesPanel(self.engine, self.canvas)
+        self.favorites.hide()
+        self.favorites.navigate_requested.connect(self._navigate_favorite)
+        self.favorites.unfavorite_requested.connect(
+            lambda page: self.canvas.call(lambda: self.canvas.set_submap_favorite(page, False)))
+        self.canvas.page_changed.connect(self._sync_favorites)
+        self.canvas.editable_changed.connect(self._sync_favorites)
+        self.canvas.editing_changed.connect(self._sync_favorites)
+        self.canvas.document_changed.connect(self._sync_favorites)
+        self._sync_favorites()
         self.files = MindMapFileController(self.canvas, self.panels, owner.window, writer=self._write)
         self.last_error = ""
         self.disposed = False
@@ -232,6 +244,17 @@ class MindMapSession(QObject):
         """离开会话时关闭旧菜单、候选预览和字段下拉框，拒绝迟到的选择回调。"""
         self.canvas.cancel_transient_ui()
         self.panels.close_popups()
+        self.favorites.close_popups()
+
+    def _sync_favorites(self, *_):
+        """状态回调始终使用所属会话，后台标签或分屏不会借用另一个活动画布。"""
+        self.favorites.set_current_page_id(self.canvas.current_page_id)
+        self.favorites.set_editable(self.canvas.editable and not self.canvas.is_editing)
+
+    def _navigate_favorite(self, page_id):
+        """复用画布输入检查与页面现场恢复；失败后还原列表高亮，不伪装已经切页。"""
+        self.canvas.call(lambda: self.canvas.navigate_to(page_id))
+        self._sync_favorites()
 
     def dispose(self):
         """停止计时器和订阅并延迟销毁组件；关闭标签和退出窗口均不缓存旧画布。
@@ -247,7 +270,9 @@ class MindMapSession(QObject):
         self._unsubscribe()
         self.close_popups()
         self.panels.dispose()
+        self.favorites.dispose()
         for stack, page in ((self.owner.window._outline_stack, self.panels.outline),
+                            (self.owner.window._favorites_stack, self.favorites),
                             (self.owner.window._properties_stack, self.panels.properties),
                             (self.owner.window._settings_stack, self.panels.settings)):
             stack.removeWidget(page)
@@ -298,6 +323,7 @@ class MindMapSessionManager(QObject):
         self._sessions[session.id] = session
         self._known_paths[session.id] = session.files.path
         self.window._outline_stack.addWidget(session.panels.outline)
+        self.window._favorites_stack.addWidget(session.favorites)
         self.window._properties_stack.addWidget(session.panels.properties)
         self.window._settings_stack.addWidget(session.panels.settings)
         # 标签只显示不含末尾扩展名的文件名，完整路径仍由文件控制器保留。

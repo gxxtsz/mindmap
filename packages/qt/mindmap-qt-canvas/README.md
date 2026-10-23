@@ -61,6 +61,14 @@ finally:
 页面变化，不属于引擎修改事件，不触发自动保存。`document_view` 始终只包含当前页，
 `engine.document` 始终包含完整文件；图形导出读取当前页的正式快照。
 
+子导图路径栏右端显示收藏星标，主导图及详情页隐藏；节点右键的 `favorite_submap`
+动作切换所选入口拥有的子导图收藏，目标与当前页星标独立。只读及正文编辑期间
+禁用修改，输入法候选检查失败后星标恢复正式状态，不显示未提交的收藏结果。
+`set_submap_favorite(page_id, favorite)` 检查目标、只读及候选状态，提交有效面板输入后
+交给引擎修改；`toggle_submap_favorite(node_id=None)` 针对入口节点切换，省略节点时
+使用当前节点。两者返回 None，失败抛出中文 `MindMapError`，宿主宜通过 `call()`
+统一报告错误。收藏不切换页面或重置视图；撤销重做沿用操作所属页导航规则。
+
 `create_detail_page()` 为当前节点创建单层详情并进入，`enter_detail_page(node_id)` 查看已有详情，
 `delete_detail_page()` 确认后删除详情、保留原节点及其子导图。`current_page_kind` 返回当前页面
 类别，详情路径末项显示“节点名称 · 详情”；通用导航、视图缓存、侧栏和只读浏览均复用页面能力。

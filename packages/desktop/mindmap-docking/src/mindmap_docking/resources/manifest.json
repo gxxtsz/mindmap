@@ -27,6 +27,10 @@
       "sha256": "6fc2e79d2a7746af1e0896e578183811d3b808bf2b4babbcea111c7a4128fc8a"
     },
     {
+      "path": "icons/favorites.svg",
+      "sha256": "46d7882893f27bc1f2cb031684be6d651368c2392c1b72f2beeef596d0c4cb44"
+    },
+    {
       "path": "icons/folder.svg",
       "sha256": "f473b2c82c0a64f0ce542d888b8d6e3538afa4b1561c876687957e9de797eb13"
     },

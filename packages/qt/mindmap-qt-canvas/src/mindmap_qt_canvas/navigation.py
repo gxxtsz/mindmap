@@ -3,7 +3,7 @@
 from dataclasses import dataclass, replace
 from typing import Mapping
 
-from mindmap_core import ChangeEvent, MindMapError
+from mindmap_core import ChangeEvent, MindMapError, Theme
 from mindmap_qt_ui.icons import toolbar_icon
 from mindmap_qt_ui.ui_style import apply_ui_palette, dialog_styles, ui_colors
 from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
@@ -16,6 +16,7 @@ class PathNavigation(QWidget):
 
     navigate_requested = Signal(object, str)
     back_requested = Signal()
+    favorite_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,6 +37,16 @@ class PathNavigation(QWidget):
         self.back_button.setFixedWidth(26)
         self.back_button.clicked.connect(self.back_requested)
         self.row.addWidget(self.back_button)
+        # 星标独立于页面路径项，路径省略、主题切换和窗口重排均复用同一按钮。
+        self.favorite_button = QToolButton(self)
+        self.favorite_button.setObjectName("mindmap_page_favorite")
+        self.favorite_button.setCheckable(True)
+        self.favorite_button.setFixedSize(28, 28)
+        self.favorite_button.setIconSize(QSize(16, 16))
+        self.favorite_button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.favorite_button.clicked.connect(self.favorite_requested)
+        self.favorite_button.hide()
+        self._favorite_visible = False
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._rebuild)
@@ -86,6 +97,31 @@ class PathNavigation(QWidget):
         )
         self._rebuild()
 
+    def set_favorite_state(self, *, visible: bool, checked: bool, enabled: bool) -> None:
+        """同步当前页星标，仅修改界面，不提交收藏或发送操作信号。
+
+        visible 指示当前页是否为子导图；checked 表示已收藏；enabled 由宿主根据
+        只读及编辑状态决定。调用返回 None，按钮在路径重排中保持同一实例；
+        收藏请求通过 favorite_requested 交回宿主校验，不把标识写入显示文字。
+        """
+        changed = self._favorite_visible != visible
+        self._favorite_visible = visible
+        self.favorite_button.setChecked(checked)
+        self.favorite_button.setEnabled(enabled)
+        text = "取消收藏当前子导图" if checked else "收藏当前子导图"
+        self.favorite_button.setToolTip(text)
+        self.favorite_button.setAccessibleName(text)
+        self._sync_favorite_icon()
+        if changed:
+            self._rebuild()
+
+    def _sync_favorite_icon(self):
+        colors = self._colors or ui_colors(Theme())
+        checked = self.favorite_button.isChecked()
+        self.favorite_button.setIcon(toolbar_icon(
+            "favorite_on" if checked else "favorite", colors.accent if checked else colors.muted,
+            colors.border, colors.accent))
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._resize_timer.start(0)
@@ -107,19 +143,22 @@ class PathNavigation(QWidget):
         # 重排只改变本控件布局，不改变路径内容；清理旧控件可避免频繁选择造成堆积。
         while self.row.count() > 1:
             item = self.row.takeAt(1)
-            if item.widget():
+            if item.widget() and item.widget() is not self.favorite_button:
                 item.widget().hide()
                 item.widget().deleteLater()
+        self.favorite_button.setVisible(self._favorite_visible)
+        self._sync_favorite_icon()
         if not self.entries:
             self.row.addStretch()
             return
-        colors = self._colors or ui_colors()
+        colors = self._colors or ui_colors(Theme())
         metrics = self.fontMetrics()
         # 预留 16 像素图标、4 像素间隔及原文字内边距；省略文字时同样扣除。
         icon_space = 20
         widths = [min(180, metrics.horizontalAdvance(entry.text.replace("\n", " ")) + 14 + icon_space)
                   for entry in self.entries]
-        available = max(70, self.width() - 65 - (80 if self.selection_count > 1 else 0))
+        available = max(70, self.width() - 65 - (80 if self.selection_count > 1 else 0)
+                        - (32 if self._favorite_visible else 0))
         indices = list(range(len(self.entries)))
         hidden = []
         if len(indices) > 2 and sum(widths) + 14 * (len(indices) - 1) > available:
@@ -181,6 +220,8 @@ class PathNavigation(QWidget):
             badge = QLabel(f"已选 {self.selection_count} 项", self)
             self.row.addWidget(badge)
             badge.show()
+        if self._favorite_visible:
+            self.row.addWidget(self.favorite_button)
         self.row.activate()
 
 
@@ -208,7 +249,15 @@ class PageNavigationMixin:
         self.path_navigation.back_requested.connect(lambda: self.call(self.return_to_parent_page))
         self.path_navigation.navigate_requested.connect(
             lambda page, node: self.call(lambda: self.navigate_to(page, node)))
+        self.path_navigation.favorite_requested.connect(self._toggle_current_page_favorite)
         layout.addWidget(self.path_navigation)
+
+    def _toggle_current_page_favorite(self):
+        # 可选中按钮会先切换外观，输入法检查可能拒绝操作；无论成功或失败都以
+        # 正式文档重新同步星标，避免候选期间显示尚未真正保存的收藏状态。
+        self.call(lambda: self.set_submap_favorite(
+            self.current_page_id, not self.engine.is_submap_favorite(self.current_page_id)))
+        self._sync_navigation()
 
     @property
     def current_page_id(self):
@@ -329,6 +378,40 @@ class PageNavigationMixin:
         self._switch_page(page_id)
         return page_id
 
+    def set_submap_favorite(self, page_id: str, favorite: bool) -> None:
+        """通过画布修改指定子导图收藏，返回 None，不切换当前页面或强制定位。
+
+        page_id 必须指向当前文件的子导图，favorite 必须为布尔值。只读、无效目标
+        或尚未完成的输入法候选抛出 MindMapError，文档及草稿保持原状。实际修改前
+        请求面板提交有效草稿并完成正文编辑；重复状态直接返回，避免无意义提交。
+        界面应通过 call() 调用本接口，把错误交给统一错误信号；历史和保存由引擎负责。
+        """
+        if not self.editable:
+            raise MindMapError("只读模式不能修改子导图收藏")
+        if not isinstance(page_id, str) or page_id not in self._book_document.submaps:
+            raise MindMapError("只能收藏当前文件中有效的子导图")
+        if not isinstance(favorite, bool):
+            raise MindMapError("子导图收藏状态必须为布尔值")
+        if self.engine.is_submap_favorite(page_id) == favorite:
+            return
+        if self.is_composing or not all(guard() for guard in tuple(self._navigation_guards)):
+            raise MindMapError("请先完成输入法候选，再修改子导图收藏")
+        self.edits_flush_requested.emit()
+        self.finish_edit(commit=True)
+        self.engine.set_submap_favorite(page_id, favorite)
+
+    def toggle_submap_favorite(self, node_id: str | None = None) -> None:
+        """切换入口节点拥有的子导图收藏，省略 node_id 时使用当前节点。
+
+        该接口供节点右键动作使用，目标与当前显示页面的星标相互独立。节点没有
+        子导图或标识无效时抛出 MindMapError；只读及输入检查复用 set_submap_favorite。
+        调用返回 None，不创建页面、不导航，成功后由文档事件同步全部收藏入口。
+        """
+        node = self.engine.get_node(node_id or self.current_node_id())
+        if not node.submap_id:
+            raise MindMapError("此节点没有子导图")
+        self.set_submap_favorite(node.submap_id, not self.engine.is_submap_favorite(node.submap_id))
+
     def enter_detail_page(self, node_id=None):
         """查看节点详情；只读也可进入，重新进入恢复该页自己的视图现场。"""
         key = node_id or self.current_node_id()
@@ -419,3 +502,7 @@ class PageNavigationMixin:
                                       page_kinds={entry.page_id: self._book_document.page_kind(entry.page_id)
                                                   for entry in pages})
         self.path_navigation.set_ui_colors(ui_colors(self._ui_colors_override or self._document.theme))
+        self.path_navigation.set_favorite_state(
+            visible=self.current_page_kind == "submap",
+            checked=self.engine.is_submap_favorite(self._current_page_id),
+            enabled=self.editable and not self.is_editing)

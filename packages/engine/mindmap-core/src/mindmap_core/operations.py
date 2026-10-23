@@ -186,6 +186,47 @@ class DocumentEditor:
         if self.document.page_kind(self._state.page_id(node_id)) == "detail":
             raise MindMapError("详情页内不能拥有详情页或子导图")
 
+    def favorite_submap_ids(self):
+        """借助文档元数据查询有效收藏，保留首次出现的顺序，不枚举全文件页面。
+
+        元数据是可扩展字段；旧程序可能保留已删除页面的 ID，或写入不认识的值。
+        此处只读过滤，不在打开文件时补写或清理内容，也不收藏主导图、详情页。
+        """
+        values = self.document.metadata.get("submap_favorites", [])
+        if not isinstance(values, list):
+            return ()
+        return tuple(dict.fromkeys(key for key in values
+                                   if isinstance(key, str) and key in self.document.submaps))
+
+    def _set_submap_favorite_ids(self, values):
+        """通过写时复制替换收藏元数据，保留其他扩展字段及旧保存快照。"""
+        metadata = self.document.metadata.copy()
+        if values:
+            metadata["submap_favorites"] = list(values)
+        else:
+            metadata.pop("submap_favorites", None)
+        self._state.set_setting("metadata", metadata)
+
+    def set_submap_favorite(self, page_id, favorite):
+        """在引擎事务内校验目标及布尔参数，只在实际切换状态时记录元数据。"""
+        if not isinstance(page_id, str) or page_id not in self.document.submaps:
+            raise MindMapError("只能收藏当前文件中有效的子导图")
+        if not isinstance(favorite, bool):
+            raise MindMapError("子导图收藏状态必须为布尔值")
+        values = self.favorite_submap_ids()
+        if (page_id in values) == favorite:
+            return
+        self._set_submap_favorite_ids(
+            (page_id, *values) if favorite else tuple(key for key in values if key != page_id))
+
+    def prune_submap_favorites(self, removed):
+        """清理本事务删除的子导图引用，使级联删除与收藏恢复保持原子性。"""
+        values = self.document.metadata.get("submap_favorites", [])
+        if isinstance(values, list):
+            remaining = [key for key in values if not isinstance(key, str) or key not in removed]
+            if remaining != values:
+                self._set_submap_favorite_ids(remaining)
+
     def create_detail_page(self, node_id):
         """为任意非详情页节点创建单层详情，普通后代与已有子导图均保持原位。"""
         owner = self.node(node_id)

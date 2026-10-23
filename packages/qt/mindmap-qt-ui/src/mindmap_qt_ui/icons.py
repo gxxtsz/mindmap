@@ -58,6 +58,11 @@ _SVG_BODIES = {
     "detail": page_icon_body("detail"),
     "submap": page_icon_body("submap"),
     "page_up": '<path d="M12 21V4m-6 6 6-6 6 6"/>',
+    "favorite": '<path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L2.9 9.6l6.3-.9Z"/>',
+    "favorite_on": (
+        '<path fill="currentColor" '
+        'd="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L2.9 9.6l6.3-.9Z"/>'
+    ),
     "panel_menu": '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
     "panel_hide": '<path d="M5 12h14"/>',
     # 逐级缩进的横线配向下箭头表示展开层级，避免用数字和大下拉箭头挤占标题栏。
@@ -171,7 +176,7 @@ def toolbar_icon(name: str, foreground: str, disabled: str, accent: str) -> QIco
     for color, states in variants:
         svg = (
             '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
-            f'fill="none" stroke="{QColor(color).name()}" stroke-width="2" '
+            f'color="{QColor(color).name()}" fill="none" stroke="{QColor(color).name()}" stroke-width="2" '
             f'stroke-linecap="round" stroke-linejoin="round">{_SVG_BODIES[name]}</svg>'
         )
         renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))

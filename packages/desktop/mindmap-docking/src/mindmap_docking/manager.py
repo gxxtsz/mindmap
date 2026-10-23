@@ -11,6 +11,7 @@ from uuid import uuid4
 from PySide6.QtCore import QEvent, QMimeData, QObject, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QDrag, QKeySequence
 from PySide6.QtWidgets import QApplication, QMenu, QTabWidget, QWidget
+from shiboken6 import isValid
 
 from .models import (
     MODE_LABELS,
@@ -310,9 +311,16 @@ class DockManager(QObject):
             self.activate(tool_id)
 
     def hide(self, tool_id):
-        """隐藏单个面板并交还焦点；保留模式、内容和主窗口内返回位置。"""
+        """隐藏指定工具面板，保留模式、内容实例和主窗口内返回位置。
+
+        tool_id 为已注册的工具标识，未知标识在变更前抛出 KeyError；返回 None。
+        隐藏活动面板后返回最后使用的文档；隐藏非活动面板时，若原焦点控件在
+        布局刷新后仍有效、可见且可用，则恢复其输入焦点，避免重挂其他面板时
+        打断用户操作。本方法须在 Qt 主线程调用，不销毁业务控件或改变其所有权。
+        """
         self._require_tool(tool_id)
         was_active = self.active_id == tool_id
+        previous_focus = QApplication.focusWidget()
         self.states[tool_id].visible = False
         if was_active:
             self.active_id = ""
@@ -320,6 +328,11 @@ class DockManager(QObject):
         # 隐藏活动面板后还给最后使用的文档，不提供额外导航动作或快捷键。
         if was_active:
             self._focus_editor()
+        elif (previous_focus is not None and isValid(previous_focus)
+              and previous_focus.isVisible() and previous_focus.isEnabled()
+              and QApplication.focusWidget() is not previous_focus):
+            # refresh 会暂存并重挂所有面板；只恢复仍留在布局中的原焦点控件。
+            previous_focus.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def set_available(self, tool_id, available):
         """控制插件式工具的可用性；不可用时移除栏入口，且不继续占据停靠位置。"""

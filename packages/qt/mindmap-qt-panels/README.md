@@ -63,3 +63,20 @@ None 表示所有层，1～9 表示指定层数，根主题计第1层。展开�
 保存前调用 `flush_pending_edits()`；永久退出时先 `panels.dispose()`，再释放宿主或画布。
 面板协调器不销毁 QWidget，最终控件所有权由宿主布局管理。
 `set_ui_colors(UiColors | None)` 只刷新展示，不提交草稿、不改写导图主题或历史。
+
+## 独立收藏面板
+
+`SubmapFavoritesPanel(engine, parent=None)` 为一份完整文档提供子导图收藏列表，
+不依赖画布或停靠框架，也不增加既有 `PanelHost` 的必需成员；原 `MindMapPanels`
+组合保持三个面板，收藏面板由支持页面导航的宿主单独创建、安装和释放。
+
+面板只读订阅引擎，按收藏顺序显示实时名称和页面层级路径；单击或 Enter 发出
+`navigate_requested(page_id)`，右键取消发出 `unfavorite_requested(page_id)`。
+宿主应分别连接安全的页面导航与取消收藏接口，由宿主检查只读和输入法状态、
+提交有效草稿。控件自身不写入文档、不切页，也不建立全文件快照。
+
+`set_current_page_id(page_id)` 同步当前页高亮，`set_editable(bool)` 控制取消收藏入口，
+禁用修改时仍可浏览、导航。`set_ui_colors(UiColors | None)` 同步列表及菜单主题，
+None 恢复默认浅色；这些方法均不触发内容修改。会话离开时调用 `close_popups()`
+关闭菜单并清除待操作目标；永久退出前调用幂等 `dispose()` 解除引擎订阅，随后
+由宿主销毁控件，借用的引擎必须至少保持有效到释放完成。

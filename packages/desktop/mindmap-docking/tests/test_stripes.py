@@ -115,22 +115,54 @@ def test_stripe_keyboard_activation_closes_open_panel(docking, qtbot):
     assert not button.isChecked()
 
 
-def test_tool_shortcut_action_still_focuses_open_panel_before_hiding(docking, qtbot):
-    """快捷键动作仍先聚焦非活动面板，再次触发才隐藏，区别于侧栏显隐入口。"""
+@pytest.mark.parametrize("entry", ["action", "shortcut"])
+@pytest.mark.parametrize("focus_owner", ["panel", "editor", "other_tool"])
+def test_tool_shortcut_closes_open_panel_regardless_of_focus(docking, qtbot, entry, focus_owner):
+    """动作和真实快捷键均直接收起可见面板，保留其他控件焦点并复用业务内容。"""
     manager = docking.manager
     manager.activate("alpha")
-    content = manager.panel("alpha").content
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is content)
-    docking.document.setFocus()
-    qtbot.waitUntil(lambda: manager.active_id == "")
-
-    action = manager.actions["tool:alpha"]
-    action.trigger()
+    panel = manager.panel("alpha")
+    content = panel.content
+    content.setPlainText("快捷键收起后保留内容")
+    button = docking.host.left_rail._buttons["alpha"]
     qtbot.waitUntil(lambda: QApplication.focusWidget() is content and manager.active_id == "alpha")
-    assert manager.states["alpha"].visible
-    action.trigger()
-    qtbot.waitUntil(lambda: QApplication.focusWidget() is docking.document)
+    expected_focus = docking.document
+    expected_active = ""
+    if focus_owner == "editor":
+        docking.document.setFocus()
+        qtbot.waitUntil(lambda: QApplication.focusWidget() is docking.document and manager.active_id == "")
+    elif focus_owner == "other_tool":
+        manager.activate("beta")
+        expected_focus = manager.panel("beta").content
+        expected_active = "beta"
+        qtbot.waitUntil(lambda: QApplication.focusWidget() is expected_focus and manager.active_id == "beta")
+    assert manager.states["alpha"].visible and panel.isVisible() and button.isChecked()
+
+    def toggle():
+        """分别覆盖菜单复用的 QAction 和当前焦点控件收到的真实 Alt+1 按键。"""
+        if entry == "action":
+            manager.actions["tool:alpha"].trigger()
+        else:
+            qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_1, Qt.KeyboardModifier.AltModifier)
+        QApplication.processEvents()
+
+    toggle()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is expected_focus and manager.active_id == expected_active)
     assert not manager.states["alpha"].visible
+    assert not panel.isVisible() and not button.isChecked()
+    if focus_owner == "other_tool":
+        assert manager.states["beta"].visible and manager.panel("beta").isVisible()
+
+    toggle()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is content and manager.active_id == "alpha")
+    assert manager.states["alpha"].visible and panel.isVisible() and button.isChecked()
+    assert manager.panel("alpha").content is content
+    assert content.toPlainText() == "快捷键收起后保留内容" and docking.calls["alpha"] == 1
+
+    toggle()
+    qtbot.waitUntil(lambda: QApplication.focusWidget() is docking.document and manager.active_id == "")
+    assert not manager.states["alpha"].visible
+    assert not panel.isVisible() and not button.isChecked()
 
 
 @pytest.mark.parametrize("side", POSITIONS)

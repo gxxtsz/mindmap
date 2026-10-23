@@ -1,4 +1,4 @@
-"""核验两类附属页面、路径栏、紧凑模式与三档缩放，并生成中文报告和截图。"""
+"""核验附属页面、路径栏、收藏侧栏、紧凑模式与三档缩放，生成中文报告和截图。"""
 
 import argparse
 import json
@@ -190,7 +190,31 @@ def child(scale, platform):
                     checks["详情内容和完整文件可保存"] = window.save_all() and (
                         load_document(window.files.path) == engine.document)
                     canvas.navigate_to(nested)
+                    canvas.set_submap_favorite(page, True)
+                    canvas.set_submap_favorite(nested, True)
+                    window.manager.activate("favorites", focus=False)
+                    app.processEvents()
+                    favorites = window.active_session.favorites
+                    checks["收藏按最近时间排序"] = [row[0].page_id for row in favorites.model.rows] == [nested, page]
+                    checks["当前子导图显示已收藏星标"] = (
+                        canvas.path_navigation.favorite_button.isVisible()
+                        and canvas.path_navigation.favorite_button.isChecked())
+                    checks["收藏侧栏属于当前会话"] = (
+                        favorites.isVisible() and window._favorites_stack.currentWidget() is favorites)
+                    checks["收藏完整页面路径"] = favorites.model.rows[0][1] == expected
+                    assert window.grab().save(str(output / (label + "-favorites.png")))
+                    canvas.navigate_to(None)
+                    favorites.list_view.clicked.emit(favorites.model.index(0, 0))
+                    checks["点击收藏进入目标页"] = canvas.current_page_id == nested
+                    checks["收藏保存在原生文件"] = window.save_all() and (
+                        load_document(window.files.path).metadata["submap_favorites"] == [nested, page])
                     canvas.set_editable(False)
+                    checks["只读禁用收藏修改"] = (
+                        not canvas.path_navigation.favorite_button.isEnabled()
+                        and not favorites.remove_action.isEnabled())
+                    canvas.navigate_to(None, branch)
+                    favorites.list_view.clicked.emit(favorites.model.index(0, 0))
+                    checks["只读可通过收藏跳转"] = canvas.current_page_id == nested
                     canvas.navigate_to(None, branch)
                     checks["只读路径跳转"] = canvas.current_page_id is None
                     results.append({"主题": theme, "紧凑模式": compact, "缩放": scale,

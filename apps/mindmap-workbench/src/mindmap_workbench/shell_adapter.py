@@ -94,9 +94,10 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         except (OSError, ValueError, TypeError) as error:
             startup_messages.append(f"最近文件与退出会话记录无效，已忽略：{error}")
         self._outline_stack = QStackedWidget(manager.parking)
+        self._favorites_stack = QStackedWidget(manager.parking)
         self._properties_stack = QStackedWidget(manager.parking)
         self._settings_stack = QStackedWidget(manager.parking)
-        for stack in (self._outline_stack, self._properties_stack, self._settings_stack):
+        for stack in (self._outline_stack, self._favorites_stack, self._properties_stack, self._settings_stack):
             message = QLabel("没有打开的导图")
             message.setAlignment(Qt.AlignmentFlag.AlignCenter)
             stack.addWidget(message)
@@ -107,6 +108,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.status.addPermanentWidget(self._status_controls)
         for identifier, title, stack, icon, position, shortcut in (
             ("outline", "大纲", self._outline_stack, "outline", DockPosition.LEFT_TOP, "Alt+1"),
+            ("favorites", "收藏", self._favorites_stack, "favorites", DockPosition.LEFT_TOP, "Alt+4"),
             ("properties", "节点属性", self._properties_stack, "properties", DockPosition.RIGHT_TOP, "Alt+2"),
             ("map_settings", "导图设置", self._settings_stack, "settings", DockPosition.RIGHT_TOP, ""),
         ):
@@ -224,6 +226,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         colors = ui_colors_from_shell(self.manager.theme)
         canvas.set_ui_colors(colors)
         panels.set_ui_colors(colors)
+        session.favorites.set_ui_colors(colors)
 
     def _save_wheel_mode(self, mode):
         if self._updating_preferences:
@@ -272,6 +275,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def _bind_session(self, session):
         """仅切换堆叠页和动作，不重建业务面板，不改变其他会话的选择和滚动位置。"""
         self._outline_stack.setCurrentWidget(session.panels.outline) if session else self._outline_stack.setCurrentIndex(0)
+        self._favorites_stack.setCurrentWidget(session.favorites) if session else self._favorites_stack.setCurrentIndex(0)
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
         self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
         self._status_controls.bind_canvas(session.canvas if session else None)
@@ -279,7 +283,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
         # 关闭活动标签到下一标签的短暂空绑定不暂停，只有关闭全部导图才回欢迎页。
-        self.manager.set_tools_suspended(("outline", "properties", "map_settings"), not bool(len(self.sessions)))
+        self.manager.set_tools_suspended(("outline", "favorites", "properties", "map_settings"),
+                                         not bool(len(self.sessions)))
 
     def _set_read_only(self, checked):
         if self.canvas:
@@ -417,7 +422,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             for session in self.sessions.values():
                 session.canvas.set_ui_colors(colors)
                 session.panels.set_ui_colors(colors)
-            for stack in (self._outline_stack, self._properties_stack, self._settings_stack):
+                session.favorites.set_ui_colors(colors)
+            for stack in (self._outline_stack, self._favorites_stack, self._properties_stack, self._settings_stack):
                 palette = stack.palette()
                 palette.setColor(QPalette.ColorRole.Window, self.manager.theme.color("tool-window-bg"))
                 stack.setPalette(palette)

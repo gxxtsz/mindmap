@@ -17,6 +17,23 @@
 `engine.document` 和保存快照始终包含全部页面，历史变化集的 `page_id` 表示操作所属页。
 普通分支遍历不跨页，完整复制与删除通过迭代的 `owned_descendants` 遍历所有附属页面。
 
+## 子导图收藏接口
+
+`favorite_submaps() -> tuple[PathEntry, ...]` 按最近收藏在前返回独立、不可变的页面根
+路径项，包含页面 ID、根节点 ID 和实时名称。通过 `node_path(entry.node_id)` 的
+`page_root` 项可以得到完整页面层级路径，查询不建立整份文档副本或修改文件。
+`is_submap_favorite(page_id) -> bool` 查询当前提交状态，无效目标、主导图和详情页返回 False。
+
+`set_submap_favorite(page_id, favorite) -> None` 仅接受有效子导图 ID 和布尔状态，
+无效参数抛出中文 `MindMapError`，失败不修改文档。实际变化经引擎事务、前置钩子及
+统一历史提交，重复设置不改变排序或产生事件；GUI 的只读与草稿约束由宿主检查。
+收藏存入 `document.metadata["submap_favorites"]` 的有序页面 ID 列表，空列表省略字段。
+缺失字段视为空，只读查询忽略旧程序删除页面后遗留的失效引用及不认识的元数据值。
+
+页面或祖先分支删除时，收藏清理合并到原删除事务，撤销同时恢复页面和收藏顺序。
+完整保存快照及另存为保留收藏；复制粘贴分支不会把原文件收藏关系传给新页面。
+收藏只引用稳定页面 ID，名称、路径和页面归属在查询时解析，不存储重复的标题副本。
+
 ## 单层详情页
 
 `Node.detail_page_id` 与 `MindMapDocument.detail_pages` 独立于既有子导图字段，页面记录

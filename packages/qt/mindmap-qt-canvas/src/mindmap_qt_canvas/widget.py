@@ -473,6 +473,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             ("hyperlink", "打开超链接", None, lambda w: w.open_hyperlink(), False),
             ("create_submap", "创建子导图", None, lambda w: w.create_submap(), True),
             ("enter_submap", "进入子导图", None, lambda w: w.enter_submap(), False),
+            ("favorite_submap", "收藏子导图", None, lambda w: w.toggle_submap_favorite(), True),
             ("delete_submap", "删除子导图…", None, lambda w: w.delete_submap(), True),
             ("create_detail_page", "添加详情页", None, lambda w: w.create_detail_page(), True),
             ("enter_detail_page", "查看详情页", None, lambda w: w.enter_detail_page(), False),
@@ -569,6 +570,12 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self._actions["enter_submap"].setEnabled(bool(not editing and single and node and node.submap_id))
         self._actions["delete_submap"].setEnabled(bool(
             self.editable and not editing and single and node and node.submap_id))
+        favorite = self._actions["favorite_submap"]
+        favorite.setVisible(bool(single and node and node.submap_id))
+        favorite.setEnabled(bool(self.editable and not editing and single and node and node.submap_id))
+        checked = bool(node and self.engine.is_submap_favorite(node.submap_id))
+        favorite.setText("取消收藏子导图" if checked else "收藏子导图")
+        set_action_icon(favorite, "favorite_on" if checked else "favorite", self._ui_colors)
         # 创建入口按所在页面过滤，已有入口按当前节点过滤；返回其他页面后立即恢复。
         self._actions["create_submap"].setVisible(not in_detail)
         self._actions["create_detail_page"].setVisible(not in_detail and not bool(node and node.detail_page_id))
@@ -1622,7 +1629,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         menu = QMenu(self)
         groups = [
             ("add_child", "add_sibling", "insert_parent", "edit", "properties", "delete"),
-            ("create_submap", "enter_submap", "delete_submap"),
+            ("create_submap", "enter_submap", "favorite_submap", "delete_submap"),
             ("create_detail_page", "enter_detail_page", "delete_detail_page"),
             ("copy", "cut", "paste", "undo", "redo"),
             ("move_up", "move_down", "fold", "expand_all", "collapse_all"),

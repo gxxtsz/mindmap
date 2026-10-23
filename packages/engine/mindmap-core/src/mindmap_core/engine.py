@@ -151,6 +151,38 @@ class MindMapEngine:
         """删除入口拥有的全部子导图，一次撤销可完整恢复，入口节点保持原位。"""
         self._execute("remove_submap", self._editor.remove_submap, node_id=node_id)
 
+    def favorite_submaps(self) -> tuple[PathEntry, ...]:
+        """按最近收藏在前的顺序返回子导图根路径项，不建立整份文档快照。
+
+        返回元组中的 PathEntry 均为独立、不可变的页面描述，包含页面 ID、根节点
+        ID 和当前名称；完整页面路径可再通过 node_path(entry.node_id) 查询。
+        缺少收藏元数据时返回空元组，忽略旧程序删除页面后遗留的无效引用；
+        查询不会修补文件、改变排序、发送事件或增加撤销记录。
+        """
+        document = self._state.document
+        return tuple(PathEntry(key, document.submaps[key].root_id,
+                               document.nodes[document.submaps[key].root_id].text, True)
+                     for key in self._editor.favorite_submap_ids())
+
+    def is_submap_favorite(self, page_id: str) -> bool:
+        """查询指定子导图是否已收藏，不修改文档或历史。
+
+        page_id 使用稳定页面标识；主导图、详情页、不存在的标识及非字符串输入
+        均返回 False。返回值只反映当前提交状态，不包含界面尚未提交的输入。
+        """
+        return isinstance(page_id, str) and page_id in self._editor.favorite_submap_ids()
+
+    def set_submap_favorite(self, page_id: str, favorite: bool) -> None:
+        """设置子导图收藏状态，返回 None，实际变化纳入一次事务及统一撤销历史。
+
+        page_id 必须是当前文档内有效的子导图 ID，favorite 必须为布尔值；主导图、
+        详情页、失效标识或错误参数均抛出 MindMapError，失败时不改变任何内容。
+        新收藏置于列表首位，重复设置不改变顺序、不发送修改事件。取消后再次
+        收藏按新的收藏时间排序。只读、输入法及草稿提交由 GUI 宿主在调用前检查。
+        """
+        self._execute("set_submap_favorite", self._editor.set_submap_favorite,
+                      page_id=page_id, favorite=favorite)
+
     def create_detail_page(self, node_id: str) -> str:
         """为主图或子导图节点创建详情页并返回页面 ID；详情页内调用会原子失败。
 
@@ -227,6 +259,11 @@ class MindMapEngine:
         # 结构由受控编辑器维护；变化实体复用导入字段校验，资源按引用差量清理。
         from .validation import validate_changes
 
+        # 页面删除与收藏清理共享同一条差量历史；只检查本次变化的页面，避免局部
+        # 编辑扫描整份文件。撤销时元数据和页面同时恢复，收藏顺序也保持原样。
+        removed = {key for key in journal.submaps if key not in self._state.document.submaps}
+        if removed:
+            self._editor.prune_submap_favorites(removed)
         validate_changes(self._state, journal)
 
     def _commit(self, delta, label: str) -> None:

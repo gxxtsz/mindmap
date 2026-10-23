@@ -304,7 +304,7 @@ def test_page_path_stays_short_for_deep_branches_and_selection(workspace, monkey
         assert bar.selection_count == len(selection)
         buttons = [button for button in bar.findChildren(QToolButton) if button.isVisible()]
         assert not any(button.text() == "…" for button in buttons)
-        pages = [button for button in buttons if button is not bar.back_button]
+        pages = [button for button in buttons if button.property("page_kind") is not None]
         assert len(pages) == len(expected_ids) and all(not button.icon().isNull() for button in pages)
         assert [button.property("page_kind") for button in pages] == ["main"] + ["submap"] * (len(pages) - 1)
         assert all(button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon for button in pages)
