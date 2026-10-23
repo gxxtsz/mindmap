@@ -90,11 +90,8 @@ _SVG_BODIES = {
     "undo": '<path d="m9 5-5 5 5 5M4 10h9a6 6 0 0 1 6 6v3"/>',
     "redo": '<path d="m15 5 5 5-5 5M20 10h-9a6 6 0 0 0-6 6v3"/>',
     "fit": ('<path d="M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5"/><rect x="8" y="8" width="8" height="8" rx="1"/>'),
-    # 用矢量笔画绘制“1:1”，表示恢复原始尺寸，不依赖系统字体或外部图片。
-    "reset_zoom": (
-        '<path d="m3 8 2-2v12m-2 0h4m10-10 2-2v12m-2 0h4"/>'
-        '<circle cx="12" cy="9" r=".6"/><circle cx="12" cy="15" r=".6"/>'
-    ),
+    # 环形逆时针箭头表示恢复原始缩放；与其他按钮共用线宽和圆角，适配小尺寸显示。
+    "reset_zoom": '<path d="M3 12a9 9 0 1 0 9-9c-3.5 0-6.5 1.8-8 4.5L3 8m0-5v5h5"/>',
     "center": (
         '<circle cx="12" cy="12" r="6"/>'
         '<path d="M12 3v3m0 12v3M3 12h3m12 0h3"/>'
