@@ -6,6 +6,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -23,11 +25,15 @@ def run_offscreen(arguments):
     )
 
 
-def test_clipboard_pytest_process_exits_normally(tmp_path):
+@pytest.mark.parametrize("test_path", [
+    "packages/qt/mindmap-qt-canvas/tests/test_extensions.py::test_clipboard_uses_injected_codec_and_rejects_old_version",
+    "packages/qt/mindmap-qt-canvas/tests/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo",
+])
+def test_clipboard_pytest_process_exits_normally(tmp_path, test_path):
     """原始崩溃场景不仅要通过断言，pytest 完成析构后也必须正常退出。"""
     result = run_offscreen([
         "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "child"),
-        "packages/qt/mindmap-qt-canvas/tests/test_extensions.py::test_clipboard_uses_injected_codec_and_rejects_old_version",
+        test_path,
     ])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
@@ -39,12 +45,16 @@ def test_desktop_launcher_releases_offscreen_mime_before_qt_shutdown(tmp_path):
         import sys
         from mindmap_shell import AppSpec, WorkbenchWindow, run_desktop
         from PySide6.QtCore import QMimeData, QTimer
+        from PySide6.QtGui import QImage
         from PySide6.QtWidgets import QApplication
 
         def build(options):
             window = WorkbenchWindow(AppSpec("clipboard-exit", "退出验证", storage_dir=options.state_dir))
             mime = QMimeData()
             mime.setData("application/x-test", b"clipboard-payload")
+            image = QImage(8, 8, QImage.Format.Format_ARGB32)
+            image.fill(0x805599aa)
+            mime.setImageData(image)
             QApplication.clipboard().setMimeData(mime)
             QTimer.singleShot(0, QApplication.instance().quit)
             return window

@@ -297,7 +297,7 @@ class NodePropertiesForm(QWidget):
         self._row(
             form,
             "图片显示宽度",
-            self._register("image_width", "图片显示宽度", self._number(20, 1200), right=True),
+            self._register("image_width", "图片显示宽度", self._number(0.1, 40_000_000), right=True),
         )
         direction = ComboBox()
         direction.setMinimumHeight(34)
@@ -562,27 +562,35 @@ class NodePropertiesForm(QWidget):
 
         节点标题与属性滚动区同步显隐，空状态不占用选中后的布局空间；加载过程
         不将默认值、混合值及未配置状态转换成修改请求，也不触发任何文档提交。
+        nodes 为借用的 Node 列表，其余关键字提供页根、父索引、权限及分支上下文；
+        返回 None。含纯图片时禁用文字和边框样式，图片宽度范围容纳原始尺寸及已有
+        缩放结果。只在 GUI 线程、表单存活时调用，不保留可写实体，无业务校验异常。
         """
         self._loading = True
         self._editable = editable and bool(nodes)
         self._composing.clear()
+        has_image_node = any(node.is_image_node for node in nodes)
         try:
             self.summary.setText(
                 ""
                 if not nodes
                 else f"已选择 {len(nodes)} 个节点"
                 if len(nodes) > 1
+                else "图片" if nodes[0].is_image_node
                 else (nodes[0].text.splitlines() or ["未命名节点"])[0]
             )
             self.empty_state.setVisible(not nodes)
             self.summary.setVisible(bool(nodes))
             self.scroll.setVisible(bool(nodes))
-            self.width_enabled.setEnabled(self._editable)
+            self.width_enabled.setEnabled(self._editable and not has_image_node)
             self.scope.setEnabled(self._editable and branch_styles)
             for key, field in self.fields.items():
                 enabled = self._editable
+                if key.startswith("style.") and has_image_node:
+                    enabled = False
                 if key == "image_width":
                     enabled &= all(node.image_id is not None for node in nodes)
+                    field.setMaximum(max(40_000_000, max((node.image_width for node in nodes), default=0)))
                 if key == "direction" and parents is not None:
                     enabled &= all(parents.get(node.id) == root_id for node in nodes)
                 if key == "branch.kind":
@@ -616,7 +624,8 @@ class NodePropertiesForm(QWidget):
                     if custom
                     else Qt.CheckState.Unchecked
                 )
-                self.fields["style.width"].setEnabled(self._editable and custom is not False)
+                self.fields["style.width"].setEnabled(
+                    self._editable and custom is not False and not has_image_node)
                 self.scope.setCurrentIndex(max(0, self.scope.findData(branch_scope)))
                 if branch_kinds is not None:
                     self.set_branch_kinds(branch_kinds)

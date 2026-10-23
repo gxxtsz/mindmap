@@ -166,9 +166,11 @@ class OutlineModel(QAbstractItemModel):
             return None
         node = self.document.nodes[self.node_id(index)]
         if role == Qt.ItemDataRole.DisplayRole:
+            if node.is_image_node:
+                return "图片"
             return " ".join(node.text.split()) or "未命名节点"
         if role == Qt.ItemDataRole.ToolTipRole:
-            return node.text
+            return "图片" if node.is_image_node else node.text
         if role == Qt.ItemDataRole.UserRole:
             return node.id
         return None

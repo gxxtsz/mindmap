@@ -52,8 +52,17 @@ class NodeItem(QGraphicsObject):
         return bounds
 
     def shape(self):
+        """返回当前视觉的命中路径；纯图片为矩形，普通节点为圆角矩形。
+
+        无参数，不修改文档，正常调用无异常。返回独立 QPainterPath，由 Qt 在
+        GUI 线程、图元存活期间查询，不将透明图片的内部像素作为命中空洞。
+        """
         path = QPainterPath()
-        path.addRoundedRect(QRectF(0, 0, self.visual.width, self.visual.height), 7, 7)
+        rect = QRectF(0, 0, self.visual.width, self.visual.height)
+        if self.node.is_image_node:
+            path.addRect(rect)
+        else:
+            path.addRoundedRect(rect, 7, 7)
         return path
 
     def paint(self, painter, option, widget=None):

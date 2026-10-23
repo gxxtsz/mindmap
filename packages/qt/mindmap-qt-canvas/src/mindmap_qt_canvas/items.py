@@ -8,7 +8,7 @@ from weakref import ref
 from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFontMetricsF, QPainterPath, QTextCursor, QTextOption
+from PySide6.QtGui import QColor, QFontMetricsF, QKeySequence, QPainterPath, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -402,6 +402,11 @@ class NodeEditor(QGraphicsTextItem):
         self.sync_geometry()
 
     def keyPressEvent(self, event):
+        # 画布粘贴动作在正文编辑时停用；仅接管图像快捷键，普通文字继续走 Qt，
+        # 图像校验失败或候选未结束时也消费按键，保持当前草稿完整。
+        if event.matches(QKeySequence.StandardKey.Paste) and self.owner._paste_editor_image():
+            event.accept()
+            return
         if self.composing and event.key() in (
             Qt.Key.Key_Return,
             Qt.Key.Key_Enter,

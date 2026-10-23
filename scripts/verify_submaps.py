@@ -1,4 +1,4 @@
-"""核验附属页面、路径栏、收藏侧栏、紧凑模式与三档缩放，生成中文报告和截图。"""
+"""核验附属页面、路径栏、收藏、图片粘贴、紧凑模式与三档缩放，生成中文报告和截图。"""
 
 import argparse
 import json
@@ -16,7 +16,9 @@ def child(scale, platform):
     from mindmap_core import MindMapError
     from mindmap_formats import load_document
     from mindmap_workbench.shell_adapter import build_window
-    from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRectF
+    from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, Qt
+    from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QToolButton
 
     app = QApplication([])
@@ -208,7 +210,84 @@ def child(scale, platform):
                     checks["点击收藏进入目标页"] = canvas.current_page_id == nested
                     checks["收藏保存在原生文件"] = window.save_all() and (
                         load_document(window.files.path).metadata["submap_favorites"] == [nested, page])
+                    # 在真实编辑器中粘贴透明位图，核验快捷键、几何、主题及文件资源。
+                    source = QImage(220, 140, QImage.Format.Format_ARGB32)
+                    source.fill(Qt.GlobalColor.transparent)
+                    painter = QPainter(source)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QColor(35, 115, 220, 170))
+                    painter.drawRoundedRect(QRectF(8, 8, 204, 124), 20, 20)
+                    painter.setPen(QColor("#ffffff"))
+                    painter.drawText(QRectF(8, 8, 204, 124), Qt.AlignmentFlag.AlignCenter, "剪贴板图片")
+                    painter.end()
+                    canvas.view.setFocus()
+                    # 收藏导航恢复的旧选择可能是子导图入口；使用允许普通后代的父节点。
+                    target = engine.add_child(canvas.document_view.root_id, "图片粘贴位置")
+                    canvas.begin_edit(target)
+                    canvas.editor.setPlainText("直接粘贴的透明图片")
+                    mime = QMimeData()
+                    mime.setImageData(source)
+                    app.clipboard().setMimeData(mime)
+                    image_scale = canvas.view.transform().m11()
+                    QTest.keyClick(canvas.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+                    app.processEvents()
+                    image_node = canvas.current_node_id()
+                    node = engine.get_node(image_node)
+                    visual = canvas.node_items[image_node].visual
+                    checks["编辑期间粘贴提交正文"] = (canvas.editor is None
+                        and engine.get_node(target).text == "直接粘贴的透明图片")
+                    checks["图片新建为普通子节点"] = engine.parent_id(image_node) == target
+                    checks["粘贴图片实际显示"] = bool(node.image_id) and visual.image is not None
+                    checks["粘贴保持原始像素尺寸"] = (node.image_width == 220
+                        and (visual.width, visual.height) == (220, 140))
+                    checks["纯图片不显示文字及节点背景"] = visual.image_only and node.text == ""
+                    checks["纯图片隐藏附属页面入口"] = (not canvas.action("create_submap").isVisible()
+                        and not canvas.action("create_detail_page").isVisible())
+                    checks["图片不超出节点边界"] = QRectF(0, 0, visual.width, visual.height).contains(visual.image_rect)
+                    checks["粘贴保留页面及缩放"] = (canvas.current_page_id == nested
+                                                     and canvas.view.transform().m11() == image_scale)
+                    checks["透明图片保留透明度"] = QImage.fromData(
+                        engine.document.assets[node.image_id].data).pixelColor(0, 0).alpha() == 0
+                    checks["粘贴图片随文件保存"] = window.save_all() and (
+                        load_document(window.files.path) == engine.document)
+                    canvas.view.ensureVisible(canvas.node_items[image_node], 30, 30)
+                    app.processEvents()
+                    assert window.grab().save(str(output / (label + "-image-paste.png")))
+                    item = canvas.node_items[image_node]
+                    start = canvas.view.mapFromScene(item.mapToScene(visual.image_rect.bottomRight()))
+                    end = start + QPoint(round(55 * image_scale), round(35 * image_scale))
+
+                    def image_mouse(kind, point):
+                        """通过视口发送真实鼠标事件，明确携带拖动按钮状态。"""
+                        button = (Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove
+                                  else Qt.MouseButton.LeftButton)
+                        buttons = (Qt.MouseButton.NoButton if kind == QEvent.Type.MouseButtonRelease
+                                   else Qt.MouseButton.LeftButton)
+                        event = QMouseEvent(kind, QPointF(point),
+                            QPointF(canvas.view.viewport().mapToGlobal(point)), button, buttons,
+                            Qt.KeyboardModifier.NoModifier)
+                        app.sendEvent(canvas.view.viewport(), event)
+
+                    before_resize, revision = engine.document, engine.revision
+                    image_mouse(QEvent.Type.MouseButtonPress, start)
+                    image_mouse(QEvent.Type.MouseMove, end)
+                    app.processEvents()
+                    checks["拖动图片只预览"] = (canvas.view.image_resize.active
+                        and engine.document == before_resize and engine.revision == revision)
+                    assert window.grab().save(str(output / (label + "-image-resize.png")))
+                    image_mouse(QEvent.Type.MouseButtonRelease, end)
+                    checks["松手等比缩放并保留原资源"] = (
+                        engine.get_node(image_node).image_width > 260
+                        and engine.document.assets == before_resize.assets
+                        and canvas.node_items[image_node].visual.width
+                            / canvas.node_items[image_node].visual.height == 220 / 140)
+                    resized = engine.document
+                    checks["图片缩放独立撤销重做"] = (engine.undo() and engine.document == before_resize
+                        and engine.redo() and engine.document == resized)
+                    app.clipboard().clear()
                     canvas.set_editable(False)
+                    checks["只读隐藏缩放手柄"] = canvas.view.image_resize.hit_test(start) is None
                     checks["只读禁用收藏修改"] = (
                         not canvas.path_navigation.favorite_button.isEnabled()
                         and not favorites.remove_action.isEnabled())
@@ -229,7 +308,7 @@ def child(scale, platform):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="子导图与详情页三档缩放及主题视觉验收")
+    parser = argparse.ArgumentParser(description="附属页面、收藏与图片粘贴的三档缩放及主题视觉验收")
     parser.add_argument("--child", type=float)
     parser.add_argument("--platform", default="offscreen")
     options = parser.parse_args()

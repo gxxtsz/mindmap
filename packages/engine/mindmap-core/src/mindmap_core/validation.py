@@ -116,6 +116,13 @@ def validate_node(document, node_id, node, *, json_data=True):
             raise MindMapError("标签和图标必须为字符串列表")
     if not isinstance(node.style, dict) or not isinstance(node.metadata, dict):
         raise MindMapError("节点样式和元数据必须为对象")
+    if node.is_image_node:
+        if not node.image_id:
+            raise MindMapError("纯图片节点必须拥有图片资源")
+        if node.text:
+            raise MindMapError("纯图片节点不能包含正文文字")
+        if node.submap_id or node.detail_page_id:
+            raise MindMapError("纯图片节点不能拥有详情页或子导图")
     get_branch_style(node.style)
     for key in ("font_size", "width", "border_width"):
         if key in node.style:

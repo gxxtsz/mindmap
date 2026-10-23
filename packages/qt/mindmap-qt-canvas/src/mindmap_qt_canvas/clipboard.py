@@ -1,11 +1,62 @@
-"""亿图剪贴板的系统适配；文件读取限量进行，格式解析仍由无 Qt 的引擎包负责。"""
+"""节点片段及图片的剪贴板适配；图片同步读取，亿图结构解析交给无 Qt 引擎包。"""
 
 from pathlib import Path
 
 from mindmap_core import MindMapDocument, MindMapError
 from mindmap_formats import MAX_ARCHIVE_BYTES, import_edraw_xml
+from mindmap_qt_render.rendering import decode_image
+from PySide6.QtCore import QBuffer, QIODevice, QMimeData
+from PySide6.QtGui import QImage, QPixmap
 
 EDRAW_CLIPBOARD_MIME = "application/edraw-mind-xml"
+
+
+def has_clipboard_image(mime: QMimeData) -> bool:
+    """查询借用的 MIME 载荷是否声明图像，返回布尔值，不解码或修改剪贴板。
+
+    mime 是当前 GUI 线程读取到的 QMimeData；调用期间必须有效，本函数不保留引用。
+    同时检查 Qt 位图与 image/* 格式，兼容 hasImage() 为 False 的独立 PNG 载荷。
+    声明图像不代表内容有效，实际读取由 read_clipboard_image 校验；正常调用无异常。
+    """
+    return mime.hasImage() or any(kind.startswith("image/") for kind in mime.formats())
+
+
+def read_clipboard_image(mime: QMimeData) -> tuple[bytes, str] | None:
+    """同步读取剪贴板图像，返回独立的图片字节与实际 MIME，无图像时返回 None。
+
+    mime 是 GUI 线程内短暂借用的 QMimeData，不转移所有权，也不缓存到调用结束之后。
+    优先使用可解码的编码图片，保留原始字节；仅有 QImage、QPixmap 时无损编码为 PNG，
+    保留透明通道。多个图像表示可相互回退，但全部无效时抛出中文 MindMapError，
+    调用方不能再降级为文本。空图、超过四千万像素或 PNG 编码失败同样抛出该异常。
+    本函数不读取图片文件、网址或 HTML 引用，不修改文档、草稿、历史及系统剪贴板。
+    """
+    if not has_clipboard_image(mime):
+        return None
+    kinds = [kind for kind in mime.formats() if kind.startswith("image/")]
+    # PNG 表示通常保留截图透明度；其余编码按来源声明顺序尝试。
+    kinds.sort(key=lambda kind: kind != "image/png")
+    error = None
+    for kind in kinds:
+        try:
+            data = bytes(mime.data(kind))
+            _, media_type = decode_image(data)
+            return data, media_type
+        except MindMapError as exc:
+            # 只保存消息，异常回溯会反向持有本次帧及借用的系统 MIME 对象。
+            error = str(exc)
+    if mime.hasImage():
+        value = mime.imageData()
+        if isinstance(value, (QImage, QPixmap)) and not value.isNull():
+            if value.width() * value.height() > 40_000_000:
+                raise MindMapError("图片无效或像素数超过四千万")
+            image = value.toImage() if isinstance(value, QPixmap) else value
+            buffer = QBuffer()
+            if not buffer.open(QIODevice.OpenModeFlag.WriteOnly) or not image.save(buffer, "PNG"):
+                raise MindMapError("剪贴板图片无法编码为 PNG")
+            return bytes(buffer.data()), "image/png"
+    if error is not None:
+        raise MindMapError(error)
+    raise MindMapError("剪贴板图片无效或格式不受支持")
 
 
 def read_edraw_clipboard(data: bytes) -> MindMapDocument:

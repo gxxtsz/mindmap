@@ -104,7 +104,12 @@ def draw_text(painter: QPainter, document: QTextDocument, position: QPointF, col
 
 
 def decode_image(data: bytes) -> tuple[QPixmap, str]:
-    """验证图片并返回可绘制资源及 MIME；限制解码像素数以避免误选超大图片。"""
+    """验证编码图片字节，返回独立的可绘制 QPixmap 及实际图片 MIME。
+
+    data 是完整图片内容，不读取路径或网络地址；调用方须在已有 QApplication 的
+    GUI 线程使用。图片尺寸无效、超过四千万像素或无法解码时抛出 MindMapError，
+    不修改输入、文档或历史。临时缓冲区仅在调用期间存活，返回值可由调用方持有。
+    """
     buffer = QBuffer()
     buffer.setData(QByteArray(data))
     buffer.open(QIODevice.OpenModeFlag.ReadOnly)
@@ -112,10 +117,11 @@ def decode_image(data: bytes) -> tuple[QPixmap, str]:
     size = reader.size()
     if not size.isValid() or size.width() * size.height() > 40_000_000:
         raise MindMapError("图片无效或像素数超过四千万")
+    # 部分 Qt 图像插件在 read() 后不再保留检测结果，须在读取前取得真实格式。
+    kind = bytes(reader.format()).decode("ascii", "replace")
     image = reader.read()
     if image.isNull():
         raise MindMapError(f"图片无法解码：{reader.errorString()}")
-    kind = bytes(reader.format()).decode("ascii", "replace")
     return QPixmap.fromImage(image), "image/" + ("jpeg" if kind in ("jpg", "jpeg") else kind)
 
 
@@ -145,6 +151,8 @@ class NodeVisual:
     page_icon_color: QColor | None = None
     # 记录最小高度居中前的内容高度，使编辑草稿增减行数时能准确恢复留白。
     content_height: float = 0.0
+    # 纯图片只绘制原始矩形和临时选中轮廓；默认值兼容旧视觉构造接口。
+    image_only: bool = False
 
     @property
     def page_controls_width(self) -> float:
@@ -208,6 +216,16 @@ class NodeVisual:
         开启以供静态导出与拖动影像复用；画布通过独立子图元绘制时传入 False。
         """
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.image_only:
+            if self.image is not None:
+                painter.drawPixmap(self.image_rect, self.image, QRectF(self.image.rect()))
+            if selected:
+                painter.setPen(QPen(QColor(accent), 1.5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(self.image_rect)
+            if node.children and controls:
+                self.paint_fold_control(painter, node)
+            return
         # 文本控件借用焦点或鼠标选区时，节点选择标记可能暂时变化；整个编辑
         # 会话仍保留同一条圆角高亮边框，不再依赖额外的文本焦点虚线表达状态。
         highlighted = selected or editing
@@ -298,8 +316,10 @@ class VisualFactory:
 
         document 提供图片资源，is_root 决定根节点的默认字号及粗体。正文、图片和
         有效外观未变时复用原视觉；分支样式不影响节点尺寸，不使文字测量缓存失效。
-        内容区上下各保留 8 个逻辑像素，图片、标签和备注继续按实际内容撑高；
+        普通图文内容区上下各保留 8 个逻辑像素，图片、标签和备注按实际内容撑高；
         附页入口需要的最小高度及居中偏移统一由 with_content_size 处理。
+        纯图片节点仅按 image_width 和原始像素比例测量，无正文、留白、填充及常驻
+        边框，也不使用普通附件的宽高限制；图片字节无效时抛出 MindMapError。
         宿主先创建 QApplication，并在 GUI 线程使用返回的文字文档和图片对象。
         """
         key = (
@@ -311,6 +331,7 @@ class VisualFactory:
             tuple(node.icons),
             node.image_id,
             node.image_width,
+            node.is_image_node,
             bool(node.children),
             bool(node.note),
             bool(node.hyperlink),
@@ -350,21 +371,26 @@ class VisualFactory:
                 if len(self.pixmaps) > 128:
                     self.pixmaps.popitem(last=False)
             image = self.pixmaps[node.image_id]
-            iw = min(node.image_width, max_width)
+            iw = node.image_width if node.is_image_node else min(node.image_width, max_width)
             ih = iw * image.height() / image.width()
-            if ih > 260:
+            if not node.is_image_node and ih > 260:
                 iw *= 260 / ih
                 ih = 260
-            image_rect = QRectF(14, y, iw, ih)
-            width = max(width, iw + 28)
-            y += ih + 10
+            if node.is_image_node:
+                image_rect = QRectF(0, 0, iw, ih)
+                width, y = iw, ih
+            else:
+                image_rect = QRectF(14, y, iw, ih)
+                width = max(width, iw + 28)
+                y += ih + 10
         text_position = QPointF(14, y)
-        y += max(metrics.height(), text_document.size().height())
+        if not node.is_image_node:
+            y += max(metrics.height(), text_document.size().height())
         tag_font = QFont(font)
         tag_font.setPointSizeF(9)
         tag_metrics = QFontMetricsF(tag_font)
         tags = []
-        if node.tags:
+        if node.tags and not node.is_image_node:
             y += 8
             x = 14.0
             for tag in node.tags:
@@ -375,9 +401,9 @@ class VisualFactory:
                 x += tag_width + 6
                 width = max(width, x + 8)
             y += 22
-        if node.note or node.hyperlink:
+        if (node.note or node.hyperlink) and not node.is_image_node:
             y += 20
-        content_height = y + _NODE_VERTICAL_PADDING
+        content_height = y if node.is_image_node else y + _NODE_VERTICAL_PADDING
         visual = NodeVisual(
             width,
             content_height,
@@ -403,6 +429,7 @@ class VisualFactory:
             page_kinds=tuple(kind for kind, page in (("detail", node.detail_page_id), ("submap", node.submap_id))
                              if page),
             content_height=content_height,
+            image_only=node.is_image_node,
         )
         # 普通底色使用强调色；根节点和自定义底色跟随正文色，避免蓝底蓝图标。
         visual.page_icon_color = visual.text_color if is_root or node.style.get("background") else QColor(theme.accent)

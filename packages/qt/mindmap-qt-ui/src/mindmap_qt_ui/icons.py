@@ -10,6 +10,7 @@ from PySide6.QtCore import QByteArray, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QMenu, QToolBar, QToolButton
+from shiboken6 import isValid
 
 from .ui_style import apply_ui_palette, toolbar_styles, ui_colors
 
@@ -197,8 +198,10 @@ def toolbar_icon(name: str, foreground: str, disabled: str, accent: str) -> QIco
 def add_icon_action(toolbar: QToolBar, action: QAction, icon_name: str) -> None:
     """将已有动作以纯图标按钮加入工具栏，保留其中文名称、快捷键和信号连接。
 
-    本函数供组件和演示窗口内部共用；不创建替代动作，菜单仍可复用同一个 QAction。
-    动作名称或快捷键改变时同步悬停提示与无障碍信息，避免自定义快捷键后提示过期。
+    toolbar、action 为 GUI 线程中有效的工具栏和既有动作，icon_name 指定内置图标名称；
+    未知图标抛出 ValueError，成功返回 None。本函数不转移动作所有权、不创建替代动作，
+    菜单仍可复用同一 QAction。名称或快捷键变化时同步当前按钮的提示及无障碍信息；
+    按钮移除或工具栏销毁后停止更新，不持有已销毁的按钮，允许动作继续被其他界面使用。
     """
     if icon_name not in _SVG_BODIES:
         raise ValueError(f"工具栏图标不存在：{icon_name}")
@@ -214,6 +217,13 @@ def add_icon_action(toolbar: QToolBar, action: QAction, icon_name: str) -> None:
 
         def sync_description():
             """直接更新按钮说明，避免改写 QAction 再次触发 changed 信号。"""
+            if not isValid(toolbar) or not isValid(action):
+                return
+            # 分屏和会话关闭可能先销毁工具栏按钮，原动作仍会继续发送 changed。
+            # 每次查询当前承载按钮，避免闭包长期借用已经被 Qt 删除的旧按钮。
+            button = toolbar.widgetForAction(action)
+            if not isinstance(button, QToolButton) or not isValid(button):
+                return
             shortcuts = " / ".join(
                 key.toString(QKeySequence.SequenceFormat.NativeText) for key in action.shortcuts()
             )

@@ -328,7 +328,9 @@ def test_async_image_download_uses_gui_commit(canvas, png_bytes, qtbot):
     try:
         with qtbot.waitSignal(widget.image_imported, timeout=4000):
             widget.import_image_url(a, f"http://127.0.0.1:{server.server_port}/image.png")
-        assert widget.engine.get_node(a).image_id is not None
+        key = widget.engine.get_node(a).children[-1]
+        assert widget.engine.get_node(key).is_image_node
+        assert widget.engine.get_node(key).image_width == QImage.fromData(png_bytes).width()
     finally:
         server.shutdown()
         server.server_close()

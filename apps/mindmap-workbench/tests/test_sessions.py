@@ -12,8 +12,8 @@ import pytest
 from mindmap_core import LayoutConfig, MindMapDocument, MindMapError, Node, Theme
 from mindmap_formats import load_document, save_document
 from mindmap_workbench.shell_adapter import build_window
-from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QInputMethodEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import QImage, QInputMethodEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton, QToolButton
 from shiboken6 import isValid
 
@@ -41,6 +41,24 @@ def create(window, path):
     """显式路径的新建不需要对话框，返回具有独立组件的已保存会话。"""
     assert window.new_document(path)
     return window.active_session
+
+
+@pytest.fixture
+def image_clipboard(qapp):
+    """图片集成测试借用系统剪贴板；原生平台结束后恢复，离屏平台提前释放载荷。"""
+    clipboard = qapp.clipboard()
+    original = QMimeData()
+    previous = clipboard.mimeData()
+    if previous is not None:
+        for kind in previous.formats():
+            original.setData(kind, previous.data(kind))
+        if previous.hasImage():
+            original.setImageData(previous.imageData())
+    yield clipboard
+    if qapp.platformName() == "offscreen":
+        clipboard.clear()
+    else:
+        clipboard.setMimeData(original)
 
 
 def create_large_session(window, path):
@@ -1064,6 +1082,109 @@ def test_owned_pages_are_isolated_between_sessions_and_reopen_from_main(empty_wi
     assert reopened.engine.document.has_page(page)
     assert reopened.canvas.document_view.root_id == reopened.engine.root_id
     assert second.canvas.current_page_id == other
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("page_kind", ["main", "submap", "detail"])
+def test_clipboard_image_paste_isolates_sessions_and_survives_file_lifecycle(
+    empty_window, tmp_path, image_clipboard, qtbot, monkeypatch, split, page_kind,
+):
+    """真实粘贴与缩放在所属页保存，历史、另存为和关闭重开保持尺寸及资源独立。"""
+    window = empty_window
+    original_path = tmp_path / "图片甲.mindmap"
+    first = create(window, original_path)
+    owner = first.engine.add_child(first.engine.root_id, "附图位置")
+    first.canvas.select_nodes([owner])
+    if page_kind == "submap":
+        first.canvas.create_submap()
+    elif page_kind == "detail":
+        first.canvas.create_detail_page()
+    page, target = first.canvas.current_page_id, first.canvas.current_node_id()
+    second = create(window, tmp_path / "图片乙.mindmap")
+    if split:
+        window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
+    assert window.save_all()
+    other_before = second.engine.document
+    other_revision = second.engine.revision
+    window.manager.activate_document(first.id)
+    window.activateWindow()
+    first.canvas.view.setFocus()
+    qtbot.waitUntil(lambda: window.active_session is first)
+    QApplication.processEvents()
+    first.canvas.view.zoom(1.3)
+    transform = first.canvas.view.transform()
+    image = QImage(40, 30, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.red)
+    mime = QMimeData()
+    mime.setImageData(image)
+    image_clipboard.setMimeData(mime)
+    qtbot.keyClick(first.canvas.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    image_node = first.canvas.selected_node_ids()[0]
+    assert first.engine.parent_id(image_node) == target
+    asset = first.engine.get_node(image_node).image_id
+    assert asset is not None and first.canvas.current_page_id == page
+    assert first.canvas.view.transform() == transform and first.files.is_dirty
+    qtbot.waitUntil(lambda: not first.files.is_dirty)
+    assert load_document(original_path) == first.engine.document
+    assert second.engine.document == other_before and second.engine.revision == other_revision
+    assert not second.files.is_dirty
+
+    destination = tmp_path / "图片甲副本.mindmap"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(destination), "原生导图"))
+    assert window.save(save_as=True) and first.files.path == destination
+    expected = first.engine.document
+    assert load_document(destination) == expected
+    first.canvas.navigate_to(None)
+    assert first.engine.undo()
+    assert first.canvas.current_page_id == page
+    assert image_node not in first.engine.document.nodes
+    qtbot.waitUntil(lambda: not first.files.is_dirty)
+    assert asset not in load_document(destination).assets
+    assert asset in load_document(original_path).assets
+    assert first.engine.redo()
+    qtbot.waitUntil(lambda: not first.files.is_dirty)
+    assert load_document(destination) == expected
+
+    # 视口事件已由画布测试逐手柄覆盖，这里验证拖动提交后的工作台会话及保存链。
+    item = first.canvas.node_items[image_node]
+    resize = first.canvas.view.image_resize
+    start = first.canvas.view.mapFromScene(item.mapToScene(item.visual.image_rect.right(),
+                                                         item.visual.image_rect.center().y()))
+    end = start + QPoint(52, 0)
+    resize.begin(3, start)
+    resize.update(end)
+    assert first.engine.document == expected and not first.files.is_dirty
+    resize.finish(end)
+    width = first.engine.get_node(image_node).image_width
+    assert width == pytest.approx(80) and first.files.is_dirty
+    assert second.engine.document == other_before and not second.files.is_dirty
+    qtbot.waitUntil(lambda: not first.files.is_dirty)
+    assert load_document(destination).nodes[image_node].image_width == pytest.approx(width)
+    assert load_document(original_path).nodes[image_node].image_width == 40
+    assert first.engine.undo() and first.engine.document == expected
+    qtbot.waitUntil(lambda: not first.files.is_dirty)
+    assert first.engine.redo() and first.engine.get_node(image_node).image_width == width
+    qtbot.waitUntil(lambda: not first.files.is_dirty)
+    expected = first.engine.document
+
+    image.fill(Qt.GlobalColor.blue)
+    mime = QMimeData()
+    mime.setImageData(image)
+    image_clipboard.setMimeData(mime)
+    first.canvas.set_editable(False)
+    first.canvas.view.setFocus()
+    qtbot.keyClick(first.canvas.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    assert first.engine.document == expected and not first.files.is_dirty
+    old_canvas = first.canvas
+    assert window.manager.close_document(first.id)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qtbot.waitUntil(lambda: not isValid(old_canvas))
+    assert window.open_path(destination)
+    reopened = window.active_session
+    assert reopened.canvas.current_page_id is None
+    assert reopened.engine.document == expected
+    assert QImage.fromData(reopened.engine.document.assets[asset].data).pixelColor(5, 5) == Qt.GlobalColor.red
+    assert second.engine.document == other_before and not second.files.is_dirty
 
 
 @pytest.mark.parametrize("page_kind", ["submap", "detail"])

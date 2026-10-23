@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsView
 from shiboken6 import isValid
 
 from .dragging import NodeDragController
+from .image_resizing import ImageResizeController
 from .items import (
     FOLD_HIDE_DELAY,
     FOLD_HOVER_PADDING,
@@ -43,6 +44,7 @@ class MindMapView(QGraphicsView):
         self.press_node = None
         self.drag_origin = QPointF()
         self.node_drag = NodeDragController(self)
+        self.image_resize = ImageResizeController(self)
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing
             | QPainter.RenderHint.TextAntialiasing
@@ -70,7 +72,7 @@ class MindMapView(QGraphicsView):
         if (
             event.type() == QEvent.Type.ShortcutOverride
             and event.key() == Qt.Key.Key_Escape
-            and self.press_node is not None
+            and (self.press_node is not None or self.image_resize.active)
         ):
             event.accept()
             return True
@@ -78,6 +80,7 @@ class MindMapView(QGraphicsView):
 
     def wheelEvent(self, event):
         """滚轮模式仅影响视图；Ctrl 始终临时缩放，不改写用户选择的模式。"""
+        self.image_resize.cancel()
         pixels = event.pixelDelta().y()
         angle = event.angleDelta().y()
         if not pixels and not angle:
@@ -109,6 +112,7 @@ class MindMapView(QGraphicsView):
         滚轮事件也具有同样的定位行为；省略锚点时围绕视口中心缩放。目标位置超出
         内容加一屏余量的范围时，由 Qt 将视口限制到最近边界，不额外扩展空白区域。
         """
+        self.image_resize.cancel()
         current = self.transform().m11()
         target = min(4.0, max(MIN_ZOOM, current * factor))
         anchor = self.viewport().rect().center() if anchor is None else anchor
@@ -255,6 +259,11 @@ class MindMapView(QGraphicsView):
         if position is not None:
             self._pointer_position = position
         position = self._pointer_position
+        resize_cursor = self.image_resize.cursor_at(position)
+        if resize_cursor is not None and not self.panning and self.drag_ghost is None:
+            self._set_hovered_node(None, immediate=True)
+            self.viewport().setCursor(resize_cursor)
+            return
         hit = None
         inside = position is not None and self.viewport().rect().contains(position)
         if inside:
@@ -304,6 +313,7 @@ class MindMapView(QGraphicsView):
         self._set_hovered_node(None, immediate=True)
         self._expire_fold_hovers(clear=True)
         self.node_drag.cancel()
+        self.image_resize.cancel()
         grabber = self.scene().mouseGrabberItem()
         if isinstance(grabber, NodeItem):
             grabber.ungrabMouse()
@@ -324,6 +334,9 @@ class MindMapView(QGraphicsView):
         return result
 
     def mousePressEvent(self, event):
+        if self.image_resize.active:
+            event.accept()
+            return
         # 一个手势只由最初按下的按键拥有；额外按下或释放其他按键都不能切换手势。
         if self._pan_button != Qt.MouseButton.NoButton or event.buttons() != event.button():
             event.accept()
@@ -339,6 +352,12 @@ class MindMapView(QGraphicsView):
             self._pan_origin = event.position().toPoint()
             self.panning = event.button() != Qt.MouseButton.RightButton
             self.last_pan = event.position().toPoint()
+            self.update_cursor(event.position().toPoint())
+            event.accept()
+            return
+        handle = self.image_resize.hit_test(event.position().toPoint())
+        if handle is not None and event.button() == Qt.MouseButton.LeftButton:
+            self.owner.call(lambda: self.image_resize.begin(handle, event.position().toPoint()))
             self.update_cursor(event.position().toPoint())
             event.accept()
             return
@@ -383,6 +402,14 @@ class MindMapView(QGraphicsView):
         self.update_cursor(event.position().toPoint())
 
     def mouseMoveEvent(self, event):
+        if self.image_resize.active:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self.image_resize.update(event.position().toPoint())
+            else:
+                self.image_resize.cancel()
+            self.update_cursor(event.position().toPoint())
+            event.accept()
+            return
         if self._fold_pressed:
             if not event.buttons() & Qt.MouseButton.LeftButton:
                 self._fold_pressed = False
@@ -431,6 +458,12 @@ class MindMapView(QGraphicsView):
         self.update_cursor(event.position().toPoint())
 
     def mouseReleaseEvent(self, event):
+        if self.image_resize.active:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.owner.call(lambda: self.image_resize.finish(event.position().toPoint()))
+            self.update_cursor(event.position().toPoint())
+            event.accept()
+            return
         if self._fold_pressed and event.button() == Qt.MouseButton.LeftButton:
             self._fold_pressed = False
             self.update_cursor(event.position().toPoint())
@@ -493,7 +526,7 @@ class MindMapView(QGraphicsView):
         self.owner.context_menu(global_position)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape and self.press_node is not None:
+        if event.key() == Qt.Key.Key_Escape and (self.press_node is not None or self.image_resize.active):
             self.cancel_interaction()
             event.accept()
             return
@@ -529,3 +562,12 @@ class MindMapView(QGraphicsView):
             event.accept()
         else:
             super().keyPressEvent(event)
+
+    def drawForeground(self, painter, rect):
+        """在 GUI 视图前景绘制固定屏幕尺寸的图片手柄，不参与场景导出。
+
+        painter、rect 为 Qt 本次绘制借用对象，不缓存、不修改文档或资源；仅由
+        Qt GUI 线程在存活视图上调用，无额外所有权或正常业务异常。
+        """
+        super().drawForeground(painter, rect)
+        self.image_resize.paint(painter)

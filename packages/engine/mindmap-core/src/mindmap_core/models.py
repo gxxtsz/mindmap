@@ -70,6 +70,17 @@ class Node:
     # 详情页与子导图分别归属当前节点；详情页不要求入口是叶子节点。
     detail_page_id: str | None = None
 
+    @property
+    def is_image_node(self) -> bool:
+        """只读判断当前实体是否为纯图片节点，返回布尔值。
+
+        无参数；仅识别元数据中的 ``image_only: true``，普通图片附件及旧文件
+        均返回 False。本查询不修改实体、不解码图片、无正常业务异常，也不依赖
+        GUI 线程；实体由所属文档管理，外部应通过引擎取得快照并避免直接修改。
+        资源存在、正文为空及禁止附属页面的约束由文档校验负责。
+        """
+        return isinstance(self.metadata, dict) and self.metadata.get("image_only") is True
+
     def __deepcopy__(self, memo: dict) -> Node:
         """建立隔离节点副本，跳过不可变标量的通用序列化重建开销。
 

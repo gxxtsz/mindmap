@@ -144,7 +144,12 @@ class MindMapEngine:
         return result
 
     def create_submap(self, node_id: str) -> str:
-        """创建一张独立子导图并返回页面 ID；实际进入页面由界面负责。"""
+        """为普通叶子节点创建独立子导图并返回页面 ID，实际进入由界面负责。
+
+        node_id 必须存在，且不为纯图片、详情页内节点，也不能已有普通子节点或
+        子导图；失败抛出 MindMapError，不留下部分修改。页面和入口共用一次历史。
+        接口不依赖 Qt，仅在引擎所属线程同步调用；标识可跨快照保存，页面由文档管理。
+        """
         return self._execute("create_submap", self._editor.create_submap, node_id=node_id)
 
     def remove_submap(self, node_id: str) -> None:
@@ -186,7 +191,9 @@ class MindMapEngine:
     def create_detail_page(self, node_id: str) -> str:
         """为主图或子导图节点创建详情页并返回页面 ID；详情页内调用会原子失败。
 
-        不限制入口是否有普通子节点或子导图，每个节点最多一张；页面切换由宿主负责。
+        node_id 必须存在且不是纯图片节点，不限制普通子节点或已有子导图，每个节点
+        最多一张详情页；非法目标抛出 MindMapError，不留下部分修改。页面切换由宿主
+        负责，接口不依赖 Qt，仅在引擎所属线程同步调用，返回 ID 的生命周期由文档管理。
         """
         return self._execute("create_detail_page", self._editor.create_detail_page, node_id=node_id)
 
@@ -444,6 +451,22 @@ class MindMapEngine:
                 self._state.set_page(page_id, page)
 
         self._execute("set_theme", action, theme=theme, page_id=page_id)
+
+    def add_image_child(self, parent_id: str, data: bytes, media_type: str = "image/png", *, width: float) -> str:
+        """原子追加纯图片子节点并返回新节点 ID，整个创建只产生一条历史。
+
+        parent_id 是允许普通子节点的父节点，data 为独立图片字节，media_type 为
+        图片 MIME，width 为有限正数的逻辑显示宽度；Qt 调用方须先验证可解码性，
+        默认传入原图像素宽度。父节点会展开，新节点正文为空且不拥有附属页面。
+        无效父节点、子导图入口、空资源或非法宽度抛出 MindMapError，失败不保留
+        节点、资源或历史。资源复用和撤销清理沿用 attach_image 的内容哈希规则。
+        本接口不依赖 Qt，仅在引擎所属线程同步调用；返回 ID 可跨快照保存，实体
+        生命周期由文档及历史管理，外部不得持有可写实体引用。
+        """
+        return self._execute(
+            "add_image_child", self._editor.add_image_child,
+            parent_id=parent_id, data=data, media_type=media_type, width=width,
+        )
 
     def attach_image(self, node_id: str, data: bytes, media_type: str = "image/png", *, width=160) -> str:
         """导入并关联图片；相同字节按内容哈希去重，关联和清理一并进入历史。"""

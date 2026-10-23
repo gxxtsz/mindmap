@@ -371,8 +371,15 @@ class PageNavigationMixin:
         self._switch_page(node.submap_id)
 
     def create_submap(self):
-        """创建后立即进入新页面；创建属于内容历史，随后进入属于临时导航。"""
+        """为当前普通叶子创建并进入子导图，返回新页面 ID。
+
+        无参数；纯图片、只读或输入法候选会抛出 MindMapError，纯图片检查先于
+        草稿提交。创建属于内容历史，进入属于临时导航；只在 GUI 线程、画布
+        存活时调用，页面及图元由所属文档和画布管理。
+        """
         self._ensure_editable()
+        if self.engine.get_node(self.current_node_id()).is_image_node:
+            raise MindMapError("纯图片节点不能拥有详情页或子导图")
         self._prepare_page_navigation()
         page_id = self.engine.create_submap(self.current_node_id())
         self._switch_page(page_id)
@@ -423,8 +430,15 @@ class PageNavigationMixin:
         self._switch_page(node.detail_page_id)
 
     def create_detail_page(self):
-        """为当前节点添加详情并进入；编辑权限与输入法检查先于事务创建。"""
+        """为当前普通节点添加详情并进入，返回新页面 ID。
+
+        无参数；纯图片、只读、已有详情或详情页内目标及输入法候选抛出
+        MindMapError，纯图片检查先于草稿提交。仅在 GUI 线程、画布存活时调用；
+        页面由文档管理，切页会释放旧图元，外部只保存稳定页面 ID。
+        """
         self._ensure_editable()
+        if self.engine.get_node(self.current_node_id()).is_image_node:
+            raise MindMapError("纯图片节点不能拥有详情页或子导图")
         self._prepare_page_navigation()
         page_id = self.engine.create_detail_page(self.current_node_id())
         self._switch_page(page_id)

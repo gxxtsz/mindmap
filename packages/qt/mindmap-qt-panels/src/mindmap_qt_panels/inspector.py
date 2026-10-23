@@ -200,7 +200,8 @@ class NodePropertiesPanel(NodePropertiesForm):
                     )
             self.canvas.sync_branch_actions()
             if len(self._ids) == 1:
-                self.summary.setText((engine.get_node(self._ids[0]).text.splitlines() or ["未命名节点"])[0])
+                node = engine.get_node(self._ids[0])
+                self.summary.setText("图片" if node.is_image_node else (node.text.splitlines() or ["未命名节点"])[0])
         except (MindMapError, ValueError, KeyError) as exc:
             for key in changes:
                 self.set_error(key, str(exc))

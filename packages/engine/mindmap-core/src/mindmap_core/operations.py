@@ -182,7 +182,14 @@ class DocumentEditor:
         return key
 
     def require_page_owner(self, node_id):
-        """两类页面创建与附页粘贴共用的归属检查，详情页所有层级均禁止再挂页面。"""
+        """验证页面归属节点；纯图片节点及详情页内节点抛出 MindMapError。
+
+        node_id 为本事务中的有效节点标识，找不到节点时同样抛出 MindMapError；
+        成功返回 None，不提交修改。页面创建与附页粘贴共用，只在引擎所属线程、
+        当前编辑事务存活期间调用，不持有事务外的节点引用。
+        """
+        if self.node(node_id).is_image_node:
+            raise MindMapError("纯图片节点不能拥有详情页或子导图")
         if self.document.page_kind(self._state.page_id(node_id)) == "detail":
             raise MindMapError("详情页内不能拥有详情页或子导图")
 
@@ -336,6 +343,18 @@ class DocumentEditor:
         ids = self.document.descendants(node_id) if recursive else [node_id]
         for current in ids:
             self.edit(current).expanded = expanded
+
+    def add_image_child(self, parent_id: str, data: bytes, media_type: str = "image/png", *, width: float) -> str:
+        """在现有事务中追加纯图片子节点，返回新节点标识。
+
+        parent_id 必须允许普通子节点，data/media_type/width 沿用 attach_image 的
+        资源与尺寸规则；失败抛出 MindMapError，由外层事务整体回滚。本接口不解码
+        图片、不持有 GUI 对象；仅供所属引擎同步调用，不得跨线程共享编辑器。
+        """
+        node_id = self.add_child(parent_id, "")
+        self.edit(node_id).metadata["image_only"] = True
+        self.attach_image(node_id, data, media_type, width=width)
+        return node_id
 
     def attach_image(self, node_id: str, data: bytes, media_type: str = "image/png", *, width=160) -> str:
         """原子导入图片资源并关联节点，相同内容只保存一份。"""

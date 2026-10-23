@@ -2,8 +2,11 @@
 
 import pytest
 from mindmap_qt_ui import toolbar_icon
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QIcon
+from mindmap_qt_ui.icons import add_icon_action
+from PySide6.QtCore import QCoreApplication, QEvent, QSize
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtWidgets import QToolBar, QWidget
+from shiboken6 import isValid
 
 
 def test_public_toolbar_icon_has_all_states_and_checks_names(qapp):
@@ -27,3 +30,27 @@ def test_page_icons_support_themes_and_high_dpi_states(qapp, kind):
                 pixmap = icon.pixmap(QSize(16, 16), ratio, mode)
                 assert not pixmap.isNull()
                 assert pixmap.devicePixelRatio() == ratio
+
+
+def test_toolbar_description_survives_button_removal_and_toolbar_disposal(qtbot):
+    """动作可长于按钮和工具栏存活，迟到更新不得访问被删除的 Qt 对象。"""
+    owner = QWidget()
+    qtbot.addWidget(owner)
+    toolbar = QToolBar(owner)
+    action = QAction("测试动作", owner)
+    add_icon_action(toolbar, action, "fit")
+    button = toolbar.widgetForAction(action)
+    action.setToolTip("第一次说明")
+    assert button.toolTip() == "第一次说明"
+    toolbar.removeAction(action)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(button)
+    action.setToolTip("按钮已移除")
+    toolbar.addAction(action)
+    replacement = toolbar.widgetForAction(action)
+    action.setToolTip("新的按钮说明")
+    assert replacement.toolTip() == "新的按钮说明"
+    toolbar.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(toolbar)
+    action.setToolTip("工具栏已释放")

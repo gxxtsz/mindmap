@@ -58,7 +58,12 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from .clipboard import EDRAW_CLIPBOARD_MIME, read_edraw_clipboard
+from .clipboard import (
+    EDRAW_CLIPBOARD_MIME,
+    has_clipboard_image,
+    read_clipboard_image,
+    read_edraw_clipboard,
+)
 from .items import NodeEditor, NodeItem
 from .navigation import PageNavigationMixin
 from .view import MIN_ZOOM, MindMapView
@@ -80,6 +85,9 @@ class MindMapWidget(PageNavigationMixin, QWidget):
     document_changed = Signal(object)
     history_changed = Signal(bool, bool, bool)
     error_occurred = Signal(str)
+    # 图片创建成功后在 GUI 线程同步通知，参数为新纯图片子节点 ID；失败不发出。
+    # 节点及原始资源由引擎文档和历史管理，接收方通过 ID 查询，不拥有可写实体；
+    # 非活动页下载完成也会通知，但信号本身不导航。画布释放后不再发出。
     image_imported = Signal(str)
     wheel_mode_changed = Signal(str)
     edraw_paste_options_changed = Signal(str, bool, bool)
@@ -131,6 +139,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             format_registry if format_registry is not None else create_default_format_registry()
         )
         self._disposed = False
+        self._applying_engine_event = False
         self._view_reset_pending = False
         # 初始化属于画布自身的生命周期；复用一个单次定时器，让打开文件、首次
         # 显示和连续布局事件合并为一次定位，并在组件销毁时由 Qt 自动取消回调。
@@ -561,11 +570,16 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         )
         self._sync_branch_actions()
         node = self._document.nodes.get(self.current_node_id())
+        image_only = bool(node and node.is_image_node)
+        self._actions["edit"].setEnabled(self.editable and not editing and not image_only)
+        self._actions["remove_image"].setVisible(not image_only)
+        for name in ("image", "image_url"):
+            self._actions[name].setEnabled(bool(self.editable and not editing and node and not node.submap_id))
         single = len(self.selected_node_ids()) <= 1
         in_detail = self.current_page_kind == "detail"
         self._actions["create_submap"].setEnabled(bool(
             self.editable and not editing and single and node and not node.children and not node.submap_id
-            and not in_detail))
+            and not in_detail and not image_only))
         self._actions["create_submap"].setToolTip("仅没有普通子节点和子导图的叶子节点可创建")
         self._actions["enter_submap"].setEnabled(bool(not editing and single and node and node.submap_id))
         self._actions["delete_submap"].setEnabled(bool(
@@ -577,10 +591,12 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         favorite.setText("取消收藏子导图" if checked else "收藏子导图")
         set_action_icon(favorite, "favorite_on" if checked else "favorite", self._ui_colors)
         # 创建入口按所在页面过滤，已有入口按当前节点过滤；返回其他页面后立即恢复。
-        self._actions["create_submap"].setVisible(not in_detail)
-        self._actions["create_detail_page"].setVisible(not in_detail and not bool(node and node.detail_page_id))
+        self._actions["create_submap"].setVisible(not in_detail and not image_only)
+        self._actions["create_detail_page"].setVisible(
+            not in_detail and not image_only and not bool(node and node.detail_page_id))
         self._actions["create_detail_page"].setEnabled(bool(
-            self.editable and not editing and single and node and not node.detail_page_id and not in_detail))
+            self.editable and not editing and single and node and not node.detail_page_id
+            and not in_detail and not image_only))
         for name in ("enter_detail_page", "delete_detail_page"):
             self._actions[name].setVisible(bool(not in_detail and node and node.detail_page_id))
             self._actions[name].setEnabled(bool(
@@ -642,6 +658,8 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             self._sync_viewport(force=True)
 
     def _selection_changed(self):
+        self.view.image_resize.cancel()
+        self.view.viewport().update()
         if self._refreshing or self._disposed:
             return
         self._cancel_branch_menu()
@@ -665,6 +683,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             return
         # 在画布刷新引发选择信号之前通知宿主，防止旧侧栏输入被提交到新文档或撤销状态。
         if event.kind != "saved":
+            self.view.image_resize.cancel()
             self.view.node_drag.document_changed()
             # 自动保存只更新保存标记，不触发文档替换通知，不打断菜单或未完成输入。
             self.document_changing.emit(event)
@@ -1201,9 +1220,16 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         # 不能改为居中根节点，否则单向布局会偏向一端，重复适配也无法正确定位。
         self.view.update_navigation_rect(center=content.center())
 
-    def begin_edit(self, node_id: str):
-        """开始无边框原地编辑，实时预览换行和尺寸，提交时只生成一次引擎操作。"""
-        if not self.editable or node_id not in self.layout_result.nodes:
+    def begin_edit(self, node_id: str) -> None:
+        """为当前页可见的普通节点开始正文编辑，返回 None。
+
+        node_id 为节点标识；只读、不可见或纯图片节点直接返回，不提交已有草稿。
+        成功时先提交原编辑器，再建立实时预览换行和尺寸的新编辑器；文字最终提交
+        只生成一次引擎操作。提交错误向上传递。仅在 GUI 线程、画布存活时使用，
+        编辑器由本画布和场景管理，调用方不得在结束编辑或切页后保留其引用。
+        """
+        if (not self.editable or node_id not in self.layout_result.nodes
+                or self._document.nodes[node_id].is_image_node):
             return
         self.finish_edit(commit=True)
         self.select_nodes([node_id])
@@ -1380,8 +1406,17 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self.copy()
         self.engine.remove_nodes(self.selected_node_ids())
 
-    def paste(self):
-        """通过注入格式完整解析剪贴板，失败时不改变选择、文档或撤销历史。"""
+    def paste(self) -> list[str]:
+        """同步粘贴节点片段、图片或文本，返回本次新增节点的标识列表。
+
+        无参数；按项目片段、亿图片段、图像、文本的优先级解析，无可处理内容返回空列表。
+        图片在编辑中的节点或 current_node_id() 下追加纯图片子节点，多选仅处理首个父节点。
+        图片校验通过后才提交有效草稿；输入法候选、只读、失效目标或坏图抛出 MindMapError，
+        不改变草稿、文档或历史。成功后选中新图片子节点，创建独立参与撤销、重做及保存。
+        片段继续使用注入的格式注册表，返回新增标识并选中它们；格式及文件读取错误向上传递。
+        仅在 GUI 线程、画布释放前调用；剪贴板载荷只在同步调用期间借用，不保留其所有权。
+        界面入口通过 call() 将异常交给统一错误信号，普通文本编辑仍由文本控件处理。
+        """
         self._ensure_editable()
         mime = QApplication.clipboard().mimeData()
         if mime is None:
@@ -1392,6 +1427,8 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             # 先读完并验证结构，再询问放置方式；亿图解析失败时不能降级为纯文本。
             fragment = read_edraw_clipboard(bytes(mime.data(EDRAW_CLIPBOARD_MIME)))
             return self._paste_edraw(fragment)
+        elif has_clipboard_image(mime):
+            return self._paste_image(mime)
         elif mime.hasText():
             text = mime.text()
             first = next((line.strip() for line in text.splitlines() if line.strip()), "")
@@ -1427,6 +1464,97 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         ids = self.engine.paste_fragment(self.current_node_id(), fragment, include_pages=include_pages)
         self.select_nodes(ids)
         return ids
+
+    def _paste_editor_image(self) -> bool:
+        """尝试接管正文编辑器的图像粘贴，返回是否已经消费本次快捷键。
+
+        无参数，仅由有效编辑器在 GUI 按键事件内同步调用。非图像或带专用节点片段时
+        返回 False，保留文本控件原行为；图像返回 True，失败通过 call() 发出错误信号，
+        避免坏图或输入法候选被误当成文本。MIME 对象仅借用到本次调用结束，不缓存。
+        """
+        mime = QApplication.clipboard().mimeData()
+        if (mime is None or mime.hasFormat(CLIPBOARD_MIME) or mime.hasFormat(EDRAW_CLIPBOARD_MIME)
+                or not has_clipboard_image(mime)):
+            return False
+        self.call(lambda: self._paste_image(mime))
+        return True
+
+    def _paste_image(self, mime: QMimeData) -> list[str]:
+        """校验借用的图像载荷后创建子节点，返回单个新增标识或无图时的空列表。
+
+        仅在 GUI 线程、组件存活期间同步执行。只读、候选输入、目标或文档失效及图片
+        解码错误抛出 MindMapError；读取并验证图片前不提交任何草稿。有效草稿沿用各自
+        历史，随后图片子节点独立提交；资源生命周期由引擎负责。调用不保留 MIME 引用。
+        """
+        self._ensure_editable()
+        target_id = self.editor.node_id if self.editor is not None else self.current_node_id()
+        page_id, generation = self.current_page_id, self.engine.document_generation
+
+        def check_target():
+            self._ensure_editable()
+            if (self._disposed or generation != self.engine.document_generation
+                    or page_id != self.current_page_id or target_id not in self._document.nodes):
+                raise MindMapError("粘贴期间导图或目标已发生变化，请重新粘贴")
+            if self.is_composing or not all(guard() for guard in tuple(self._navigation_guards)):
+                raise MindMapError("请先完成输入法候选，再粘贴图片")
+            self._check_image_parent(target_id)
+
+        check_target()
+        image = read_clipboard_image(mime)
+        if image is None:
+            return []
+        check_target()
+        return [self._insert_image_child(target_id, *image)]
+
+    def _check_image_parent(self, node_id: str) -> None:
+        """同步验证图片父节点；只读、已释放、缺失节点及子导图入口抛出 MindMapError。
+
+        不读取或提交输入，必须在有效 GUI 线程内调用。node_id 可属于非活动页面；
+        查询借用引擎快照，不缓存节点引用，不改变文档、选择或历史。
+        """
+        self._ensure_editable()
+        if self._disposed:
+            raise MindMapError("画布已释放，不能添加图片")
+        if self.engine.get_node(node_id).submap_id:
+            raise MindMapError("此节点已有子导图，请进入子导图添加图片")
+
+    def _insert_image_child(self, node_id: str, data: bytes, media_type: str) -> str:
+        """先验证图片及输入，再原子创建纯图片子节点，返回新节点 ID。
+
+        node_id 是父节点；data 为独立图片字节，media_type 为读取适配层识别的 MIME，
+        这里再次解码取得实际像素尺寸及 MIME，保留原始字节与透明通道。有效草稿独立
+        提交，创建只产生一次历史；活动页中的新节点会被选中，非活动页不抢占选择。
+        校验、只读、输入法候选或同步提交导致目标失效时抛出 MindMapError。仅在 GUI
+        线程、画布存活时同步调用，不持有系统 MIME 对象，也不创建后台任务。
+        """
+        self._check_image_parent(node_id)
+        image, media_type = decode_image(data)
+        generation, page_id = self.engine.document_generation, self.current_page_id
+        parent_page = self.engine.node_page_id(node_id)
+        selection = self.selected_node_ids()
+
+        def check():
+            self._check_image_parent(node_id)
+            if (generation != self.engine.document_generation or page_id != self.current_page_id
+                    or parent_page != self.engine.node_page_id(node_id)):
+                raise MindMapError("添加图片期间导图或目标已发生变化，请重新操作")
+            if self.is_composing or not all(guard() for guard in tuple(self._navigation_guards)):
+                raise MindMapError("请先完成输入法候选，再添加图片")
+
+        check()
+        self.edits_flush_requested.emit()
+        self.finish_edit(commit=True)
+        check()
+        key = self.engine.add_image_child(node_id, data, media_type, width=image.width())
+        if parent_page == self.current_page_id:
+            self.select_nodes([key])
+        else:
+            self.select_nodes(selection)
+        if self._selection_undo:
+            self._selection_undo[-1] = (
+                selection.copy() if parent_page == page_id else [node_id], [key])
+        self.image_imported.emit(key)
+        return key
 
     def _paste_edraw(self, fragment: MindMapDocument) -> list[str]:
         """询问亿图片段的放置方式，并原子地更新树、选择和成功后的默认偏好。"""
@@ -1524,18 +1652,29 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             self._branch_scope = result.branch_scope
             self._sync_branch_actions()
 
-    def import_image(self, node_id: str, path: str | Path):
-        """导入本地图片，先验证可解码再修改文档。"""
-        self._ensure_editable()
+    def import_image(self, node_id: str, path: str | Path) -> None:
+        """读取本地图片并在 node_id 父节点下创建纯图片节点，返回 None。
+
+        path 为本机图片路径；创建前同步校验图片和父节点，默认使用原始像素尺寸。
+        文件读取错误抛出 OSError，图片、父节点、只读或输入法错误抛出 MindMapError，
+        校验失败不提交草稿。成功发出携带新节点 ID 的 image_imported；仅在 GUI
+        线程、组件释放前调用，不保留文件句柄，历史及资源由引擎管理。
+        """
+        self._check_image_parent(node_id)
         data = Path(path).read_bytes()
-        _, media_type = decode_image(data)
-        self.engine.attach_image(node_id, data, media_type)
-        self.image_imported.emit(node_id)
+        self._insert_image_child(node_id, data, "")
 
     def import_image_url(self, node_id: str, url: str) -> QNetworkReply:
-        """异步下载图片；文档切换、节点删除或进入只读后丢弃过期结果。"""
-        self._ensure_editable()
-        self.engine.get_node(node_id)
+        """从 HTTP(S) 网址下载图片并在 node_id 下创建子节点，返回 QNetworkReply。
+
+        node_id 是原始父节点，url 必须为有效 HTTP(S) 地址；启动前无效目标、只读、
+        已释放或非法网址抛出 MindMapError。完成时重新校验原父节点及文档代次，
+        图片或输入错误通过 error_occurred 报告，不留下半成品。切页不抢占活动页，
+        成功的 image_imported 携带新节点 ID。仅在 GUI 线程使用；reply 由本组件
+        网络管理器拥有，完成后 deleteLater，调用方不得缓存到完成之后。dispose
+        取消未完成下载，文档替换、只读和父节点删除会使过期结果失效。
+        """
+        self._check_image_parent(node_id)
         address = QUrl(url)
         if address.scheme() not in ("http", "https") or not address.host():
             raise MindMapError("图片网址必须是有效的 HTTP 或 HTTPS 地址")
@@ -1558,9 +1697,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
                 if reply.error() != QNetworkReply.NetworkError.NoError:
                     raise MindMapError(f"图片下载失败：{reply.errorString()}")
                 data = bytes(reply.readAll())
-                _, media_type = decode_image(data)
-                self.engine.attach_image(node_id, data, media_type)
-                self.image_imported.emit(node_id)
+                self._insert_image_child(node_id, data, "")
             except (MindMapError, OSError) as exc:
                 self.error_occurred.emit(str(exc))
             finally:
@@ -1569,16 +1706,24 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         reply.finished.connect(finished)
         return reply
 
-    def choose_image(self):
-        """为当前节点打开本地图片选择器；取消保持原状，实际导入复用图片校验接口。"""
+    def choose_image(self) -> None:
+        """打开文件选择器，在当前父节点下导入纯图片子节点，返回 None。
+
+        无参数；取消保持原状，成功复用 import_image() 的校验、历史及异常规则。
+        仅在 GUI 线程、画布存活时调用；对话框在同步调用结束时释放，不保留文件句柄。
+        """
         path, _ = QFileDialog.getOpenFileName(
             self, "选择图片", "", "图片 (*.png *.jpg *.jpeg *.webp *.gif *.svg)"
         )
         if path:
             self.import_image(self.current_node_id(), path)
 
-    def choose_image_url(self):
-        """询问当前节点的图片网址并启动异步导入；取消不创建下载或修改文档。"""
+    def choose_image_url(self) -> None:
+        """询问网址，在当前父节点下异步创建纯图片子节点，返回 None。
+
+        无参数；取消不创建下载或修改文档，复用 import_image_url() 的校验及异常
+        规则。仅在 GUI 线程、画布存活时调用；对话框同步释放，下载由本画布管理。
+        """
         url, accepted = QInputDialog.getText(self, "导入网络图片", "图片网址")
         if accepted and url:
             self.import_image_url(self.current_node_id(), url)
