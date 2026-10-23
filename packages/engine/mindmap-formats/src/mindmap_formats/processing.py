@@ -55,5 +55,5 @@ def can_process_snapshot(document: MindMapDocument) -> bool:
                     for node in document.nodes.values())
             and all(type(page) is MindMapPage and type(page.layout) is LayoutConfig and type(page.theme) is Theme
                     and vars(page).keys() == {"id", "root_id", "owner_id", "layout", "theme"}
-                    for page in document.submaps.values())
+                    for page in document.iter_pages())
             and all(type(asset) is Asset for asset in document.assets.values()))

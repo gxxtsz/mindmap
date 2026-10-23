@@ -1023,13 +1023,16 @@ def test_save_all_shortcut_from_sidebar_preserves_active_session(empty_window, t
 
 
 @pytest.mark.parametrize("split", [False, True])
-def test_submap_pages_are_isolated_between_sessions_and_reopen_from_main(empty_window, tmp_path, split):
+@pytest.mark.parametrize("page_kind", ["submap", "detail"])
+def test_owned_pages_are_isolated_between_sessions_and_reopen_from_main(empty_window, tmp_path, split, page_kind):
     """标签和分屏仅切换所属画布，导航现场独立，文件重开从主导图开始。"""
     window = empty_window
     first = create(window, tmp_path / "子导图甲.mindmap")
     owner = first.engine.add_child(first.engine.root_id, "甲的入口")
     first.canvas.select_nodes([owner])
-    page = first.canvas.create_submap()
+    create_page = "create_submap" if page_kind == "submap" else "create_detail_page"
+    enter_page = "enter_submap" if page_kind == "submap" else "enter_detail_page"
+    page = getattr(first.canvas, create_page)()
     QApplication.processEvents()
     root = first.canvas.document_view.root_id
     first.engine.add_child(root, "甲的页内内容")
@@ -1039,7 +1042,7 @@ def test_submap_pages_are_isolated_between_sessions_and_reopen_from_main(empty_w
     if split:
         window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     second.canvas.select_nodes([second.engine.root_id])
-    other = second.canvas.create_submap()
+    other = getattr(second.canvas, create_page)()
     second.engine.add_child(second.canvas.document_view.root_id, "乙的页内内容")
     assert window.save_all()
     assert load_document(first.files.path) == first.engine.document
@@ -1051,27 +1054,28 @@ def test_submap_pages_are_isolated_between_sessions_and_reopen_from_main(empty_w
     assert window.panels.outline.tree_model.document.root_id == root
     revision = first.engine.revision
     first.canvas.return_to_parent_page()
-    first.canvas.enter_submap(owner)
+    getattr(first.canvas, enter_page)(owner)
     assert first.engine.revision == revision and not first.engine.is_dirty
     path = first.files.path
     assert window.manager.close_document(first.id)
     assert window.open_path(path)
     reopened = window.active_session
     assert reopened.canvas.current_page_id is None
-    assert page in reopened.engine.document.submaps
+    assert reopened.engine.document.has_page(page)
     assert reopened.canvas.document_view.root_id == reopened.engine.root_id
     assert second.canvas.current_page_id == other
 
 
-def test_background_snapshot_keeps_all_submaps_and_preserves_newer_page_edit(
-    empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
+@pytest.mark.parametrize("page_kind", ["submap", "detail"])
+def test_background_snapshot_keeps_owned_pages_and_preserves_newer_page_edit(
+    empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor, page_kind
 ):
     """后台写入旧版本的全文件快照，期间对子页的修改继续保持未保存。"""
     session = create_large_session(empty_window, tmp_path / "子图后台版本.mindmap")
     # 从独立新叶子创建入口，原大图结构继续覆盖后台保存阈值。
     owner = session.engine.add_child(session.engine.root_id, "后台入口")
     session.canvas.select_nodes([owner])
-    page = session.canvas.create_submap()
+    page = (session.canvas.create_submap() if page_kind == "submap" else session.canvas.create_detail_page())
     key = session.engine.add_child(session.canvas.document_view.root_id, "捕获版本")
     started, release = Event(), Event()
 
@@ -1091,7 +1095,7 @@ def test_background_snapshot_keeps_all_submaps_and_preserves_newer_page_edit(
         qtbot.waitUntil(lambda: session._background_save is None)
         session.timer.stop()
         saved = load_document(session.files.path)
-        assert page in saved.submaps and saved.nodes[key].text == "捕获版本"
+        assert saved.has_page(page) and saved.nodes[key].text == "捕获版本"
         assert session.engine.is_dirty
         assert session.autosave()
         assert load_document(session.files.path).nodes[key].text == "较新的页内编辑"

@@ -1,4 +1,4 @@
-"""在独立进程核验子导图、路径栏、紧凑模式与三档缩放，并生成中文报告和截图。"""
+"""核验两类附属页面、路径栏、紧凑模式与三档缩放，并生成中文报告和截图。"""
 
 import argparse
 import json
@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def child(scale, platform):
     """每档缩放使用独立 QApplication，避免运行中改变 Qt 缩放基线。"""
+    from mindmap_core import MindMapError
     from mindmap_formats import load_document
     from mindmap_workbench.shell_adapter import build_window
     from PySide6.QtCore import QCoreApplication, QEvent, QPointF
@@ -138,6 +139,43 @@ def child(scale, platform):
                     checks["取消编辑恢复正式尺寸"] = (canvas.layout_result is original_layout
                                                         and canvas.node_items[owner].visual is original_visual
                                                         and engine.revision == revision and not engine.is_dirty)
+                    # 同一入口同时拥有两类页面，非叶子与主根也能附加详情；检查独立命中区。
+                    detail = engine.create_detail_page(owner)
+                    branch_detail = engine.create_detail_page(branch)
+                    engine.create_detail_page(engine.root_id)
+                    app.processEvents()
+                    item = canvas.node_items[owner]
+                    checks["两类入口形状与提示区分"] = (
+                        item.detail_page_control.toolTip() == "查看详情页"
+                        and item.submap_control.toolTip() == "进入子导图")
+                    checks["两类入口互不重叠"] = not item.detail_page_control.boundingRect().intersects(
+                        item.submap_control.boundingRect())
+                    item = canvas.node_items[branch]
+                    checks["详情入口避让折叠按钮"] = not item.detail_page_control.boundingRect().intersects(
+                        item.fold_control.button_rect())
+                    assert window.grab().save(str(output / (label + "-detail-entry.png")))
+                    canvas.enter_detail_page(owner)
+                    engine.add_child(canvas.document_view.root_id, "业务规则与补充说明")
+                    app.processEvents()
+                    checks["详情路径有明确标识"] = canvas.path_navigation.full_path.endswith("整数与进制 · 详情")
+                    checks["详情页隐藏创建入口"] = not canvas.action("create_submap").isVisible() and not (
+                        canvas.action("create_detail_page").isVisible())
+                    rejected = 0
+                    for create in (engine.create_submap, engine.create_detail_page):
+                        try:
+                            create(canvas.document_view.root_id)
+                        except MindMapError:
+                            rejected += 1
+                    checks["详情底层禁止两类附页"] = rejected == 2
+                    checks["详情页侧栏隔离"] = window.panels.outline.tree_model.document.root_id == (
+                        canvas.document_view.root_id)
+                    assert window.grab().save(str(output / (label + "-detail-page.png")))
+                    canvas.return_to_parent_page()
+                    canvas.enter_detail_page(branch)
+                    checks["非叶子详情可进入"] = canvas.current_page_id == branch_detail
+                    canvas.navigate_to(detail)
+                    checks["详情内容和完整文件可保存"] = window.save_all() and (
+                        load_document(window.files.path) == engine.document)
                     canvas.navigate_to(nested)
                     canvas.set_editable(False)
                     canvas.navigate_to(None, branch)
@@ -154,7 +192,7 @@ def child(scale, platform):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="子导图三档缩放与主题视觉验收")
+    parser = argparse.ArgumentParser(description="子导图与详情页三档缩放及主题视觉验收")
     parser.add_argument("--child", type=float)
     parser.add_argument("--platform", default="offscreen")
     options = parser.parse_args()

@@ -1,4 +1,4 @@
-"""原生文档结构映射；写入版本 3，兼容读取版本 2 的单页文档。"""
+"""原生文档结构映射；写入版本 4，兼容版本 2 单页和版本 3 子导图文档。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from mindmap_core import (
     Theme,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
@@ -49,6 +49,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
         "theme": asdict(document.theme),
         "metadata": deepcopy(document.metadata),
         "submaps": [asdict(page) for page in document.submaps.values()],
+        "detail_pages": [asdict(page) for page in document.detail_pages.values()],
     }
 
 
@@ -58,12 +59,14 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
         if not isinstance(data, dict) or data.get("format") != "mindmap":
             raise MindMapError("不是本项目的思维导图文档")
         data = deepcopy(data)
-        if type(data.get("schema_version")) is not int or data["schema_version"] not in (2, SCHEMA_VERSION):
+        if type(data.get("schema_version")) is not int or data["schema_version"] not in (2, 3, SCHEMA_VERSION):
             raise MindMapError("不支持的文档格式版本")
 
         allowed = {"format", "schema_version", "root_id", "nodes", "assets", "layout", "theme", "metadata"}
-        if data["schema_version"] == SCHEMA_VERSION:
+        if data["schema_version"] >= 3:
             allowed.add("submaps")
+        if data["schema_version"] >= 4:
+            allowed.add("detail_pages")
         if data.keys() - allowed:
             raise MindMapError("文档包含未知字段，请使用当前文件格式")
         if "layout" not in data or not isinstance(data["layout"], dict):
@@ -106,11 +109,11 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
             assets[key] = Asset(key, content, record["media_type"])
         def page_factory(**record):
             if set(record) != {"id", "root_id", "owner_id", "layout", "theme"}:
-                raise MindMapError("子导图字段不完整或包含未知字段")
+                raise MindMapError("页面字段不完整或包含未知字段")
             if not isinstance(record["layout"], dict) or set(record["layout"]) != {
                 "algorithm_id", "direction", "compact", "options"
             }:
-                raise MindMapError("子导图布局配置无效")
+                raise MindMapError("页面布局配置无效")
             return MindMapPage(record["id"], record["root_id"], record["owner_id"],
                                LayoutConfig(**record["layout"]), Theme(**record["theme"]))
 
@@ -122,6 +125,7 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
             theme=Theme(**data.get("theme", {})),
             metadata=data.get("metadata", {}),
             submaps=entities("submaps", page_factory),
+            detail_pages=entities("detail_pages", page_factory),
         )
         document.validate()
         return document

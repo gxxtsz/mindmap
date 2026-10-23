@@ -9,7 +9,7 @@ from typing import Any
 from .errors import MindMapError
 from .models import MindMapDocument, new_id
 
-_COLLECTIONS = ("nodes", "assets", "submaps")
+_COLLECTIONS = ("nodes", "assets", "submaps", "detail_pages")
 
 
 @dataclass

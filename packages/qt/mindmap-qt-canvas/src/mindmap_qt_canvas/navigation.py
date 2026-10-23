@@ -1,6 +1,6 @@
 """页面路径控件与会话内视图恢复；所有导航均独立于内容事务和文件保存。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from mindmap_core import ChangeEvent, MindMapError
 from mindmap_qt_ui.icons import toolbar_icon
@@ -187,6 +187,11 @@ class PageNavigationMixin:
         """当前显示页面，None 表示主导图；查询不改变引擎修订号或修改状态。"""
         return self._current_page_id
 
+    @property
+    def current_page_kind(self):
+        """查询活动页面类别，菜单可据此隐藏详情页内禁止使用的两类创建入口。"""
+        return self._book_document.page_kind(self._current_page_id)
+
     def register_navigation_guard(self, callback):
         """面板注册切页前的输入检查；返回 False 时保留原页，返回取消注册函数。"""
         self._navigation_guards.append(callback)
@@ -215,8 +220,8 @@ class PageNavigationMixin:
 
     def _switch_page(self, page_id, *, notify=True, cache=True):
         """只切换页内读模型和视图；撤销导致页面消失时由调用方先选择有效祖先。"""
-        if page_id is not None and page_id not in self._book_document.submaps:
-            raise MindMapError("子导图不存在")
+        if not self._book_document.has_page(page_id):
+            raise MindMapError("导图页面不存在")
         event = ChangeEvent("切换导图页面", (), self.engine.revision, "navigation")
         if notify:
             self.document_changing.emit(event)
@@ -296,12 +301,51 @@ class PageNavigationMixin:
         self._switch_page(page_id)
         return page_id
 
+    def enter_detail_page(self, node_id=None):
+        """查看节点详情；只读也可进入，重新进入恢复该页自己的视图现场。"""
+        key = node_id or self.current_node_id()
+        node = self.engine.get_node(key)
+        if not node.detail_page_id:
+            raise MindMapError("此节点没有详情页")
+        self._prepare_page_navigation()
+        self.select_nodes([key])
+        self._switch_page(node.detail_page_id)
+
+    def create_detail_page(self):
+        """为当前节点添加详情并进入；编辑权限与输入法检查先于事务创建。"""
+        self._ensure_editable()
+        self._prepare_page_navigation()
+        page_id = self.engine.create_detail_page(self.current_node_id())
+        self._switch_page(page_id)
+        return page_id
+
+    def delete_detail_page(self):
+        """确认详情删除范围，保留入口、原分支及子导图；取消不触碰文档或历史。"""
+        self._ensure_editable()
+        key = self.current_node_id()
+        node = self.engine.get_node(key)
+        if not node.detail_page_id:
+            raise MindMapError("此节点没有详情页")
+        page = self._book_document.detail_pages[node.detail_page_id]
+        count = len(self._book_document.descendants(page.root_id))
+        generation, revision = self.engine.document_generation, self.engine.revision
+        choice = QMessageBox.question(
+            self, "删除详情页", f"将删除此详情页及其 {count} 个节点，保留入口节点、原分支和子导图。\n删除后可以撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        self._ensure_editable()
+        if (generation, revision) != (self.engine.document_generation, self.engine.revision):
+            raise MindMapError("确认期间导图发生变化，请重新删除")
+        self._prepare_page_navigation()
+        self.engine.remove_detail_page(key)
+
     def return_to_parent_page(self):
         """按页面所有权返回一层，不等同于编辑撤销或浏览历史后退。"""
         if self._current_page_id is None:
             return
         self._prepare_page_navigation()
-        owner = self._book_document.submaps[self._current_page_id].owner_id
+        owner = self._book_document.page_record(self._current_page_id).owner_id
         self._switch_page(self.engine.node_page_id(owner))
 
     def delete_submap(self):
@@ -314,13 +358,16 @@ class PageNavigationMixin:
         root = self._book_document.submaps[node.submap_id].root_id
         nodes = self._book_document.owned_descendants(root)
         count = 1 + sum(bool(self._book_document.nodes[item].submap_id) for item in nodes)
+        details = sum(bool(self._book_document.nodes[item].detail_page_id) for item in nodes)
         generation, revision = self.engine.document_generation, self.engine.revision
         choice = QMessageBox.question(self, "删除子导图",
-                                      f"将删除 {count} 张子导图、{len(nodes)} 个节点，保留入口节点。\n删除后可以撤销。",
+                                      f"将删除 {count} 张子导图、{details} 张详情页、{len(nodes)} 个节点，"
+                                      "保留入口节点及其详情页。\n删除后可以撤销。",
                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                       QMessageBox.StandardButton.No)
         if choice != QMessageBox.StandardButton.Yes:
             return
+        self._ensure_editable()
         if (generation, revision) != (self.engine.document_generation, self.engine.revision):
             raise MindMapError("确认期间导图发生变化，请重新删除")
         self._prepare_page_navigation()
@@ -334,6 +381,11 @@ class PageNavigationMixin:
         # 引擎仍提供完整节点祖先路径，界面仅投影其中的页面根，避免普通分支撑长路径栏。
         # 必须保留原有页面、节点 ID：同名页面及由根节点连续下钻的页面不能按标题合并。
         pages = [entry for entry in self.engine.node_path(self._document.root_id) if entry.page_root]
+        pages = [replace(entry, text=f"{entry.text} · 详情")
+                 if self._book_document.page_kind(entry.page_id) == "detail" else entry for entry in pages]
+        self.path_navigation.back_button.setToolTip(
+            "返回所属导图" if self.current_page_kind == "detail" else "返回上级导图")
+        self.path_navigation.back_button.setAccessibleName(self.path_navigation.back_button.toolTip())
         self.path_navigation.set_path(pages, page_id=self._current_page_id,
                                       selection_count=len(self.selected_node_ids()))
         self.path_navigation.set_ui_colors(ui_colors(self._ui_colors_override or self._document.theme))

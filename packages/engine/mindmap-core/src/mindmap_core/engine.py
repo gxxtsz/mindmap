@@ -114,7 +114,7 @@ class MindMapEngine:
         try:
             return deepcopy(self._state.document.page_view(page_id))
         except KeyError as exc:
-            raise MindMapError("子导图不存在") from exc
+            raise MindMapError("导图页面不存在") from exc
 
     def node_path(self, node_id: str) -> list[PathEntry]:
         """迭代构造全局祖先路径，入口与子图根合并，保留每一级页面根的跳转项。
@@ -127,7 +127,7 @@ class MindMapEngine:
         key = node_id
         while True:
             page_id = self._state.page_id(key)
-            page = self._state.document if page_id is None else self._state.document.submaps[page_id]
+            page = self._state.document.page_record(page_id)
             local = []
             while True:
                 node = self._editor.node(key)
@@ -150,6 +150,17 @@ class MindMapEngine:
     def remove_submap(self, node_id: str) -> None:
         """删除入口拥有的全部子导图，一次撤销可完整恢复，入口节点保持原位。"""
         self._execute("remove_submap", self._editor.remove_submap, node_id=node_id)
+
+    def create_detail_page(self, node_id: str) -> str:
+        """为主图或子导图节点创建详情页并返回页面 ID；详情页内调用会原子失败。
+
+        不限制入口是否有普通子节点或子导图，每个节点最多一张；页面切换由宿主负责。
+        """
+        return self._execute("create_detail_page", self._editor.create_detail_page, node_id=node_id)
+
+    def remove_detail_page(self, node_id: str) -> None:
+        """删除节点拥有的详情内容，保留原节点、普通分支与子导图，可一次撤销恢复。"""
+        self._execute("remove_detail_page", self._editor.remove_detail_page, node_id=node_id)
 
     def subscribe(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:
         """订阅已提交状态并返回取消函数，监听器异常不会撤销提交。
@@ -271,6 +282,7 @@ class MindMapEngine:
         document = copy(source)
         document.nodes, document.assets = source.nodes.copy(), source.assets.copy()
         document.submaps = source.submaps.copy()
+        document.detail_pages = source.detail_pages.copy()
         document.layout, document.theme = deepcopy(source.layout), deepcopy(source.theme)
         document.metadata = deepcopy(source.metadata)
         return SaveSnapshot(document, self._snapshot_owner, self.document_generation, self._history._state)
@@ -377,7 +389,7 @@ class MindMapEngine:
             if page_id is None:
                 self._state.set_setting("layout", config)
             else:
-                page = deepcopy(self._state.document.submaps[page_id])
+                page = deepcopy(self._state.document.page_record(page_id))
                 page.layout = deepcopy(config)
                 self._state.set_page(page_id, page)
 
@@ -390,7 +402,7 @@ class MindMapEngine:
             if page_id is None:
                 self._state.set_setting("theme", theme)
             else:
-                page = deepcopy(self._state.document.submaps[page_id])
+                page = deepcopy(self._state.document.page_record(page_id))
                 page.theme = deepcopy(theme)
                 self._state.set_page(page_id, page)
 
@@ -411,10 +423,15 @@ class MindMapEngine:
         """建立包含属性、资源和布局配置的独立剪贴板文档，不修改原文档。"""
         return self._editor.copy_fragment(node_ids)
 
-    def paste_fragment(self, parent_id: str, fragment: MindMapDocument) -> list[str]:
-        """验证并插入片段，重建全部节点标识，并复用相同图片资源。"""
+    def paste_fragment(self, parent_id: str, fragment: MindMapDocument, *, include_pages: bool = True) -> list[str]:
+        """验证并插入片段，重建节点及页面标识，并按内容哈希复用图片资源。
+
+        include_pages 默认无损保留附属页面；详情页目标不接受这些页面，宿主可在用户
+        确认后显式传入 False，只粘贴普通树和所需资源，来源及传入片段均不被修改。
+        """
         return self._execute(
-            "paste_fragment", self._editor.paste_fragment, parent_id=parent_id, fragment=fragment
+            "paste_fragment", self._editor.paste_fragment, parent_id=parent_id, fragment=fragment,
+            include_pages=include_pages,
         )
 
     def copy_nodes(self, node_ids, parent_id: str) -> list[str]:

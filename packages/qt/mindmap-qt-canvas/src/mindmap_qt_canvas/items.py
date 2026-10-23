@@ -7,7 +7,7 @@ from weakref import ref
 
 from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
-from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFontMetricsF, QPainterPath, QPen, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QGraphicsItem,
@@ -174,16 +174,18 @@ class FoldControlItem(QGraphicsObject):
         )
 
 
-class SubmapControlItem(QGraphicsObject):
-    """叶子入口的常驻页面按钮；仅画布创建，静态渲染与导出不包含此控件。"""
+class PageControlItem(QGraphicsObject):
+    """两类附属页面的常驻按钮；不改变正文测量，静态导出不创建此对象。"""
 
-    def __init__(self, node_item):
+    def __init__(self, node_item, *, kind="submap"):
         super().__init__(node_item)
+        self.field_name = "detail_page_id" if kind == "detail" else "submap_id"
+        self.label = "查看详情页" if kind == "detail" else "进入子导图"
         self._node_item_ref = ref(node_item)
         self._rect = QRectF()
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setZValue(2)
-        self.setToolTip("进入子导图")
+        self.setToolTip(self.label)
         self.sync()
 
     @property
@@ -195,17 +197,23 @@ class SubmapControlItem(QGraphicsObject):
         item = self.node_item
         if item is None:
             return
-        rect = QRectF(item.visual.width + 6, (item.visual.height - 22) / 2, 22, 22)
+        x = item.visual.width + 6
+        # 非叶子的详情入口排在折叠按钮之后；折叠计数变宽时同样跟随避让。
+        if item.node.children and item.fold_control is not None and item.fold_control.direction == "right":
+            x = item.fold_control.button_rect().right() + 6
+        if self.field_name == "submap_id" and item.node.detail_page_id:
+            x += 26
+        rect = QRectF(x, (item.visual.height - 22) / 2, 22, 22)
         if rect != self._rect:
             self.prepareGeometryChange()
             self._rect = rect
-        self.setVisible(bool(item.node.submap_id))
+        self.setVisible(bool(getattr(item.node, self.field_name)))
         self.update()
 
     def can_activate(self):
         """只读仍允许导航；文字编辑、拖动和销毁期间的迟到点击保持原位。"""
         item = self.node_item
-        return bool(item and item.owner and not item.owner._disposed and item.node.submap_id
+        return bool(item and item.owner and not item.owner._disposed and getattr(item.node, self.field_name)
                     and item.owner.editor is None and not item.owner.view.node_drag.active)
 
     def boundingRect(self):
@@ -216,12 +224,27 @@ class SubmapControlItem(QGraphicsObject):
         if item is None:
             return
         colors = item.owner._ui_colors
+        # 图标落在出线通道时以画布底色遮住线条，保持信息标记清晰可辨。
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self.scene().backgroundBrush())
+        painter.drawRoundedRect(self._rect, 3, 3)
         painter.setPen(QPen(QColor(colors.accent if colors else item.theme.accent), 1.3))
         painter.setBrush(Qt.BrushStyle.NoBrush)
+        if self.field_name == "detail_page_id":
+            circle = self._rect.adjusted(4, 4, -4, -4)
+            painter.drawEllipse(circle)
+            center = circle.center()
+            painter.drawLine(QPointF(center.x(), center.y()), QPointF(center.x(), center.y() + 3))
+            painter.drawPoint(QPointF(center.x(), center.y() - 3))
+            return
         rect = self._rect.adjusted(5, 3, -5, -3)
         painter.drawRoundedRect(rect, 2, 2)
         painter.drawLine(rect.left() + 3, rect.top() + 6, rect.right() - 3, rect.top() + 6)
         painter.drawLine(rect.left() + 3, rect.top() + 10, rect.right() - 3, rect.top() + 10)
+
+
+# 保留旧模块中的控件名字；两种图标由同一个具体 Qt 图元绘制并处理命中。
+SubmapControlItem = PageControlItem
 
 
 class NodeItem(StaticNodeItem):
@@ -233,6 +256,7 @@ class NodeItem(StaticNodeItem):
         self.hovered = False
         self._fold_hide_pending = False
         self.fold_control = FoldControlItem(self) if owner is not None else None
+        self.detail_page_control = PageControlItem(self, kind="detail") if owner is not None else None
         self.submap_control = SubmapControlItem(self) if owner is not None else None
 
     def set_hovered(self, hovered: bool, *, immediate: bool = False) -> None:
@@ -260,6 +284,8 @@ class NodeItem(StaticNodeItem):
             self.fold_control.sync()
         if self.submap_control is not None:
             self.submap_control.sync()
+        if self.detail_page_control is not None:
+            self.detail_page_control.sync()
 
     def itemChange(self, change, value):
         result = super().itemChange(change, value)

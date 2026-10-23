@@ -15,14 +15,16 @@ def test_version_two_load_does_not_change_ids_styles_or_assets(tmp_path):
     legacy = to_dict(current)
     legacy["schema_version"] = 2
     del legacy["submaps"]
+    del legacy["detail_pages"]
     for node in legacy["nodes"]:
         del node["submap_id"]
+        del node["detail_page_id"]
     loaded = from_dict(legacy)
     assert loaded == current and not loaded.submaps
     path = tmp_path / "升级保存.mindmap"
     save_document(loaded, path)
     assert load_document(path) == current
-    assert to_dict(load_document(path))["schema_version"] == 3
+    assert to_dict(load_document(path))["schema_version"] == 4
 
 
 def test_deep_nested_pages_roundtrip_with_images(tmp_path):

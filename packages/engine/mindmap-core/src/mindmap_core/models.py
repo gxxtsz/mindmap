@@ -67,6 +67,8 @@ class Node:
     image_width: float = 160.0
     metadata: dict[str, Any] = field(default_factory=dict)
     submap_id: str | None = None
+    # 详情页与子导图分别归属当前节点；详情页不要求入口是叶子节点。
+    detail_page_id: str | None = None
 
     def __deepcopy__(self, memo: dict) -> Node:
         """建立隔离节点副本，跳过不可变标量的通用序列化重建开销。
@@ -122,10 +124,10 @@ class Asset:
 
 @dataclass
 class MindMapPage:
-    """独立子导图的页面记录。
+    """子导图与详情页共用的独立页面记录。
 
     页面只保存根节点、入口和外观配置；节点与资源统一放在文档表中。
-    页面之间仅通过字符串 ID 关联，因此任意深度的嵌套都不会形成递归对象。
+    页面之间仅通过字符串 ID 关联，因此多级子导图不会形成递归对象；详情页不再嵌套页面。
     """
 
     id: str
@@ -156,6 +158,7 @@ class MindMapDocument:
     theme: Theme = field(default_factory=Theme)
     metadata: dict[str, Any] = field(default_factory=dict)
     submaps: dict[str, MindMapPage] = field(default_factory=dict)
+    detail_pages: dict[str, MindMapPage] = field(default_factory=dict)
 
     @classmethod
     def new(cls, text: str = "中心主题") -> MindMapDocument:
@@ -199,19 +202,53 @@ class MindMapDocument:
         result[self.root_id] = self.layout.direction if self.layout.direction != "both" else "right"
         return result
 
+    def page_record(self, page_id: str | None = None) -> MindMapDocument | MindMapPage:
+        """按稳定标识借用页面记录；主导图使用 None，两类附属页面共用查询入口。
+
+        返回值仍属于当前文档，外部不得直接修改；修改配置应使用引擎事务接口。
+        查询只做字典访问，不合并页面表，避免局部编辑退回全文件扫描。
+        """
+        if page_id is None:
+            return self
+        if page_id in self.submaps:
+            return self.submaps[page_id]
+        return self.detail_pages[page_id]
+
+    def page_kind(self, page_id: str | None = None) -> str:
+        """返回 main、submap 或 detail；不存在的页面标识抛出 KeyError。"""
+        if page_id is None:
+            return "main"
+        if page_id in self.submaps:
+            return "submap"
+        if page_id in self.detail_pages:
+            return "detail"
+        raise KeyError(page_id)
+
+    def has_page(self, page_id: str | None) -> bool:
+        """检查页面是否仍存在，供撤销删除后的导航回退使用。"""
+        return page_id is None or page_id in self.submaps or page_id in self.detail_pages
+
+    def iter_pages(self):
+        """依次借用两类附属页面；只用于完整装载、校验和显式全文件操作。"""
+        yield from self.submaps.values()
+        yield from self.detail_pages.values()
+
     def page_view(self, page_id: str | None = None) -> MindMapPageView:
         """借用一页的节点与配置，供布局、渲染和面板只读使用。
 
         返回对象不拥有整份文档，不能作为文件保存；调用方不得修改借用的实体。
-        主导图使用 None 标识。子导图引用保留在节点上，页内校验不跨页展开。
+        主导图使用 None 标识。两类页面引用保留在节点上，页内校验不跨页展开。
         """
-        page = self if page_id is None else self.submaps[page_id]
+        page = self.page_record(page_id)
         nodes = {key: self.nodes[key] for key in self.descendants(page.root_id)}
         assets = {node.image_id: self.assets[node.image_id] for node in nodes.values() if node.image_id}
-        return MindMapPageView(page.root_id, nodes, assets, page.layout, page.theme, self.metadata)
+        view = MindMapPageView(page.root_id, nodes, assets, page.layout, page.theme, self.metadata)
+        # 页面类别只属于读模型上下文，不是文件字段；详情页单页校验仍执行嵌套禁令。
+        view.kind = self.page_kind(page_id)
+        return view
 
     def owned_descendants(self, node_id: str) -> list[str]:
-        """迭代取得分支及其拥有的全部子导图节点，用于删除和完整复制。"""
+        """迭代取得普通分支及其拥有的两类页面节点，用于删除和完整复制。"""
         result, stack = [], [node_id]
         while stack:
             key = stack.pop()
@@ -220,6 +257,8 @@ class MindMapDocument:
             stack.extend(reversed(node.children))
             if node.submap_id:
                 stack.append(self.submaps[node.submap_id].root_id)
+            if node.detail_page_id:
+                stack.append(self.detail_pages[node.detail_page_id].root_id)
         return result
 
     def validate(self) -> None:
@@ -231,6 +270,8 @@ class MindMapDocument:
 
 class MindMapPageView(MindMapDocument):
     """具有既有布局文档接口的单页读模型；外部页面引用由完整文档负责校验。"""
+
+    kind = "main"
 
     def validate(self) -> None:
         from .validation import validate_document

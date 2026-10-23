@@ -7,7 +7,7 @@
 主导图保持既有接口，页面标识使用 `None` 表示主导图。
 
 `engine.create_submap(node_id)` 仅允许尚无普通子节点及子导图的叶子节点，返回页面 ID。
-`engine.remove_submap(node_id)` 保留入口，删除其拥有的全部页面；两种操作均支持
+`engine.remove_submap(node_id)` 保留入口及其自身详情，删除子导图内部拥有的全部页面；两种操作均支持
 统一事务和整体撤销。入口与根节点名称由 `update_node` 在一个事务内沿别名链同步。
 入口不能再接普通子节点，新增、粘贴和移动统一校验；每页根节点均禁止删除或移动。
 
@@ -16,6 +16,23 @@
 `set_layout` 与 `set_theme` 接受可选关键字参数 `page_id`，省略时仍修改主导图。
 `engine.document` 和保存快照始终包含全部页面，历史变化集的 `page_id` 表示操作所属页。
 普通分支遍历不跨页，完整复制与删除通过迭代的 `owned_descendants` 遍历所有附属页面。
+
+## 单层详情页
+
+`Node.detail_page_id` 与 `MindMapDocument.detail_pages` 独立于既有子导图字段，页面记录
+共用 `MindMapPage`。`create_detail_page(node_id) -> str` 允许主导图、子导图中的任意节点
+创建唯一详情；`remove_detail_page(node_id)` 只删除详情内容，保留入口、普通分支与子导图。
+两类页面名称都沿 ID 关联双向同步，布局和主题分别维护，禁止直接通过 `update_node` 改写页面引用。
+
+`page_record(page_id)` 借用页面记录，`page_kind(page_id)` 返回 `main`、`submap` 或 `detail`，
+`has_page(page_id)` 检查导航目标，`iter_pages()` 枚举两类附属页；借用记录禁止外部修改。
+`page_document`、`page_view`、布局与主题接口接受两类页面标识，详情单页读模型也保留类别。
+详情中的任何节点均不能再拥有两类附属页；操作入口、差量校验及完整导入共同执行约束。
+
+`paste_fragment(parent_id, fragment, include_pages=True)` 默认完整复制两类页面并重建标识。
+向详情页粘贴带附页的片段默认拒绝；宿主确认省略后可显式传入 `include_pages=False`，
+仅复制普通分支及其属性、图片，并裁掉附属页面引用和无用资源。原片段与来源始终保持完整。
+详情页同样参与写时复制、事务回滚、差量历史、图片引用计数及后台保存快照。
 
 思维导图核心，包含模型、校验、编辑操作、事务、差异历史、事件、共享几何类型与扩展协议。
 仅使用 Python 3.12+ 标准库，不导入布局实现、文档格式、默认组合包或 Qt。

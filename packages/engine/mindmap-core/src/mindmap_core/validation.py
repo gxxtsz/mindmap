@@ -18,14 +18,20 @@ def validate_document(document, *, page_only=False) -> None:
         raise MindMapError("文档缺少有效根节点")
     if not isinstance(document.submaps, dict):
         raise MindMapError("子导图表必须为对象")
+    if not isinstance(document.detail_pages, dict):
+        raise MindMapError("详情页表必须为对象")
+    if document.submaps.keys() & document.detail_pages.keys():
+        raise MindMapError("不同类型的页面不能共用标识")
     if not isinstance(document.layout, LayoutConfig):
         raise MindMapError("布局配置必须为 LayoutConfig")
     document.layout.validate()
     seen: set[str] = set()
     pages: set[str] = set()
-    stack = [document.root_id]
+    # 栈中保留所属页面类别，普通后代沿用上下文；跨页时才改变类别。
+    # 因而完整导入同样不能把附属页面藏在详情页的深层节点中。
+    stack = [(document.root_id, getattr(document, "kind", "main") == "detail")]
     while stack:
-        node_id = stack.pop()
+        node_id, in_detail = stack.pop()
         if node_id in seen:
             raise MindMapError("节点树包含循环或重复父节点")
         if node_id not in document.nodes:
@@ -33,20 +39,26 @@ def validate_document(document, *, page_only=False) -> None:
         seen.add(node_id)
         node = document.nodes[node_id]
         validate_node(document, node_id, node, json_data=False)
-        stack.extend(reversed(node.children))
-        if node.submap_id and not page_only:
-            page = document.submaps.get(node.submap_id)
-            if not isinstance(page, MindMapPage) or page.id != node.submap_id or page.owner_id != node_id:
-                raise MindMapError("子导图引用不存在或页面归属无效")
-            if page.id in pages:
-                raise MindMapError("子导图包含循环或重复入口")
-            pages.add(page.id)
-            validate_page(document, page)
-            stack.append(page.root_id)
+        if in_detail and (node.submap_id or node.detail_page_id):
+            raise MindMapError("详情页内不能拥有详情页或子导图")
+        stack.extend((child, in_detail) for child in reversed(node.children))
+        if not page_only:
+            for kind, page_id, table in (("submap", node.submap_id, document.submaps),
+                                         ("detail", node.detail_page_id, document.detail_pages)):
+                if not page_id:
+                    continue
+                page = table.get(page_id)
+                if not isinstance(page, MindMapPage) or page.id != page_id or page.owner_id != node_id:
+                    raise MindMapError("页面引用不存在或页面归属无效")
+                if page.id in pages:
+                    raise MindMapError("页面包含循环或重复入口")
+                pages.add(page.id)
+                validate_page(document, page, kind=kind)
+                stack.append((page.root_id, kind == "detail"))
     if seen != set(document.nodes):
         raise MindMapError("文档包含未连接到根节点的节点")
-    if not page_only and pages != set(document.submaps):
-        raise MindMapError("文档包含没有入口的子导图")
+    if not page_only and pages != set(document.submaps) | set(document.detail_pages):
+        raise MindMapError("文档包含没有入口的子导图或详情页")
     for key, asset in document.assets.items():
         if not isinstance(asset.data, bytes) or not asset.data:
             raise MindMapError("图片数据必须为非空字节串")
@@ -93,6 +105,8 @@ def validate_node(document, node_id, node, *, json_data=True):
             raise MindMapError("子导图标识无效")
         if node.children:
             raise MindMapError("此节点已有子导图，请进入子导图添加内容")
+    if node.detail_page_id is not None and (not isinstance(node.detail_page_id, str) or not node.detail_page_id):
+        raise MindMapError("详情页标识无效")
     if not isinstance(node.expanded, bool) or node.direction not in (None, "left", "right"):
         raise MindMapError("节点展开状态或方向无效")
     if node.text_format not in ("plain", "markdown"):
@@ -122,17 +136,22 @@ def validate_node(document, node_id, node, *, json_data=True):
             raise MindMapError("元数据与样式必须是有效的 JSON 数据") from exc
 
 
-def validate_page(document, page):
+def validate_page(document, page, *, kind=None):
     """校验单张页面的归属、名称和独立外观，不遍历它所拥有的下级页面。"""
+    if not isinstance(page, MindMapPage):
+        raise MindMapError("页面记录无效")
     if not all(isinstance(x, str) and x for x in (page.id, page.root_id, page.owner_id)):
         raise MindMapError("页面标识无效")
     if page.root_id not in document.nodes or page.owner_id not in document.nodes:
         raise MindMapError("页面根节点或入口不存在")
     owner = document.nodes[page.owner_id]
-    if owner.submap_id != page.id or owner.children:
+    kind = kind or document.page_kind(page.id)
+    if kind == "submap" and (owner.submap_id != page.id or owner.children):
         raise MindMapError("子导图必须属于唯一叶子入口")
+    if kind == "detail" and owner.detail_page_id != page.id:
+        raise MindMapError("详情页必须属于唯一入口节点")
     if document.nodes[page.root_id].text != owner.text:
-        raise MindMapError("子导图根节点与入口名称不同步")
+        raise MindMapError("页面根节点与入口名称不同步")
     if not isinstance(page.layout, LayoutConfig):
         raise MindMapError("布局配置必须为 LayoutConfig")
     page.layout.validate()
@@ -156,14 +175,20 @@ def validate_changes(state, journal):
         if node is None:
             continue
         validate_node(document, key, node)
-        if node.submap_id:
-            page = document.submaps.get(node.submap_id)
-            if page is None or page.owner_id != key:
-                raise MindMapError("子导图引用不存在或页面归属无效")
-            validate_page(document, page)
+        if node.submap_id or node.detail_page_id:
+            if document.page_kind(state.page_id(key)) == "detail":
+                raise MindMapError("详情页内不能拥有详情页或子导图")
+            for kind, page_id, table in (("submap", node.submap_id, document.submaps),
+                                         ("detail", node.detail_page_id, document.detail_pages)):
+                if not page_id:
+                    continue
+                page = table.get(page_id)
+                if not isinstance(page, MindMapPage) or page.id != page_id or page.owner_id != key:
+                    raise MindMapError("页面引用不存在或页面归属无效")
+                validate_page(document, page, kind=kind)
         page_id = state.root_pages.get(key)
         if page_id is not None:
-            validate_page(document, document.submaps[page_id])
+            validate_page(document, document.page_record(page_id))
         if len(set(node.children)) != len(node.children):
             raise MindMapError("节点树包含循环或重复父节点")
         for child in node.children:
@@ -185,10 +210,13 @@ def validate_changes(state, journal):
             if key is None or key not in document.nodes:
                 raise MindMapError("文档包含未连接到根节点的节点")
         verified.update(path)
-    for key in journal.submaps:
-        page = document.submaps.get(key)
-        if page is not None:
-            validate_page(document, page)
+    for name in ("submaps", "detail_pages"):
+        for key in getattr(journal, name):
+            page = getattr(document, name).get(key)
+            if page is not None:
+                if page.id != key:
+                    raise MindMapError("页面标识与记录不匹配")
+                validate_page(document, page)
     usage = Counter()
     for key, old in journal.nodes.items():
         node = document.nodes.get(key)

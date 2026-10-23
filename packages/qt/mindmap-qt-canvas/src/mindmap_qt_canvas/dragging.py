@@ -1126,7 +1126,7 @@ class NodeDragController(QObject):
             # 不建立临时引擎或整图副本，也不提前执行宿主钩子和发布历史事件。
             with self.owner.engine.preview_operation() as (candidate, touched):
                 _apply_move(self.owner.engine, drop.proposal, drop.document)
-                if self.owner.current_page_id is not None or candidate.submaps:
+                if self.owner.current_page_id is not None or candidate.submaps or candidate.detail_pages:
                     candidate = candidate.page_view(self.owner.current_page_id)
                 changed_sizes = {}
                 for key in touched:

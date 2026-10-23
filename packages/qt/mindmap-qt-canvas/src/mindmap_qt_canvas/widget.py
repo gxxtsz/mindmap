@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QInputDialog,
     QMenu,
+    QMessageBox,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -471,6 +472,9 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             ("create_submap", "创建子导图", None, lambda w: w.create_submap(), True),
             ("enter_submap", "进入子导图", None, lambda w: w.enter_submap(), False),
             ("delete_submap", "删除子导图…", None, lambda w: w.delete_submap(), True),
+            ("create_detail_page", "添加详情页", None, lambda w: w.create_detail_page(), True),
+            ("enter_detail_page", "查看详情页", None, lambda w: w.enter_detail_page(), False),
+            ("delete_detail_page", "删除详情页…", None, lambda w: w.delete_detail_page(), True),
             ("zoom_in", "放大", "Ctrl+=", lambda w: w.view.zoom(1.2), False),
             ("zoom_out", "缩小", "Ctrl+-", lambda w: w.view.zoom(1 / 1.2), False),
             ("fit", "适应窗口", "Ctrl+0", lambda w: w.fit_to_view(), False),
@@ -553,12 +557,24 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self._sync_branch_actions()
         node = self._document.nodes.get(self.current_node_id())
         single = len(self.selected_node_ids()) <= 1
+        in_detail = self.current_page_kind == "detail"
         self._actions["create_submap"].setEnabled(bool(
-            self.editable and not editing and single and node and not node.children and not node.submap_id))
+            self.editable and not editing and single and node and not node.children and not node.submap_id
+            and not in_detail))
         self._actions["create_submap"].setToolTip("仅没有普通子节点和子导图的叶子节点可创建")
         self._actions["enter_submap"].setEnabled(bool(not editing and single and node and node.submap_id))
         self._actions["delete_submap"].setEnabled(bool(
             self.editable and not editing and single and node and node.submap_id))
+        # 创建入口按所在页面过滤，已有入口按当前节点过滤；返回其他页面后立即恢复。
+        self._actions["create_submap"].setVisible(not in_detail)
+        self._actions["create_detail_page"].setVisible(not in_detail and not bool(node and node.detail_page_id))
+        self._actions["create_detail_page"].setEnabled(bool(
+            self.editable and not editing and single and node and not node.detail_page_id and not in_detail))
+        for name in ("enter_detail_page", "delete_detail_page"):
+            self._actions[name].setVisible(bool(not in_detail and node and node.detail_page_id))
+            self._actions[name].setEnabled(bool(
+                not editing and single and node and node.detail_page_id
+                and (name == "enter_detail_page" or self.editable)))
         self._sync_navigation()
 
     def set_editable(self, editable: bool) -> None:
@@ -658,9 +674,9 @@ class MindMapWidget(PageNavigationMixin, QWidget):
                 target_page = self._current_page_id
                 if event.kind in ("undo", "redo"):
                     target_page = changes.page_id
-                if target_page is not None and target_page not in self._book_document.submaps:
+                if not self._book_document.has_page(target_page):
                     target_page = next((page for page in reversed(self._page_chain)
-                                        if page is None or page in self._book_document.submaps), None)
+                                        if self._book_document.has_page(page)), None)
                 if target_page != self._current_page_id:
                     self._switch_page(target_page, notify=False, cache=False)
                     switched = True
@@ -687,8 +703,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
                         self._document.nodes.pop(key, None)
                     else:
                         self._document.nodes[key] = self._book_document.nodes[key]
-                source = (self._book_document if self._current_page_id is None
-                          else self._book_document.submaps[self._current_page_id])
+                source = self._book_document.page_record(self._current_page_id)
                 self._document.layout, self._document.theme = source.layout, source.theme
                 self._document.assets = self._book_document.assets
                 self._document.metadata = self._book_document.metadata
@@ -1292,6 +1307,21 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self._ensure_editable()
         ids = self.selected_node_ids()
         if ids:
+            nodes = {key for root in ids for key in self._book_document.owned_descendants(root)}
+            submaps = sum(bool(self._book_document.nodes[key].submap_id) for key in nodes)
+            details = sum(bool(self._book_document.nodes[key].detail_page_id) for key in nodes)
+            if submaps or details:
+                generation, revision = self.engine.document_generation, self.engine.revision
+                choice = QMessageBox.question(
+                    self, "删除节点及附属页面",
+                    f"将删除 {len(nodes)} 个节点，以及其中的 {submaps} 张子导图、{details} 张详情页。\n删除后可以撤销。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+                if choice != QMessageBox.StandardButton.Yes:
+                    return
+                self._ensure_editable()
+                if self._disposed or (generation, revision) != (
+                        self.engine.document_generation, self.engine.revision):
+                    raise MindMapError("确认期间导图发生变化，请重新删除")
             self.engine.remove_nodes(ids)
 
     def toggle_expanded(self):
@@ -1348,7 +1378,26 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             fragment.nodes.update(document.nodes)
         else:
             return []
-        ids = self.engine.paste_fragment(self.current_node_id(), fragment)
+        include_pages = True
+        if self.current_page_kind == "detail" and (fragment.submaps or fragment.detail_pages):
+            target_id = self.current_node_id()
+            generation, revision = self.engine.document_generation, self.engine.revision
+            # 明确说明只省略附属页面；关闭或取消不改写片段、当前选择或撤销历史。
+            choice = QMessageBox.question(
+                self, "粘贴到详情页",
+                f"所复制的分支包含 {len(fragment.submaps)} 张子导图和 {len(fragment.detail_pages)} 张详情页。\n"
+                "详情页内不能拥有附属页面。是否仅粘贴普通分支、文字、图片和样式？\n"
+                "附属页面将不会粘贴，剪贴板内容保持完整。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if choice != QMessageBox.StandardButton.Yes:
+                return []
+            self._ensure_editable()
+            if (self._disposed or (generation, revision) != (
+                    self.engine.document_generation, self.engine.revision)
+                    or self.current_page_kind != "detail" or self.current_node_id() != target_id):
+                raise MindMapError("粘贴期间导图或目标已发生变化，请重新粘贴")
+            include_pages = False
+        ids = self.engine.paste_fragment(self.current_node_id(), fragment, include_pages=include_pages)
         self.select_nodes(ids)
         return ids
 
@@ -1533,7 +1582,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         """替换前验证算法、图片、测量与布局结果，失败时当前引擎和画布不变。"""
         document.validate()
         # 完整文件装载时逐页校验；页内候选仍只测量当前页，禁止混排所有页面节点。
-        pages = [document.page_view()] + [document.page_view(key) for key in document.submaps]
+        pages = [document.page_view()] + [document.page_view(page.id) for page in document.iter_pages()]
         for page in pages:
             self.layout_registry.validate_config(page.layout)
             _, sizes = self.factory.measure(page)
@@ -1548,6 +1597,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         groups = [
             ("add_child", "add_sibling", "insert_parent", "edit", "properties", "delete"),
             ("create_submap", "enter_submap", "delete_submap"),
+            ("create_detail_page", "enter_detail_page", "delete_detail_page"),
             ("copy", "cut", "paste", "undo", "redo"),
             ("move_up", "move_down", "fold", "expand_all", "collapse_all"),
             ("image", "image_url", "remove_image", "hyperlink"),

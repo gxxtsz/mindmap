@@ -16,7 +16,7 @@ from .items import (
     FoldControlItem,
     NodeEditor,
     NodeItem,
-    SubmapControlItem,
+    PageControlItem,
 )
 
 # 交互缩放与“适应窗口”共用 10% 下限，避免自动适配绕过交互入口的倍率限制。
@@ -259,7 +259,7 @@ class MindMapView(QGraphicsView):
         inside = position is not None and self.viewport().rect().contains(position)
         if inside:
             hit = self.itemAt(position)
-        hovered = hit.node_item if isinstance(hit, (FoldControlItem, SubmapControlItem)) else hit
+        hovered = hit.node_item if isinstance(hit, (FoldControlItem, PageControlItem)) else hit
         if inside:
             if not isinstance(hovered, (NodeItem, NodeEditor)) and not self.panning and self.drag_ghost is None:
                 hovered = self._fold_hover_at(position)
@@ -283,7 +283,7 @@ class MindMapView(QGraphicsView):
             shape = Qt.CursorShape.ArrowCursor
             if isinstance(item, NodeEditor):
                 shape = Qt.CursorShape.IBeamCursor
-            elif isinstance(item, SubmapControlItem):
+            elif isinstance(item, PageControlItem):
                 if item.can_activate():
                     shape = Qt.CursorShape.PointingHandCursor
             elif isinstance(item, FoldControlItem):
@@ -343,10 +343,13 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         item = self.itemAt(event.position().toPoint())
-        if isinstance(item, SubmapControlItem) and event.button() == Qt.MouseButton.LeftButton:
+        if isinstance(item, PageControlItem) and event.button() == Qt.MouseButton.LeftButton:
             if item.can_activate():
+                # 切页会释放当前图元，回调只捕获节点 ID，不能在被销毁的按钮实例上继续执行。
                 key = item.node_item.node.id
-                self.owner.call(lambda: self.owner.enter_submap(key))
+                enter = (self.owner.enter_detail_page if item.field_name == "detail_page_id"
+                         else self.owner.enter_submap)
+                self.owner.call(lambda: enter(key))
             self._fold_pressed = True
             event.accept()
             return
@@ -465,7 +468,7 @@ class MindMapView(QGraphicsView):
     def mouseDoubleClickEvent(self, event):
         """按钮双击仍按独立点击处理，不把事件交给正文的双击编辑入口。"""
         if self._fold_pressed or isinstance(self.itemAt(event.position().toPoint()),
-                                           (FoldControlItem, SubmapControlItem)):
+                                           (FoldControlItem, PageControlItem)):
             self.mousePressEvent(event)
         else:
             super().mouseDoubleClickEvent(event)
@@ -483,7 +486,7 @@ class MindMapView(QGraphicsView):
     def _show_context_menu(self, position, global_position):
         """仅在确定为点击后选择菜单目标，右键拖动始终保留原有选择。"""
         item = self.itemAt(position)
-        if isinstance(item, (FoldControlItem, SubmapControlItem)):
+        if isinstance(item, (FoldControlItem, PageControlItem)):
             item = item.node_item
         if item is not None and isinstance(item, NodeItem) and not item.isSelected():
             self.owner.select_nodes([item.node.id])
