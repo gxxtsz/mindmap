@@ -56,7 +56,8 @@ class MindMapSession(QObject):
         self.owner = owner
         self.id = session_id or "mindmap." + uuid4().hex
         self.engine = MindMapEngine()
-        self.canvas = MindMapWidget(self.engine, toolbar=False, view_controls=True, embedded=True,
+        # 历史动作由标签栏承载，视图操作由主窗口状态栏承载，画布不再创建浮条。
+        self.canvas = MindMapWidget(self.engine, toolbar=False, view_controls=False, embedded=True,
                                     layout_registry=owner.window.layout_registry,
                                     format_registry=owner.window.format_registry)
         self.canvas.setFocusProxy(self.canvas.view)
@@ -81,7 +82,6 @@ class MindMapSession(QObject):
         self.canvas.selection_changed.connect(lambda *_: owner.window._sync_document())
         self.canvas.editable_changed.connect(lambda *_: owner.window._sync_document())
         owner.window._configure_session(self)
-        self.settings_menu = self.panels.settings.create_menu(owner.window)
 
     def _write(self, document, path, **kwargs):
         """所有写入先检查其他会话的文件归属，再复用引擎原子写入，禁止跨标签覆盖。"""
@@ -246,8 +246,6 @@ class MindMapSession(QObject):
         self._finish_background_save(wait=True)
         self._unsubscribe()
         self.close_popups()
-        self.settings_menu.close()
-        self.settings_menu.deleteLater()
         self.panels.dispose()
         for stack, page in ((self.owner.window._outline_stack, self.panels.outline),
                             (self.owner.window._properties_stack, self.panels.properties),

@@ -9,13 +9,14 @@ from mindmap_layouts import create_default_layout_registry
 from mindmap_qt_render import ensure_fonts
 from mindmap_qt_ui import UiColors
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
-from PySide6.QtCore import QLibraryInfo, QPoint, QSettings, QSignalBlocker, Qt, QTranslator
+from PySide6.QtCore import QLibraryInfo, QSettings, QSignalBlocker, Qt, QTranslator
 from PySide6.QtGui import QAction, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from .document_state import DocumentState
 from .recent_files import RecentFilesButton
 from .sessions import MindMapSessionManager
+from .status_controls import _StatusViewControls
 
 
 def ui_colors_from_shell(theme) -> UiColors:
@@ -95,11 +96,10 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             message.setAlignment(Qt.AlignmentFlag.AlignCenter)
             stack.addWidget(message)
         self._depth_action = QAction("显示层级", self)
-        # 空文档时仍保留同一级的滚轮入口，禁用占位避免创建临时画布或改写偏好。
-        self._empty_settings_menu = QMenu("滚轮行为", self)
-        self._empty_settings_menu.menuAction().setToolTip("没有打开的导图")
-        self._empty_settings_menu.setEnabled(False)
         self.sessions = MindMapSessionManager(self)
+        # 放在外壳已有版本文字之后；常驻区不会被临时状态消息遮挡。
+        self._status_controls = _StatusViewControls(self.status)
+        self.status.addPermanentWidget(self._status_controls)
         for identifier, title, stack, icon, position, shortcut in (
             ("outline", "大纲", self._outline_stack, "outline", DockPosition.LEFT_TOP, "Alt+1"),
             ("properties", "节点属性", self._properties_stack, "properties", DockPosition.RIGHT_TOP, "Alt+2"),
@@ -166,10 +166,6 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def panels(self):
         """只读访问活动面板组合；外层停靠容器在各会话间共用。"""
         return self.active_session.panels if self.active_session else None
-
-    @property
-    def settings_menu(self):
-        return self.active_session.settings_menu if self.active_session else self._empty_settings_menu
 
     def call(self, callback):
         """无会话时也能报告新建、打开错误；UI 异常边界不依赖某个画布的生命周期。"""
@@ -261,6 +257,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._outline_stack.setCurrentWidget(session.panels.outline) if session else self._outline_stack.setCurrentIndex(0)
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
         self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
+        self._status_controls.bind_canvas(session.canvas if session else None)
         self._sync_depth_action()
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
@@ -278,12 +275,6 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             session.canvas.finish_edit(commit=True)
             self.manager.activate("properties")
 
-    def show_settings_menu(self):
-        """直接展开当前会话的滚轮选项，保留既有宿主调用入口。"""
-        if self.active_session and not self._disposed:
-            button = self.title_bar.menu
-            self.settings_menu.popup(button.mapToGlobal(QPoint(0, button.height())))
-
     def show_settings_panel(self):
         """打开活动导图的布局及外观设置；不强制结束正文编辑或另建临时导图。
 
@@ -294,13 +285,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.manager.activate("map_settings", focus=False)
 
     def appearance_menu(self):
-        """将滚轮行为直接放在设置顶部；导图布局和外观统一通过侧栏调整。"""
+        """仅保留应用外观与布局；滚轮行为通过状态栏按钮直接切换。"""
         menu = super().appearance_menu()
         menu.setTitle("设置")
-        if hasattr(self, "_empty_settings_menu"):
-            anchor = menu.actions()[0]
-            menu.insertMenu(anchor, self.settings_menu)
-            menu.insertSeparator(anchor)
         return menu
 
     def _sync_document(self, *_):
@@ -389,7 +376,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         for title, keys in (
             ("编辑", ("undo", "redo", "add_child", "add_sibling", "insert_parent", "edit", "properties",
                     "delete", "copy", "cut", "paste", "image", "image_url")),
-            ("视图", ("zoom_in", "zoom_out", "fit", "center", "focus", "unfocus", "expand_all", "collapse_all")),
+            ("视图", ("zoom_in", "zoom_out", "focus", "unfocus", "expand_all", "collapse_all")),
         ):
             section = QMenu(title, menu)
             for key in keys:
@@ -422,6 +409,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                 if group.empty_widget:
                     group.empty_widget.refresh_theme()
             self._sync_depth_action()
+        if hasattr(self, "_status_controls"):
+            self._status_controls.set_ui_colors(ui_colors_from_shell(self.manager.theme),
+                                                compact=self.manager.theme.compact)
 
     def _layout_changed(self):
         if self._disposed:

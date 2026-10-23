@@ -809,15 +809,19 @@ def test_autosave_keeps_inline_ime_and_property_draft(empty_window, tmp_path):
     assert session.flush() and load_document(session.files.path).root.style["font_size"] == 28
 
 
-def test_saved_notification_keeps_open_settings_menu(empty_window, tmp_path):
+def test_saved_notification_keeps_open_appearance_menu(empty_window, tmp_path):
+    """自动保存只同步文件状态，不关闭正在使用的应用设置菜单或重建状态栏按钮。"""
     session = create(empty_window, tmp_path / "菜单.mindmap")
     session.engine.add_child(session.engine.root_id, "修改")
-    empty_window.show_settings_menu()
+    menu = empty_window.appearance_menu()
+    menu.popup(empty_window.mapToGlobal(empty_window.rect().center()))
     QApplication.processEvents()
-    assert session.settings_menu.isVisible()
+    assert menu.isVisible()
+    wheel = empty_window._status_controls.buttons["wheel_mode"]
     assert session.autosave()
-    assert session.settings_menu.isVisible()
-    session.settings_menu.close()
+    assert menu.isVisible() and empty_window._status_controls.buttons["wheel_mode"] is wheel
+    menu.close()
+    menu.deleteLater()
 
 
 def test_save_failure_preserves_file_and_retries_only_on_request_or_edit(empty_window, tmp_path, qtbot):

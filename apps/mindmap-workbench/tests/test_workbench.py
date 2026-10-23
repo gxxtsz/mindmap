@@ -19,8 +19,8 @@ from mindmap_formats import load_document, save_document
 from mindmap_layouts import TreeLayout, resolve_tree_spacing
 from mindmap_workbench.shell_adapter import build_window
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
-from PySide6.QtGui import QEnterEvent, QImage
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QToolButton
+from PySide6.QtGui import QEnterEvent, QIcon, QImage, QWheelEvent
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMenu, QMessageBox, QToolButton
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     """明暗主题下点击左上角主菜单，核对设置子菜单中的三组平铺选项。"""
     window.manager.set_theme(theme_name)
     expected = [
-        "滚轮行为：上下滚动", None, "浅色", "深色", "紧凑模式", None,
+        "浅色", "深色", "紧凑模式", None,
         "显示停靠栏", "始终显示标题按钮", None, "宽屏布局", "左侧并排", "右侧并排",
     ]
     popped = []
@@ -82,10 +82,9 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
             qtbot.keyClick(main, Qt.Key.Key_Right)
             qtbot.waitUntil(menu.isVisible)
             popped.append([None if action.isSeparator() else action.text() for action in menu.actions()])
-            assert menu.actions()[0].menu() is window.settings_menu
-            for action in menu.actions()[2:4]:
+            for action in menu.actions()[:2]:
                 assert action.isChecked() == (action.text() == ("浅色" if theme_name == "light" else "深色"))
-            assert all(action.menu() is None for action in menu.actions()[2:])
+            assert all(action.menu() is None for action in menu.actions())
             menu.close()
         finally:
             main.close()
@@ -105,7 +104,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert all(action.isEnabled() for action in exports.actions())
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
     assert view.actions() == [window.canvas.action(key) for key in (
-        "zoom_in", "zoom_out", "fit", "center", "focus", "unfocus", "expand_all", "collapse_all",
+        "zoom_in", "zoom_out", "focus", "unfocus", "expand_all", "collapse_all",
     )] + [window.read_only_action]
     assert not hasattr(window, "show_document")
     assert window.manager.states["properties"].visible
@@ -162,12 +161,9 @@ def test_settings_shortcut_and_real_menu_click_switch_right_panel(window, qtbot)
 
 
 def test_settings_sidebar_readonly_and_inline_edit_preserve_document(window, qtbot):
-    """菜单只提供滚轮，侧栏查看不提交正文，受限状态的布局和外观控件均禁用。"""
+    """侧栏查看和滚轮切换不提交正文，受限状态的布局和外观控件均禁用。"""
     before, revision = window.engine.document, window.engine.revision
-    window.show_settings_menu()
-    menu = window.settings_menu
-    assert [action.text() for action in menu.actions()] == ["上下滚动", "缩放"]
-    menu.close()
+    wheel = window._status_controls.buttons["wheel_mode"]
     window.show_settings_panel()
     assert window.panels.settings.isVisible() and not window.panels.properties.isVisible()
     assert window.panels.settings.branch.isVisible() and window.panels.settings.theme.isVisible()
@@ -175,6 +171,12 @@ def test_settings_sidebar_readonly_and_inline_edit_preserve_document(window, qtb
     assert window.engine.document == before and window.engine.revision == revision
     window.canvas.begin_edit(window.engine.root_id)
     window.canvas.editor.setPlainText("尚未提交的正文草稿")
+    editor = window.canvas.editor
+    qtbot.mouseClick(wheel, Qt.MouseButton.LeftButton)
+    assert window.canvas.editor is editor and editor.toPlainText() == "尚未提交的正文草稿"
+    assert window.canvas.wheel_mode == "zoom"
+    assert not window._status_controls.buttons["fit"].isEnabled()
+    assert not window._status_controls.buttons["center"].isEnabled()
     window.show_settings_panel()
     assert window.canvas.is_editing and window.engine.document == before
     assert not window.panels.settings.direction.isEnabled()
@@ -185,9 +187,9 @@ def test_settings_sidebar_readonly_and_inline_edit_preserve_document(window, qtb
     assert not window.panels.settings.vertical.isEnabled()
     assert all(not button.isEnabled() for button in window.panels.settings.preset_buttons)
     assert not window.panels.settings.branch.isEnabled() and not window.panels.settings.theme.isEnabled()
-    window.show_settings_menu()
-    assert menu.actions()[0].isEnabled()
-    menu.close()
+    assert wheel.isEnabled()
+    qtbot.mouseClick(wheel, Qt.MouseButton.LeftButton)
+    assert window.canvas.wheel_mode == "scroll"
     window.canvas.set_editable(True)
     assert window.panels.settings.horizontal.isEnabled()
     assert window.engine.document == before and window.engine.revision == revision
@@ -296,27 +298,32 @@ def test_layout_sidebar_restores_geometry_and_default_layout(window, qtbot):
         restored.close()
 
 
-def test_settings_menu_survives_temporary_main_menu_deletion(window):
-    """临时主菜单释放后，借用的设置菜单仍可同步并提交布局与滚轮修改。"""
+def test_status_controls_survive_temporary_main_menu_deletion(window, qtbot):
+    """临时主菜单释放后，常驻状态栏仍可切换滚轮，侧栏仍可提交布局。"""
     temporary = window.main_menu()
     temporary.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    window.show_settings_menu()
-    wheel = window.settings_menu
-    next(action for action in wheel.actions() if action.data() == "zoom").trigger()
+    qtbot.mouseClick(window._status_controls.buttons["wheel_mode"], Qt.MouseButton.LeftButton)
     assert window.canvas.wheel_mode == "zoom"
     window.panels.settings.horizontal.setValue(80)
     window.panels.flush_pending_edits()
     assert resolve_tree_spacing(window.engine.document.layout) == (80, 22)
 
 
-def test_menu_wheel_preference_survives_restart_without_document_changes(window, qtbot):
-    """通过菜单改变本机滚轮偏好，重启后恢复但不写入文档和撤销历史。"""
+def test_status_wheel_preference_survives_restart_without_document_changes(window, qtbot):
+    """按钮改变本机滚轮偏好，重启后恢复但不写入文档和撤销历史。"""
     before, revision = window.engine.document, window.engine.revision
-    window.show_settings_menu()
-    wheel = window.settings_menu
-    next(action for action in wheel.actions() if action.data() == "zoom").trigger()
-    window.settings_menu.close()
+    wheel = window._status_controls.buttons["wheel_mode"]
+    initial_icon = wheel.icon().cacheKey()
+    for mode, current, following in (("zoom", "缩放", "上下滚动"), ("scroll", "上下滚动", "缩放"),
+                                     ("zoom", "缩放", "上下滚动")):
+        qtbot.mouseClick(wheel, Qt.MouseButton.LeftButton)
+        assert window.canvas.wheel_mode == mode
+        assert f"滚轮行为：{current}" in wheel.toolTip() and f"点击切换为{following}" in wheel.toolTip()
+        assert "Ctrl＋滚轮始终缩放" in wheel.toolTip()
+        assert not wheel.isCheckable() and not wheel.isChecked() and wheel.menu() is None
+        assert QApplication.activePopupWidget() is None
+    assert wheel.icon().cacheKey() != initial_icon
     assert window.canvas.wheel_mode == "zoom"
     assert window.engine.document == before and window.engine.revision == revision
     assert not window.files.is_dirty
@@ -326,23 +333,36 @@ def test_menu_wheel_preference_survives_restart_without_document_changes(window,
     try:
         assert restored.new_document(window.manager.storage_dir / "重启.mindmap")
         assert restored.canvas.wheel_mode == "zoom" and not restored.files.is_dirty
+        assert "滚轮行为：缩放" in restored._status_controls.buttons["wheel_mode"].toolTip()
         assert "settings" not in restored.manager.specs
     finally:
         restored.close()
 
 
-def test_empty_settings_menu_keeps_disabled_wheel_and_application_options(window):
-    """关闭全部导图后只禁用滚轮占位，应用主题和布局选项仍可使用。"""
+def test_empty_status_controls_are_disabled_and_application_options_remain(window, qtbot, tmp_path):
+    """关闭全部导图后按钮原位禁用；应用设置可用，新建后重新绑定新的画布。"""
+    controls = window._status_controls
+    previous = window.canvas
+    old_icon = controls.buttons["wheel_mode"].icon().cacheKey()
     assert window.manager.close_document(window.active_session.id)
     menu = window.appearance_menu()
-    wheel = menu.actions()[0]
-    assert wheel.text() == "滚轮行为" and wheel.menu() is window.settings_menu
-    assert not wheel.isEnabled() and "没有打开" in wheel.toolTip()
+    assert controls.isVisible() and all(not button.isEnabled() for button in controls.buttons.values())
+    assert all("没有打开" in button.toolTip() for button in controls.buttons.values())
+    assert all(not button.actions() for button in controls.buttons.values())
+    assert not any(action.text().startswith("滚轮") for action in menu.actions())
     assert next(action for action in menu.actions() if action.text() == "深色").isEnabled()
     assert not window.settings_action.isEnabled()
     assert not any(action.text().startswith(("导图设置", "导图布局", "连接线样式", "导图主题"))
                    for action in menu.actions())
     menu.deleteLater()
+    # 关闭后的旧画布即使尚未完成延迟销毁，也不能再更新按钮或成为点击目标。
+    previous.action("wheel_mode").setIcon(QIcon())
+    assert controls.buttons["wheel_mode"].icon().cacheKey() == old_icon
+    assert window.new_document(tmp_path / "重新绑定.mindmap")
+    assert controls.buttons["fit"].defaultAction() is window.canvas.action("fit")
+    assert all(button.isEnabled() for button in controls.buttons.values())
+    qtbot.mouseClick(controls.buttons["wheel_mode"], Qt.MouseButton.LeftButton)
+    assert window.canvas.wheel_mode == "zoom"
 
 
 def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
@@ -598,44 +618,108 @@ def test_integrated_history_actions_keep_buttons_shortcuts_and_readonly(window, 
     group, _ = window.host.editor.find_token(window.active_session.id)
     assert group.cornerWidget().actions() == [current.action("undo"), current.action("redo")]
     assert current is not canvas and not window.engine.can_undo
-    assert current._view_controls.isVisible() and current.toolbar.isHidden()
+    assert current._view_controls is None and current.toolbar.isHidden()
+    assert window._status_controls.buttons["fit"].defaultAction() is current.action("fit")
 
 
-def test_canvas_controls_follow_viewport_theme_and_stay_out_of_export(window, qtbot, tmp_path):
-    """浮条固定在可见视口中，窗口与侧栏变化后仍可点按，界面外观不进入图形导出。"""
+def test_status_controls_follow_window_theme_and_stay_out_of_export(window, qtbot, tmp_path):
+    """状态栏按钮随窗口调整，消息不会覆盖入口，主题与紧凑模式不影响图形导出。"""
     canvas = window.canvas
-    controls = canvas._view_controls
-    buttons = {button.defaultAction(): button for button in controls.findChildren(QToolButton)}
-    assert set(buttons) == {canvas.action("fit"), canvas.action("center")}
+    controls = window._status_controls
+    buttons = controls.buttons
+    assert canvas._view_controls is None
+    assert buttons["fit"].defaultAction() is canvas.action("fit")
+    assert buttons["center"].defaultAction() is canvas.action("center")
+    version = next(label for label in window.status.findChildren(QLabel) if "思维导图工作台 ·" in label.text())
     document, revision = window.engine.document, window.engine.revision
     for size in ((1200, 800), (860, 540), (1440, 900)):
         window.resize(*size)
         QApplication.processEvents()
-        viewport = canvas.view.viewport()
-        position = controls.pos()
-        assert controls.isVisible() and viewport.geometry().contains(controls.geometry())
-        assert viewport.geometry().right() - controls.geometry().right() == 16
-        assert viewport.geometry().bottom() - controls.geometry().bottom() == 16
+        assert controls.isVisible() and window.status.rect().contains(controls.geometry())
+        assert controls.x() >= version.geometry().right()
         # 文档正文从标签栏下方直接开始，隐藏工具栏没有残留高度。
         assert canvas._view_card.mapTo(canvas, QPoint(0, 0)).y() == 0
     canvas.view.zoom(1.3)
-    qtbot.mouseClick(buttons[canvas.action("fit")], Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(buttons["fit"], Qt.MouseButton.LeftButton)
     scale = canvas.view.transform().m11()
     canvas.view.centerOn(500, 500)
-    assert controls.pos() == position
-    qtbot.mouseClick(buttons[canvas.action("center")], Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(buttons["center"], Qt.MouseButton.LeftButton)
     assert canvas.view.transform().m11() == scale
+    root = QPointF(*canvas.layout_result.nodes[canvas.engine.root_id].center)
+    visible_center = canvas.view.mapToScene(canvas.view.viewport().rect()).boundingRect().center()
+    assert (visible_center - root).manhattanLength() < 2 / scale
     for theme in ("light", "dark"):
         window.manager.set_theme(theme)
         QApplication.processEvents()
         assert controls._colors == canvas._ui_colors
         assert window.engine.document == document and window.engine.revision == revision
-        visible, hidden = tmp_path / f"{theme}-显示浮条.png", tmp_path / f"{theme}-隐藏浮条.png"
+        visible, hidden = tmp_path / f"{theme}-显示按钮.png", tmp_path / f"{theme}-隐藏按钮.png"
         canvas.export(visible)
         controls.hide()
         canvas.export(hidden)
         assert QImage(str(visible)) == QImage(str(hidden))
         controls.show()
+        for compact in (True, False):
+            window.manager.set_option("compact", compact)
+            window.show_status_message("状态消息" * 100)
+            QApplication.processEvents()
+            assert window.status.height() == (24 if compact else 28)
+            assert window.status.rect().contains(controls.geometry())
+            assert all(button.isVisible() and controls.rect().contains(button.geometry())
+                       for button in buttons.values())
+            assert window.engine.document == document and window.engine.revision == revision
+
+
+def test_status_controls_route_buttons_and_shortcuts_to_active_split(window, qtbot, tmp_path, monkeypatch):
+    """分屏与标签反复切换后按钮只执行一次活动会话动作，原快捷键仍在画布生效。"""
+    first = window.active_session
+    assert window.new_document(tmp_path / "分屏按钮.mindmap")
+    second = window.active_session
+    window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
+    fit_calls, center_calls = [], []
+    for session in (first, second):
+        monkeypatch.setattr(session.canvas, "fit_to_view", lambda selected=session: fit_calls.append(selected.id))
+        monkeypatch.setattr(session.canvas, "center_root", lambda selected=session: center_calls.append(selected.id))
+    controls = window._status_controls
+    window.activateWindow()
+    expected = []
+    for session in (first, second, first):
+        session.canvas.view.setFocus()
+        qtbot.waitUntil(lambda: window.active_session is session)
+        for key in ("fit", "center"):
+            assert controls.buttons[key].actions() == [session.canvas.action(key)]
+            qtbot.mouseClick(controls.buttons[key], Qt.MouseButton.LeftButton)
+        qtbot.keyClick(session.canvas.view, Qt.Key.Key_0, Qt.KeyboardModifier.ControlModifier)
+        qtbot.keyClick(session.canvas.view, Qt.Key.Key_Home)
+        expected.extend([session.id, session.id])
+        assert fit_calls == center_calls == expected
+    qtbot.mouseClick(controls.buttons["wheel_mode"], Qt.MouseButton.LeftButton)
+    assert first.canvas.wheel_mode == second.canvas.wheel_mode == "zoom"
+    assert window.preferences.value("view/wheel_mode") == "zoom"
+    assert all(not item.files.is_dirty and not item.engine.can_undo for item in (first, second))
+
+
+def test_status_wheel_button_changes_real_wheel_events(window, qtbot):
+    """真实滚轮事件跟随按钮模式，Ctrl 覆盖普通滚动且不改变文档状态。"""
+    canvas, wheel = window.canvas, window._status_controls.buttons["wheel_mode"]
+    view = canvas.view
+    before, revision = canvas.engine.document, canvas.engine.revision
+    for mode, ctrl in (("scroll", False), ("scroll", True), ("zoom", False), ("scroll", False)):
+        if canvas.wheel_mode != mode:
+            qtbot.mouseClick(wheel, Qt.MouseButton.LeftButton)
+        position = view.viewport().rect().center()
+        scale, offset = view.transform().m11(), view.verticalScrollBar().value()
+        event = QWheelEvent(QPointF(position), QPointF(view.viewport().mapToGlobal(position)),
+                            QPoint(), QPoint(0, 120), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.ControlModifier if ctrl else Qt.KeyboardModifier.NoModifier,
+                            Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(view.viewport(), event)
+        if mode == "zoom" or ctrl:
+            assert view.transform().m11() == pytest.approx(scale * 1.15)
+        else:
+            assert view.transform().m11() == scale and view.verticalScrollBar().value() < offset
+    assert canvas.engine.document == before and canvas.engine.revision == revision
+    assert not window.files.is_dirty
 
 
 @pytest.mark.parametrize(("format_id", "label"), [("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档")])

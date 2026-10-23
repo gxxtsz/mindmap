@@ -34,6 +34,9 @@ def child(scale, platform):
             window.show()
             app.processEvents()
             assert window.canvas is None and len(window.sessions) == 0
+            welcome_controls_disabled = all(
+                button.isVisible() and not button.isEnabled() for button in window._status_controls.buttons.values()
+            )
             assert window.grab().save(str(output / (name + "-welcome.png")))
             assert window.new_document(data_dir / (name + "-主导图.mindmap"))
             primary = window.active_session
@@ -55,7 +58,7 @@ def child(scale, platform):
             window.canvas.fit_to_view()
             app.processEvents()
             group, _ = window.host.editor.find_token(primary.id)
-            controls = window.canvas._view_controls
+            controls = window._status_controls
             # 从实际视口像素检查左右顶部接缝；嵌入画布应填满矩形，不再露出内层圆角。
             viewport_image = window.canvas.view.viewport().grab().toImage()
             canvas_color = window.manager.theme.color("editor-bg")
@@ -76,11 +79,17 @@ def child(scale, platform):
                     for x in (0, viewport_image.width() - 1)
                 ),
                 "画布与外壳有层次": canvas_color != window.manager.theme.color("main-window-bg"),
-                "画布导航浮条": controls.isVisible()
-                and window.canvas.view.viewport().geometry().contains(controls.geometry()),
+                "空文档按钮原位禁用": welcome_controls_disabled,
+                "画布没有导航浮条": all(session.canvas._view_controls is None for session in (primary, secondary)),
+                "状态栏导航入口": controls.isVisible() and window.status.rect().contains(controls.geometry())
+                and list(controls.buttons) == ["fit", "center", "wheel_mode"],
             }
             # 真实菜单保留固定原生打开和保存；扩展编解码器不能增加文件格式入口。
             main_menu = window.main_menu()
+            view_menu = next(action.menu() for action in main_menu.actions() if action.text() == "视图")
+            checks["视图菜单无重复入口"] = not any(
+                action.text() in {"适应窗口", "回到中心"} for action in view_menu.actions()
+            )
             file_menu = main_menu.actions()[0].menu()
             checks["仅打开原生导图"] = (file_menu.actions()[1].text() == "打开…"
                 and window.files.format_filters("open") == "思维导图 (*.mindmap)")
@@ -206,27 +215,49 @@ def child(scale, platform):
             checks["大纲所有层"] = outline.isExpanded(outline.tree_model.index_for(first))
             outline.set_display_depth(2)
             assert window.grab().save(str(output / (name + ".png")))
-            # 设置菜单直接承载滚轮子菜单，导图布局和外观只从侧栏进入。
+            # 设置菜单只保留应用选项；滚轮直接在状态栏切换，导图布局和外观从侧栏进入。
             settings_menu = window.appearance_menu()
             settings_menu.popup(window.title_bar.menu.mapToGlobal(QPoint(0, window.title_bar.menu.height())))
             app.processEvents()
-            checks["滚轮直接位于设置顶部"] = (
-                settings_menu.actions()[0].menu() is window.settings_menu
-                and settings_menu.actions()[0].text().startswith("滚轮行为：")
-                and not any(action.text().startswith(("导图设置", "导图布局", "连接线样式", "导图主题"))
+            checks["设置菜单无重复入口"] = (
+                settings_menu.actions()[0].text() == "浅色"
+                and not any(action.text().startswith(("滚轮", "导图设置", "导图布局", "连接线样式", "导图主题"))
                             for action in settings_menu.actions())
             )
             assert settings_menu.grab().save(str(output / (name + "-settings-menu.png")))
-            settings_menu.setActiveAction(settings_menu.actions()[0])
-            QTest.keyClick(settings_menu, Qt.Key.Key_Right)
-            app.processEvents()
-            checks["滚轮仅含两个选项"] = window.settings_menu.isVisible() and [
-                action.text() for action in window.settings_menu.actions()
-            ] == ["上下滚动", "缩放"]
-            assert window.settings_menu.grab().save(str(output / (name + "-wheel-menu.png")))
-            window.settings_menu.close()
             settings_menu.close()
             settings_menu.deleteLater()
+            # 对每个主题及实际显示倍率检查两个图标状态、紧凑布局及消息覆盖边界。
+            wheel_button = controls.buttons["wheel_mode"]
+            document, revision = window.engine.document, window.engine.revision
+            initial_icon = wheel_button.icon().cacheKey()
+            toggles = []
+            for mode in ("zoom", "scroll"):
+                QTest.mouseClick(wheel_button, Qt.MouseButton.LeftButton)
+                app.processEvents()
+                toggles.append(window.canvas.wheel_mode == secondary.canvas.wheel_mode == mode
+                               and wheel_button.menu() is None and not wheel_button.isCheckable()
+                               and not wheel_button.isChecked() and QApplication.activePopupWidget() is None)
+                assert window.status.grab().save(str(output / f"{name}-status-{mode}.png"))
+                if mode == "zoom":
+                    checks["滚轮通过图标表示模式"] = wheel_button.icon().cacheKey() != initial_icon
+            checks["滚轮单击双向切换"] = all(toggles)
+            checks["切换滚轮不改文档"] = window.engine.document == document and window.engine.revision == revision
+            version_label = next(label for label in window.status.findChildren(QLabel)
+                                 if "思维导图工作台 ·" in label.text())
+            for compact in (True, False):
+                window.manager.set_option("compact", compact)
+                window.show_status_message("验证临时状态消息不会覆盖右侧按钮。" * 30)
+                app.processEvents()
+                checks[f"状态栏{'紧凑' if compact else '普通'}模式无裁切"] = (
+                    window.status.height() == (24 if compact else 28)
+                    and window.status.rect().contains(controls.geometry())
+                    and controls.x() > version_label.geometry().right()
+                    and all(button.isVisible() and controls.rect().contains(button.geometry())
+                            for button in controls.buttons.values())
+                )
+                assert window.status.grab().save(str(output / f"{name}-status-{'compact' if compact else 'normal'}.png"))
+            window.status.clearMessage()
             window.activateWindow()
             window.canvas.view.setFocus()
             QTest.keyClick(window.canvas.view, Qt.Key.Key_3, Qt.KeyboardModifier.AltModifier)
