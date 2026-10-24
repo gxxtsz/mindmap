@@ -15,7 +15,8 @@ def child(scale):
     """每档缩放启动独立 Qt 进程，截图和报告不修改用户导图。"""
     from mindmap_formats import load_document
     from mindmap_workbench.shell_adapter import build_window
-    from PySide6.QtCore import QTimer
+    from PySide6.QtCore import QPoint, QTimer
+    from PySide6.QtGui import QContextMenuEvent, QPainter
     from PySide6.QtWidgets import QApplication, QDialog, QTreeWidget
 
     app = QApplication([])
@@ -54,7 +55,27 @@ def child(scale):
                     engine.set_submap_favorite(page, True)
                     canvas.show_inspiration(a)
                     app.processEvents()
+                    panel = window.active_session.inspiration
+                    viewport = panel.list_view.viewport()
+                    point = panel.list_view.visualItemRect(panel.list_view.item(1)).center()
+                    event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, viewport.mapToGlobal(point))
+                    QApplication.sendEvent(viewport, event)
+                    app.processEvents()
+                    menu = panel._menu
+                    menu_valid = (event.isAccepted() and menu.isVisible()
+                                  and [action.text() for action in menu.actions()] ==
+                                  ["加入导图…", "", "删除想法"] and menu.defaultAction() is None
+                                  and panel._menu_root == b and canvas.current_inspiration_root_id == a)
+                    # 菜单是独立顶层控件；按真实屏幕相对位置合入窗口截图，覆盖各档缩放和主题。
+                    preview = window.grab()
+                    painter = QPainter(preview)
+                    painter.drawPixmap(menu.mapToGlobal(QPoint()) - window.mapToGlobal(QPoint()), menu.grab())
+                    painter.end()
+                    assert preview.save(str(output / f"{label}-context-menu.png"))
+                    panel.close_popups()
+                    app.processEvents()
                     checks = {
+                        "列表右键独立菜单且不提前切换想法": menu_valid,
                         "默认只显示当前想法": a in canvas.node_items and b not in canvas.node_items,
                         "单想法根在展示原点": canvas.layout_result.nodes[a].x == 0,
                         "侧栏单选列出全部想法": window.active_session.inspiration.list_view.count() == 2,

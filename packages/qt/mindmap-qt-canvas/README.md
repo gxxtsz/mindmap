@@ -53,14 +53,24 @@ finally:
 `add_inspiration(position=None)` 新建并编辑主题；
 `move_selected_to_inspiration()` 整条移出，`attach_selected_inspirations()` 选择父主题接入，
 `group_selected_inspirations()` 新建共同父主题。所有入口检查只读与输入法状态。
-想法画布内的空白落点不拆分、不自由摆放根节点；Esc 取消，明确节点落点松手一次提交。
+想法画布内的空白落点不拆分、不自由摆放根节点；Esc 取消，有效结构落点松手一次提交。
 跨区提交重载当前页成员读模型，随行但未改字段的子孙不会残留在旧画布或大纲中。
 
 跨控件拖放使用 `create_branch_drag(node_ids=None, origin="canvas")` 生成本文件标识载荷，
 侧栏单根来源使用 `origin="sidebar"`；`can_detach_branch_drag()` 只读验收，
 `detach_branch_drag()` 在一次事务中拆出分支并留在原画布，成功发出 `inspirations_detached(list)`。
 `can_receive_branch_drag(mime, parent_id=None)` 检查当前目标资格，
-`receive_branch_drag(mime, parent_id)` 独立试算后追加为子主题并保持目标画布。
+`receive_branch_drag(mime, parent_id, *, index=None, direction=None)` 独立试算后迁入目标父主题，
+`index` 是移除移动根后的子节点插入下标，省略时追加；`direction` 可指定双向根节点的左右分支。
+两个关键字均省略时保留原有追加行为，非法位置或方向抛出中文 `MindMapError`；
+有效操作的迁入、排序、方向与展开作为一条事务提交，保持目标画布并选中迁入分支。
+原生拖入与内部鼠标拖动共用控制器、落点解析器和影像图层：正文接为子主题、外缘及同级间隙插入，
+支持双向根节点左右落点和向下布局的左右插入；子导图入口正文拒绝接入，但可作为同级参照。
+共用24／36逻辑像素吸附、半透明源影像、圆角高亮、预连接、插入短条、文字气泡和边缘滚动。
+源影像进入时建立并缓存，仅绘制当前视口可见的节点和连线，悬停不改文档或重算布局；
+成功放下才展开目标并播放140毫秒重排，
+超过500个可见节点直接显示最终布局。未提交的预览与已提交的动画分别清理，原生拖放结束通知不提前停止动画。
+节点自身样式及附属内容保持，显示使用目标页布局和主题；详情页和跨文件拖入继续拒绝，空白无有效落点不提交。
 所有接口均检查会话、文档代次、修订号、只读、输入法及页面归属；无效载荷不提交，
 正式异常由宿主通过 `call()` 统一提示。`inspiration_sidebar_requested` 请求宿主打开侧栏。
 面板只通过这些公开接口连接，不导入画布私有对象。

@@ -5,8 +5,8 @@ from time import monotonic
 from weakref import ref
 
 from PySide6.QtCore import QEvent, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QApplication, QGraphicsRectItem, QGraphicsSimpleTextItem, QGraphicsView
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import QApplication, QGraphicsView
 from shiboken6 import isValid
 
 from .dragging import NodeDragController
@@ -52,8 +52,6 @@ class MindMapView(QGraphicsView):
         self._fold_pressed = False
         self._wheel_scroll_remainder = 0.0
         self._hidden_center = None
-        self._branch_drop_preview = None
-        self._branch_drop_label = None
         self.press_node = None
         self.drag_origin = QPointF()
         self.node_drag = NodeDragController(self)
@@ -86,69 +84,41 @@ class MindMapView(QGraphicsView):
         if (
             event.type() == QEvent.Type.ShortcutOverride
             and event.key() == Qt.Key.Key_Escape
-            and (self.press_node is not None or self.image_resize.active)
+            and (self.press_node is not None or self.image_resize.active or self.node_drag.external_active)
         ):
             event.accept()
             return True
         return super().event(event)
 
-    def _clear_branch_drop_preview(self):
-        for name in ("_branch_drop_preview", "_branch_drop_label"):
-            item = getattr(self, name, None)
-            if item is not None:
-                self.scene().removeItem(item)
-                setattr(self, name, None)
-
-    def _branch_drop_parent(self, position):
-        # 提示层位于节点上方，命中时跳过它，避免预览自身遮挡下一帧目标。
-        return next((item.node.id for item in self.items(position)
-                     if isinstance(item, NodeItem)), None)
-
-    def _show_branch_drop_preview(self, parent_id):
-        self._clear_branch_drop_preview()
-        if parent_id is None:
-            return
-        rect = self.owner.node_items[parent_id].sceneBoundingRect().adjusted(-4, -4, 4, 4)
-        color = QColor(self.owner._document.theme.accent)
-        self._branch_drop_preview = QGraphicsRectItem(rect)
-        self._branch_drop_preview.setPen(QPen(color, 2 / self.transform().m11()))
-        self._branch_drop_preview.setZValue(100000)
-        self._branch_drop_preview.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self.scene().addItem(self._branch_drop_preview)
-        label = QGraphicsSimpleTextItem("＋ 作为子主题")
-        label.setBrush(color)
-        label.setScale(1 / self.transform().m11())
-        label.setPos(rect.left(), rect.bottom() + 6 / self.transform().m11())
-        label.setZValue(100001)
-        label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self._branch_drop_label = label
-        self.scene().addItem(label)
-
     def dragEnterEvent(self, event):
-        if self.owner.can_receive_branch_drag(event.mimeData()):
+        """为有效原生拖入建立共用预览，空白处暂时接受进入以允许继续寻找落点。"""
+        accepted = self.owner.call(lambda: self.node_drag.begin_external(
+            event.mimeData(), event.position().toPoint()))
+        if accepted:
             event.setDropAction(Qt.DropAction.MoveAction)
             event.accept()
         else:
+            self.node_drag.cancel_external()
             event.ignore()
 
     def dragMoveEvent(self, event):
-        parent = self._branch_drop_parent(event.position().toPoint())
-        if parent is not None and self.owner.can_receive_branch_drag(event.mimeData(), parent):
-            self._show_branch_drop_preview(parent)
+        """正文、同级间隙和吸附均交给节点控制器，预览不参与下一帧命中。"""
+        if self.node_drag.update_external(event.mimeData(), event.position().toPoint()):
             event.setDropAction(Qt.DropAction.MoveAction)
             event.accept()
         else:
-            self._clear_branch_drop_preview()
             event.ignore()
 
     def dragLeaveEvent(self, event):
-        self._clear_branch_drop_preview()
+        self.node_drag.cancel_external()
         event.accept()
 
     def dropEvent(self, event):
-        parent = self._branch_drop_parent(event.position().toPoint())
-        self._clear_branch_drop_preview()
-        if parent is not None and self.owner.call(lambda: self.owner.receive_branch_drag(event.mimeData(), parent)):
+        """释放时复查落点后再提交；异常和取消统一清理未提交的影像及滚动。"""
+        changed = self.owner.call(lambda: self.node_drag.drop_external(
+            event.mimeData(), event.position().toPoint()))
+        self.node_drag.cancel_external()
+        if changed:
             event.setDropAction(Qt.DropAction.MoveAction)
             event.accept()
         else:
@@ -390,7 +360,6 @@ class MindMapView(QGraphicsView):
         self._set_hovered_node(None, immediate=True)
         self._expire_fold_hovers(clear=True)
         self.node_drag.cancel()
-        self._clear_branch_drop_preview()
         self.image_resize.cancel()
         grabber = self.scene().mouseGrabberItem()
         if isinstance(grabber, NodeItem):
@@ -615,7 +584,8 @@ class MindMapView(QGraphicsView):
         self.owner.context_menu(global_position)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape and (self.press_node is not None or self.image_resize.active):
+        if event.key() == Qt.Key.Key_Escape and (
+                self.press_node is not None or self.image_resize.active or self.node_drag.external_active):
             self.cancel_interaction()
             event.accept()
             return

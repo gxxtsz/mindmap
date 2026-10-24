@@ -66,6 +66,8 @@ _SVG_BODIES = {
     ),
     "panel_menu": '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
     "panel_hide": '<path d="M5 12h14"/>',
+    # 标题栏的新建入口使用纯加号，与相邻菜单、收起按钮保持相同线宽。
+    "plus": '<path d="M12 4v16M4 12h16"/>',
     # 日志标题栏复用同一组线条、禁用及高 DPI 状态；图形分别表示复制全部和清空。
     "copy": '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
     "clear": '<path d="M4 6h16M9 6V4h6v2M6 6l1 14h10l1-14M10 10v6m4-6v6"/>',

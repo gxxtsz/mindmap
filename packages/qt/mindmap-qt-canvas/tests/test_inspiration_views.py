@@ -102,7 +102,8 @@ def test_sidebar_drag_combines_then_undo_restores_exact_view(canvas):
     move = QDragMoveEvent(point, Qt.DropAction.MoveAction, mime,
                           Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
     QApplication.sendEvent(canvas.view.viewport(), move)
-    assert move.isAccepted() and canvas.view._branch_drop_preview is not None
+    assert move.isAccepted() and canvas.view.node_drag.external_active
+    assert canvas.view.node_drag.target.position == "inside"
     assert canvas.engine.document == original and canvas.engine.revision == revision
     drop = QDropEvent(QPointF(point), Qt.DropAction.MoveAction, mime,
                       Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)

@@ -10,8 +10,17 @@ from collections import ChainMap, defaultdict
 from dataclasses import dataclass, replace
 from math import ceil, floor, hypot
 
-from mindmap_core import BranchPath, Curve, LayoutResult, MindMapDocument, MindMapEngine, Rect
-from mindmap_qt_render.rendering import paint_branch
+from mindmap_core import (
+    BranchPath,
+    Curve,
+    LayoutResult,
+    MindMapDocument,
+    MindMapEngine,
+    MindMapForestView,
+    Rect,
+)
+from mindmap_qt_render.rendering import branch_path, paint_branch
+from mindmap_qt_ui.branch_drag import encode_branch_drag
 from PySide6.QtCore import (
     QEasingCurve,
     QElapsedTimer,
@@ -264,7 +273,12 @@ class _MovingSubtrees:
 class _DropResolver:
     """只读落点计算，缓存父索引、源子树和稳定几何，不读取场景中的预览图元。"""
 
-    def __init__(self, document, layout, selection, focus_id):
+    def __init__(self, document, layout, selection, focus_id, *, moving_roots=None):
+        """冻结目标页和源根；moving_roots 供原生拖放传入已归并的跨展示树标识。
+
+        目标文档中不存在的根只用于生成落点提案，不加入目标树或参与命中几何。
+        参数均为只读借用；普通鼠标拖动仍从 selection 按树序解析移动根。
+        """
         self.document = document
         self.layout = layout
         self.geometry = getattr(layout, "geometry", None)
@@ -273,7 +287,9 @@ class _DropResolver:
         selected = set(selection)
         # 显式遍历并跳过已选祖先的后代，同时保留文档先序顺序。
         roots = []
-        if self._virtual:
+        if moving_roots is not None:
+            roots = list(moving_roots)
+        elif self._virtual:
             for key in selected:
                 ancestor = self.parents.get(key)
                 while ancestor is not None and ancestor not in selected:
@@ -291,7 +307,7 @@ class _DropResolver:
                     stack.extend(reversed(document.nodes[key].children))
         self.roots = tuple(roots)
         self.moving = (_MovingSubtrees(roots, self.parents) if self._virtual else
-                       {key for root in roots for key in document.descendants(root)})
+                       {key for root in roots if root in document.nodes for key in document.descendants(root)})
         self.center_id = focus_id or document.root_id
         self.valid = bool(roots) and (getattr(document, "kind", None) == "inspiration"
                                      or not {document.root_id, self.center_id}.intersection(roots))
@@ -662,12 +678,19 @@ class _DragLayer(QGraphicsItem):
         # 吸附后降低影像浓度，避免源分支遮住正在选择的目标文字。
         painter.setOpacity(0.45 if control.target else 0.72)
         painter.translate(control._offset)
-        for branch in control._ghost_branches:
-            paint_branch(painter, branch)
+        # 侧栏源树没有原画布的视口裁剪，预先缓存绘制边界，只画当前视口中的影像。
+        visible = control.view.mapToScene(control.view.viewport().rect()).boundingRect().translated(-control._offset)
+        padding = 4 / control.view.transform().m11()
+        visible.adjust(-padding, -padding, padding, padding)
+        for branch, bounds in zip(control._ghost_branches, control._ghost_branch_bounds):
+            if bounds.intersects(visible):
+                paint_branch(painter, branch)
         for key, rect in control._ghost_nodes.items():
+            if not control._ghost_node_bounds[key].intersects(visible):
+                continue
             painter.save()
             painter.translate(rect.x, rect.y)
-            control._base.visuals[key].paint(painter, control._base.document.nodes[key], controls=False)
+            control._source.visuals[key].paint(painter, control._source.document.nodes[key], controls=False)
             painter.restore()
         painter.restore()
         target = control.target
@@ -689,7 +712,9 @@ class _DragLayer(QGraphicsItem):
         # 正文始终清晰；预览不绘制交互按钮，也不移动或改写实际节点图元。
         painter.save()
         painter.translate(rect.x, rect.y)
-        control._base.visuals[target.reference].paint(
+        # 虚拟画布滚动后可能命中起点视口之外的节点，复用正式测量，避免拖动中重新排版。
+        visual = control._base.visuals.get(target.reference) or control.owner._visuals[target.reference]
+        visual.paint(
             painter, control._base.document.nodes[target.reference], controls=False
         )
         painter.restore()
@@ -746,7 +771,7 @@ class _DragLayer(QGraphicsItem):
 
 
 class NodeDragController(QObject):
-    """画布内部的单次拖动状态机；结束和取消都幂等，所有定时器由视图拥有。"""
+    """内部鼠标及跨控件原生拖放共用的状态机，所有预览和定时器由视图拥有。"""
 
     def __init__(self, view):
         super().__init__(view)
@@ -755,6 +780,9 @@ class NodeDragController(QObject):
         self.ghost = None
         self.target = None
         self._base = None
+        self._source = None
+        self._external_mime = None
+        self._external_forbidden = set()
         self._resolver = None
         self._reflow = None
         self._pointer = QPoint()
@@ -780,6 +808,11 @@ class NodeDragController(QObject):
     def active(self):
         return self.ghost is not None
 
+    @property
+    def external_active(self):
+        """是否存在尚未提交的原生拖入预览；已提交的重排动画不计入。"""
+        return self.active and self._external_mime is not None
+
     def begin(self, origin):
         """越过系统阈值后冻结源几何与选择；只读、根节点和聚焦中心在此再次校验。"""
         if not self.owner.editable or self.owner.editor is not None or self.owner._disposed:
@@ -799,29 +832,138 @@ class NodeDragController(QObject):
         self.owner._cancel_branch_menu()
         # 正式图元已经持有测量结果，拖动影像只需要可见节点，无需再次测量整图。
         visuals = {key: item.visual for key, item in self.owner.node_items.items()}
-        self._base = _DragSnapshot(document, visuals, self.owner.layout_result)
-        self._selection = selection
-        self._resolver = resolver
-        self._resolver.rebuild(self._base.layout.nodes, scale=self.view.transform().m11())
-        self._origin = QPointF(origin)
-        self._last_scene_point = self._last_scale = None
-        self._ghost_nodes = {
-            key: self._base.layout.nodes[key] for key in self.owner.node_items if key in resolver.moving
+        snapshot = _DragSnapshot(document, visuals, self.owner.layout_result)
+        nodes = {
+            key: snapshot.layout.nodes[key] for key in self.owner.node_items if key in resolver.moving
         }
-        self._ghost_branches = [
+        branches = [
             _shift_branch(item._branch, (item.pos().x(), item.pos().y()), (item.pos().x(), item.pos().y()))
             for key, item in self.owner.branch_items.items()
             if key in resolver.moving and resolver.parents.get(key) in resolver.moving
         ]
+        self._start_preview(snapshot, snapshot, resolver, selection, origin, nodes, branches)
+        return True
+
+    def _start_preview(self, target, source, resolver, selection, origin, nodes, branches):
+        """用独立的源影像与冻结目标建立共用绘制层，不执行布局或修改文档。"""
+        self._base, self._source = target, source
+        self._selection, self._resolver = selection, resolver
+        resolver.rebuild(target.layout.nodes, scale=self.view.transform().m11())
+        self._origin = QPointF(origin)
+        self._last_scene_point = self._last_scale = None
+        self._ghost_nodes, self._ghost_branches = nodes, branches
+        self._ghost_node_bounds = {key: _qrect(rect) for key, rect in nodes.items()}
+        # 水平、竖直直线的原始包围框可能宽或高为零，扩展后才能正确参与可见性相交判断。
+        self._ghost_branch_bounds = [branch_path(branch).boundingRect().adjusted(-4, -4, 4, 4)
+                                     for branch in branches]
         self._ghost_bounds = QRectF()
-        for rect in self._ghost_nodes.values():
-            self._ghost_bounds = self._ghost_bounds.united(_qrect(rect))
+        for rect in self._ghost_node_bounds.values():
+            self._ghost_bounds = self._ghost_bounds.united(rect)
         self._offset = QPointF()
         self.ghost = _DragLayer(self)
         self.ghost.sync()
         self.owner.scene.addItem(self.ghost)
         self._dim_sources()
-        return True
+
+    def begin_external(self, mime, position) -> bool:
+        """进入当前视口时建立原生拖放预览，返回是否接受本文件的移动载荷。
+
+        mime 只借用本次调用；控制器复制标识载荷并自行持有，避免原生 QDrag
+        释放数据后仍被滚动定时器访问。源树在进入时测量和布局一次，目标页不动。
+        position 是视口逻辑像素 QPoint；源影像只绘制当前视口可见部分。
+        不切换页面或选择，不运行正式事务；异常由视图交给宿主错误边界。
+        """
+        if not self.owner.can_receive_branch_drag(mime):
+            self.cancel_external()
+            return False
+        data = self.owner._branch_drag_data(mime)
+        self.cancel()
+        self.owner._cancel_branch_menu()
+        context = self.owner.current_page_id, self.owner.current_inspiration_root_id
+        target = _DragSnapshot(self.owner._document,
+                               {key: item.visual for key, item in self.owner.node_items.items()},
+                               self.owner.layout_result)
+        resolver = _DropResolver(target.document, target.layout, (), self.owner.focus_id,
+                                 moving_roots=data.node_ids)
+        if not resolver.valid:
+            return False
+        if all(key in target.document.nodes for key in data.node_ids):
+            source = target
+            nodes = {key: target.layout.nodes[key] for key in self.owner.node_items if key in resolver.moving}
+            branches = [
+                _shift_branch(item._branch, (item.pos().x(), item.pos().y()), (item.pos().x(), item.pos().y()))
+                for key, item in self.owner.branch_items.items()
+                if key in resolver.moving and resolver.parents.get(key) in resolver.moving
+            ]
+        else:
+            book = self.owner._book_document
+            # 独立的区域外壳借用节点与资源，配置采用目标画布；不改原坐标、外观或折叠状态。
+            area = replace(book.inspiration, root_ids=list(data.node_ids),
+                           positions={key: (0, index * 80) for index, key in enumerate(data.node_ids)},
+                           layout=target.document.layout, theme=target.document.theme)
+            document = MindMapForestView(
+                area, {key: book.nodes[key] for root in data.node_ids for key in book.descendants(root)},
+                book.assets, book.metadata)
+            # 使用单节点工厂入口，不让独立影像的测量清理当前目标页的正式缓存。
+            visuals = {key: self.owner.factory.visual(node, document.theme, document,
+                                                      is_root=key in document.root_ids)
+                       for key, node in document.nodes.items()}
+            sizes = {key: (visual.width, visual.height) for key, visual in visuals.items()}
+            layout = self.owner.layout_registry.layout(document, sizes)
+            source = _DragSnapshot(document, visuals, layout)
+            nodes, branches = dict(layout.nodes), list(layout.branches.values())
+        # 注入布局可能回调宿主修改内容或导航；旧源影像不能安装到已经改变的目标页。
+        if (context != (self.owner.current_page_id, self.owner.current_inspiration_root_id)
+                or not self.owner.can_receive_branch_drag(mime)):
+            return False
+        forbidden = {key for root in data.node_ids
+                     for key in self.owner._book_document.owned_descendants(root)}
+        anchor = source.layout.nodes[data.node_ids[0]]
+        self._start_preview(target, source, resolver, self.owner.selected_node_ids(),
+                            QPointF(*anchor.center), nodes, branches)
+        self._external_mime = encode_branch_drag(data)
+        self._external_mime.setParent(self)
+        # 内容版本在手势期间冻结，源分支及其附属页面的禁入集合只需计算一次。
+        self._external_forbidden = forbidden
+        self.update(position)
+        return self.external_active
+
+    def update_external(self, mime, position) -> bool:
+        """按原生移动事件更新共用落点，返回当前是否存在可提交的结构目标。
+
+        mime 只借用本次事件，position 为视口逻辑像素 QPoint。载荷失效时取消；
+        单纯无落点则保留影像以便继续移动，故返回 False 不一定代表手势已经结束。
+        """
+        if not self.external_active:
+            return False
+        data = self.owner._branch_drag_data(mime)
+        if data is None or data != self.owner._branch_drag_data(self._external_mime):
+            self.cancel_external()
+            return False
+        self.update(position)
+        return self.target is not None
+
+    def cancel_external(self) -> None:
+        """只取消未提交的原生预览；拖动结束通知不会提前结束已提交的重排动画。"""
+        if self.external_active:
+            self.cancel()
+
+    def drop_external(self, mime, position) -> bool:
+        """按释放位置复查落点，提交跨区域迁入后播放与内部拖动相同的重排动画。"""
+        if not self.update_external(mime, position):
+            self.cancel_external()
+            return False
+        drop = self.finish(position)
+        if drop is None:
+            return False
+        proposal = drop.proposal
+        changed = self.owner.receive_branch_drag(mime, proposal.parent_id,
+                                                 index=proposal.index, direction=proposal.direction)
+        if (changed and not self.owner._disposed and self.owner.editable
+                and self._content_version == drop.content_version + 1
+                and self.owner.focus_id == drop.focus_id):
+            self._start_reflow(drop.start_nodes)
+        return changed
 
     def _dim_sources(self):
         """原位置保留淡色源分支作为参照，其他主题和连线完全保持原貌。"""
@@ -923,6 +1065,9 @@ class NodeDragController(QObject):
         """只更新稳定落点、影像和滚动；悬停不试算文档、不测量、不启动布局动画。"""
         if not self.active:
             return
+        if self.external_active and not self.owner.can_receive_branch_drag(self._external_mime):
+            self.cancel_external()
+            return
         point = self.view.mapToScene(position)
         scale = self.view.transform().m11()
         moved = position != self._pointer or point != self._last_scene_point or scale != self._last_scale
@@ -949,6 +1094,9 @@ class NodeDragController(QObject):
         ):
             candidate = current
         if candidate is not None and not _changes(self._base.document, candidate.proposal):
+            candidate = None
+        if (candidate is not None and self.external_active
+                and candidate.proposal.parent_id in self._external_forbidden):
             candidate = None
         self.target = candidate
         self._offset = self.view.mapToScene(position) - self._origin
@@ -1098,21 +1246,19 @@ class NodeDragController(QObject):
         drop = None
         proposal = self.target.proposal if self.target is not None else None
         if self.active and proposal is not None:
+            starts = {}
+            if len(self._base.layout.nodes) <= ANIMATION_NODE_LIMIT:
+                starts = dict(self._base.layout.nodes)
+                starts.update({key: Rect(rect.x + self._offset.x(), rect.y + self._offset.y(),
+                                          rect.width, rect.height)
+                               for key, rect in self._ghost_nodes.items()})
             drop = _PreparedDrop(
                 proposal,
                 self._base.document,
                 self._selection,
                 self._content_version,
                 self.owner.focus_id,
-                {
-                    key: Rect(
-                        rect.x + (self._offset.x() if key in self._resolver.moving else 0),
-                        rect.y + (self._offset.y() if key in self._resolver.moving else 0),
-                        rect.width,
-                        rect.height,
-                    )
-                    for key, rect in self._base.layout.nodes.items()
-                } if len(self._base.layout.nodes) <= ANIMATION_NODE_LIMIT else {},
+                starts,
             )
         self.cancel()
         return drop
@@ -1211,5 +1357,10 @@ class NodeDragController(QObject):
                 if key in self._resolver.moving:
                     self.owner.branch_items[key].setOpacity(1)
         self._display_nodes = {}
-        self._base = self._resolver = None
+        self._base = self._source = self._resolver = None
         self._ghost_nodes = self._ghost_branches = None
+        self._ghost_node_bounds = self._ghost_branch_bounds = None
+        self._external_forbidden.clear()
+        if self._external_mime is not None:
+            self._external_mime.deleteLater()
+            self._external_mime = None

@@ -1,10 +1,12 @@
 """灵感侧栏与画布之间的标识拖放、独立候选校验和一次性事务。"""
 
-from mindmap_core import MindMapEngine
+from mindmap_core import MindMapEngine, MindMapError
 from mindmap_qt_ui.branch_drag import BranchDrag, decode_branch_drag, encode_branch_drag
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QDrag
 from shiboken6 import isValid
+
+from .dragging import _apply_move, _DropProposal
 
 
 class BranchTransferMixin:
@@ -14,10 +16,11 @@ class BranchTransferMixin:
         """清除跨控件落点提示，返回 None，不回滚已提交内容或生成历史。
 
         侧栏原生拖放结束时由宿主调用，覆盖 Windows 取消后未发送 dragLeave 的
-        情况。重复调用安全，画布释放后无操作；仅在 GUI 线程调用。
+        情况；已经成功提交的重排动画继续播放。重复调用安全，画布释放后无操作；
+        仅在 GUI 线程调用。
         """
         if not self._disposed:
-            self.view._clear_branch_drop_preview()
+            self.view.node_drag.cancel_external()
 
     def create_branch_drag(self, node_ids=None, *, origin="canvas"):
         """创建本会话的分支移动载荷，返回新 QMimeData，无效来源返回 None。
@@ -146,12 +149,16 @@ class BranchTransferMixin:
             return False
         return not any(parent_id in self._book_document.owned_descendants(key) for key in data.node_ids)
 
-    def receive_branch_drag(self, mime, parent_id: str) -> bool:
-        """把有效分支追加到当前画布父主题，留在目标画布并选中移动分支。
+    def receive_branch_drag(self, mime, parent_id: str, *, index: int | None = None,
+                            direction: str | None = None) -> bool:
+        """把有效分支迁入当前父主题的指定位置，留在目标画布并选中移动分支。
 
-        只允许明确节点落点，复用引擎普通移动或加入导图接口；折叠父主题随正式
-        提交展开。独立候选先验证布局，任意失败保留正式内容、历史及保存状态。
-        同一拖放最多一条内容历史；无效或无变化返回 False，GUI 线程调用。
+        mime 来自本会话，parent_id 必须在当前页；index 为移除本次移动根后的
+        子节点插入下标，省略时追加。direction 可指定双向布局根主题的左右分支，
+        其他位置只能省略。两个关键字均省略时保留旧的追加语义。
+        非法下标或方向抛出 MindMapError，无效载荷或无变化返回 False。先独立
+        试算并复查内容版本和目标页，再把迁入、排序、方向和展开作为一条可撤销
+        事务提交。节点样式及附属内容保持原样；仅限 Qt GUI 线程调用。
         """
         if not self.can_receive_branch_drag(mime, parent_id):
             return False
@@ -161,18 +168,30 @@ class BranchTransferMixin:
         data = self._branch_drag_data(mime)
         roots = list(data.node_ids)
         source = self.engine.node_page_id(roots[0])
+        document = self._document
+        context = self.current_page_id, self.current_inspiration_root_id
+        siblings = [key for key in document.nodes[parent_id].children if key not in roots]
+        if index is not None and (type(index) is not int or not 0 <= index <= len(siblings)):
+            raise MindMapError("拖放插入位置已失效")
+        if direction not in (None, "left", "right") or (direction is not None and (
+                document.layout.direction != "both" or parent_id != document.root_id)):
+            raise MindMapError("拖放分支方向不适用于当前目标")
+        proposal = _DropProposal(tuple(roots), parent_id, len(siblings) if index is None else index, direction)
 
         def apply(engine):
             if source == self.engine.inspiration_id and self.current_page_id != source:
                 engine.attach_inspirations(roots, parent_id)
-            else:
+            if index is not None or direction is not None:
+                _apply_move(engine, proposal, document)
+            elif source != self.engine.inspiration_id or self.current_page_id == source:
                 engine.move_nodes(roots, parent_id, "inside")
 
         scratch = MindMapEngine(self.engine.document)
         apply(scratch)
         self.validate_document(scratch.page_document(
             self.current_page_id, inspiration_root_id=self.current_inspiration_root_id))
-        if not self.can_receive_branch_drag(mime, parent_id):
+        if (context != (self.current_page_id, self.current_inspiration_root_id)
+                or not self.can_receive_branch_drag(mime, parent_id)):
             return False
         revision = self.engine.revision
         self._inspiration_stay = True
@@ -209,8 +228,7 @@ class BranchTransferMixin:
         finally:
             self._native_branch_drag = None
             if not self._disposed and isValid(self.view):
-                self.view._clear_branch_drop_preview()
-                self.view.cancel_interaction()
+                self.view.node_drag.cancel_external()
             if isValid(drag):
                 drag.deleteLater()
 

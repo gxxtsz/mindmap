@@ -77,8 +77,12 @@ class MindMapSession(QObject):
         self._sync_favorites()
         self.inspiration = InspirationPanel(self.engine, self.canvas)
         self.inspiration.hide()
-        self.inspiration.navigate_requested.connect(
-            lambda root: self.canvas.call(lambda: self.canvas.show_inspiration(root)))
+        self.inspiration.navigate_requested.connect(self._run_inspiration_action)
+        self.inspiration.attach_requested.connect(lambda root: self._run_inspiration_action(root, "attach"))
+        self.inspiration.delete_requested.connect(lambda root: self._run_inspiration_action(root, "delete"))
+        # 弹出菜单只刷新即时权限，不重设当前项，以保留键盘浏览尚未打开的想法。
+        self.inspiration.menu_about_to_show.connect(
+            lambda: self.inspiration.set_editable(self.canvas.editable and not self.is_composing))
         self.inspiration.new_requested.connect(lambda: self.canvas.call(self.canvas.add_inspiration))
         self.inspiration.drag_finished.connect(self.canvas.cancel_branch_transfer_preview)
         self.inspiration.set_drag_handlers(
@@ -281,6 +285,7 @@ class MindMapSession(QObject):
         self.canvas.cancel_transient_ui()
         self.panels.close_popups()
         self.favorites.close_popups()
+        self.inspiration.close_popups()
 
     def _sync_favorites(self, *_):
         """状态回调始终使用所属会话，后台标签或分屏不会借用另一个活动画布。"""
@@ -301,6 +306,35 @@ class MindMapSession(QObject):
                 root = path[1].node_id
         self.inspiration.set_current_root_id(root)
         self.inspiration.set_editable(self.canvas.editable and not self.is_composing)
+
+    def _run_inspiration_action(self, root_id: str, operation: str = "open") -> None:
+        """对本会话指定想法执行列表导航、迁入导图或删除，返回 None。
+
+        root_id 来自列表导航或右键命中的稳定根标识；operation 仅由本会话的信号连接提供。
+        菜单弹出不切页，确定动作后才导航；修改项先复查只读与输入法状态，再选择
+        根节点并复用画布既有操作，保留撤销、自动保存及附属页面删除确认。
+        关闭或离开本会话后的迟到请求直接忽略；导航失败后重新同步侧栏高亮。
+        所有调用均在 GUI 线程，错误交给画布的公开异常边界报告。
+        """
+        if self.disposed or self.owner.active is not self:
+            return
+
+        def perform():
+            if operation != "open":
+                if not self.canvas.editable:
+                    raise MindMapError("当前画布为只读模式")
+                if self.is_composing:
+                    raise MindMapError("请先完成输入法候选，再操作想法")
+            self.canvas.show_inspiration(root_id)
+            if operation != "open":
+                self.canvas.select_nodes([root_id])
+                if operation == "attach":
+                    self.canvas.attach_selected_inspirations()
+                elif operation == "delete":
+                    self.canvas.delete_selected()
+
+        self.canvas.call(perform)
+        self._sync_inspiration()
 
     def _show_inspiration(self):
         """导航成功后打开共享左侧灵感工具；后台恢复候选不抢占其他文件焦点。"""

@@ -142,10 +142,19 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             message.setAlignment(Qt.AlignmentFlag.AlignCenter)
             stack.addWidget(message)
         self._depth_action = QAction("显示层级", self)
+        self._new_inspiration_action = QAction("新建想法", self)
+        self._new_inspiration_action.setToolTip("新建想法")
+        self._new_inspiration_action.setEnabled(False)
+        self._new_inspiration_action.setVisible(False)
+        self._new_inspiration_action.triggered.connect(self._new_inspiration)
         self.sessions = MindMapSessionManager(self)
         # 视图按钮位于状态栏最右侧的常驻区，不会被临时状态消息遮挡。
         self._status_controls = _StatusViewControls(self.status)
         self.status.addPermanentWidget(self._status_controls)
+        header_actions = {
+            "outline": (self._depth_action,),
+            "inspiration": (self._new_inspiration_action,),
+        }
         for identifier, title, stack, icon, position, shortcut in (
             ("outline", "大纲", self._outline_stack, "outline", DockPosition.LEFT_TOP, "Alt+1"),
             ("favorites", "收藏", self._favorites_stack, "favorites", DockPosition.LEFT_TOP, "Alt+4"),
@@ -155,7 +164,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         ):
             manager.register_tool_window(ToolWindowSpec(
                 identifier, title, lambda content=stack: content, icon, position, shortcut,
-                header_actions=(self._depth_action,) if identifier == "outline" else (),
+                header_actions=header_actions.get(identifier, ()),
             ))
         manager.register_tool_window(ToolWindowSpec(
             "operation_log", "操作日志", lambda: self.operation_log, "log",
@@ -318,6 +327,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         canvas.edraw_paste_options_changed.connect(self._save_edraw_paste_options)
         panels.outline.display_depth_changed.connect(self._save_outline_depth)
         panels.outline.depth_action.changed.connect(self._sync_depth_action)
+        session.inspiration.new_action.changed.connect(self._sync_new_inspiration_action)
         canvas.set_properties_handler(lambda: self._show_properties(session))
         colors = ui_colors_from_shell(self.manager.theme)
         canvas.set_ui_colors(colors)
@@ -369,6 +379,30 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._depth_action.setText(source.text() if source else "显示层级")
         self._depth_action.setToolTip(source.toolTip() if source else "没有打开的导图")
 
+    def _new_inspiration(self):
+        """标题栏每次点击时解析活动会话，复用所属侧栏的新建动作及权限检查。
+
+        不保存旧标签的回调，不直接写引擎；空白页或窗口释放后忽略迟到点击。
+        正常新建仍通过 new_requested 交给原有画布异常边界与输入检查处理。
+        """
+        session = self.active_session
+        if not self._disposed and session and not session.disposed:
+            session.inspiration.new_action.trigger()
+
+    def _sync_new_inspiration_action(self):
+        """将活动侧栏的新建图标与权限同步到共享标题栏，不改变会话或文档。
+
+        后台会话的动作变化也只读取当前活动会话；无文档时隐藏并禁用入口，
+        只读或输入法候选期间沿用侧栏的禁用状态，主题变化沿用侧栏图标。
+        """
+        if self._disposed:
+            return
+        session = self.active_session
+        source = session.inspiration.new_action if session and not session.disposed else None
+        self._new_inspiration_action.setEnabled(source is not None and source.isEnabled())
+        self._new_inspiration_action.setVisible(source is not None)
+        self._new_inspiration_action.setIcon(source.icon() if source else QIcon())
+
     def _bind_session(self, session):
         """仅切换堆叠页和动作，不重建业务面板，不改变其他会话的选择和滚动位置。"""
         self._outline_stack.setCurrentWidget(session.panels.outline) if session else self._outline_stack.setCurrentIndex(0)
@@ -378,6 +412,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
         self._status_controls.bind_canvas(session.canvas if session else None)
         self._sync_depth_action()
+        self._sync_new_inspiration_action()
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
         # 关闭活动标签到下一标签的短暂空绑定不暂停，只有关闭全部导图才回欢迎页。
