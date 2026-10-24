@@ -481,7 +481,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             # 读取真实标签树和活动项；dispose 后会话集合清空，不能再生成退出快照。
             try:
                 self.document_state.save_session([
-                    {"id": session.id, "path": str(session.files.path)}
+                    {"id": session.id, "path": str(session.files.path),
+                     "view_state": session.canvas.capture_page_view_state()}
                     for session in self.sessions.ordered()
                 ], self.sessions.active_id)
             except OSError as error:

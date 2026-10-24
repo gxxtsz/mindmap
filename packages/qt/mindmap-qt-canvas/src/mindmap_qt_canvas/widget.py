@@ -141,6 +141,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self._disposed = False
         self._applying_engine_event = False
         self._view_reset_pending = False
+        self._view_restore_center = None
         # 初始化属于画布自身的生命周期；复用一个单次定时器，让打开文件、首次
         # 显示和连续布局事件合并为一次定位，并在组件销毁时由 Qt 自动取消回调。
         self._view_reset_timer = QTimer(self)
@@ -207,6 +208,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         self.view.cancel_interaction()
         self._disposed = True
         self._view_reset_pending = False
+        self._view_restore_center = None
         self._view_reset_timer.stop()
         self._unsubscribe()
         for reply in tuple(self._downloads):
@@ -757,6 +759,10 @@ class MindMapWidget(PageNavigationMixin, QWidget):
                 self._current_page_id = None
                 self._page_states.clear()
                 self._page_chain = [None]
+                self._view_restore_center = None
+                self._view_reset_pending = False
+                self._view_reset_timer.stop()
+                self.view._hidden_center = None
                 self._document = self._book_document.page_view()
                 self._node_parents = self._document.parents()
                 new_ids = []
@@ -1148,6 +1154,7 @@ class MindMapWidget(PageNavigationMixin, QWidget):
         """
         if self._disposed:
             return
+        self._view_restore_center = None
         self._view_reset_pending = True
         self._schedule_view_reset()
 
@@ -1162,18 +1169,25 @@ class MindMapWidget(PageNavigationMixin, QWidget):
             self._view_reset_timer.start(0)
 
     def _apply_view_reset(self) -> None:
-        """在有效布局上消费一次初始化请求；隐藏或释放后的迟到回调不触碰视图。"""
+        """在有效布局上消费一次初始定位或恢复请求；隐藏及释放后不触碰视图。"""
         if (self._disposed or not self._view_reset_pending or not self.view.isVisible()
                 or self.view.viewport().size().isEmpty() or self._refreshing):
             return
-        root = self.node_items.get(self._document.root_id)
-        if root is None or root.sceneBoundingRect().isEmpty():
-            return
-        # 先消费请求，再恢复倍率，防止变换引发的尺寸事件重复排程。导航余量必须
-        # 按恢复后的 100% 倍率计算，定位目标使用根节点中心而非整张导图的中心。
+        center = self._view_restore_center
+        reset_zoom = center is None
+        if center is None:
+            root = self.node_items.get(self.focus_id or self._document.root_id)
+            if root is None or root.sceneBoundingRect().isEmpty():
+                return
+            center = root.sceneBoundingRect().center()
+        # 先消费请求再调整视图，避免变换引发的尺寸事件重复排程。普通初始化
+        # 使用 100% 根中心，退出快照则保留已经设置的倍率并使用目标场景中心。
         self._view_reset_pending = False
-        self.view.resetTransform()
-        self.view.update_navigation_rect(center=root.sceneBoundingRect().center())
+        self._view_restore_center = None
+        self.view._hidden_center = None
+        if reset_zoom:
+            self.view.resetTransform()
+        self.view.update_navigation_rect(center=center)
         self.view.update_cursor()
 
     def reset_zoom(self) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
 
 from mindmap_docking import JsonLayoutStore
@@ -37,11 +38,17 @@ class DocumentState:
     def __init__(self, path: str | Path):
         self.store = JsonLayoutStore(path)
         self.recent_files: list[str] = []
-        self.open_documents: list[dict[str, str]] = []
+        self.open_documents: list[dict[str, object]] = []
         self.active_id = ""
 
     def load(self) -> None:
-        """先完整校验再替换内存状态；不存在的配置表示首次使用，不产生错误。"""
+        """读取版本 1 本机记录，返回 None；路径和标识完整校验后才替换内存状态。
+
+        可选 view_state 仅接受 JSON 对象，内部字段由所属画布按实际文档降级恢复，
+        无效视图不使整份退出集合失效。旧记录缺少此字段仍可加载。不存在配置
+        表示首次使用；I/O 或基本结构错误抛出 OSError/ValueError。由 GUI 线程
+        的窗口初始化调用，读取结果独立持有，不借用导图或 Qt 控件的生命周期。
+        """
         payload = self.store.load()
         if payload is None:
             return
@@ -71,7 +78,10 @@ class DocumentState:
                 raise ValueError("退出会话包含重复的文件或标识")
             identifiers.add(identifier)
             document_keys.add(key)
-            normalized_documents.append({"id": identifier, "path": path})
+            record = {"id": identifier, "path": path}
+            if isinstance(item.get("view_state"), dict):
+                record["view_state"] = deepcopy(item["view_state"])
+            normalized_documents.append(record)
         self.recent_files = normalized_recent[:RECENT_FILE_LIMIT]
         self.open_documents = normalized_documents
         self.active_id = active if active in identifiers else ""
@@ -99,8 +109,22 @@ class DocumentState:
         self.recent_files = []
         self._save()
 
-    def save_session(self, documents: list[dict[str, str]], active_id: str) -> None:
-        """提交已通过关闭检查的退出快照，列表顺序来自实际分屏树中的标签顺序。"""
-        self.open_documents = [dict(item) for item in documents]
+    def save_session(self, documents: list[dict[str, object]], active_id: str) -> None:
+        """原子提交已通过全部关闭检查的退出快照，成功返回 None。
+
+        documents 按实际分屏标签顺序提供，每项含会话 id、文件 path 和可选
+        view_state；后者来自所属画布的公开快照接口。active_id 不在集合中时
+        保存为空。深拷贝列表和嵌套视图，调用方之后修改参数不会改变已记住的
+        状态。旧调用方只传 id/path 仍受支持，配置继续采用版本 1。
+
+        写入失败抛出 OSError，磁盘和内存均保留上次成功提交的退出快照。由窗口
+        在 GUI 线程、会话释放前调用；不访问画布或保存导图，不持有任何 Qt 对象。
+        """
+        previous = self.open_documents, self.active_id
+        self.open_documents = deepcopy(documents)
         self.active_id = active_id if any(item["id"] == active_id for item in documents) else ""
-        self._save()
+        try:
+            self._save()
+        except OSError:
+            self.open_documents, self.active_id = previous
+            raise

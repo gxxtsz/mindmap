@@ -361,8 +361,12 @@ class MindMapSessionManager(QObject):
         """仅打开原生导图；先校验再查重，额外格式不能借已有会话绕过打开限制。"""
         return self._open_path(path)
 
-    def _open_path(self, path, *, session_id=None, remember=True):
-        """共用文件校验和安装流程；仅启动恢复传入旧标识并禁止历史重排。"""
+    def _open_path(self, path, *, session_id=None, remember=True, view_state=None):
+        """共用校验与安装流程；启动恢复在加载后、安装前还原旧标识和页面视图。
+
+        view_state 仅由退出恢复传入，普通打开继续使用默认主导图。画布自行校验
+        可选字段并保存延迟定位请求，不借用配置对象；初始化失败仍释放候选会话。
+        """
         source = MindMapFileController.validate_open_path(path)
         existing = self.find_path(source)
         if existing is not None:
@@ -376,6 +380,8 @@ class MindMapSessionManager(QObject):
                 candidate.dispose()
                 candidate.canvas.deleteLater()
                 return False
+            if view_state is not None:
+                candidate.canvas.restore_page_view_state(view_state)
             self._install(candidate, remember=remember)
             return True
         except Exception:
@@ -388,11 +394,15 @@ class MindMapSessionManager(QObject):
 
         记录顺序已经是视觉标签顺序；安装时复用会话 ID，随后由外壳恢复分屏树。
         提前选中原活动项，避免布局恢复时把最后加载的文件误当成活动标签。
+        可选页面快照只用于此次启动，不用于之后手动重开；隐藏标签在实际显示
+        后完成定位，不激活后台会话或改变最近文件顺序。仅在 GUI 线程初始化时
+        调用，返回中文错误列表，文件失败不影响其他会话，候选对象由本管理器释放。
         """
         failures = []
         for item in documents:
             try:
-                if not self._open_path(item["path"], session_id=item["id"], remember=False):
+                if not self._open_path(item["path"], session_id=item["id"], remember=False,
+                                       view_state=item.get("view_state")):
                     failures.append(f"{Path(item['path']).name}：未能打开导图")
             except (MindMapError, OSError, ValueError) as error:
                 failures.append(f"{Path(item['path']).name}：{error}")

@@ -1,7 +1,8 @@
-"""页面路径控件与会话内视图恢复；所有导航均独立于内容事务和文件保存。"""
+"""页面路径控件与视图快照；所有导航均独立于内容事务和文件保存。"""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Mapping
+from math import isfinite
 
 from mindmap_core import ChangeEvent, MindMapError, Theme
 from mindmap_qt_ui.icons import toolbar_icon
@@ -9,6 +10,19 @@ from mindmap_qt_ui.ui_style import apply_ui_palette, dialog_styles, ui_colors
 from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QToolButton, QWidget
+
+from .view import MIN_ZOOM
+
+
+def _finite_number(value):
+    """将 JSON 数字转成有限浮点数；布尔、超大整数和非数值返回 None，不抛出异常。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if isfinite(number) else None
 
 
 class PathNavigation(QWidget):
@@ -269,6 +283,91 @@ class PageNavigationMixin:
         """查询活动页面类别，菜单可据此隐藏详情页内禁止使用的两类创建入口。"""
         return self._book_document.page_kind(self._current_page_id)
 
+    def capture_page_view_state(self) -> dict[str, object]:
+        """返回当前页的独立 JSON 兼容快照，供宿主在正常退出时保存到本机配置。
+
+        无参数；返回值包含 page_id（None 为主导图）、zoom、场景中心 center、
+        按树顺序排列的 selection，以及导航临时显示范围 focus_id。嵌套列表均为
+        新对象，调用方可以序列化或修改，不会影响画布缓存；不包含其他已访问页、
+        文档内容、输入草稿或 Qt 对象，也不提交编辑、不改变历史或修改标记。
+
+        尚未完成首次定位时使用目标视图，隐藏标签使用隐藏前的逻辑中心，不记录
+        占位视口。只能在 GUI 线程且画布存活时调用；dispose 后抛出 MindMapError。
+        快照由调用方拥有，画布释放后仍可读取，但只应用于对应文件重新加载后的画布。
+        """
+        if self._disposed:
+            raise MindMapError("画布已释放，不能读取页面视图")
+        self._cache_page_view()
+        state = self._page_states[self._current_page_id]
+        return {
+            "page_id": self._current_page_id,
+            "zoom": state.transform.m11(),
+            "center": [state.center.x(), state.center.y()],
+            "selection": list(state.selection),
+            "focus_id": state.focus_id,
+        }
+
+    def restore_page_view_state(self, state: Mapping[str, object]) -> None:
+        """在文件加载后恢复当前页面及视图，返回 None，不修改文档或创建历史记录。
+
+        state 为 capture_page_view_state 返回的映射或从本机 JSON 解码的同形数据。
+        页面按稳定 ID 匹配；不存在的页面回退主导图默认视图。无效倍率或中心只
+        重置目标页视图，有限正倍率限制在 10%～400%；选择只保留属于当前页的
+        可见有效节点，空选择保持为空，非空选择全部失效时回退页根。focus_id
+        仅恢复有效的导航临时范围，不改写折叠字段，也不会恢复编辑器或输入草稿。
+
+        本接口供初始化使用，允许只读画布。参数不是映射、画布已释放、正文仍在
+        编辑或导航检查发现输入法候选时抛出 MindMapError，原状态保持不变；不
+        请求提交面板草稿。宿主应先结束输入再调用，或在安装新画布前恢复。
+        仅限 GUI 线程；不持有传入映射或其中的可变列表。定位复用画布拥有的
+        单次定时器，等待实际显示与布局，隐藏、替换文档或释放不会留下悬空回调。
+        """
+        if self._disposed:
+            raise MindMapError("画布已释放，不能恢复页面视图")
+        if not isinstance(state, Mapping):
+            raise MindMapError("页面视图快照必须是对象")
+        if self.editor is not None or self.is_composing or not all(
+                guard() for guard in tuple(self._navigation_guards)):
+            raise MindMapError("请先结束编辑和输入法候选，再恢复页面视图")
+        page_id = state.get("page_id")
+        page_exists = (page_id is None or isinstance(page_id, str)) and self._book_document.has_page(page_id)
+        if not page_exists:
+            page_id = None
+        zoom = _finite_number(state.get("zoom"))
+        center = state.get("center")
+        coordinates = ([_finite_number(value) for value in center]
+                       if isinstance(center, (list, tuple)) and len(center) == 2 else [None, None])
+        valid_view = page_exists and zoom is not None and zoom > 0 and None not in coordinates
+        if valid_view:
+            document = self._book_document.page_view(page_id)
+            selection = state.get("selection")
+            ids = (tuple(dict.fromkeys(key for key in selection if isinstance(key, str) and key in document.nodes))
+                   if isinstance(selection, (list, tuple)) else ())
+            empty_selection = isinstance(selection, (list, tuple)) and not selection
+            focus = state.get("focus_id")
+            focus = focus if isinstance(focus, str) and focus in document.nodes else None
+            if not ids and not empty_selection:
+                ids, focus = (document.root_id,), None
+            center = QPointF(*coordinates)
+            zoom = min(4.0, max(MIN_ZOOM, zoom))
+            self._page_states[page_id] = PageViewState(
+                QTransform.fromScale(zoom, zoom), center, ids, focus)
+        else:
+            # 不让同一实例先前访问过的缓存覆盖损坏记录应使用的默认视图。
+            self._page_states.pop(page_id, None)
+        self._switch_page(page_id, cache=False)
+        if valid_view:
+            if ids and not self.selected_node_ids():
+                # 文件可能被外部重新折叠；不强行展开或留下不可见的非空选择。
+                self.focus_id = None
+                self.refresh()
+                self.select_nodes([self._document.root_id])
+            self._view_restore_center = QPointF(center)
+            self._view_reset_pending = True
+            if not self.view.isVisible():
+                self.view._hidden_center = QPointF(center)
+            self._schedule_view_reset()
+
     def register_navigation_guard(self, callback):
         """面板注册切页前的输入检查；返回 False 时保留原页，返回取消注册函数。"""
         self._navigation_guards.append(callback)
@@ -289,11 +388,20 @@ class PageNavigationMixin:
         # 首次居中尚未执行时先完成请求，防止快速进入再返回恢复到初始化占位视口。
         if self._view_reset_pending and self.view.isVisible():
             self._apply_view_reset()
-        center = self.view._hidden_center
+        transform = QTransform(self.view.transform())
+        center = self._view_restore_center
+        if center is None:
+            center = self.view._hidden_center
+        if self._view_reset_pending and self._view_restore_center is None:
+            # 隐藏的新文件尚未获得真实视口，保存其目标根中心和 100%，不能把旧
+            # 文件的变换或隐藏控件的占位中心带入正常退出记录。
+            rect = self.layout_result.nodes.get(self.focus_id or self._document.root_id)
+            center = QPointF(rect.x + rect.width / 2, rect.y + rect.height / 2) if rect else QPointF()
+            transform = QTransform()
         if center is None:
             center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
         self._page_states[self._current_page_id] = PageViewState(
-            QTransform(self.view.transform()), QPointF(center), tuple(self.selected_node_ids()), self.focus_id)
+            transform, QPointF(center), tuple(self.selected_node_ids()), self.focus_id)
 
     def _switch_page(self, page_id, *, notify=True, cache=True):
         """只切换页内读模型和视图；撤销导致页面消失时由调用方先选择有效祖先。"""
@@ -308,6 +416,7 @@ class PageNavigationMixin:
         self._cancel_branch_menu()
         self._view_reset_timer.stop()
         self._view_reset_pending = False
+        self._view_restore_center = None
         # 恢复缩放时，Qt 的 setTransform 会同步触发 scrollContentsBy，进而刷新视口图元。
         # 此刻即将换成新页节点，旧页布局和测量缓存还未替换，不能继续按旧布局取节点。
         # 先停用旧页的视口同步；refresh 会用新页的布局重新确定是否启用虚拟化并重建图元。
@@ -332,7 +441,8 @@ class PageNavigationMixin:
         else:
             self.reset_view()
         if not self.view.isVisible():
-            self.view._hidden_center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
+            self.view._hidden_center = (QPointF(state.center) if state else
+                                       self.view.mapToScene(self.view.viewport().rect()).boundingRect().center())
         self._sync_navigation()
         self._update_actions()
         if notify:
