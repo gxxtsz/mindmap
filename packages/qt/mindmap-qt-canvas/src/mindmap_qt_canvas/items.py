@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import isValid
 
+from .image_decoration import image_shadow_bounds, paint_image_hover, paint_image_shadow
+
 FOLD_HOVER_PADDING = 10.0
 FOLD_HIDE_DELAY = 200
 
@@ -254,7 +256,7 @@ SubmapControlItem = PageControlItem
 
 
 class NodeItem(StaticNodeItem):
-    """保持原节点构造接口；有宿主时转发双击编辑，导出图元无需创建该交互对象。"""
+    """交互节点转发编辑并绘制图片辅助效果，导出继续使用独立的静态图元。"""
 
     def __init__(self, node, visual, theme, owner=None):
         super().__init__(node, visual, theme, controls=False, page_controls=owner is None)
@@ -265,11 +267,51 @@ class NodeItem(StaticNodeItem):
         self.detail_page_control = PageControlItem(self, kind="detail") if owner is not None else None
         self.submap_control = SubmapControlItem(self) if owner is not None else None
 
-    def set_hovered(self, hovered: bool, *, immediate: bool = False) -> None:
-        """进入立即显示，离开延迟 200 毫秒隐藏；再次进入取消待执行的隐藏。
+    def boundingRect(self):
+        """返回交互图元的重绘边界，纯图片额外覆盖画布投影。
 
-        immediate 用于手势中断或文档刷新，立即清除旧悬停状态。定时器由视图统一
-        管理，节点只保存临时标记；重复的鼠标移动不会不断重启隐藏倒计时。
+        无参数，返回独立 QRectF；投影不计入正式图片尺寸、布局或命中路径。
+        无宿主时复用静态边界。仅在 GUI 线程、图元存活期间由 Qt 查询，不修改
+        文档、不保留外部对象，无正常业务异常。
+        """
+        bounds = super().boundingRect()
+        if getattr(self, "owner", None) is not None and self.node.is_image_node:
+            bounds = bounds.united(image_shadow_bounds(self.visual.image_rect))
+        return bounds
+
+    def update_content(self, node, visual, theme):
+        """同步借用的节点、视觉和主题，返回 None，纯图片类型变化时更新 Qt 边界。
+
+        三个参数必须来自同一正式快照，生命周期沿用静态图元接口；只在所属 GUI
+        线程、图元存活时调用。不修改参数或文档，不产生历史，无正常业务异常。
+        """
+        if self.node.is_image_node != node.is_image_node:
+            self.prepareGeometryChange()
+        super().update_content(node, visual, theme)
+
+    def paint(self, painter, option, widget=None):
+        """绘制正式内容及画布专用的图片投影、悬停轮廓，返回 None。
+
+        painter、option、widget 为 Qt 当前 GUI 绘制过程借用，不缓存或转移所有权。
+        纯图片的投影避开图片内部，选中时沿用蓝色轮廓及视图的缩放手柄；无宿主
+        及普通图文节点复用静态绘制。宿主释放后不绘制辅助效果，不写文档或资源，
+        不改变导出视觉，无正常业务异常。
+        """
+        decorated = self.owner is not None and not self.owner._disposed and self.node.is_image_node
+        if decorated:
+            background = self.scene().backgroundBrush().color()
+            paint_image_shadow(painter, self.visual.image_rect, background)
+        super().paint(painter, option, widget)
+        if decorated and self.hovered and not self.isSelected():
+            paint_image_hover(painter, self.visual.image_rect, background)
+
+    def set_hovered(self, hovered: bool, *, immediate: bool = False) -> None:
+        """同步折叠按钮及纯图片的悬停状态，返回 None，不改变文档或选择。
+
+        hovered 指定是否进入热区；折叠按钮移出后延迟 200 毫秒隐藏，纯图片细轮廓
+        立即消失。immediate 用于手势中断或文档刷新，立即清除旧按钮状态。定时器
+        由视图统一管理，节点只保存临时标记，重复移动不会重启倒计时。仅在 GUI
+        线程、图元及宿主存活时调用，不保留输入对象，无正常业务异常。
         """
         changed = self.hovered != hovered
         self.hovered = hovered
@@ -281,6 +323,8 @@ class NodeItem(StaticNodeItem):
                 self.owner.view._defer_fold_hide(self)
         if self.fold_control is not None and (changed or immediate):
             self.fold_control.sync_visibility()
+        if changed and self.node.is_image_node:
+            self.update()
 
     def sync_fold_control(self) -> None:
         """宿主同步实体及布局后更新内外侧控件，共用正式或草稿的测量边界。"""

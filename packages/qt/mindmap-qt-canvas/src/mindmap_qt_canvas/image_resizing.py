@@ -11,6 +11,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPen
 from shiboken6 import isValid
 
+from .image_decoration import paint_image_shadow
 from .items import NodeItem
 
 # 顺时针排列八个边缘手柄，零分量表示以对应边的中点为锚点。
@@ -192,6 +193,7 @@ class ImageResizeController:
             return
         painter.save()
         if self.active:
+            paint_image_shadow(painter, self._rect, self.view.scene().backgroundBrush().color())
             painter.drawPixmap(self._rect, self._visual.image, QRectF(self._visual.image.rect()))
         painter.resetTransform()
         accent = QColor(self.view.owner._document.theme.accent)

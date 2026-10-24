@@ -1,4 +1,4 @@
-"""核验附属页面、路径栏、收藏、图片粘贴、紧凑模式与三档缩放，生成中文报告和截图。"""
+"""核验附属页面、收藏、图片辅助效果、紧凑模式与三档缩放，生成中文报告和截图。"""
 
 import argparse
 import json
@@ -285,6 +285,54 @@ def child(scale, platform):
                     resized = engine.document
                     checks["图片缩放独立撤销重做"] = (engine.undo() and engine.document == before_resize
                         and engine.redo() and engine.document == resized)
+                    # 同色图片才是轻投影的目标场景，使用临时图片，不改写用户资源。
+                    contrast = QImage(300, 160, QImage.Format.Format_ARGB32)
+                    background = canvas.scene.backgroundBrush().color()
+                    contrast.fill(background)
+                    painter = QPainter(contrast)
+                    painter.setPen(QColor(canvas._ui_colors.text))
+                    font = painter.font()
+                    font.setPointSizeF(15)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.drawText(QRectF(24, 22, 252, 40), "与画布同色的图片")
+                    font.setPointSizeF(10)
+                    font.setBold(False)
+                    painter.setFont(font)
+                    painter.drawText(QRectF(24, 78, 252, 55), Qt.TextFlag.TextWordWrap,
+                                     "轻投影提示图片边界，悬停出现细轮廓，选中后保留缩放手柄。")
+                    painter.end()
+                    contrast_path = Path(temporary) / (label + "-contrast.png")
+                    assert contrast.save(str(contrast_path))
+                    canvas.import_image(target, contrast_path)
+                    contrast_node = canvas.current_node_id()
+                    item = canvas.node_items[contrast_node]
+                    canvas.select_nodes([])
+                    canvas.view.centerOn(item)
+                    canvas.view.update_cursor(QPoint(2, 2))
+                    app.processEvents()
+                    idle = canvas.view.viewport().grab()
+                    assert window.grab().save(str(output / (label + "-image-shadow.png")))
+                    sample = canvas.view.mapFromScene(item.mapToScene(QPointF(-2, 40)))
+                    pixels, ratio = idle.toImage(), idle.devicePixelRatioF()
+                    shadow_color = pixels.pixelColor(round(sample.x() * ratio), round(sample.y() * ratio))
+                    checks["同色图片的外缘投影可见"] = (shadow_color.lightness() > background.lightness()
+                        if theme == "dark" else shadow_color.lightness() < background.lightness())
+                    before_hover, hover_revision = engine.document, engine.revision
+                    center = canvas.view.mapFromScene(item.mapToScene(item.visual.image_rect.center()))
+                    canvas.view.update_cursor(center)
+                    app.processEvents()
+                    checks["图片悬停显示轮廓"] = item.hovered and canvas.view.viewport().grab().toImage() != idle.toImage()
+                    assert window.grab().save(str(output / (label + "-image-hover.png")))
+                    canvas.view.update_cursor(QPoint(2, 2))
+                    app.processEvents()
+                    checks["移出图片恢复轻投影"] = not item.hovered and canvas.view.viewport().grab().toImage() == idle.toImage()
+                    checks["投影与悬停不修改文档历史"] = engine.document == before_hover and engine.revision == hover_revision
+                    canvas.select_nodes([contrast_node])
+                    app.processEvents()
+                    corner = canvas.view.mapFromScene(item.mapToScene(item.visual.image_rect.bottomRight()))
+                    checks["同色图片选中后仍可缩放"] = canvas.view.image_resize.hit_test(corner) == 4
+                    assert window.grab().save(str(output / (label + "-image-selected.png")))
                     app.clipboard().clear()
                     canvas.set_editable(False)
                     checks["只读隐藏缩放手柄"] = canvas.view.image_resize.hit_test(start) is None
