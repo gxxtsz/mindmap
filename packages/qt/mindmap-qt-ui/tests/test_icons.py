@@ -32,6 +32,17 @@ def test_page_icons_support_themes_and_high_dpi_states(qapp, kind):
                 assert pixmap.devicePixelRatio() == ratio
 
 
+@pytest.mark.parametrize("kind", ["copy", "clear"])
+def test_log_icons_keep_all_states_and_high_dpi_resources(qapp, kind):
+    """日志标题的复制与清空图标在明暗主题、禁用状态及多档缩放下均可绘制。"""
+    for foreground, disabled, accent in (("#80848d", "#d5d7de", "#3478d5"),
+                                          ("#92959e", "#4b4d52", "#83b2ff")):
+        icon = toolbar_icon(kind, foreground, disabled, accent)
+        for ratio in (1.0, 1.5, 2.0):
+            for mode in (QIcon.Mode.Normal, QIcon.Mode.Disabled, QIcon.Mode.Active):
+                assert not icon.pixmap(QSize(14, 14), ratio, mode).isNull()
+
+
 def test_toolbar_description_survives_button_removal_and_toolbar_disposal(qtbot):
     """动作可长于按钮和工具栏存活，迟到更新不得访问被删除的 Qt 对象。"""
     owner = QWidget()

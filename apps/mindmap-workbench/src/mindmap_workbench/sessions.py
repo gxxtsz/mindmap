@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog
 
 from .background_save import save_snapshot
 from .document_state import path_key
+from .operation_log import describe_change
 
 # 延迟启动一个独立进程，避免编码、深拷贝及垃圾回收持有 GUI 的解释器锁。
 _SAVE_POOL = None
@@ -88,8 +89,8 @@ class MindMapSession(QObject):
         self.files.wait_for_pending_write = lambda: self._finish_background_save(wait=True)
         self._unsubscribe = self.engine.subscribe(self._changed)
         self.files.error_occurred.connect(self._failed)
-        self.canvas.error_occurred.connect(owner.window.show_status_message)
-        self.files.message.connect(owner.window.show_status_message)
+        self.canvas.error_occurred.connect(self._canvas_failed)
+        self.files.message.connect(self._file_message)
         self.files.state_changed.connect(self._saved)
         self.canvas.selection_changed.connect(lambda *_: owner.window._sync_document())
         self.canvas.editable_changed.connect(lambda *_: owner.window._sync_document())
@@ -107,6 +108,8 @@ class MindMapSession(QObject):
         """保存事件不重新启动计时器；修改、撤销和重做合并为一次延迟写入。"""
         if not self.disposed and event.kind in {"change", "undo", "redo"}:
             self.timer.start()
+            if self.owner.get(self.id) is self:
+                self.owner.window.record_operation(describe_change(event), session=self)
         self.owner.sync(self)
 
     def _saved(self):
@@ -121,11 +124,26 @@ class MindMapSession(QObject):
 
     def _failed(self, message):
         """失败保留原始状态且停止重试；显示文件名，下一次编辑或显式保存可再次尝试。"""
+        if self.disposed:
+            return
         self.last_error = message
         self.timer.stop()
         name = self.files.path.name if self.files.path else "新建导图"
         self.owner.window.show_status_message(f"{name}：{message}")
+        self.owner.window.record_operation(f"保存导图失败：{message}", session=self, level="error")
         self.owner.sync(self)
+
+    def _canvas_failed(self, message):
+        """记录本会话的编辑失败，保留原状态提示，不把编辑错误写成保存失败状态。"""
+        if not self.disposed:
+            self.owner.window.show_status_message(message)
+            self.owner.window.record_operation(f"操作失败：{message}", session=self, level="error")
+
+    def _file_message(self, message):
+        """文件控制器仅在实际导出成功后通知；来源始终使用发出信号的所属会话。"""
+        if not self.disposed:
+            self.owner.window.show_status_message(message)
+            self.owner.window.record_operation(message, session=self)
 
     def autosave(self, *, background=False):
         """保存已提交版本，不结束编辑、移动焦点或提交草稿。
@@ -268,6 +286,10 @@ class MindMapSession(QObject):
         self.timer.stop()
         self._finish_background_save(wait=True)
         self._unsubscribe()
+        self.files.error_occurred.disconnect(self._failed)
+        self.canvas.error_occurred.disconnect(self._canvas_failed)
+        self.files.message.disconnect(self._file_message)
+        self.files.state_changed.disconnect(self._saved)
         self.close_popups()
         self.panels.dispose()
         self.favorites.dispose()
@@ -351,15 +373,21 @@ class MindMapSessionManager(QObject):
                 candidate.canvas.deleteLater()
                 return False
             self._install(candidate)
+            self.window.record_operation(f"新建导图：{candidate.files.path}", session=candidate)
             return True
-        except Exception:
+        except Exception as error:
+            self.window._record_exception(error, operation="新建导图", session=candidate)
             candidate.dispose()
             candidate.canvas.deleteLater()
             raise
 
     def open_path(self, path):
         """仅打开原生导图；先校验再查重，额外格式不能借已有会话绕过打开限制。"""
-        return self._open_path(path)
+        try:
+            return self._open_path(path)
+        except Exception as error:
+            self.window._record_exception(error, operation="打开导图", session=path)
+            raise
 
     def _open_path(self, path, *, session_id=None, remember=True, view_state=None):
         """共用校验与安装流程；启动恢复在加载后、安装前还原旧标识和页面视图。
@@ -373,6 +401,7 @@ class MindMapSessionManager(QObject):
             self.window.manager.activate_document(existing.id)
             if remember:
                 self.window._remember_path(existing.files.path)
+            self.window.record_operation("激活已打开的导图", session=existing)
             return True
         candidate = MindMapSession(self, session_id=session_id)
         try:
@@ -383,6 +412,7 @@ class MindMapSessionManager(QObject):
             if view_state is not None:
                 candidate.canvas.restore_page_view_state(view_state)
             self._install(candidate, remember=remember)
+            self.window.record_operation(f"打开导图：{candidate.files.path}", session=candidate)
             return True
         except Exception:
             candidate.dispose()
@@ -406,6 +436,7 @@ class MindMapSessionManager(QObject):
                     failures.append(f"{Path(item['path']).name}：未能打开导图")
             except (MindMapError, OSError, ValueError) as error:
                 failures.append(f"{Path(item['path']).name}：{error}")
+                self.window._record_exception(error, operation="恢复导图", session=item["path"])
         selected = self.get(active_id) or next(iter(self.values()), None)
         if selected is not None:
             self.window.manager.activate_document(selected.id)
@@ -453,9 +484,15 @@ class MindMapSessionManager(QObject):
     def save_all(self):
         """按可见标签顺序提交和保存；失败时停止并定位错误，成功不切换当前标签。"""
         for session in self.ordered():
-            if not session.can_close():
-                return False
+            try:
+                if not session.can_close():
+                    return False
+            except Exception as error:
+                self.window._record_exception(error, operation="保存导图", session=session)
+                raise
         self.window.show_status_message("全部导图已保存")
+        if len(self):
+            self.window.record_operation(f"保存全部完成，共 {len(self)} 份导图")
         return True
 
     def _saved_path(self, session):
@@ -488,6 +525,7 @@ class MindMapSessionManager(QObject):
         self.window._sync_document()
 
     def _closed(self, session):
+        self.window.record_operation("关闭导图", session=session)
         self._sessions.pop(session.id, None)
         self._known_paths.pop(session.id, None)
         if self.active_id == session.id:

@@ -146,6 +146,8 @@ def test_drop_structure_four_directions_and_one_undo(canvas, direction, position
     source = c if position == "before" else a
     end = body(widget, b) if position == "inside" else sorting(widget, b, position)
     before, revision = widget.engine.document, widget.engine.revision
+    events = []
+    widget.engine.subscribe(events.append)
     control = begin(widget, source)
     mouse(widget, QEvent.Type.MouseMove, end)
     assert control.target is not None
@@ -168,11 +170,19 @@ def test_drop_structure_four_directions_and_one_undo(canvas, direction, position
                 if key != source
             )
     assert widget.engine.revision == revision + 1
+    assert len(events) == 1 and events[0].operation == "拖动节点"
+    move, = events[0].changes.moves
+    assert move.node_id == source and move.before.parent_id == before.root_id
+    assert move.after.parent_id == (b if position == "inside" else document.root_id)
+    assert move.before.index == before.root.children.index(source) + 1
+    assert move.after.index == document.nodes[move.after.parent_id].children.index(source) + 1
     assert widget.selected_node_ids() == [source]
     assert_clean(widget)
     assert widget.engine.undo() and widget.engine.document == before
+    assert events[-1].changes.moves == (move,) and not events[-1].forward
     assert not widget.engine.can_undo
     assert widget.engine.redo() and widget.engine.document == document
+    assert events[-1].changes.moves == (move,) and events[-1].forward
 
 
 def test_hover_keeps_all_geometry_and_content_fixed_without_layout_or_events(canvas, monkeypatch, qtbot):
@@ -306,6 +316,8 @@ def test_saved_notification_keeps_post_drop_animation_and_new_press_settles_it(c
 
 def test_multi_selection_deduplicates_descendants_and_preserves_preorder(canvas):
     widget, (a, b, c, x, y, z) = canvas
+    events = []
+    widget.engine.subscribe(events.append)
     end = body(widget, b)
     widget.select_nodes([c, x, a])
     control = begin(widget, a, select=False)
@@ -316,6 +328,7 @@ def test_multi_selection_deduplicates_descendants_and_preserves_preorder(canvas)
     assert widget.engine.get_node(b).children == [a, c]
     assert widget.engine.get_node(a).children == [x]
     assert widget.selected_node_ids() == [a, x, c]
+    assert len(events) == 1 and [move.node_id for move in events[0].changes.moves] == [a, c]
     assert_clean(widget)
 
 
@@ -367,6 +380,8 @@ def test_both_layout_empty_side_and_undo(canvas, side):
         widget.engine.update_node(key, direction=other)
     widget.engine.replace_document(widget.engine.document)
     before = widget.engine.document
+    events = []
+    widget.engine.subscribe(events.append)
     root = widget.layout_result.nodes[widget.engine.root_id]
     point = QPointF(root.x - 48 if side == "left" else root.right + 48, root.center[1])
     end = widget.view.mapFromScene(point)
@@ -376,6 +391,9 @@ def test_both_layout_empty_side_and_undo(canvas, side):
     assert document.layout == before.layout
     assert document.branch_sides()[a] == side
     assert document.branch_sides()[b] == document.branch_sides()[c] == other
+    assert len(events) == 1
+    move, = events[0].changes.moves
+    assert move.node_id == a and move.before.direction == other and move.after.direction == side
     assert widget.engine.undo() and widget.engine.document == before
     assert not control.active
     assert_clean(widget)

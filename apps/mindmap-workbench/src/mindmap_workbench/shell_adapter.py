@@ -1,8 +1,8 @@
 """桌面外壳接入边界：文档、停靠面板、应用动作与局部主题映射。"""
 
+from copy import deepcopy
 from pathlib import Path
 
-from mindmap_core import MindMapError
 from mindmap_docking import DockManager, DockPosition, Theme, ToolWindowSpec
 from mindmap_formats import create_default_format_registry
 from mindmap_layouts import create_default_layout_registry
@@ -14,8 +14,9 @@ from PySide6.QtGui import QAction, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from .document_state import DocumentState
+from .operation_log import OperationLogPanel
 from .recent_files import RecentFilesButton
-from .sessions import MindMapSessionManager
+from .sessions import MindMapSession, MindMapSessionManager
 from .status_controls import _StatusViewControls
 
 
@@ -31,6 +32,40 @@ def ui_colors_from_shell(theme) -> UiColors:
         selected=color("toolbar-selected-bg-active"), accent=color("control-brand-border"),
         error=color("danger"),
     )
+
+
+class _OperationLogLayoutStore:
+    """在既有布局存储边界补齐新面板，原始校验及原子写入仍交给停靠框架。"""
+
+    def __init__(self, store, default_tool):
+        self.store = store
+        self.default_tool = deepcopy(default_tool)
+
+    def load(self) -> dict | None:
+        """读取旧布局时添加缺失的日志面板；已有日志显隐及位置一律保留。
+
+        只迁移结构可识别的版本 1 数据，损坏结构原样交回管理器统一校验；读取
+        不写文件，下一次正常布局保存才落盘。复制数据，避免修改存储方缓存的快照。
+        """
+        payload = self.store.load()
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return payload
+        session = payload.get("session")
+        tools = session.get("tools") if isinstance(session, dict) else None
+        if (isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools)
+                and not any(tool.get("id") == "operation_log" for tool in tools)):
+            payload = deepcopy(payload)
+            tool = deepcopy(self.default_tool)
+            # 旧版允许把其他侧栏移到底部，优先使用未占用的底部格。
+            occupied = {item.get("position") for item in tools if item.get("visible")}
+            if tool["position"] in occupied and DockPosition.BOTTOM_RIGHT not in occupied:
+                tool["position"] = tool["last_position"] = DockPosition.BOTTOM_RIGHT
+            payload["session"]["tools"].append(tool)
+        return payload
+
+    def save(self, payload: dict) -> None:
+        """保存现有完整布局，不保存日志文本、不改变原存储格式和失败语义。"""
+        self.store.save(payload)
 
 
 class _WelcomePage(QWidget):
@@ -74,6 +109,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         ensure_fonts()
         self._disposed = False
         self._updating_preferences = False
+        self._operation_error_token = object()
         self.layout_registry = layout_registry if layout_registry is not None else create_default_layout_registry()
         self.format_registry = format_registry if format_registry is not None else create_default_format_registry()
         manager = DockManager(application_id="mindmap-workbench", storage_dir=storage_dir,
@@ -81,6 +117,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                               shortcut_context=Qt.ShortcutContext.WindowShortcut)
         super().__init__(AppSpec("mindmap-workbench", "原生思维导图", subtitle="思维导图工作台",
                                 storage_dir=storage_dir, theme=manager.theme), manager=manager)
+        self.operation_log = OperationLogPanel(manager.parking)
         self.preferences = QSettings(str(manager.storage_dir / "preferences.ini"), QSettings.Format.IniFormat)
         # 置顶是本机窗口偏好，与是否恢复导图及布局无关；首次显示前应用，避免闪现。
         # INI 重读可能返回字符串，不能直接 bool("false")；无效值统一视为关闭。
@@ -93,6 +130,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.document_state.load()
         except (OSError, ValueError, TypeError) as error:
             startup_messages.append(f"最近文件与退出会话记录无效，已忽略：{error}")
+            self.record_operation(startup_messages[-1], level="warning")
         self._outline_stack = QStackedWidget(manager.parking)
         self._favorites_stack = QStackedWidget(manager.parking)
         self._properties_stack = QStackedWidget(manager.parking)
@@ -116,6 +154,13 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                 identifier, title, lambda content=stack: content, icon, position, shortcut,
                 header_actions=(self._depth_action,) if identifier == "outline" else (),
             ))
+        manager.register_tool_window(ToolWindowSpec(
+            "operation_log", "操作日志", lambda: self.operation_log, "log",
+            DockPosition.BOTTOM_LEFT, "Alt+5",
+            header_actions=(self.operation_log.copy_all_action, self.operation_log.clear_action),
+        ))
+        self.log_action = manager.actions["tool:operation_log"]
+        self.log_action.setCheckable(True)
         self.host.editor.set_empty_widget_factory(lambda: _WelcomePage(self))
         self._register_file_actions()
         self.settings_action = manager.register_action("app.settings", "导图设置", self.show_settings_panel,
@@ -125,11 +170,16 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.recent_files_button = RecentFilesButton(self)
         self.set_title_bar_navigation(self.recent_files_button)
         manager.activate("properties", focus=False)
+        manager.activate("operation_log", focus=False)
+        self.log_action.setChecked(True)
         layout = manager.capture_layout()
         for sizes in layout["hosts"]["main"]["region_sizes"].values():
             sizes.update(left=260, right=360, bottom=260)
         manager.restore_layout(layout)
         manager.set_default_layout()
+        manager.layout_store = _OperationLogLayoutStore(
+            manager.layout_store, next(tool for tool in layout["tools"] if tool["id"] == "operation_log"),
+        )
         self._properties_visible = True
         self._settings_visible = False
         manager.layout_changed.connect(self._layout_changed)
@@ -174,11 +224,53 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         """只读访问活动面板组合；外层停靠容器在各会话间共用。"""
         return self.active_session.panels if self.active_session else None
 
+    def record_operation(self, message: str, *, session: MindMapSession | str | Path | None = None,
+                         level: str = "info") -> None:
+        """在 GUI 线程记录一条操作摘要，返回 None，不影响状态栏或当前活动导图。
+
+        message 为中文说明；session 可以是所属 MindMapSession、尚未建立会话的
+        文件路径（str 或 Path），或代表应用级事件的 None。来源在调用时冻结为文件名
+        及完整路径字符串，分别供标签和悬停详情使用，不保存会话引用，也不随标签切换
+        或另存为回写旧记录。level 接受 info、warning、
+        error，语义由调用方明确指定。已释放的窗口或会话忽略迟到回调。
+        """
+        if self._disposed or not hasattr(self, "operation_log"):
+            return
+        if session is None:
+            source, source_path = "应用", ""
+        elif isinstance(session, (str, Path)):
+            source = Path(session).name or "新建导图"
+            source_path = str(session)
+        else:
+            if session.disposed:
+                return
+            source = session.files.path.name if session.files.path else "新建导图"
+            source_path = str(session.files.path) if session.files.path else ""
+        self.operation_log.append_entry(message, source=source, level=level, source_path=source_path)
+
+    def _record_exception(self, error, *, operation="操作", session=None):
+        """在业务失败边界记录异常，并标记本次传播，防止 UI 再重复记录同一失败。
+
+        标记不持有窗口或文档；业务入口每次失败都重新记录，即使调用方复用异常
+        实例也不吞掉后续失败。只有外层 call 消费标记，不根据错误文字做去重。
+        """
+        self.record_operation(f"{operation}失败：{error}", session=session, level="error")
+        error._mindmap_operation_log_token = self._operation_error_token
+
+    def report_tool_error(self, tool_id, error):
+        """保留框架工具失败提示，并将失败原因写入应用级日志。"""
+        super().report_tool_error(tool_id, error)
+        self.record_operation(f"无法创建工具窗口 {tool_id}：{error}", level="error")
+
     def call(self, callback):
-        """无会话时也能报告新建、打开错误；UI 异常边界不依赖某个画布的生命周期。"""
+        """UI 异常边界捕获操作开始时的会话；内层已记录的同一异常只显示状态提示。"""
+        session = self.active_session
         try:
             return callback()
-        except (MindMapError, OSError, ValueError) as error:
+        except Exception as error:
+            if getattr(error, "_mindmap_operation_log_token", None) is not self._operation_error_token:
+                self._record_exception(error, session=session)
+            error._mindmap_operation_log_token = None
             self.show_status_message(str(error))
             return None
 
@@ -192,7 +284,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ("save_as", "另存为…", lambda: self.save(save_as=True), "Ctrl+Shift+S", "save-as"),
             ("quit", "退出", self.close, "Ctrl+Q", "exit"),
         ):
-            self.add_action(ActionSpec("app." + identifier, title, callback, icon, shortcut, "文件", False))
+            self.add_action(ActionSpec("app." + identifier, title,
+                                       lambda action=callback: self.call(action), icon, shortcut, "文件", False))
 
     def _save_always_on_top(self, enabled: bool) -> None:
         """在窗口实际切换置顶后立即保存本机偏好，不改动导图及退出会话记录。"""
@@ -342,6 +435,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.document_state.remember(path)
         except OSError as error:
             self.show_status_message(f"最近文件未能保存：{error}")
+            self.record_operation(f"最近文件未能保存：{error}", level="warning")
 
     def clear_recent_files(self):
         """清空最近文件，退出快照及运行中的全部会话继续保留。"""
@@ -349,6 +443,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.document_state.clear_recent()
         except OSError as error:
             self.show_status_message(f"最近文件未能保存：{error}")
+            self.record_operation(f"最近文件未能保存：{error}", level="warning")
 
     def new_document(self, path=None):
         """选择路径并成功首次保存后新增会话，现有会话保持不变。"""
@@ -371,10 +466,16 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             return False
         # 另存为取消时仍沿用原路径的防抖保存；成功或写入失败由文件状态通知
         # 停止计时器。不能在打开对话框前停掉已经排队的自动保存。
-        result = session.files.save(save_as=True) if save_as else session.flush()
+        try:
+            result = session.files.save(save_as=True) if save_as else session.flush()
+        except Exception as error:
+            self._record_exception(error, operation="另存为" if save_as else "保存导图", session=session)
+            raise
         self.sessions.sync(session)
         if result and save_as:
             self._remember_path(session.files.path)
+        if result:
+            self.record_operation(f"{'另存为' if save_as else '保存导图'}：{session.files.path}", session=session)
         return result
 
     def save_all(self):
@@ -409,6 +510,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                     break
             if title == "视图":
                 section.addAction(self.read_only_action)
+                section.addSeparator()
+                section.addAction(self.log_action)
             menu.insertMenu(anchor, section)
         return menu
 
@@ -435,10 +538,16 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         if hasattr(self, "_status_controls"):
             self._status_controls.set_ui_colors(ui_colors_from_shell(self.manager.theme),
                                                 compact=self.manager.theme.compact)
+        if hasattr(self, "operation_log"):
+            self.operation_log.set_ui_colors(ui_colors_from_shell(self.manager.theme),
+                                             compact=self.manager.theme.compact)
+        if hasattr(self, "log_action"):
+            self.log_action.setIcon(self.manager.theme.icon("log"))
 
     def _layout_changed(self):
         if self._disposed:
             return
+        self.log_action.setChecked(self.manager.states["operation_log"].visible)
         visible = self.manager.states["properties"].visible
         if getattr(self, "_properties_visible", visible) and not visible and self.panels:
             self.panels.flush_pending_edits()
@@ -487,6 +596,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                 ], self.sessions.active_id)
             except OSError as error:
                 self.show_status_message(f"退出会话未能保存：{error}")
+                self.record_operation(f"退出会话未能保存：{error}", level="warning")
             self.dispose()
 
 

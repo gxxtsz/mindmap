@@ -17,6 +17,8 @@ class ChangeEvent:
     forward=event.forward) 更新自己的独立读模型。撤销时 forward=False。
     reset/saved 不携带差量，分别需要重新装载快照和仅同步保存标记。每个引擎
     监听器取得独立变化集，修改收到的数据不会改动历史或其他监听器的数据。
+    changes.moves 可准确标识移动根节点及前后位置；其快照顺序固定，forward=False
+    时以 after 为移动起点、before 为终点，不需要查询当前节点或选择状态。
     """
 
     operation: str

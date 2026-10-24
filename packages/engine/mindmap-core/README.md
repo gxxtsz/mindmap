@@ -1,5 +1,27 @@
 # mindmap-core
 
+## 精确移动事件
+
+`ChangeEvent.changes.moves` 为默认空元组的移动记录，元素是不可变的 `NodeMove`：
+`node_id` 标识真正移动的分支根，`before`、`after` 分别保存事务前后的 `NodePlacement`。
+位置快照包括 `node_text`、`parent_id`、`parent_text`、`index` 和 `direction`，其中同级
+序号从1开始，方向为解析自动分配及父分支继承后的有效 `left`、`right` 或 `down`。
+
+这些记录从事务中已登记的父引用变更生成，不根据兄弟节点最终顺序猜测移动对象。
+多选祖先及其后代时只记录真正移动的独立根，普通兄弟和随行后代不额外记录。
+被移动节点自身可能没有实体字段变化，因此不能用 `ChangeEvent.node_ids` 代替移动记录。
+节点及父节点名称在事务两端固定，后续改名和删除不会污染已提交记录；构造记录不复制
+整张导图，只读取受影响节点、父级子列表及所属页面的一级分支。
+
+修改和重做的 `forward=True`，起点为 `before`、终点为 `after`；撤销的 `forward=False`，
+起点改为 `after`、终点改为 `before`。通知中的快照顺序始终固定，读取者负责依据方向
+描述实际发生的操作；事件订阅者依旧获得各自隔离的差量，不影响其他订阅者及历史。
+
+位置没有净变化时不生成移动记录，试算和失败事务不发送成功事件。`ChangeSet.empty`
+及 `apply()` 忽略移动元数据，不能仅靠元数据产生历史或改写文档；`ChangeSet.between()`
+无法从快照还原具体移动意图，继续返回空 `moves`。新增字段位于原有三个字段之后，
+兼容已有位置参数构造。移动信息只随内存撤销历史保存，不改变 `.mindmap` 文件格式。
+
 ## 独立子导图
 
 `MindMapDocument.submaps` 使用扁平页面表，`Node.submap_id` 关联独立子导图；

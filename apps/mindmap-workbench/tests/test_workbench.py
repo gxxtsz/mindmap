@@ -142,7 +142,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     QTimer.singleShot(0, inspect_menu)
     qtbot.mouseClick(window.title_bar.menu, Qt.MouseButton.LeftButton)
     assert popped == [expected]
-    assert set(window.manager.specs) == {"outline", "favorites", "properties", "map_settings"}
+    assert set(window.manager.specs) == {"outline", "favorites", "properties", "map_settings", "operation_log"}
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
     assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected
@@ -153,9 +153,10 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [action.text() for action in exports.actions()] == ["PNG 图片…", "SVG 矢量图…", "PDF 文档…"]
     assert all(action.isEnabled() for action in exports.actions())
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
-    assert view.actions() == [window.canvas.action(key) for key in (
+    assert [action for action in view.actions() if not action.isSeparator()] == [window.canvas.action(key) for key in (
         "zoom_in", "zoom_out", "expand_all", "collapse_all",
-    )] + [window.read_only_action]
+    )] + [window.read_only_action, window.log_action]
+    assert view.actions()[-2].isSeparator()
     assert not hasattr(window, "show_document")
     assert window.manager.states["properties"].visible
     main.deleteLater()

@@ -12,14 +12,52 @@ from .models import MindMapDocument, new_id
 _COLLECTIONS = ("nodes", "assets", "submaps", "detail_pages")
 
 
+@dataclass(frozen=True)
+class NodePlacement:
+    """一次事务某一端的节点位置快照，仅保存文字、标识和位置，不引用实体。
+
+    node_text 是该端的节点名称，parent_id、parent_text 是直接父节点的标识及名称；
+    index 为父节点 children 中从 1 开始的同级序号，direction 为继承并解析自动分配
+    后的有效方向（left、right 或 down），不能用原始的可空 direction 字段代替。
+    引擎在提交时创建快照，后续改名、移动及历史重放均不会改变已有快照。
+    """
+
+    node_text: str
+    parent_id: str
+    parent_text: str
+    index: int
+    direction: str
+
+
+@dataclass(frozen=True)
+class NodeMove:
+    """一个实际移动根节点的前后位置，供日志等只读订阅者准确描述操作。
+
+    node_id 标识真正被移动的节点；before、after 分别对应整个事务提交前后的
+    NodePlacement。随分支移动的后代及被挤动的兄弟不额外记录。撤销通知仍保留
+    原始前后顺序，读取者依据 ChangeEvent.forward 决定本次起点及终点。
+    本类型只随内存差量历史保存，不参与文档编码、位置重放或修改状态判定。
+    """
+
+    node_id: str
+    before: NodePlacement
+    after: NodePlacement
+
+
 @dataclass
 class ChangeSet:
-    """实体与文档字段的前后值；同一份变化集驱动撤销、重做和事件摘要。"""
+    """实体与文档字段的前后值；同一份变化集驱动撤销、重做和事件摘要。
+
+    moves 是可选的精确移动信息，默认空元组，保留原三个位置参数的兼容性。
+    只有事务写入日志能够识别实际移动意图；between 不能仅凭两个快照猜测哪个
+    兄弟被拖动，因此不生成移动信息。empty、apply 和文件格式均忽略这项元数据。
+    """
 
     collections: dict[str, dict[str, tuple[Any, Any]]] = field(default_factory=dict)
     settings: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     # 操作所属页面随内容历史保存；界面据此跨页展示撤销结果，导航自身不产生历史。
     page_id: str | None = None
+    moves: tuple[NodeMove, ...] = ()
 
     @classmethod
     def between(cls, before: MindMapDocument, after: MindMapDocument) -> ChangeSet:

@@ -7,7 +7,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from .errors import MindMapError
-from .history import ChangeSet
+from .history import ChangeSet, NodeMove, NodePlacement
 from .models import MindMapDocument
 
 
@@ -175,7 +175,72 @@ class TransactionJournal:
             key: (deepcopy(old), deepcopy(getattr(document, key)))
             for key, old in self.settings.items() if old != getattr(document, key)
         }
-        return ChangeSet(collections, settings, self.page_id)
+        return ChangeSet(collections, settings, self.page_id, self._moves())
+
+    def _moves(self) -> tuple[NodeMove, ...]:
+        """从登记过父引用的节点生成净移动快照，不从兄弟顺序变化猜测拖动对象。
+
+        parents 保留首次改动前的父标识，包括同父节点排序；未登记的兄弟及后代
+        不能成为移动对象。新建、删除、页面根及往返后位置不变的节点均被排除。
+        名称从写时复制前值和正式结果读取，只扫描相关父级的子列表及页根分支；
+        缓存索引和方向，批量移动不会为每个节点重复枚举同一父级或整张节点表。
+        """
+        if not self.parents:
+            return ()
+        document = self.state.document
+        positions, sides = {}, {}
+
+        def node(key, before):
+            current = document.nodes.get(key)
+            return self.nodes.get(key, current) if before else current
+
+        def parent(key, before):
+            current = self.state.parents.get(key)
+            return self.parents.get(key, current) if before else current
+
+        def direction(key, before):
+            # 沿该端父链确定所属页面及一级分支，不遍历分支后代。
+            branch, root = key, key
+            while (ancestor := parent(root, before)) is not None:
+                branch, root = root, ancestor
+            page_id = self.state.root_pages[root]
+            if page_id is None:
+                layout = self.settings.get("layout", document.layout) if before else document.layout
+            else:
+                page = document.page_record(page_id)
+                if before:
+                    page = self.submaps.get(page_id, self.detail_pages.get(page_id, page))
+                layout = page.layout
+            if layout.direction != "both":
+                return layout.direction
+            cache_key = before, root
+            if cache_key not in sides:
+                counts, resolved = {"left": 0, "right": 0}, {}
+                for child in node(root, before).children:
+                    side = node(child, before).direction or min(counts, key=counts.get)
+                    counts[side] += 1
+                    resolved[child] = side
+                sides[cache_key] = resolved
+            return sides[cache_key][branch]
+
+        def placement(key, parent_id, before):
+            owner = node(parent_id, before)
+            cache_key = before, parent_id
+            if cache_key not in positions:
+                positions[cache_key] = {child: index for index, child in enumerate(owner.children, 1)}
+            return NodePlacement(node(key, before).text, parent_id, owner.text,
+                                 positions[cache_key][key], direction(key, before))
+
+        moves = []
+        for key, old_parent in self.parents.items():
+            new_parent = parent(key, False)
+            if old_parent is None or new_parent is None or node(key, True) is None or node(key, False) is None:
+                continue
+            old = placement(key, old_parent, True)
+            new = placement(key, new_parent, False)
+            if (old.parent_id, old.index, old.direction) != (new.parent_id, new.index, new.direction):
+                moves.append(NodeMove(key, old, new))
+        return tuple(moves)
 
     def rollback(self):
         """原实体未被修改，直接恢复实体及父索引，无需再次深拷贝整图。"""

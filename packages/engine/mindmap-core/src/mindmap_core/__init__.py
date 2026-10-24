@@ -16,7 +16,7 @@ from .extensions import (
     LayoutRegistry,
 )
 from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point, Rect
-from .history import ChangeSet
+from .history import ChangeSet, NodeMove, NodePlacement
 from .models import Asset, MindMapDocument, MindMapPage, MindMapPageView, Node, PathEntry, Theme
 
 __all__ = [
@@ -44,6 +44,8 @@ __all__ = [
     "SaveSnapshot",
     "MindMapError",
     "Node",
+    "NodeMove",
+    "NodePlacement",
     "OperationRejected",
     "PathCommand",
     "PathEntry",
