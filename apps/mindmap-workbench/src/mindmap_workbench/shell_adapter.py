@@ -20,6 +20,22 @@ from .sessions import MindMapSession, MindMapSessionManager
 from .status_controls import _StatusViewControls
 
 
+def _format_file_size(size: int | None) -> str:
+    """将已缓存的字节数转换为中文状态栏使用的大小文本，不访问文件系统。
+
+    None 表示当前无法读取磁盘大小，显示“未知”；字节使用整数，其余单位按
+    1024 进制转换并保留一位小数。最大使用 GiB，不影响实际文件内容或保存状态。
+    """
+    if size is None:
+        return "未知"
+    units = ("B", "KiB", "MiB", "GiB")
+    value, index = float(size), 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+    return f"{size} B" if index == 0 else f"{value:.1f} {units[index]}"
+
+
 def ui_colors_from_shell(theme) -> UiColors:
     """把框架主题映射为通用色板；两种 Theme 不相互依赖或写回文档。"""
     def color(key):
@@ -462,7 +478,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             title = session.files.path.name
             self.setWindowTitle(f"{'* ' if session.files.is_dirty else ''}{title} — 原生思维导图")
             self.status_label.setText(f"  {session.engine.node_count} 个节点 · "
-                                      f"{len(session.canvas.selected_node_ids())} 个选中 · {status}")
+                                      f"{len(session.canvas.selected_node_ids())} 个选中 · {status} · "
+                                      f"文件大小：{_format_file_size(session._file_size_bytes)}")
         else:
             self.setWindowTitle("原生思维导图")
             self.status_label.setText("  新建导图或打开文件以开始")

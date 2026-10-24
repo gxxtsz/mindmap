@@ -98,6 +98,8 @@ class MindMapSession(QObject):
         self.canvas.inspiration_sidebar_requested.connect(self._show_inspiration)
         self._sync_inspiration()
         self.files = MindMapFileController(self.canvas, self.panels, owner.window, writer=self._write)
+        # 大小来自已落盘的整个文件；普通编辑和选中变化只读取缓存，不触发磁盘查询。
+        self._file_size_bytes: int | None = None
         self.last_error = ""
         self.disposed = False
         self.timer = QTimer(self)
@@ -134,7 +136,21 @@ class MindMapSession(QObject):
                 self.owner.window.record_operation(describe_change(event), session=self)
         self.owner.sync(self)
 
+    def _refresh_file_size(self) -> None:
+        """在文件操作或会话激活边界刷新实际字节数，不估算内存中尚未保存的内容。
+
+        只读取当前绑定路径的磁盘元信息，整份导图的全部页面和图片均计入大小。
+        未绑定路径、文件缺失或元信息读取失败时缓存 None，由状态栏显示“未知”；
+        读取失败不修改保存错误、文档脏状态或自动保存计时器，也不弹出额外提示。
+        """
+        try:
+            self._file_size_bytes = self.files.path.stat().st_size if self.files.path is not None else None
+        except OSError:
+            self._file_size_bytes = None
+
     def _saved(self):
+        """打开或保存成功后更新磁盘大小及原有状态；后台保存也复用此通知边界。"""
+        self._refresh_file_size()
         self.last_error = ""
         if self.engine.is_dirty and not self.disposed:
             if not self.timer.isActive():
@@ -148,6 +164,7 @@ class MindMapSession(QObject):
         """失败保留原始状态且停止重试；显示文件名，下一次编辑或显式保存可再次尝试。"""
         if self.disposed:
             return
+        self._refresh_file_size()
         self.last_error = message
         self.timer.stop()
         name = self.files.path.name if self.files.path else "新建导图"
@@ -531,6 +548,9 @@ class MindMapSessionManager(QObject):
                 old.commit_input()
                 old.close_popups()
             self.active_id = session_id
+            if self.active is not None:
+                # 标签及分屏切换时重新读取，允许外部文件变化在下次激活时更新。
+                self.active._refresh_file_size()
             self.window._bind_session(self.active)
             if focus is not None and focus.isVisible() and QApplication.focusWidget() is not focus:
                 focus.setFocus(Qt.FocusReason.OtherFocusReason)
