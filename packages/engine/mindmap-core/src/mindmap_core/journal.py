@@ -26,6 +26,7 @@ class DocumentState:
         self.document = document
         self.parents = document.parents()
         self.root_pages = {document.root_id: None, **{p.root_id: p.id for p in document.iter_pages()}}
+        self.root_pages.update(dict.fromkeys(document.inspiration.root_ids, document.inspiration.id))
         self.asset_counts = Counter(node.image_id for node in document.nodes.values() if node.image_id)
         self.unused_assets = set(document.assets) - self.asset_counts.keys()
 
@@ -110,6 +111,12 @@ class DocumentState:
         或历史重放后改变，失败事务不必扫描资源或恢复整张计数表。
         """
         index = 1 if forward else 0
+        if "inspiration" in changes.settings:
+            old, new = changes.settings["inspiration"][1 - index], changes.settings["inspiration"][index]
+            for root in old.root_ids:
+                if self.root_pages.get(root) == old.id:
+                    self.root_pages.pop(root)
+            self.root_pages.update(dict.fromkeys(new.root_ids, new.id))
         nodes = changes.collections.get("nodes", {})
         pages = {**changes.collections.get("submaps", {}), **changes.collections.get("detail_pages", {})}
         for pair in pages.values():
@@ -185,10 +192,19 @@ class TransactionJournal:
         名称从写时复制前值和正式结果读取，只扫描相关父级的子列表及页根分支；
         缓存索引和方向，批量移动不会为每个节点重复枚举同一父级或整张节点表。
         """
-        if not self.parents:
+        if not self.parents and "inspiration" not in self.settings:
             return ()
         document = self.state.document
         positions, sides = {}, {}
+        old_area = self.settings.get("inspiration", document.inspiration)
+        root_pages = self.state.root_pages.copy()
+        for root in document.inspiration.root_ids:
+            root_pages.pop(root, None)
+        root_pages.update(dict.fromkeys(old_area.root_ids, old_area.id))
+        for table in (self.submaps, self.detail_pages):
+            for page in table.values():
+                if page is not None:
+                    root_pages[page.root_id] = page.id
 
         def node(key, before):
             current = document.nodes.get(key)
@@ -203,9 +219,11 @@ class TransactionJournal:
             branch, root = key, key
             while (ancestor := parent(root, before)) is not None:
                 branch, root = root, ancestor
-            page_id = self.state.root_pages[root]
+            page_id = (root_pages if before else self.state.root_pages)[root]
             if page_id is None:
                 layout = self.settings.get("layout", document.layout) if before else document.layout
+            elif page_id == document.inspiration.id:
+                layout = old_area.layout if before else document.inspiration.layout
             else:
                 page = document.page_record(page_id)
                 if before:
@@ -213,6 +231,8 @@ class TransactionJournal:
                 layout = page.layout
             if layout.direction != "both":
                 return layout.direction
+            if key == root:
+                return "right"
             cache_key = before, root
             if cache_key not in sides:
                 counts, resolved = {"left": 0, "right": 0}, {}
@@ -224,21 +244,35 @@ class TransactionJournal:
             return sides[cache_key][branch]
 
         def placement(key, parent_id, before):
+            root = key
+            while (ancestor := parent(root, before)) is not None:
+                root = ancestor
+            page_id = (root_pages if before else self.state.root_pages)[root]
+            if parent_id is None:
+                area = old_area if before else document.inspiration
+                return NodePlacement(node(key, before).text, None, "灵感区", area.root_ids.index(key) + 1,
+                                     direction(key, before), page_id, tuple(area.positions[key]))
             owner = node(parent_id, before)
             cache_key = before, parent_id
             if cache_key not in positions:
                 positions[cache_key] = {child: index for index, child in enumerate(owner.children, 1)}
             return NodePlacement(node(key, before).text, parent_id, owner.text,
-                                 positions[cache_key][key], direction(key, before))
+                                 positions[cache_key][key], direction(key, before), page_id)
 
         moves = []
-        for key, old_parent in self.parents.items():
+        candidates = dict(self.parents)
+        if "inspiration" in self.settings:
+            for key in set(old_area.root_ids) & set(document.inspiration.root_ids):
+                if old_area.positions[key] != document.inspiration.positions[key]:
+                    candidates.setdefault(key, self.state.parents.get(key))
+        for key, old_parent in candidates.items():
             new_parent = parent(key, False)
-            if old_parent is None or new_parent is None or node(key, True) is None or node(key, False) is None:
+            if node(key, True) is None or node(key, False) is None:
                 continue
             old = placement(key, old_parent, True)
             new = placement(key, new_parent, False)
-            if (old.parent_id, old.index, old.direction) != (new.parent_id, new.index, new.direction):
+            if (old.parent_id, old.index, old.direction, old.page_id, old.position) != (
+                    new.parent_id, new.index, new.direction, new.page_id, new.position):
                 moves.append(NodeMove(key, old, new))
         return tuple(moves)
 
@@ -261,6 +295,10 @@ class TransactionJournal:
                     target[key] = old
         for key, old in self.settings.items():
             setattr(document, key, old)
+            if key == "inspiration":
+                self.state.root_pages = {root: page for root, page in self.state.root_pages.items()
+                                         if page != old.id}
+                self.state.root_pages.update(dict.fromkeys(old.root_ids, old.id))
         for key, old in self.parents.items():
             if old is None:
                 self.state.parents.pop(key, None)

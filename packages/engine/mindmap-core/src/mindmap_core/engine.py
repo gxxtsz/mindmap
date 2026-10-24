@@ -105,14 +105,28 @@ class MindMapEngine:
         return self._state.parents.get(node_id)
 
     def node_page_id(self, node_id: str) -> str | None:
-        """查询节点的页内归属；主导图返回 None，不跨越入口边界。"""
+        """查询节点所在区域或页面，主导图返回 None，灵感区返回 inspiration_id。
+
+        仅沿普通父链读取运行时索引，不跨附属页面入口，不复制或修改文档。
+        无效节点抛出中文 MindMapError；同步调用，返回标识可跨快照使用。
+        """
         self._editor.node(node_id)
         return self._state.page_id(node_id)
 
-    def page_document(self, page_id: str | None = None) -> MindMapDocument:
-        """返回独立单页快照；只用于当前页布局、渲染、面板和图形导出。"""
+    def page_document(self, page_id: str | None = None, *,
+                      inspiration_root_id: str | None = None) -> MindMapDocument:
+        """返回独立的区域快照，供布局、渲染、面板和图形导出使用。
+
+        page_id 省略或为 None 时读取主导图；灵感区标识返回可为空的
+        MindMapForestView，以 root_ids 枚举游离树，附属页面继续返回单根快照。
+        结果归调用方所有，修改不会写回引擎，不能作为整份文档保存；无效页面
+        抛出 MindMapError。查询不产生历史或修改标记，仅在引擎所属线程同步调用。
+        inspiration_root_id 指定灵感区中有效的游离根时，只复制这一棵普通树，
+        展示根坐标归零，实际总览坐标保持不变；省略仍返回全部游离树。
+        该参数用于其他页面或指定非游离根时抛出 MindMapError，结果不借用引擎实体。
+        """
         try:
-            return deepcopy(self._state.document.page_view(page_id))
+            return deepcopy(self._state.document.page_view(page_id, inspiration_root_id=inspiration_root_id))
         except KeyError as exc:
             raise MindMapError("导图页面不存在") from exc
 
@@ -128,6 +142,14 @@ class MindMapEngine:
         while True:
             page_id = self._state.page_id(key)
             page = self._state.document.page_record(page_id)
+            if page_id == self.inspiration_id:
+                local = []
+                while True:
+                    local.append(PathEntry(page_id, key, self._editor.node(key).text))
+                    if key not in self._state.parents:
+                        break
+                    key = self._state.parents[key]
+                return [PathEntry(page_id, None, "灵感区", True), *reversed(local), *result]
             local = []
             while True:
                 node = self._editor.node(key)
@@ -140,8 +162,75 @@ class MindMapEngine:
                 break
             owner = page.owner_id
             parent_page = self._state.page(owner)
-            key = owner if owner == parent_page.root_id else self._state.parents[owner]
+            key = (owner if self._state.page_id(owner) == self.inspiration_id
+                   or owner == parent_page.root_id else self._state.parents[owner])
         return result
+
+    @property
+    def inspiration_id(self) -> str:
+        """读取当前文档灵感区的稳定页面标识，不复制文档或产生历史。"""
+        return self._state.document.inspiration.id
+
+    def inspiration_items(self) -> tuple[tuple[str, str, int], ...]:
+        """按游离根顺序返回侧栏摘要，每项为（根标识、原始标题、普通后代数量）。
+
+        不包含根本身或附属页面内部节点，不复制实体及图片字节，不借用可变容器。
+        空区返回空元组；查询不修改文档、历史或保存标记。仅在引擎所属线程读取，
+        返回的不可变快照可由界面保存，后续编辑不会改变其中的旧标题和计数。
+        """
+        document = self._state.document
+        return tuple((root, document.nodes[root].text, len(document.descendants(root)) - 1)
+                     for root in document.inspiration.root_ids)
+
+    def add_inspiration(self, text="新想法", *, position) -> str:
+        """创建游离根并返回稳定节点 ID，普通后代及附属页面能力沿用普通节点。
+
+        position 是两个有限数值组成的逻辑像素坐标；非法文本或坐标抛出
+        MindMapError，失败完整回滚。成功只提交一次历史，不依赖 Qt；只能在
+        引擎所属线程同步调用，返回标识可跨快照保存，实体仍归文档管理。
+        """
+        return self._execute("add_inspiration", self._editor.add_inspiration,
+                             text=text, position=position)
+
+    def set_inspiration_positions(self, positions) -> None:
+        """原子调整游离根位置；映射键为有效根 ID，值为有限二维逻辑坐标。
+
+        不调整普通后代，不改变根序；相同坐标不产生历史。失效根、子节点或非法
+        坐标抛出 MindMapError 并回滚；一次多根调整只产生一条历史。同步接口，
+        不持有传入映射，也不允许调用方直接改写文档借用记录。
+        """
+        self._execute("set_inspiration_positions", self._editor.set_inspiration_positions,
+                      positions=positions)
+
+    def move_to_inspiration(self, node_ids, *, positions) -> list[str]:
+        """把同页选中分支无损移出并返回去重后的分支根，详情页内部不接受移动。
+
+        positions 必须恰好覆盖排除祖先重复选择后的每个根；普通页根禁止移出。
+        节点、图片及全部附属页标识保持不变，坐标与归属共同进入一次历史。
+        非法目标或坐标抛出 MindMapError，完整回滚；仅限引擎所属线程同步调用。
+        """
+        return self._execute("move_to_inspiration", self._editor.move_to_inspiration,
+                             node_ids=list(node_ids), positions=positions)
+
+    def attach_inspirations(self, node_ids, parent_id) -> None:
+        """把灵感区分支追加到主导图或子导图父主题，保留所有内容及稳定标识。
+
+        目标必须能接普通子节点，不能位于源分支拥有的普通后代或附属页面中。
+        非法来源、页面根约束或归属循环抛出 MindMapError，整个操作回滚。
+        成功只提交一次历史，父主题自动展开；同步调用，不依赖 GUI 或剪贴板。
+        """
+        self._execute("attach_inspirations", self._editor.attach_inspirations,
+                      node_ids=list(node_ids), parent_id=parent_id)
+
+    def group_inspirations(self, node_ids, text="新主题", *, position) -> str:
+        """新建共同游离父主题，按原树序组合选中分支，返回新父主题 ID。
+
+        来源必须都在灵感区；重复及祖先后代选择只保留最上层分支。position 为
+        新父主题的有限二维逻辑坐标，失败抛出 MindMapError 并完整回滚。
+        创建与组合只产生一条历史，后续改名另记历史；仅限所属引擎线程同步调用。
+        """
+        return self._execute("group_inspirations", self._editor.group_inspirations,
+                             node_ids=list(node_ids), text=text, position=position)
 
     def create_submap(self, node_id: str) -> str:
         """为普通叶子节点创建独立子导图并返回页面 ID，实际进入由界面负责。
@@ -259,6 +348,8 @@ class MindMapEngine:
                 ids = parameters.get("node_ids")
                 key = key or (ids[0] if ids else None)
                 journal.page_id = self._state.page_id(key) if key is not None else parameters.get("page_id")
+                if key is None and name in ("add_inspiration", "set_inspiration_positions"):
+                    journal.page_id = self.inspiration_id
                 journal.has_origin = True
             return action(**parameters)
 
@@ -329,6 +420,7 @@ class MindMapEngine:
         document.detail_pages = source.detail_pages.copy()
         document.layout, document.theme = deepcopy(source.layout), deepcopy(source.theme)
         document.metadata = deepcopy(source.metadata)
+        document.inspiration = deepcopy(source.inspiration)
         return SaveSnapshot(document, self._snapshot_owner, self.document_generation, self._history._state)
 
     def mark_saved_snapshot(self, snapshot: SaveSnapshot) -> bool:
@@ -435,7 +527,10 @@ class MindMapEngine:
             else:
                 page = deepcopy(self._state.document.page_record(page_id))
                 page.layout = deepcopy(config)
-                self._state.set_page(page_id, page)
+                if page_id == self.inspiration_id:
+                    self._state.set_setting("inspiration", page)
+                else:
+                    self._state.set_page(page_id, page)
 
         self._execute("set_layout", action, config=config, page_id=page_id)
 
@@ -448,7 +543,10 @@ class MindMapEngine:
             else:
                 page = deepcopy(self._state.document.page_record(page_id))
                 page.theme = deepcopy(theme)
-                self._state.set_page(page_id, page)
+                if page_id == self.inspiration_id:
+                    self._state.set_setting("inspiration", page)
+                else:
+                    self._state.set_page(page_id, page)
 
         self._execute("set_theme", action, theme=theme, page_id=page_id)
 

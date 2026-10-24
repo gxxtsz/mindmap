@@ -7,11 +7,12 @@ from dataclasses import fields
 
 from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
+from .inspiration import InspirationEditorMixin
 from .models import Asset, MindMapDocument, MindMapPage, Node, new_id
 from .transactions import DocumentState
 
 
-class DocumentEditor:
+class DocumentEditor(InspirationEditorMixin):
     """在事务内部执行树、节点和图片操作，不持有引擎或注册表。"""
 
     def __init__(self, state: DocumentState):
@@ -35,7 +36,9 @@ class DocumentEditor:
     def side(self, node_id: str) -> str:
         """沿父链找到一级分支，仅扫描一级分支确定方向，不遍历其后代。"""
         page = self._state.page(node_id)
-        root = page.root_id
+        root = node_id
+        while root in self._state.parents:
+            root = self._state.parents[root]
         current = node_id
         while current != root and self._state.parents.get(current) != root:
             current = self._state.parents[current]
@@ -69,7 +72,8 @@ class DocumentEditor:
                     parent = parents[key]
                     path.append(self.node(parent).children.index(key))
                     key = parent
-                return tuple(reversed(path))
+                roots_order = self.document.inspiration.root_ids
+                return (roots_order.index(key) if key in roots_order else 0, *reversed(path))
             roots.sort(key=order)
         return roots
 
@@ -91,6 +95,9 @@ class DocumentEditor:
 
         parent_id = self._state.parents.get(node_id)
         if parent_id is None:
+            if node_id in self.document.inspiration.root_ids:
+                point = self.document.inspiration.positions[node_id]
+                return self.add_inspiration(text, position=(point[0], point[1] + 100))
             raise MindMapError("根节点不能添加同级节点")
         siblings = self.edit(parent_id).children
         child = Node(text, direction=self.node(node_id).direction)
@@ -105,6 +112,9 @@ class DocumentEditor:
 
         parents = self._state.parents
         if node_id not in parents:
+            if node_id in self.document.inspiration.root_ids:
+                return self.group_inspirations([node_id], text,
+                                               position=self.document.inspiration.positions[node_id])
             raise MindMapError("不能在根节点上方插入父节点")
         node = self.node(node_id)
         parent = Node(text, children=[node_id], direction=node.direction)
@@ -153,7 +163,7 @@ class DocumentEditor:
                 if current.detail_page_id:
                     linked.append(self.document.detail_pages[current.detail_page_id].root_id)
                 page_id = self._state.root_pages.get(current.id)
-                if page_id is not None:
+                if page_id is not None and page_id != self.document.inspiration.id:
                     linked.append(self.document.page_record(page_id).owner_id)
                 for key in linked:
                     if key not in seen:
@@ -286,11 +296,10 @@ class DocumentEditor:
         node_ids = list(node_ids)
 
         roots = self.roots(node_ids)
-        if any(key in self._state.root_pages for key in roots):
+        if any(key in self._state.root_pages and key not in self.document.inspiration.root_ids for key in roots):
             raise MindMapError("根节点不能删除")
-        parents = self._state.parents
+        self._unlink_branches(roots)
         for node_id in roots:
-            self.edit(parents[node_id]).children.remove(node_id)
             keys = self.document.owned_descendants(node_id)
             self._remove_owned_nodes(keys)
 
@@ -302,7 +311,7 @@ class DocumentEditor:
         if not roots:
             return
         self.node(target_id)
-        if any(key in self._state.root_pages for key in roots):
+        if any(key in self._state.root_pages and key not in self.document.inspiration.root_ids for key in roots):
             raise MindMapError("根节点不能移动")
         parents = self._state.parents
         ancestor = target_id
@@ -320,8 +329,7 @@ class DocumentEditor:
         target_page = self._state.page_id(parent_id)
         if any(self._state.page_id(key) != target_page for key in roots):
             raise MindMapError("跨页移动请使用剪切和粘贴")
-        for node_id in roots:
-            self.edit(parents[node_id]).children.remove(node_id)
+        self._unlink_branches(roots)
         parent = self.edit(parent_id)
         index = (
             len(parent.children)

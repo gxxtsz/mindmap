@@ -5,8 +5,8 @@ from time import monotonic
 from weakref import ref
 
 from PySide6.QtCore import QEvent, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QPainter
-from PySide6.QtWidgets import QApplication, QGraphicsView
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QApplication, QGraphicsRectItem, QGraphicsSimpleTextItem, QGraphicsView
 from shiboken6 import isValid
 
 from .dragging import NodeDragController
@@ -25,6 +25,17 @@ MIN_ZOOM = 0.1
 
 
 class MindMapView(QGraphicsView):
+    def _draw_inspiration_empty(self, painter):
+        """空想法画布显示侧栏与双击新建指引；仅属于界面，不参与保存和导出。"""
+        if self.owner.current_page_kind == "inspiration" and not self.owner.document_view.nodes:
+            painter.save()
+            painter.resetTransform()
+            colors = self.owner._ui_colors
+            painter.setPen(QColor(colors.muted if colors else "#788493"))
+            painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter,
+                             "先把想法记下来，稍后再确定归属\n\n双击空白处，或在左侧灵感栏点击“新建想法”")
+            painter.restore()
+
     def __init__(self, owner, scene):
         super().__init__(scene, owner)
         self.owner = owner
@@ -41,6 +52,8 @@ class MindMapView(QGraphicsView):
         self._fold_pressed = False
         self._wheel_scroll_remainder = 0.0
         self._hidden_center = None
+        self._branch_drop_preview = None
+        self._branch_drop_label = None
         self.press_node = None
         self.drag_origin = QPointF()
         self.node_drag = NodeDragController(self)
@@ -60,6 +73,7 @@ class MindMapView(QGraphicsView):
         self.setFrameShape(QGraphicsView.Shape.NoFrame)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
 
     @property
     def drag_ghost(self):
@@ -77,6 +91,68 @@ class MindMapView(QGraphicsView):
             event.accept()
             return True
         return super().event(event)
+
+    def _clear_branch_drop_preview(self):
+        for name in ("_branch_drop_preview", "_branch_drop_label"):
+            item = getattr(self, name, None)
+            if item is not None:
+                self.scene().removeItem(item)
+                setattr(self, name, None)
+
+    def _branch_drop_parent(self, position):
+        # 提示层位于节点上方，命中时跳过它，避免预览自身遮挡下一帧目标。
+        return next((item.node.id for item in self.items(position)
+                     if isinstance(item, NodeItem)), None)
+
+    def _show_branch_drop_preview(self, parent_id):
+        self._clear_branch_drop_preview()
+        if parent_id is None:
+            return
+        rect = self.owner.node_items[parent_id].sceneBoundingRect().adjusted(-4, -4, 4, 4)
+        color = QColor(self.owner._document.theme.accent)
+        self._branch_drop_preview = QGraphicsRectItem(rect)
+        self._branch_drop_preview.setPen(QPen(color, 2 / self.transform().m11()))
+        self._branch_drop_preview.setZValue(100000)
+        self._branch_drop_preview.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.scene().addItem(self._branch_drop_preview)
+        label = QGraphicsSimpleTextItem("＋ 作为子主题")
+        label.setBrush(color)
+        label.setScale(1 / self.transform().m11())
+        label.setPos(rect.left(), rect.bottom() + 6 / self.transform().m11())
+        label.setZValue(100001)
+        label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._branch_drop_label = label
+        self.scene().addItem(label)
+
+    def dragEnterEvent(self, event):
+        if self.owner.can_receive_branch_drag(event.mimeData()):
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        parent = self._branch_drop_parent(event.position().toPoint())
+        if parent is not None and self.owner.can_receive_branch_drag(event.mimeData(), parent):
+            self._show_branch_drop_preview(parent)
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        else:
+            self._clear_branch_drop_preview()
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._clear_branch_drop_preview()
+        event.accept()
+
+    def dropEvent(self, event):
+        parent = self._branch_drop_parent(event.position().toPoint())
+        self._clear_branch_drop_preview()
+        if parent is not None and self.owner.call(lambda: self.owner.receive_branch_drag(event.mimeData(), parent)):
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+        else:
+            event.ignore()
 
     def wheelEvent(self, event):
         """滚轮模式仅影响视图；Ctrl 始终临时缩放，不改写用户选择的模式。"""
@@ -299,7 +375,8 @@ class MindMapView(QGraphicsView):
                 if item.can_activate() and item.contains_button(self.mapToScene(position)):
                     shape = Qt.CursorShape.PointingHandCursor
             elif isinstance(item, NodeItem) and self.owner.editable and self.owner.editor is None:
-                if item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id):
+                if (self.owner.current_page_kind == "inspiration"
+                        or item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id)):
                     shape = Qt.CursorShape.OpenHandCursor
         self.viewport().setCursor(shape)
 
@@ -313,6 +390,7 @@ class MindMapView(QGraphicsView):
         self._set_hovered_node(None, immediate=True)
         self._expire_fold_hovers(clear=True)
         self.node_drag.cancel()
+        self._clear_branch_drop_preview()
         self.image_resize.cancel()
         grabber = self.scene().mouseGrabberItem()
         if isinstance(grabber, NodeItem):
@@ -391,7 +469,8 @@ class MindMapView(QGraphicsView):
             if (
                 self.owner.editable
                 and self.owner.editor is None
-                and item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id)
+                and (self.owner.current_page_kind == "inspiration"
+                     or item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id))
             ):
                 self.press_node = item.node.id
                 self.press_position = event.position().toPoint()
@@ -447,6 +526,11 @@ class MindMapView(QGraphicsView):
                     event.accept()
                     return
             if self.drag_ghost is not None:
+                if not self.viewport().rect().contains(event.position().toPoint()):
+                    roots = tuple(self.node_drag._resolver.roots)
+                    self.owner.call(lambda: self.owner.start_external_branch_drag(roots))
+                    event.accept()
+                    return
                 self.node_drag.update(event.position().toPoint())
                 self.update_cursor(event.position().toPoint())
                 event.accept()
@@ -500,6 +584,11 @@ class MindMapView(QGraphicsView):
 
     def mouseDoubleClickEvent(self, event):
         """按钮双击仍按独立点击处理，不把事件交给正文的双击编辑入口。"""
+        if (event.button() == Qt.MouseButton.LeftButton and self.owner.current_page_kind == "inspiration"
+                and self.itemAt(event.position().toPoint()) is None and self.owner.editable):
+            self.owner.call(self.owner.add_inspiration)
+            event.accept()
+            return
         if self._fold_pressed or isinstance(self.itemAt(event.position().toPoint()),
                                            (FoldControlItem, PageControlItem)):
             self.mousePressEvent(event)
@@ -570,4 +659,5 @@ class MindMapView(QGraphicsView):
         Qt GUI 线程在存活视图上调用，无额外所有权或正常业务异常。
         """
         super().drawForeground(painter, rect)
+        self._draw_inspiration_empty(painter)
         self.image_resize.paint(painter)

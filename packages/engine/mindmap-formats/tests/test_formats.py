@@ -41,7 +41,7 @@ def test_roundtrip_assets_and_metadata(tmp_path, suffix):
     else:
         with zipfile.ZipFile(target) as archive:
             stored = json.loads(archive.read("document.json"))
-    assert stored["schema_version"] == 4
+    assert stored["schema_version"] == 5
     assert "relations" not in stored and "summaries" not in stored
 
 
@@ -83,7 +83,7 @@ def test_branch_styles_keep_current_version_and_roundtrip(tmp_path, kind, suffix
     assert loaded == document
     assert "branch" not in loaded.nodes[first].style
     assert loaded.root.style["branch"] == {"kind": kind.value}
-    assert to_dict(loaded)["schema_version"] == 4
+    assert to_dict(loaded)["schema_version"] == 5
 
 
 @pytest.mark.parametrize("branch", [{"kind": "未知"}, {}, None, {"kind": 8}])

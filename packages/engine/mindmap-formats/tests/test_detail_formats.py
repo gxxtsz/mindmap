@@ -16,6 +16,7 @@ def test_old_versions_keep_ids_and_upgrade_only_when_saved(tmp_path, version):
         engine.create_submap(key)
     data = to_dict(engine.document)
     data["schema_version"] = version
+    del data["inspiration"]
     del data["detail_pages"]
     if version == 2:
         del data["submaps"]
@@ -28,7 +29,7 @@ def test_old_versions_keep_ids_and_upgrade_only_when_saved(tmp_path, version):
     assert loaded == engine.document and data == original
     path = tmp_path / "升级保存.mindmap"
     save_document(loaded, path)
-    assert to_dict(load_document(path))["schema_version"] == 4
+    assert to_dict(load_document(path))["schema_version"] == 5
 
 
 def test_both_page_types_roundtrip_with_images_and_process_snapshot(tmp_path):

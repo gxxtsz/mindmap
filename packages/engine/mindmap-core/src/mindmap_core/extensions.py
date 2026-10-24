@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import isfinite
 from pathlib import PurePath
 from typing import Any, BinaryIO, Protocol
@@ -12,7 +12,7 @@ from typing import Any, BinaryIO, Protocol
 from .config import Direction, LayoutConfig
 from .errors import MindMapError
 from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point
-from .models import MindMapDocument
+from .models import MindMapDocument, MindMapForestView
 
 
 @dataclass(frozen=True)
@@ -139,6 +139,8 @@ class LayoutRegistry:
         """调度并校验布局；按注册时的只读约定决定是否复制输入，默认隔离扩展。"""
         document.validate()
         self.validate_config(document.layout)
+        if isinstance(document, MindMapForestView):
+            return self._layout_forest(document, measurements, expand_all=expand_all, focus_id=focus_id)
         algorithm = self.get(document.layout.algorithm_id)
         try:
             if self._copy_inputs[document.layout.algorithm_id]:
@@ -176,6 +178,34 @@ class LayoutRegistry:
         except Exception as exc:
             raise MindMapError(f"布局结果无效：{exc}") from exc
         return result
+
+    def _layout_forest(self, document, measurements, *, expand_all, focus_id):
+        """逐树经过同一注册表调度，再平移全部几何；第三方单根布局无需适配。"""
+        nodes, branches, bounds = {}, {}, None
+        for root in document.root_ids:
+            tree = document.tree_view(root)
+            result = self.layout(tree, measurements, expand_all=expand_all,
+                                 focus_id=focus_id if focus_id in tree.nodes else None)
+            anchor = result.nodes.get(root, result.nodes.get(focus_id))
+            x, y = document.inspiration.positions[root]
+            dx, dy = x - anchor.x, y - anchor.y
+
+            def point(p):
+                return p[0] + dx, p[1] + dy
+
+            nodes.update({key: replace(rect, x=rect.x + dx, y=rect.y + dy)
+                          for key, rect in result.nodes.items()})
+            for key, branch in result.branches.items():
+                if isinstance(branch, Curve):
+                    branches[key] = replace(branch, points=tuple(map(point, branch.points)))
+                else:
+                    branches[key] = replace(
+                        branch, start=point(branch.start), end=point(branch.end),
+                        commands=tuple(replace(c, points=tuple(map(point, c.points))) for c in branch.commands),
+                        arrow=tuple(map(point, branch.arrow)) if branch.arrow else None)
+            shifted = replace(result.bounds, x=result.bounds.x + dx, y=result.bounds.y + dy)
+            bounds = bounds.union(shifted) if bounds else shifted
+        return LayoutResult(nodes, branches, bounds) if bounds else LayoutResult()
 
 
 def _validate_branch(branch: Curve | BranchPath) -> None:

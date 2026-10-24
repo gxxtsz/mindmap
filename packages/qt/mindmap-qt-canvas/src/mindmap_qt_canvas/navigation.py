@@ -26,9 +26,13 @@ def _finite_number(value):
 
 
 class PathNavigation(QWidget):
-    """固定高度的页面路径栏；空间不足时收起中间页面，每一级仍可直接跳转。"""
+    """只提供返回上级与页面路径的固定高度导航栏。
 
-    navigate_requested = Signal(object, str)
+    返回和路径点击仅发送导航意图，不创建想法或直接操作文档；空间不足时收起
+    中间页面，每一级仍可直接跳转。当前子导图的收藏星标继续独立同步与复用。
+    """
+
+    navigate_requested = Signal(object, object)
     back_requested = Signal()
     favorite_requested = Signal()
 
@@ -46,8 +50,8 @@ class PathNavigation(QWidget):
         self.row.setContentsMargins(8, 3, 8, 3)
         self.row.setSpacing(3)
         self.back_button = QToolButton(self)
-        self.back_button.setToolTip("返回上级导图")
-        self.back_button.setAccessibleName("返回上级导图")
+        self.back_button.setToolTip("返回上级")
+        self.back_button.setAccessibleName("返回上级")
         self.back_button.setFixedWidth(26)
         self.back_button.clicked.connect(self.back_requested)
         self.row.addWidget(self.back_button)
@@ -76,9 +80,11 @@ class PathNavigation(QWidget):
                  page_kinds: Mapping[str | None, str] | None = None):
         """同步页面根路径、类型图标和选择数量，不修改引擎路径对象。
 
-        page_kinds 将页面 ID 映射到 main、submap、detail，由导航层从文档查询。
+        page_kinds 将页面 ID 映射到 main、submap、detail、inspiration，由导航层从文档查询。
         省略时兼容旧调用：None 使用主导图图标，其余使用子导图图标。映射仅
         用于显示，不参与路径文字、复制内容或跳转依据；类型变化同样触发重建。
+        page_id 为 None 时禁用返回按钮，其他页面允许按归属返回；宿主同步目标
+        对应的悬停与无障碍说明。仅在 GUI 线程调用，不提交内容或改变撤销历史。
         """
         entries = list(entries)
         kinds = {entry.page_id: (page_kinds or {}).get(
@@ -171,7 +177,8 @@ class PathNavigation(QWidget):
         icon_space = 20
         widths = [min(180, metrics.horizontalAdvance(entry.text.replace("\n", " ")) + 14 + icon_space)
                   for entry in self.entries]
-        available = max(70, self.width() - 65 - (80 if self.selection_count > 1 else 0)
+        available = max(70, self.width() - self.back_button.width() - 25
+                        - (80 if self.selection_count > 1 else 0)
                         - (32 if self._favorite_visible else 0))
         indices = list(range(len(self.entries)))
         hidden = []
@@ -258,6 +265,11 @@ class PageNavigationMixin:
     def _init_page_navigation(self, layout):
         self._current_page_id = None
         self._page_states = {}
+        self._inspiration_root_id = None
+        self._last_inspiration_root = None
+        self._view_undo, self._view_redo = [], []
+        self._inspiration_stay = False
+        self._creating_inspiration = False
         self._navigation_guards = []
         self.path_navigation = PathNavigation(self)
         self.path_navigation.back_requested.connect(lambda: self.call(self.return_to_parent_page))
@@ -275,13 +287,44 @@ class PageNavigationMixin:
 
     @property
     def current_page_id(self):
-        """当前显示页面，None 表示主导图；查询不改变引擎修订号或修改状态。"""
+        """当前显示区域标识，None 为主导图；其余为附属页或灵感区，不改变文档。"""
         return self._current_page_id
 
     @property
     def current_page_kind(self):
         """查询活动页面类别，菜单可据此隐藏详情页内禁止使用的两类创建入口。"""
         return self._book_document.page_kind(self._current_page_id)
+
+    @property
+    def current_inspiration_root_id(self) -> str | None:
+        """返回当前想法画布的游离根；空态及其他页面返回 None。
+
+        标识仅描述显示范围，不代表新增页面，也不改变节点真实区域归属。
+        仅在 GUI 线程、画布存活时读取；附属页返回时由导航重新解析其所属想法。
+        """
+        return self._inspiration_root_id if self.current_page_kind == "inspiration" else None
+
+    def _view_key(self):
+        if self.current_page_id == self.engine.inspiration_id:
+            return (self.current_page_id, self._inspiration_root_id)
+        return self.current_page_id
+
+    def _inspiration_root_for(self, node_id):
+        """沿普通父链解析游离根；附属页面由页面导航负责，不跨入口猜测归属。"""
+        if node_id not in self._book_document.nodes or self.engine.node_page_id(node_id) != self.engine.inspiration_id:
+            return None
+        while (parent := self.engine.parent_id(node_id)) is not None:
+            node_id = parent
+        return node_id
+
+    def _choose_inspiration_root(self, preferred=None, old_order=()):
+        roots = self._book_document.inspiration.root_ids
+        root = self._inspiration_root_for(preferred)
+        if root in roots:
+            return root
+        if preferred in old_order and roots:
+            return roots[min(old_order.index(preferred), len(roots) - 1)]
+        return self._last_inspiration_root if self._last_inspiration_root in roots else next(iter(roots), None)
 
     def capture_page_view_state(self) -> dict[str, object]:
         """返回当前页的独立 JSON 兼容快照，供宿主在正常退出时保存到本机配置。
@@ -298,7 +341,7 @@ class PageNavigationMixin:
         if self._disposed:
             raise MindMapError("画布已释放，不能读取页面视图")
         self._cache_page_view()
-        state = self._page_states[self._current_page_id]
+        state = self._page_states[self._view_key()]
         return {
             "page_id": self._current_page_id,
             "zoom": state.transform.m11(),
@@ -333,13 +376,19 @@ class PageNavigationMixin:
         page_exists = (page_id is None or isinstance(page_id, str)) and self._book_document.has_page(page_id)
         if not page_exists:
             page_id = None
+        root = state.get("inspiration_root_id")
+        root = root if isinstance(root, str) else None
+        if page_id == self.engine.inspiration_id:
+            root = self._choose_inspiration_root(root)
+        key = (page_id, root) if page_id == self.engine.inspiration_id else page_id
         zoom = _finite_number(state.get("zoom"))
         center = state.get("center")
         coordinates = ([_finite_number(value) for value in center]
                        if isinstance(center, (list, tuple)) and len(center) == 2 else [None, None])
         valid_view = page_exists and zoom is not None and zoom > 0 and None not in coordinates
         if valid_view:
-            document = self._book_document.page_view(page_id)
+            document = self._book_document.page_view(
+                page_id, inspiration_root_id=root if page_id == self.engine.inspiration_id else None)
             selection = state.get("selection")
             ids = (tuple(dict.fromkeys(key for key in selection if isinstance(key, str) and key in document.nodes))
                    if isinstance(selection, (list, tuple)) else ())
@@ -350,12 +399,12 @@ class PageNavigationMixin:
                 ids, focus = (document.root_id,), None
             center = QPointF(*coordinates)
             zoom = min(4.0, max(MIN_ZOOM, zoom))
-            self._page_states[page_id] = PageViewState(
+            self._page_states[key] = PageViewState(
                 QTransform.fromScale(zoom, zoom), center, ids, focus)
         else:
             # 不让同一实例先前访问过的缓存覆盖损坏记录应使用的默认视图。
-            self._page_states.pop(page_id, None)
-        self._switch_page(page_id, cache=False)
+            self._page_states.pop(key, None)
+        self._switch_page(page_id, cache=False, inspiration_root_id=root)
         if valid_view:
             if ids and not self.selected_node_ids():
                 # 文件可能被外部重新折叠；不强行展开或留下不可见的非空选择。
@@ -400,10 +449,10 @@ class PageNavigationMixin:
             transform = QTransform()
         if center is None:
             center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
-        self._page_states[self._current_page_id] = PageViewState(
+        self._page_states[self._view_key()] = PageViewState(
             transform, QPointF(center), tuple(self.selected_node_ids()), self.focus_id)
 
-    def _switch_page(self, page_id, *, notify=True, cache=True):
+    def _switch_page(self, page_id, *, notify=True, cache=True, inspiration_root_id=None):
         """只切换页内读模型和视图；撤销导致页面消失时由调用方先选择有效祖先。"""
         if not self._book_document.has_page(page_id):
             raise MindMapError("导图页面不存在")
@@ -412,6 +461,7 @@ class PageNavigationMixin:
             self.document_changing.emit(event)
         if cache:
             self._cache_page_view()
+        old_page = self.current_page_id
         self.view.cancel_interaction()
         self._cancel_branch_menu()
         self._view_reset_timer.stop()
@@ -422,15 +472,22 @@ class PageNavigationMixin:
         # 先停用旧页的视口同步；refresh 会用新页的布局重新确定是否启用虚拟化并重建图元。
         self._virtualized = False
         self._current_page_id = page_id
-        self._document = self._book_document.page_view(page_id)
-        self._page_chain = [entry.page_id for entry in self.engine.node_path(self._document.root_id)
-                            if entry.page_root]
+        if page_id == self.engine.inspiration_id:
+            self._inspiration_root_id = self._choose_inspiration_root(
+                inspiration_root_id or self._inspiration_root_id)
+            if self._inspiration_root_id:
+                self._last_inspiration_root = self._inspiration_root_id
+        self._document = self._book_document.page_view(
+            page_id, inspiration_root_id=self.current_inspiration_root_id)
+        self._page_chain = ([page_id] if self.current_page_kind == "inspiration" else
+                            [entry.page_id for entry in self.engine.node_path(self._document.root_id)
+                             if entry.page_root])
         self._node_parents = self._document.parents()
         self._node_order = None
         self._incremental_layout = None
         self._visual_document = None
         self._measure_dirty = None
-        state = self._page_states.get(page_id)
+        state = self._page_states.get(self._view_key())
         self.focus_id = state.focus_id if state and state.focus_id in self._document.nodes else None
         self.view.setTransform(state.transform if state else QTransform())
         self.refresh()
@@ -448,6 +505,8 @@ class PageNavigationMixin:
         if notify:
             self.document_changed.emit(event)
         self.page_changed.emit(page_id)
+        if page_id == self.engine.inspiration_id and (notify or old_page != page_id):
+            self.inspiration_sidebar_requested.emit()
 
     def navigate_to(self, page_id, node_id=None):
         """先恢复目标页现场，再定位节点；被折叠隐藏的目标只临时显示，不改写文档。
@@ -458,7 +517,13 @@ class PageNavigationMixin:
         self._prepare_page_navigation()
         if node_id is not None and self.engine.node_page_id(node_id) != page_id:
             raise MindMapError("路径节点与目标页面不一致")
-        if page_id != self._current_page_id:
+        if page_id == self.engine.inspiration_id:
+            root = self._choose_inspiration_root(node_id or self._last_inspiration_root)
+            if page_id != self._current_page_id or self._inspiration_root_id != root:
+                self._switch_page(page_id, inspiration_root_id=root)
+            else:
+                self.inspiration_sidebar_requested.emit()
+        elif page_id != self._current_page_id:
             self._switch_page(page_id)
         if node_id is not None:
             if node_id not in self.layout_result.nodes:
@@ -579,9 +644,14 @@ class PageNavigationMixin:
         """按页面所有权返回一层，不等同于编辑撤销或浏览历史后退。"""
         if self._current_page_id is None:
             return
+        if self.current_page_kind == "inspiration":
+            self._prepare_page_navigation()
+            self._switch_page(None)
+            return
         self._prepare_page_navigation()
         owner = self._book_document.page_record(self._current_page_id).owner_id
-        self._switch_page(self.engine.node_page_id(owner))
+        page = self.engine.node_page_id(owner)
+        self._switch_page(page, inspiration_root_id=self._inspiration_root_for(owner))
 
     def delete_submap(self):
         """确认影响范围后删除所有下级页面，取消不改变内容、选择和历史。"""
@@ -608,6 +678,26 @@ class PageNavigationMixin:
         self._prepare_page_navigation()
         self.engine.remove_submap(key)
 
+    def _page_path_entries(self, node_id):
+        """投影页面路径；想法根代替内部区域项，附属页仍保留原有页面与节点标识。"""
+        path = self.engine.node_path(node_id)
+        pages = [entry for entry in path if entry.page_root and entry.page_id != self.engine.inspiration_id]
+        if path and path[0].page_id == self.engine.inspiration_id:
+            pages.insert(0, path[1])
+        return pages
+
+    def _back_button_text(self):
+        """按实际返回目标生成提示，区分主导图、所属想法及不同层级的附属页面。"""
+        if self.current_page_id is None:
+            return "已在主导图"
+        if self.current_page_kind == "inspiration":
+            return "返回主导图"
+        owner = self._book_document.page_record(self.current_page_id).owner_id
+        parent_kind = self._book_document.page_kind(self.engine.node_page_id(owner))
+        return {"main": "返回主导图", "inspiration": "返回所属想法",
+                "submap": "返回所属子导图" if self.current_page_kind == "detail" else "返回上级导图",
+                "detail": "返回所属详情页"}[parent_kind]
+
     def _sync_navigation(self):
         """路径始终终止于当前页根节点，普通节点选择只影响数量提示。"""
         if (not hasattr(self, "_document") or self._disposed
@@ -615,12 +705,12 @@ class PageNavigationMixin:
             return
         # 引擎仍提供完整节点祖先路径，界面仅投影其中的页面根，避免普通分支撑长路径栏。
         # 必须保留原有页面、节点 ID：同名页面及由根节点连续下钻的页面不能按标题合并。
-        pages = [entry for entry in self.engine.node_path(self._document.root_id) if entry.page_root]
+        pages = self._page_path_entries(self._document.root_id) if self._document.nodes else []
         pages = [replace(entry, text=f"{entry.text} · 详情")
                  if self._book_document.page_kind(entry.page_id) == "detail" else entry for entry in pages]
-        self.path_navigation.back_button.setToolTip(
-            "返回所属导图" if self.current_page_kind == "detail" else "返回上级导图")
-        self.path_navigation.back_button.setAccessibleName(self.path_navigation.back_button.toolTip())
+        back_text = self._back_button_text()
+        self.path_navigation.back_button.setToolTip(back_text)
+        self.path_navigation.back_button.setAccessibleName(back_text)
         self.path_navigation.set_path(pages, page_id=self._current_page_id,
                                       selection_count=len(self.selected_node_ids()),
                                       page_kinds={entry.page_id: self._book_document.page_kind(entry.page_id)

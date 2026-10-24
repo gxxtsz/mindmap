@@ -29,7 +29,7 @@ def details(qtbot):
     canvas.dispose()
 
 
-def test_nonleaf_detail_navigation_restores_views_and_scopes_panels_and_export(details, tmp_path):
+def test_nonleaf_detail_navigation_restores_views_and_scopes_panels_and_export(details, tmp_path, qtbot):
     canvas, panels, branch, _, errors = details
     canvas.select_nodes([branch])
     canvas.view.zoom(1.3)
@@ -55,7 +55,8 @@ def test_nonleaf_detail_navigation_restores_views_and_scopes_panels_and_export(d
     canvas.select_nodes([child])
     canvas.engine.mark_saved()
     revision = canvas.engine.revision
-    canvas.return_to_parent_page()
+    assert canvas.path_navigation.back_button.toolTip() == "返回主导图"
+    qtbot.mouseClick(canvas.path_navigation.back_button, Qt.MouseButton.LeftButton)
     restored = canvas.view.mapToScene(canvas.view.viewport().rect()).boundingRect().center()
     assert canvas.selected_node_ids() == [branch] and canvas.view.transform().m11() == 1.3
     assert (center - restored).manhattanLength() < 3

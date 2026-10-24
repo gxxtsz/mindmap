@@ -31,7 +31,7 @@
 父节点必须允许普通子节点，创建后自动展开；图片字节与有限正数显示宽度由调用方传入，图像解码及像素上限由 Qt 适配层校验。
 失败抛出 `MindMapError` 并回滚，成功只产生一条历史，复用资源去重、引用清理、撤销重做和保存机制。
 纯图片节点使用元数据 `image_only: true`，正文为空，`Node.is_image_node` 只读返回识别结果；不能拥有详情页或子导图，可以拥有普通子节点。
-缺少标记的旧图文节点保持原语义；`attach_image()` 继续为现有节点关联图片附件。文件格式仍为版本 4，不自动迁移旧节点。
+缺少标记的旧图文节点保持原语义；`attach_image()` 继续为现有节点关联图片附件，不自动迁移旧节点。
 上述核心接口不依赖 GUI，在所属引擎线程同步使用；ID 可跨快照保存，可写实体归文档管理，外部不直接修改借用对象。
 主导图保持既有接口，页面标识使用 `None` 表示主导图。
 
@@ -63,7 +63,42 @@
 完整保存快照及另存为保留收藏；复制粘贴分支不会把原文件收藏关系传给新页面。
 收藏只引用稳定页面 ID，名称、路径和页面归属在查询时解析，不存储重复的标题副本。
 
-## 单层详情页
+## 灵感区接口
+
+`MindMapDocument.inspiration` 为独立的 `InspirationArea`，保存区域标识、根序、根坐标、
+布局和主题。它没有入口节点，不属于子导图表；所有实际节点、图片与附属页面仍保存在
+文档共享表中。`engine.inspiration_id` 只读返回区域标识，导航及归属查询支持该标识。
+
+`engine.page_document(engine.inspiration_id)` 返回隔离的 `MindMapForestView`，可为空，
+`root_ids` 按稳定顺序返回全部游离根，`ordered_nodes()` 返回多棵普通树的先序节点。
+`root_id` 仅为旧调用提供首根或空字符串，新增调用应使用 `root_ids`；区域路径项的
+`PathEntry.node_id` 可为 None。该读模型不能保存为完整文件，布局逐树通过注册表调度。
+
+以下修改只在引擎所属线程同步执行，全部经过事务、前置钩子、差量历史和通知。
+失败抛出中文 `MindMapError` 并完整回滚；传入坐标不会被借用，每次批量操作只记一条历史。
+
+| 接口 | 参数与结果 |
+| --- | --- |
+| `add_inspiration(text="新想法", *, position) -> str` | 创建游离根，返回节点标识；坐标是两个有限数值 |
+| `set_inspiration_positions(positions) -> None` | 字典键为游离根标识，值为新坐标；不能给普通后代写坐标，相同位置不产生历史 |
+| `move_to_inspiration(node_ids, *, positions) -> list[str]` | 将同页分支拆成游离树；坐标字典恰好覆盖去重后的最上层选中根，返回原树序根列表 |
+| `attach_inspirations(node_ids, parent_id) -> None` | 将游离分支追加到主导图或子导图父主题；禁止移入自身、后代和所属附属页面 |
+| `group_inspirations(node_ids, text="新主题", *, position) -> str` | 在新游离父主题下组合选中分支，返回父主题标识 |
+
+迁移只改父边、区域根表和坐标，不重新创建实体，完整保留页面、图片及收藏关系。
+主导图、子导图和详情页本身的根仍受保护；详情页内部不支持跨区移动。
+游离根可删除、剪切、接为子主题、添加同级和插入父主题；删除与恢复包含全部附属页面。
+`NodePlacement` 补充页面标识和可选根坐标，游离根的父标识为空，日志与撤销按两端快照解释。
+保存快照独立复制区域记录，后续拖动及组合不会污染正在后台编码的版本。
+
+`page_view(page_id, inspiration_root_id=...)` 与
+`engine.page_document(page_id, inspiration_root_id=...)` 可投影一棵有效游离树，
+仍返回 `kind="inspiration"` 的森林读模型，展示根坐标为原点，原文档坐标不变。
+省略参数保持完整总览；非灵感页面或非游离根拒绝该参数。前者借用实体，后者返回隔离快照，
+两者均不能作为完整文档保存。`engine.inspiration_items()` 返回按根序排列的不可变摘要，
+每项包含根标识、原始标题及普通后代数量，不包含附属页面内部节点。
+
+## 详情页归属规则
 
 `Node.detail_page_id` 与 `MindMapDocument.detail_pages` 独立于既有子导图字段，页面记录
 共用 `MindMapPage`。`create_detail_page(node_id) -> str` 允许主导图、子导图中的任意节点

@@ -13,7 +13,7 @@ from mindmap_core import MindMapEngine, MindMapError
 from mindmap_docking import DocumentSpec
 from mindmap_formats import can_process_snapshot, save_document, supports_process_save
 from mindmap_qt_canvas import MindMapFileController, MindMapWidget
-from mindmap_qt_panels import MindMapPanels, SubmapFavoritesPanel
+from mindmap_qt_panels import InspirationPanel, MindMapPanels, SubmapFavoritesPanel
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -75,6 +75,24 @@ class MindMapSession(QObject):
         self.canvas.editing_changed.connect(self._sync_favorites)
         self.canvas.document_changed.connect(self._sync_favorites)
         self._sync_favorites()
+        self.inspiration = InspirationPanel(self.engine, self.canvas)
+        self.inspiration.hide()
+        self.inspiration.navigate_requested.connect(
+            lambda root: self.canvas.call(lambda: self.canvas.show_inspiration(root)))
+        self.inspiration.new_requested.connect(lambda: self.canvas.call(self.canvas.add_inspiration))
+        self.inspiration.drag_finished.connect(self.canvas.cancel_branch_transfer_preview)
+        self.inspiration.set_drag_handlers(
+            lambda root: self.canvas.call(lambda: self.canvas.create_branch_drag([root], origin="sidebar")),
+            self.canvas.can_detach_branch_drag,
+            lambda mime: bool(self.canvas.call(lambda: self.canvas.detach_branch_drag(mime))),
+        )
+        self.canvas.page_changed.connect(self._sync_inspiration)
+        self.canvas.document_changed.connect(self._sync_inspiration)
+        self.canvas.editable_changed.connect(self._sync_inspiration)
+        self.canvas.editing_changed.connect(self._sync_inspiration)
+        self.canvas.inspirations_detached.connect(self.inspiration.flash_roots)
+        self.canvas.inspiration_sidebar_requested.connect(self._show_inspiration)
+        self._sync_inspiration()
         self.files = MindMapFileController(self.canvas, self.panels, owner.window, writer=self._write)
         self.last_error = ""
         self.disposed = False
@@ -274,6 +292,21 @@ class MindMapSession(QObject):
         self.canvas.call(lambda: self.canvas.navigate_to(page_id))
         self._sync_favorites()
 
+    def _sync_inspiration(self, *_):
+        """更新本文件侧栏高亮与权限；附属页面仍高亮所属灵感根，不借用活动会话。"""
+        root = self.canvas.current_inspiration_root_id
+        if self.canvas.current_page_kind in ("submap", "detail"):
+            path = self.engine.node_path(self.canvas.document_view.root_id)
+            if path and path[0].page_id == self.engine.inspiration_id:
+                root = path[1].node_id
+        self.inspiration.set_current_root_id(root)
+        self.inspiration.set_editable(self.canvas.editable and not self.is_composing)
+
+    def _show_inspiration(self):
+        """导航成功后打开共享左侧灵感工具；后台恢复候选不抢占其他文件焦点。"""
+        if self.owner.get(self.id) is self and self.owner.active is self:
+            self.owner.window.manager.activate("inspiration", focus=False)
+
     def dispose(self):
         """停止计时器和订阅并延迟销毁组件；关闭标签和退出窗口均不缓存旧画布。
 
@@ -293,8 +326,10 @@ class MindMapSession(QObject):
         self.close_popups()
         self.panels.dispose()
         self.favorites.dispose()
+        self.inspiration.dispose()
         for stack, page in ((self.owner.window._outline_stack, self.panels.outline),
                             (self.owner.window._favorites_stack, self.favorites),
+                            (self.owner.window._inspiration_stack, self.inspiration),
                             (self.owner.window._properties_stack, self.panels.properties),
                             (self.owner.window._settings_stack, self.panels.settings)):
             stack.removeWidget(page)
@@ -346,6 +381,7 @@ class MindMapSessionManager(QObject):
         self._known_paths[session.id] = session.files.path
         self.window._outline_stack.addWidget(session.panels.outline)
         self.window._favorites_stack.addWidget(session.favorites)
+        self.window._inspiration_stack.addWidget(session.inspiration)
         self.window._properties_stack.addWidget(session.panels.properties)
         self.window._settings_stack.addWidget(session.panels.settings)
         # 标签只显示不含末尾扩展名的文件名，完整路径仍由文件控制器保留。

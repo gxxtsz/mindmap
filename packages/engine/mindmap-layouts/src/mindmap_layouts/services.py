@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from mindmap_core import LayoutRegistry, MindMapDocument, Point
+from mindmap_core import LayoutRegistry, MindMapDocument, MindMapForestView, Point
 
 from .incremental_result import IncrementalTreeLayout
 from .tree import TreeLayout
@@ -37,14 +37,14 @@ def create_incremental_layout(
     document: MindMapDocument,
     measurements: Mapping[str, Point],
 ) -> IncrementalTreeLayout | None:
-    """为已校验文档建立独立增量服务；不支持的注入实现返回 None。
+    """为已校验单根文档建立增量服务；多根灵感区及不支持的注入实现返回 None。
 
     document 必须来自引擎已提交的文档或正式校验后的快照，measurements 包含全部
     节点尺寸。服务只读取输入，后续通过 update() 消费提交差量；调用方负责文档
     重置、全局配置变化时重新创建。返回 None 时必须继续使用 registry.layout()，
     不能自行构造内置实现绕过宿主。缺失算法或非法配置沿用注册表异常语义。
     """
-    if not supports_incremental_layout(registry, document.layout.algorithm_id):
+    if isinstance(document, MindMapForestView) or not supports_incremental_layout(registry, document.layout.algorithm_id):
         return None
     registry.validate_config(document.layout)
     return IncrementalTreeLayout(document, measurements)

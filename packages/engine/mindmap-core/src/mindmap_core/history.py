@@ -19,14 +19,18 @@ class NodePlacement:
     node_text 是该端的节点名称，parent_id、parent_text 是直接父节点的标识及名称；
     index 为父节点 children 中从 1 开始的同级序号，direction 为继承并解析自动分配
     后的有效方向（left、right 或 down），不能用原始的可空 direction 字段代替。
+    游离根的 parent_id 为 None，parent_text 为“灵感区”；page_id 标明所属页面，
+    position 仅为游离根保存逻辑像素坐标。新增字段具有默认值，兼容原位置参数构造。
     引擎在提交时创建快照，后续改名、移动及历史重放均不会改变已有快照。
     """
 
     node_text: str
-    parent_id: str
+    parent_id: str | None
     parent_text: str
     index: int
     direction: str
+    page_id: str | None = None
+    position: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)

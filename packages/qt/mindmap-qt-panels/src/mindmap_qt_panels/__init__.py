@@ -3,9 +3,10 @@
 from .contracts import PanelHost
 from .favorites import SubmapFavoritesPanel
 from .inspector import NodePropertiesPanel
+from .inspiration import InspirationPanel
 from .outline import OutlineModel, OutlinePanel
 from .panels import MindMapPanels
 from .settings import GlobalSettingsPanel
 
 __all__ = ["PanelHost", "NodePropertiesPanel", "OutlineModel", "OutlinePanel", "MindMapPanels",
-           "GlobalSettingsPanel", "SubmapFavoritesPanel"]
+           "GlobalSettingsPanel", "SubmapFavoritesPanel", "InspirationPanel"]

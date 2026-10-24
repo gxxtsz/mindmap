@@ -100,6 +100,8 @@ _SVG_BODIES = {
         '<circle cx="15" cy="7" r=".8"/><circle cx="17" cy="11" r=".8"/>'
     ),
     "undo": '<path d="m9 5-5 5 5 5M4 10h9a6 6 0 0 1 6 6v3"/>',
+    "inspiration": ('<path d="M9 17h6m-5 3h4M8.5 14.5a6 6 0 1 1 7 0L15 17H9Z"/>'
+                    '<path d="M12 1v1M3 5l1 1m16-1-1 1M1 12h2m18 0h2"/>'),
     "redo": '<path d="m15 5 5 5-5 5M20 10h-9a6 6 0 0 0-6 6v3"/>',
     "fit": ('<path d="M8 3H3v5m13-5h5v5M3 16v5h5m8 0h5v-5"/><rect x="8" y="8" width="8" height="8" rx="1"/>'),
     # 环形逆时针箭头表示恢复原始缩放；与其他按钮共用线宽和圆角，适配小尺寸显示。

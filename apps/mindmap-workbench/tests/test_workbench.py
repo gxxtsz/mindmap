@@ -142,7 +142,9 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     QTimer.singleShot(0, inspect_menu)
     qtbot.mouseClick(window.title_bar.menu, Qt.MouseButton.LeftButton)
     assert popped == [expected]
-    assert set(window.manager.specs) == {"outline", "favorites", "properties", "map_settings", "operation_log"}
+    assert set(window.manager.specs) == {
+        "outline", "favorites", "inspiration", "properties", "map_settings", "operation_log",
+    }
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
     assert [None if action.isSeparator() else action.text() for action in settings.actions()] == expected

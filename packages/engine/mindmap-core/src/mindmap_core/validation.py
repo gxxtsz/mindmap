@@ -9,12 +9,13 @@ from typing import Any
 from .branch_styles import get_branch_style
 from .config import LayoutConfig
 from .errors import MindMapError
-from .models import MindMapPage, Theme
+from .models import InspirationArea, MindMapForestView, MindMapPage, Theme
 
 
 def validate_document(document, *, page_only=False) -> None:
     """验证树、引用、数值和资源。失败时抛出 MindMapError，不修补损坏输入。"""
-    if document.root_id not in document.nodes or not document.nodes:
+    forest = isinstance(document, MindMapForestView)
+    if not forest and (document.root_id not in document.nodes or not document.nodes):
         raise MindMapError("文档缺少有效根节点")
     if not isinstance(document.submaps, dict):
         raise MindMapError("子导图表必须为对象")
@@ -29,7 +30,13 @@ def validate_document(document, *, page_only=False) -> None:
     pages: set[str] = set()
     # 栈中保留所属页面类别，普通后代沿用上下文；跨页时才改变类别。
     # 因而完整导入同样不能把附属页面藏在详情页的深层节点中。
-    stack = [(document.root_id, getattr(document, "kind", "main") == "detail")]
+    roots = list(document.root_ids)
+    if not page_only:
+        validate_inspiration(document)
+        roots.extend(document.inspiration.root_ids)
+    elif forest:
+        validate_inspiration(document)
+    stack = [(root, getattr(document, "kind", "main") == "detail") for root in roots]
     while stack:
         node_id, in_detail = stack.pop()
         if node_id in seen:
@@ -170,6 +177,38 @@ def validate_page(document, page, *, kind=None):
         raise MindMapError("主题名称及颜色必须为非空字符串")
 
 
+def validate_inspiration(document):
+    """校验区域标识、根序与有限坐标，完整导入及区域事务共用。
+
+    根必须存在且唯一，每个根恰有一份坐标；普通后代不得伪装成额外根。
+    树间重复引用和页面归属循环由完整遍历继续校验。
+    """
+    area = document.inspiration
+    if not isinstance(area, InspirationArea) or not isinstance(area.id, str) or not area.id:
+        raise MindMapError("灵感区记录或标识无效")
+    if area.id in document.submaps or area.id in document.detail_pages:
+        raise MindMapError("灵感区不能与附属页面共用标识")
+    if (not isinstance(area.root_ids, list) or not all(isinstance(key, str) for key in area.root_ids)
+            or len(set(area.root_ids)) != len(area.root_ids)):
+        raise MindMapError("灵感区根节点列表无效或重复")
+    if any(key not in document.nodes for key in area.root_ids):
+        raise MindMapError("灵感区根节点不存在")
+    if not isinstance(area.positions, dict) or set(area.positions) != set(area.root_ids):
+        raise MindMapError("灵感区坐标必须与根节点一一对应")
+    for point in area.positions.values():
+        if not isinstance(point, (tuple, list)) or len(point) != 2 or not all(finite(v) for v in point):
+            raise MindMapError("灵感区坐标必须为两个有限数值")
+    if not isinstance(area.layout, LayoutConfig):
+        raise MindMapError("灵感区布局配置无效")
+    area.layout.validate()
+    theme = area.theme
+    if (not isinstance(theme, Theme) or not isinstance(theme.palette, list) or not theme.palette
+            or not all(isinstance(x, str) and x for x in theme.palette)
+            or not all(isinstance(getattr(theme, key), str) and getattr(theme, key)
+                       for key in ("name", "background", "node_background", "text", "border", "accent"))):
+        raise MindMapError("灵感区主题无效")
+
+
 def validate_changes(state, journal):
     """校验受控编辑产生的局部变化，保留完整导入的字段和资源规则。
 
@@ -194,7 +233,7 @@ def validate_changes(state, journal):
                     raise MindMapError("页面引用不存在或页面归属无效")
                 validate_page(document, page, kind=kind)
         page_id = state.root_pages.get(key)
-        if page_id is not None:
+        if page_id is not None and page_id != document.inspiration.id:
             validate_page(document, document.page_record(page_id))
         if len(set(node.children)) != len(node.children):
             raise MindMapError("节点树包含循环或重复父节点")
@@ -224,6 +263,11 @@ def validate_changes(state, journal):
                 if page.id != key:
                     raise MindMapError("页面标识与记录不匹配")
                 validate_page(document, page)
+    if "inspiration" in journal.settings:
+        validate_inspiration(document)
+        for root in document.inspiration.root_ids:
+            if root in state.parents or state.root_pages.get(root) != document.inspiration.id:
+                raise MindMapError("灵感区根节点具有重复父级或归属")
     usage = Counter()
     for key, old in journal.nodes.items():
         node = document.nodes.get(key)
@@ -265,7 +309,10 @@ def validate_changes(state, journal):
 
 
 def finite(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    try:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def positive_number(value: Any, name: str, *, allow_zero: bool = False) -> None:

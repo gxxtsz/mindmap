@@ -32,7 +32,7 @@ def workspace(qtbot):
     canvas.dispose()
 
 
-def test_nested_page_navigation_restores_zoom_center_selection_and_temporary_display(workspace):
+def test_nested_page_navigation_restores_zoom_center_selection_and_temporary_display(workspace, qtbot):
     canvas, panels, branch, owner, errors = workspace
     canvas.select_nodes([owner])
     canvas.view.zoom(1.3)
@@ -57,13 +57,17 @@ def test_nested_page_navigation_restores_zoom_center_selection_and_temporary_dis
     assert canvas.path_navigation.full_path == "中心主题 › 整数 › 十进制"
     canvas.engine.mark_saved()
     revision = canvas.engine.revision
-    canvas.return_to_parent_page()
+    assert canvas.path_navigation.back_button.toolTip() == "返回上级导图"
+    qtbot.mouseClick(canvas.path_navigation.back_button, Qt.MouseButton.LeftButton)
     assert canvas.current_page_id == first
     assert canvas.focus_id == child
     assert canvas.selected_node_ids() == [child]
     assert canvas.view.transform().m11() == first_scale
-    canvas.return_to_parent_page()
+    assert canvas.path_navigation.back_button.toolTip() == "返回主导图"
+    qtbot.mouseClick(canvas.path_navigation.back_button, Qt.MouseButton.LeftButton)
     assert canvas.current_page_id is None
+    assert not canvas.path_navigation.back_button.isEnabled()
+    assert canvas.path_navigation.back_button.toolTip() == "已在主导图"
     assert canvas.selected_node_ids() == [owner]
     assert canvas.view.transform().m11() == scale
     restored = canvas.view.mapToScene(canvas.view.viewport().rect()).boundingRect().center()

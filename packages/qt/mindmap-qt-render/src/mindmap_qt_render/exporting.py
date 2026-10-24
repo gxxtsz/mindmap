@@ -22,6 +22,9 @@ def export_document(document, path, *, layout_registry: LayoutRegistry, expand_a
     所有输出先在内存完成，再原子替换文件，失败不会截断原有目标。
     """
     target = Path(path).absolute()
+    if not document.nodes:
+        raise MindMapError("暂无可导出的想法内容")
+    title = document.root.text
     extension = target.suffix.lower()
     if extension not in (".png", ".svg", ".pdf"):
         raise MindMapError("支持的图形导出格式为 PNG、SVG、PDF")
@@ -63,7 +66,7 @@ def export_document(document, path, *, layout_registry: LayoutRegistry, expand_a
         device.setOutputDevice(buffer)
         device.setSize(QSize(width, height))
         device.setViewBox(QRectF(0, 0, width, height))
-        device.setTitle(document.root.text)
+        device.setTitle(title)
     else:
         device = QPdfWriter(buffer)
         device.setResolution(96)
@@ -71,7 +74,7 @@ def export_document(document, path, *, layout_registry: LayoutRegistry, expand_a
             QPageSize(QSizeF(width * 25.4 / 96, height * 25.4 / 96), QPageSize.Unit.Millimeter)
         )
         device.setPageMargins(QMarginsF(0, 0, 0, 0))
-        device.setTitle(document.root.text)
+        device.setTitle(title)
     painter = QPainter(device)
     if not painter.isActive():
         raise MindMapError("无法初始化导出绘图设备")

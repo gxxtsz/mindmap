@@ -80,7 +80,11 @@ def branch_style_targets(
     selected = set(ids)
     targets = []
     # 一次显式遍历合并重叠选择，深树不依赖递归；整棵子树操作保持线性复杂度。
-    pending = [(document.root_id, False)]
+    roots = list(document.root_ids)
+    if not hasattr(document, "kind"):
+        roots.extend(document.inspiration.root_ids)
+        roots.extend(page.root_id for page in document.iter_pages())
+    pending = [(root, False) for root in reversed(roots)]
     while pending:
         key, inherited = pending.pop()
         active = key in selected or (scope == "subtree" and inherited)

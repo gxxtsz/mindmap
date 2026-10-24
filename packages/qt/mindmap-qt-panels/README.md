@@ -8,6 +8,16 @@
 
 ## 宿主协议
 
+`InspirationPanel(engine, parent=None)` 是独立的灵感单选侧栏，不扩大 `PanelHost`
+协议，也不依赖画布或停靠包。按游离根顺序展示标题与普通后代数量，提供标题搜索、
+新建入口；不提供多选整理、根排序或共同父主题菜单。
+`navigate_requested(root_id)`、`new_requested` 仅向宿主发送意图。
+宿主通过 `set_current_root_id()`、`set_editable()`、`set_ui_colors()` 同步展示，
+通过 `set_drag_handlers(create, accept, drop)` 注入只读验收及正式拖放回调。
+拖起列表项不触发导航，画布分支放入侧栏时统一成为独立想法，不作为列表项的子主题。
+`flash_roots(node_ids)` 仅短暂提示成功新增的数量，不改变画布或搜索。
+所有方法在 GUI 线程调用；引擎在面板存活期间必须有效，永久释放前先 `dispose()`。
+
 公开入口包括 `MindMapPanels`、`OutlinePanel`、`NodePropertiesPanel`、
 `GlobalSettingsPanel` 和 `PanelHost`。宿主提供协议中的文档、选择、布局校验和信号，
 不需要继承或安装 `MindMapWidget`；普通 QWidget 宿主也可以连接这些面板。

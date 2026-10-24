@@ -150,12 +150,28 @@ class MindMapPage:
 
 @dataclass(frozen=True)
 class PathEntry:
-    """可点击路径项；页面和节点 ID 是跳转依据，标题只用于显示。"""
+    """可点击路径项；区域路径的 node_id 可为空，标题只用于显示，不作为定位依据。"""
 
     page_id: str | None
-    node_id: str
+    node_id: str | None
     text: str
     page_root: bool = False
+
+
+@dataclass
+class InspirationArea:
+    """文档内无入口节点的独立灵感区，坐标均为导图逻辑像素。
+
+    root_ids 保存游离树的稳定顺序，positions 仅保存这些根的左上角坐标；
+    普通后代仍由树布局决定。固定默认区域标识使旧文件的空区也能恢复视图。
+    所有字段均由引擎事务管理，外部不得直接修改借用记录。
+    """
+
+    id: str = "@inspiration"
+    root_ids: list[str] = field(default_factory=list)
+    positions: dict[str, tuple[float, float]] = field(default_factory=dict)
+    layout: LayoutConfig = field(default_factory=LayoutConfig)
+    theme: Theme = field(default_factory=Theme)
 
 
 @dataclass
@@ -170,6 +186,7 @@ class MindMapDocument:
     metadata: dict[str, Any] = field(default_factory=dict)
     submaps: dict[str, MindMapPage] = field(default_factory=dict)
     detail_pages: dict[str, MindMapPage] = field(default_factory=dict)
+    inspiration: InspirationArea = field(default_factory=InspirationArea)
 
     @classmethod
     def new(cls, text: str = "中心主题") -> MindMapDocument:
@@ -185,6 +202,15 @@ class MindMapDocument:
     @property
     def root(self) -> Node:
         return self.nodes[self.root_id]
+
+    @property
+    def root_ids(self) -> tuple[str, ...]:
+        """返回当前读模型的全部普通树根；传统单根文档保持一个元素。"""
+        return (self.root_id,)
+
+    def ordered_nodes(self) -> list[str]:
+        """按根顺序及各树先序返回页内节点，不跨越附属页面边界。"""
+        return [key for root in self.root_ids for key in self.descendants(root)]
 
     def parents(self) -> dict[str, str]:
         """计算临时父索引；它不属于持久化内容。"""
@@ -213,22 +239,28 @@ class MindMapDocument:
         result[self.root_id] = self.layout.direction if self.layout.direction != "both" else "right"
         return result
 
-    def page_record(self, page_id: str | None = None) -> MindMapDocument | MindMapPage:
-        """按稳定标识借用页面记录；主导图使用 None，两类附属页面共用查询入口。
+    def page_record(self, page_id: str | None = None) -> MindMapDocument | MindMapPage | InspirationArea:
+        """按稳定标识借用主导图、附属页面或灵感区记录。
 
+        None 表示主导图，inspiration.id 表示多根灵感区，其余标识查询附属页；
+        目标不存在抛出 KeyError，不创建默认页面、不修改文档或历史。
         返回值仍属于当前文档，外部不得直接修改；修改配置应使用引擎事务接口。
         查询只做字典访问，不合并页面表，避免局部编辑退回全文件扫描。
         """
         if page_id is None:
             return self
+        if page_id == self.inspiration.id:
+            return self.inspiration
         if page_id in self.submaps:
             return self.submaps[page_id]
         return self.detail_pages[page_id]
 
     def page_kind(self, page_id: str | None = None) -> str:
-        """返回 main、submap 或 detail；不存在的页面标识抛出 KeyError。"""
+        """只读返回 main、submap、detail 或 inspiration，无效标识抛出 KeyError。"""
         if page_id is None:
             return "main"
+        if page_id == self.inspiration.id:
+            return "inspiration"
         if page_id in self.submaps:
             return "submap"
         if page_id in self.detail_pages:
@@ -237,20 +269,40 @@ class MindMapDocument:
 
     def has_page(self, page_id: str | None) -> bool:
         """检查页面是否仍存在，供撤销删除后的导航回退使用。"""
-        return page_id is None or page_id in self.submaps or page_id in self.detail_pages
+        return (page_id is None or page_id == self.inspiration.id
+                or page_id in self.submaps or page_id in self.detail_pages)
 
     def iter_pages(self):
         """依次借用两类附属页面；只用于完整装载、校验和显式全文件操作。"""
         yield from self.submaps.values()
         yield from self.detail_pages.values()
 
-    def page_view(self, page_id: str | None = None) -> MindMapPageView:
+    def page_view(self, page_id: str | None = None, *,
+                  inspiration_root_id: str | None = None) -> MindMapPageView:
         """借用一页的节点与配置，供布局、渲染和面板只读使用。
 
         返回对象不拥有整份文档，不能作为文件保存；调用方不得修改借用的实体。
         主导图使用 None 标识。两类页面引用保留在节点上，页内校验不跨页展开。
+        灵感区标识返回 MindMapForestView，允许没有任何节点，应通过 root_ids
+        枚举普通树；附属页面不混入读模型。目标无效时抛出 KeyError。
+
+        inspiration_root_id 仅允许用于灵感区，指定时只借用该游离根及普通后代，
+        保留 inspiration 类别，并以独立的区域记录将展示根置于 (0, 0)。原文档的
+        根顺序、坐标及实体均不修改；省略时保持完整总览。无效根或用于其他页面
+        时抛出 KeyError。该查询不产生历史，结果不能用于整份文件保存。
         """
         page = self.page_record(page_id)
+        if page_id == self.inspiration.id:
+            if inspiration_root_id is not None:
+                if inspiration_root_id not in page.root_ids:
+                    raise KeyError(inspiration_root_id)
+                page = InspirationArea(page.id, [inspiration_root_id],
+                                       {inspiration_root_id: (0.0, 0.0)}, page.layout, page.theme)
+            nodes = {key: self.nodes[key] for root in page.root_ids for key in self.descendants(root)}
+            assets = {n.image_id: self.assets[n.image_id] for n in nodes.values() if n.image_id}
+            return MindMapForestView(page, nodes, assets, self.metadata)
+        if inspiration_root_id is not None:
+            raise KeyError(inspiration_root_id)
         nodes = {key: self.nodes[key] for key in self.descendants(page.root_id)}
         assets = {node.image_id: self.assets[node.image_id] for node in nodes.values() if node.image_id}
         view = MindMapPageView(page.root_id, nodes, assets, page.layout, page.theme, self.metadata)
@@ -288,3 +340,39 @@ class MindMapPageView(MindMapDocument):
         from .validation import validate_document
 
         validate_document(self, page_only=True)
+
+
+class MindMapForestView(MindMapPageView):
+    """借用多棵普通树的灵感区读模型，禁止作为完整文档保存。
+
+    root_ids 是正式的多根接口；root_id 仅为既有单根调用提供首根或空字符串。
+    空区没有伪造的节点，调用方应使用 root_ids/nodes 判断是否可操作主题。
+    """
+
+    kind = "inspiration"
+
+    def __init__(self, area, nodes, assets, metadata):
+        super().__init__(area.root_ids[0] if area.root_ids else "", nodes, assets,
+                         area.layout, area.theme, metadata, inspiration=area)
+
+    @property
+    def root_ids(self) -> tuple[str, ...]:
+        """返回独立根标识的不可变快照；空区返回空元组，不产生修改。"""
+        return tuple(self.inspiration.root_ids)
+
+    def tree_view(self, root_id):
+        """借用一棵游离树作为传统单根布局输入，不复制节点及图片字节。"""
+        nodes = {key: self.nodes[key] for key in self.descendants(root_id)}
+        return MindMapPageView(root_id, nodes, self.assets, self.layout, self.theme, self.metadata)
+
+    def page_view(self, page_id=None, *, inspiration_root_id=None):
+        """多根读模型已限定当前区域，返回自身供候选校验，不丢弃其余游离树。"""
+        if page_id is None or page_id == self.inspiration.id:
+            if inspiration_root_id is not None:
+                return super().page_view(self.inspiration.id, inspiration_root_id=inspiration_root_id)
+            return self
+        raise KeyError(page_id)
+
+    def branch_sides(self):
+        """逐树解析方向，根坐标不参与树内分支方向计算。"""
+        return {key: side for root in self.root_ids for key, side in self.tree_view(root).branch_sides().items()}

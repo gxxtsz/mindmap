@@ -35,6 +35,10 @@
       "sha256": "f473b2c82c0a64f0ce542d888b8d6e3538afa4b1561c876687957e9de797eb13"
     },
     {
+      "path": "icons/inspiration.svg",
+      "sha256": "8550764a5201421dedf6b6d8fbef0728e1f4ffc5329d63f6321fb9e6e55b1589"
+    },
+    {
       "path": "icons/log.svg",
       "sha256": "bccf2d60804d8ca34c0563b42e3d9a8ae51982a1cc662fd28f07e047eaddd657"
     },

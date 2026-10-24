@@ -44,6 +44,9 @@ from PySide6.QtWidgets import (
 )
 
 _OPERATION_NAMES = {
+    "add_inspiration": "新建想法", "set_inspiration_positions": "移动游离主题",
+    "move_to_inspiration": "转为独立想法", "attach_inspirations": "加入导图",
+    "group_inspirations": "创建共同父主题",
     "add_child": "新增子节点", "add_sibling": "新增同级节点", "insert_parent": "插入父节点",
     "update_node": "修改节点属性", "remove_nodes": "删除节点", "move_nodes": "移动节点",
     "move_up": "调整节点顺序", "set_expanded": "调整节点折叠状态",
@@ -77,8 +80,10 @@ def _describe_move(move: NodeMove, event: ChangeEvent) -> str:
     """
     start, end = (move.before, move.after) if event.forward else (move.after, move.before)
     title = _node_title(end.node_text, move.node_id)
-    source = _node_title(start.parent_text, start.parent_id)
-    target = _node_title(end.parent_text, end.parent_id)
+    if start.position != end.position and start.parent_id is None and end.parent_id is None:
+        return f"更新独立想法{title}的兼容坐标至 {end.position}"
+    source = _node_title(start.parent_text if start.parent_id is not None else "独立想法列表", start.parent_id)
+    target = _node_title(end.parent_text if end.parent_id is not None else "独立想法列表", end.parent_id)
     if start.parent_id != end.parent_id:
         verb = "移回" if event.kind == "undo" else "移到"
         return f"将{title}从{source}{verb}{target}下"

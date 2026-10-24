@@ -17,10 +17,22 @@ from .extensions import (
 )
 from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point, Rect
 from .history import ChangeSet, NodeMove, NodePlacement
-from .models import Asset, MindMapDocument, MindMapPage, MindMapPageView, Node, PathEntry, Theme
+from .models import (
+    Asset,
+    InspirationArea,
+    MindMapDocument,
+    MindMapForestView,
+    MindMapPage,
+    MindMapPageView,
+    Node,
+    PathEntry,
+    Theme,
+)
 
 __all__ = [
     "Asset",
+    "InspirationArea",
+    "MindMapForestView",
     "BranchPath",
     "BranchStyle",
     "ChangeEvent",

@@ -133,9 +133,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             self.record_operation(startup_messages[-1], level="warning")
         self._outline_stack = QStackedWidget(manager.parking)
         self._favorites_stack = QStackedWidget(manager.parking)
+        self._inspiration_stack = QStackedWidget(manager.parking)
         self._properties_stack = QStackedWidget(manager.parking)
         self._settings_stack = QStackedWidget(manager.parking)
-        for stack in (self._outline_stack, self._favorites_stack, self._properties_stack, self._settings_stack):
+        for stack in (self._outline_stack, self._favorites_stack, self._inspiration_stack,
+                      self._properties_stack, self._settings_stack):
             message = QLabel("没有打开的导图")
             message.setAlignment(Qt.AlignmentFlag.AlignCenter)
             stack.addWidget(message)
@@ -147,6 +149,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         for identifier, title, stack, icon, position, shortcut in (
             ("outline", "大纲", self._outline_stack, "outline", DockPosition.LEFT_TOP, "Alt+1"),
             ("favorites", "收藏", self._favorites_stack, "favorites", DockPosition.LEFT_TOP, "Alt+4"),
+            ("inspiration", "灵感", self._inspiration_stack, "inspiration", DockPosition.LEFT_TOP, "Alt+6"),
             ("properties", "节点属性", self._properties_stack, "properties", DockPosition.RIGHT_TOP, "Alt+2"),
             ("map_settings", "导图设置", self._settings_stack, "settings", DockPosition.RIGHT_TOP, ""),
         ):
@@ -320,6 +323,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         canvas.set_ui_colors(colors)
         panels.set_ui_colors(colors)
         session.favorites.set_ui_colors(colors)
+        session.inspiration.set_ui_colors(colors)
 
     def _save_wheel_mode(self, mode):
         if self._updating_preferences:
@@ -369,6 +373,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         """仅切换堆叠页和动作，不重建业务面板，不改变其他会话的选择和滚动位置。"""
         self._outline_stack.setCurrentWidget(session.panels.outline) if session else self._outline_stack.setCurrentIndex(0)
         self._favorites_stack.setCurrentWidget(session.favorites) if session else self._favorites_stack.setCurrentIndex(0)
+        self._inspiration_stack.setCurrentWidget(session.inspiration) if session else self._inspiration_stack.setCurrentIndex(0)
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
         self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
         self._status_controls.bind_canvas(session.canvas if session else None)
@@ -376,7 +381,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
         # 关闭活动标签到下一标签的短暂空绑定不暂停，只有关闭全部导图才回欢迎页。
-        self.manager.set_tools_suspended(("outline", "favorites", "properties", "map_settings"),
+        self.manager.set_tools_suspended(("outline", "favorites", "inspiration", "properties", "map_settings"),
                                          not bool(len(self.sessions)))
 
     def _set_read_only(self, checked):
@@ -488,7 +493,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         exports = QMenu("导出图形", files)
         exports.setIcon(self.manager.theme.icon("export-image"))
         exports.menuAction().setProperty("mindmap_icon", "export-image")
-        exports.setEnabled(self.active_session is not None)
+        exports.setEnabled(self.active_session is not None and bool(self.canvas.document_view.nodes))
         for format_id, label in (("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档")):
             action = exports.addAction(label + "…")
             action.setData(format_id)
@@ -497,7 +502,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         files.insertMenu(self.action("app.quit"), exports)
         anchor = next(action for action in menu.actions() if action.text() == "设置")
         for title, keys in (
-            ("编辑", ("undo", "redo", "add_child", "add_sibling", "insert_parent", "edit", "properties",
+            ("编辑", ("undo", "redo", "add_inspiration", "move_to_inspiration", "attach_inspirations",
+                    "group_inspirations", "add_child", "add_sibling", "insert_parent", "edit", "properties",
                     "delete", "copy", "cut", "paste", "image", "image_url")),
             ("视图", ("zoom_in", "zoom_out", "expand_all", "collapse_all")),
         ):
@@ -526,7 +532,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                 session.canvas.set_ui_colors(colors)
                 session.panels.set_ui_colors(colors)
                 session.favorites.set_ui_colors(colors)
-            for stack in (self._outline_stack, self._favorites_stack, self._properties_stack, self._settings_stack):
+                session.inspiration.set_ui_colors(colors)
+            for stack in (self._outline_stack, self._favorites_stack, self._inspiration_stack,
+                          self._properties_stack, self._settings_stack):
                 palette = stack.palette()
                 palette.setColor(QPalette.ColorRole.Window, self.manager.theme.color("tool-window-bg"))
                 stack.setPalette(palette)

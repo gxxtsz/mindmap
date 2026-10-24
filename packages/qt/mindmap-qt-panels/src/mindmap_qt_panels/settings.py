@@ -437,7 +437,7 @@ class GlobalSettingsPanel(QWidget):
         elif key == "branch":
             if not info.supports_branch_styles:
                 raise MindMapError("当前布局算法不支持分支连接线样式")
-            apply_branch_style(candidate, [candidate.root_id], value, scope="subtree")
+            apply_branch_style(candidate, candidate.root_ids, value, scope="subtree")
         if candidate == document:
             return
         # 先验证整份候选文档，包括折叠和聚焦范围外的节点，再走公开引擎事务。
@@ -456,7 +456,7 @@ class GlobalSettingsPanel(QWidget):
             elif key == "theme":
                 engine.set_theme(candidate.theme, page_id=page_id)
             else:
-                engine.set_branch_style([document.root_id], value, scope="subtree")
+                engine.set_branch_style(document.root_ids, value, scope="subtree")
 
     def sync(self, *events):
         """从正式状态同步值、混合状态及布局能力；不创建默认配置或触发用户选择信号。"""
@@ -494,7 +494,7 @@ class GlobalSettingsPanel(QWidget):
                 self.direction.model().item(index).setEnabled(
                     self.direction.itemData(index) in info.directions
                 )
-            kinds = self.canvas.branch_kinds([document.root_id])
+            kinds = self.canvas.branch_kinds(document.root_ids)
             kind = next(iter(kinds)) if len(kinds) == 1 else MIXED
             with QSignalBlocker(self.branch), QSignalBlocker(self.theme):
                 self.branch.set_value(kind)

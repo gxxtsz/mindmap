@@ -177,7 +177,7 @@ def _apply_move(engine: MindMapEngine, proposal: _DropProposal, document: MindMa
         return False
     moving = set(proposal.roots)
     siblings = [key for key in document.nodes[proposal.parent_id].children if key not in moving]
-    both = document.layout.direction == "both"
+    both = document.layout.direction == "both" and getattr(document, "kind", None) != "inspiration"
     touches_root = proposal.parent_id == document.root_id or any(
         engine.parent_id(key) == document.root_id for key in proposal.roots
     )
@@ -282,7 +282,7 @@ class _DropResolver:
                     roots.append(key)
             roots.sort(key=self.geometry.order)
         else:
-            stack = [document.root_id]
+            stack = list(reversed(document.root_ids))
             while stack:
                 key = stack.pop()
                 if key in selected:
@@ -293,7 +293,8 @@ class _DropResolver:
         self.moving = (_MovingSubtrees(roots, self.parents) if self._virtual else
                        {key for root in roots for key in document.descendants(root)})
         self.center_id = focus_id or document.root_id
-        self.valid = bool(roots) and not {document.root_id, self.center_id}.intersection(roots)
+        self.valid = bool(roots) and (getattr(document, "kind", None) == "inspiration"
+                                     or not {document.root_id, self.center_id}.intersection(roots))
         self.down = document.layout.direction == "down"
         if self._virtual:
             self.sides = _OnDemand(lambda key: "down" if self.down else
@@ -386,7 +387,7 @@ class _DropResolver:
         for key, rect in regions:
             # 子导图入口可以作为同级排序参照，但不能出现接入普通子节点的落区。
             has_submap = bool(self.document.nodes[key].submap_id)
-            if key == self.center_id:
+            if key == self.center_id or key not in self.parents:
                 if has_submap:
                     continue
                 sides = (
@@ -672,6 +673,7 @@ class _DragLayer(QGraphicsItem):
         target = control.target
         rect = control._base.layout.nodes.get(target.reference) if target else None
         if rect is None:
+            self._paint_free_label(painter)
             return
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -724,6 +726,25 @@ class _DragLayer(QGraphicsItem):
         painter.restore()
 
 
+    def _paint_free_label(self, painter):
+        """空白落点仅绘制独立主题提示，不把源主题高亮成结构目标。"""
+        if self._label_bounds.isEmpty():
+            return
+        control = self.controller
+        color = QColor(control._base.document.theme.accent)
+        painter.save()
+        painter.translate(self._label_bounds.topLeft())
+        scale = control.view.transform().m11()
+        painter.scale(1 / scale, 1 / scale)
+        badge = QRectF(0, 0, self._label_bounds.width() * scale, self._label_bounds.height() * scale)
+        painter.setPen(QPen(color, 1))
+        painter.setBrush(QColor(control._base.document.theme.background))
+        painter.drawRoundedRect(badge, 7, 7)
+        painter.setFont(self._label_font)
+        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, control._hint_text())
+        painter.restore()
+
+
 class NodeDragController(QObject):
     """画布内部的单次拖动状态机；结束和取消都幂等，所有定时器由视图拥有。"""
 
@@ -762,6 +783,9 @@ class NodeDragController(QObject):
     def begin(self, origin):
         """越过系统阈值后冻结源几何与选择；只读、根节点和聚焦中心在此再次校验。"""
         if not self.owner.editable or self.owner.editor is not None or self.owner._disposed:
+            return False
+        if not all(guard() for guard in tuple(self.owner._navigation_guards)):
+            self.owner.error_occurred.emit("请先完成输入法候选，再拖动主题")
             return False
         # 下一次操作开始前收束上次放下动画，避免拿中间帧作为新的命中几何。
         self._settle_reflow()
@@ -952,7 +976,7 @@ class NodeDragController(QObject):
         starts = {}
         bounds = layout.bounds
         # 按树顺序处理新显露的节点，确保其父节点起点已知，不依赖注入布局的字典顺序。
-        for key in self.owner._document.descendants(self.owner._document.root_id):
+        for key in self.owner._document.ordered_nodes():
             if key not in layout.nodes:
                 continue
             rect = layout.nodes[key]
@@ -1072,9 +1096,10 @@ class NodeDragController(QObject):
         """按释放坐标再次判定并记录动画起点，配对释放鼠标捕获后才提交命令。"""
         self.update(position)
         drop = None
-        if self.active and self.target is not None:
+        proposal = self.target.proposal if self.target is not None else None
+        if self.active and proposal is not None:
             drop = _PreparedDrop(
-                self.target.proposal,
+                proposal,
                 self._base.document,
                 self._selection,
                 self._content_version,
@@ -1115,7 +1140,8 @@ class NodeDragController(QObject):
             changed_ids = []
             scratch.subscribe(lambda event: changed_ids.extend(event.node_ids))
             _apply_move(scratch, drop.proposal, drop.document)
-            candidate = scratch.page_document(self.owner.current_page_id)
+            candidate = scratch.page_document(
+                self.owner.current_page_id, inspiration_root_id=self.owner.current_inspiration_root_id)
             _, sizes = self.owner.factory.measure(
                 candidate, changed_node_ids=changed_ids,
                 previous_document=drop.document, previous_visuals=self.owner._visuals,
@@ -1127,7 +1153,8 @@ class NodeDragController(QObject):
             with self.owner.engine.preview_operation() as (candidate, touched):
                 _apply_move(self.owner.engine, drop.proposal, drop.document)
                 if self.owner.current_page_id is not None or candidate.submaps or candidate.detail_pages:
-                    candidate = candidate.page_view(self.owner.current_page_id)
+                    candidate = candidate.page_view(
+                        self.owner.current_page_id, inspiration_root_id=self.owner.current_inspiration_root_id)
                 changed_sizes = {}
                 for key in touched:
                     node = candidate.nodes.get(key)

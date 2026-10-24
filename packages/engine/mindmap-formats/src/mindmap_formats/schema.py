@@ -1,4 +1,4 @@
-"""原生文档结构映射；写入版本 4，兼容版本 2 单页和版本 3 子导图文档。"""
+"""原生文档结构映射；写入版本 5，兼容版本 2、3、4 文档。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from dataclasses import asdict
 
 from mindmap_core import (
     Asset,
+    InspirationArea,
     LayoutConfig,
     MindMapDocument,
     MindMapError,
@@ -19,7 +20,7 @@ from mindmap_core import (
     Theme,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
@@ -50,6 +51,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
         "metadata": deepcopy(document.metadata),
         "submaps": [asdict(page) for page in document.submaps.values()],
         "detail_pages": [asdict(page) for page in document.detail_pages.values()],
+        "inspiration": asdict(document.inspiration),
     }
 
 
@@ -59,7 +61,7 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
         if not isinstance(data, dict) or data.get("format") != "mindmap":
             raise MindMapError("不是本项目的思维导图文档")
         data = deepcopy(data)
-        if type(data.get("schema_version")) is not int or data["schema_version"] not in (2, 3, SCHEMA_VERSION):
+        if type(data.get("schema_version")) is not int or data["schema_version"] not in (2, 3, 4, SCHEMA_VERSION):
             raise MindMapError("不支持的文档格式版本")
 
         allowed = {"format", "schema_version", "root_id", "nodes", "assets", "layout", "theme", "metadata"}
@@ -67,6 +69,8 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
             allowed.add("submaps")
         if data["schema_version"] >= 4:
             allowed.add("detail_pages")
+        if data["schema_version"] >= 5:
+            allowed.add("inspiration")
         if data.keys() - allowed:
             raise MindMapError("文档包含未知字段，请使用当前文件格式")
         if "layout" not in data or not isinstance(data["layout"], dict):
@@ -127,6 +131,18 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
             submaps=entities("submaps", page_factory),
             detail_pages=entities("detail_pages", page_factory),
         )
+        if "inspiration" in data:
+            record = data["inspiration"]
+            if not isinstance(record, dict) or set(record) != {"id", "root_ids", "positions", "layout", "theme"}:
+                raise MindMapError("灵感区字段不完整或包含未知字段")
+            if not isinstance(record["positions"], dict):
+                raise MindMapError("灵感区坐标必须为对象")
+            positions = {key: tuple(value) if isinstance(value, list) else value
+                         for key, value in record["positions"].items()}
+            document.inspiration = InspirationArea(record["id"], record["root_ids"], positions,
+                                                   LayoutConfig(**record["layout"]), Theme(**record["theme"]))
+        else:
+            document.inspiration = InspirationArea(layout=deepcopy(document.layout), theme=deepcopy(document.theme))
         document.validate()
         return document
     except MindMapError:

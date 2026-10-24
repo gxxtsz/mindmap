@@ -14,7 +14,7 @@ def test_native_and_json_roundtrip_preserve_favorites_order_and_metadata(tmp_pat
     document = engine.document
     document.metadata["自定义数据"] = {"说明": "保留其他元数据"}
     encoded = to_dict(document)
-    assert encoded["schema_version"] == 4
+    assert encoded["schema_version"] == 5
     assert encoded["metadata"]["submap_favorites"] == [second, first]
     assert from_dict(encoded) == document
     path = tmp_path / "收藏.mindmap"
@@ -29,6 +29,7 @@ def test_old_file_without_favorites_opens_cleanly(version):
     document = MindMapEngine().document
     data = to_dict(document)
     data["schema_version"] = version
+    del data["inspiration"]
     if version < 4:
         data.pop("detail_pages")
         for node in data["nodes"]:

@@ -49,7 +49,7 @@ class OutlineModel(QAbstractItemModel):
         self.rows = {
             child: row for node in self.document.nodes.values() for row, child in enumerate(node.children)
         }
-        self.rows[self.document.root_id] = 0
+        self.rows.update({root: row for row, root in enumerate(self.document.root_ids)})
         self._next_identifier = len(self.identifiers) + 1
 
     def apply_changes(self, event):
@@ -105,7 +105,7 @@ class OutlineModel(QAbstractItemModel):
     def replace_document(self, document):
         """仅在结构变化时重置模型；普通文本变化不丢失用户的树展开和滚动状态。"""
         structural = (
-            document.root_id != self.document.root_id or document.nodes.keys() != self.document.nodes.keys()
+            document.root_ids != self.document.root_ids or document.nodes.keys() != self.document.nodes.keys()
         )
         if not structural:
             structural = any(
@@ -145,7 +145,7 @@ class OutlineModel(QAbstractItemModel):
         children = (
             self.document.nodes[self.node_id(parent)].children
             if parent.isValid()
-            else [self.document.root_id]
+            else self.document.root_ids
         )
         return self.index_for(children[row]) if row < len(children) else QModelIndex()
 
@@ -156,7 +156,7 @@ class OutlineModel(QAbstractItemModel):
     def rowCount(self, parent=QModelIndex()):
         if parent.isValid():
             return len(self.document.nodes[self.node_id(parent)].children) if parent.column() == 0 else 0
-        return 1
+        return len(self.document.root_ids)
 
     def columnCount(self, parent=QModelIndex()):
         return 1
@@ -260,7 +260,7 @@ class OutlinePanel(QTreeView):
     def _nodes_with_depth(self):
         """以显式栈迭代整棵树，避免深层导图触发 Python 递归上限。"""
         document = self.tree_model.document
-        pending = [(document.root_id, 1)]
+        pending = [(root, 1) for root in reversed(document.root_ids)]
         while pending:
             key, depth = pending.pop()
             yield key, depth
@@ -313,7 +313,7 @@ class OutlinePanel(QTreeView):
         self.nodes_selected.emit(
             [
                 key
-                for key in self.tree_model.document.descendants(self.tree_model.document.root_id)
+                for key in self.tree_model.document.ordered_nodes()
                 if key in selected_ids
             ]
         )
@@ -351,7 +351,7 @@ class OutlinePanel(QTreeView):
         try:
             previous = set(self._expanded_ids)
             scroll = self.verticalScrollBar().value()
-            page_changed = self.tree_model.document.root_id != self.canvas.document_view.root_id
+            page_changed = self.tree_model.document.root_ids != self.canvas.document_view.root_ids
             if event.changes is not None:
                 changed, fresh = self.tree_model.apply_changes(event)
             else:

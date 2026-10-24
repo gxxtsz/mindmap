@@ -465,7 +465,7 @@ class VisualFactory:
             key: (
                 previous_visuals[key]
                 if changed is not None and key not in changed and key in previous_visuals
-                else self.visual(node, document.theme, document, is_root=key == document.root_id)
+                else self.visual(node, document.theme, document, is_root=key in document.root_ids)
             )
             for key, node in document.nodes.items()
         }
@@ -485,7 +485,7 @@ class VisualFactory:
                 sizes.pop(key, None)
                 self._node_visuals.pop(key, None)
             else:
-                visual = self.visual(node, document.theme, document, is_root=key == document.root_id)
+                visual = self.visual(node, document.theme, document, is_root=key in document.root_ids)
                 visuals[key] = visual
                 sizes[key] = visual.width, visual.height
 
