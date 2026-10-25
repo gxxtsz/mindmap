@@ -164,6 +164,24 @@ def child(scale, platform):
                     checks["详情入口避让折叠按钮"] = not item.detail_page_control.boundingRect().intersects(
                         item.fold_control.button_rect())
                     assert window.grab().save(str(output / (label + "-detail-entry.png")))
+                    canvas.enter_submap(owner)
+                    app.processEvents()
+                    shared_root = canvas.document_view.root_id
+                    shared_item = canvas.node_items[shared_root]
+                    checks["子导图根显示共享详情图标"] = (
+                        shared_item.detail_page_control.isVisible()
+                        and shared_item.visual.page_kinds == ("detail",)
+                        and shared_item.visual.page_icon_color == shared_item.visual.text_color
+                        and engine.resolve_detail_page(shared_root) == (owner, detail))
+                    assert window.grab().save(str(output / (label + "-shared-detail-root.png")))
+                    canvas.enter_detail_page(shared_root)
+                    checks["共享详情返回提示指向子导图"] = (
+                        canvas.current_page_id == detail
+                        and canvas.path_navigation.back_button.toolTip() == "返回所属子导图")
+                    canvas.return_to_parent_page()
+                    checks["共享详情返回原子导图"] = (
+                        canvas.current_page_id == page and canvas.selected_node_ids() == [shared_root])
+                    canvas.return_to_parent_page()
                     canvas.enter_detail_page(owner)
                     engine.add_child(canvas.document_view.root_id, "业务规则与补充说明")
                     app.processEvents()

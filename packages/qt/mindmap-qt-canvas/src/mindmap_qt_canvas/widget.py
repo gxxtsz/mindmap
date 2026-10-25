@@ -20,6 +20,7 @@ from mindmap_core import (
     MindMapDocument,
     MindMapEngine,
     MindMapError,
+    MindMapPageView,
     Rect,
     apply_branch_style,
     branch_style_targets,
@@ -187,6 +188,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._preview_layout = None
         self._measurements = {}
         self._measure_dirty = None
+        self._detail_targets = {}
+        self._detail_targets_dirty = True
         self._visual_document = None
         self._visuals = {}
         self._incremental_layout = None
@@ -230,6 +233,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
 
             QDrag.cancel()
         self._disposed = True
+        self._detail_origin = None
+        self._detail_targets.clear()
         self._view_reset_pending = False
         self._view_restore_center = None
         self._view_reset_timer.stop()
@@ -656,15 +661,19 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         set_action_icon(favorite, "favorite_on" if checked else "favorite", self._ui_colors)
         # 创建入口按所在页面过滤，已有入口按当前节点过滤；返回其他页面后立即恢复。
         self._actions["create_submap"].setVisible(not in_detail and not image_only)
+        # 结束已失效的共享编辑器时，旧选择可能已经从引擎删除而读模型尚未合并。
+        # 动作借用当前读模型对应的解析缓存，正式刷新后再同步新的共享详情目标。
+        detail_page = (self._detail_targets.get(node.id, (node.id, node.detail_page_id))[1]
+                       if node and not in_detail else None)
         self._actions["create_detail_page"].setVisible(
-            not in_detail and not image_only and not bool(node and node.detail_page_id))
+            not in_detail and not image_only and not detail_page)
         self._actions["create_detail_page"].setEnabled(bool(
-            self.editable and not editing and single and node and not node.detail_page_id
+            self.editable and not editing and single and node and not detail_page
             and not in_detail and not image_only))
         for name in ("enter_detail_page", "delete_detail_page"):
-            self._actions[name].setVisible(bool(not in_detail and node and node.detail_page_id))
+            self._actions[name].setVisible(bool(not in_detail and node and detail_page))
             self._actions[name].setEnabled(bool(
-                not editing and single and node and node.detail_page_id
+                not editing and single and node and detail_page
                 and (name == "enter_detail_page" or self.editable)))
         self._sync_navigation()
 
@@ -741,6 +750,9 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             return
         self._applying_engine_event = True
         try:
+            if event.changes is not None and any(
+                    event.changes.collections.get(name) for name in ("submaps", "detail_pages")):
+                self._detail_targets_dirty = True
             if event.kind != "saved":
                 self._branch_content_revision = event.revision
             if (event.kind != "saved" and self._native_branch_drag is not None
@@ -863,6 +875,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 self._current_page_id = None
                 self._inspiration_root_id = self._last_inspiration_root = None
                 self._page_states.clear()
+                self._detail_origin = None
                 self._page_chain = [None]
                 self._view_restore_center = None
                 self._view_reset_pending = False
@@ -917,6 +930,39 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.history_changed.emit(self.engine.can_undo, self.engine.can_redo, self.engine.is_dirty)
         self.document_changed.emit(event)
 
+    def _detail_measurement_changes(self, document, dirty):
+        """把页外共享详情变化折算为当前页的测量差量，不改借用节点的归属字段。
+
+        完整刷新时建立根节点和子导图入口的候选表；普通编辑只维护变化候选。
+        仅在附属页面关系变化时复查候选，避免每次输入都扫描当前页或整份文件。
+        目标变化的别名加入返回的脏节点，保证增量布局使用新的图标占位宽度。
+        dirty 为 None 时保持完整测量语义；返回值仅供当前 GUI 刷新使用。
+        """
+        roots = document.root_ids
+        if dirty is None:
+            self._detail_targets.clear()
+            candidates = {key for key, node in document.nodes.items() if key in roots or node.submap_id}
+        else:
+            candidates = set(self._detail_targets) if self._detail_targets_dirty else set()
+            for key in dirty:
+                node = document.nodes.get(key)
+                if node is not None and (key in roots or node.submap_id):
+                    candidates.add(key)
+                else:
+                    self._detail_targets.pop(key, None)
+                    candidates.discard(key)
+        changed = []
+        for key in candidates:
+            if key not in document.nodes:
+                self._detail_targets.pop(key, None)
+                continue
+            target = self.engine.resolve_detail_page(key)
+            if self._detail_targets.get(key) != target:
+                changed.append(key)
+            self._detail_targets[key] = target
+        self._detail_targets_dirty = False
+        return None if dirty is None else tuple(dict.fromkeys((*dirty, *changed)))
+
     def refresh(self) -> None:
         """用提交事件维护的界面读模型刷新几何，复用按 ID 索引的图元。
 
@@ -930,12 +976,13 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         # 时再由视图限制到最近边界；不要为了容纳内容而自动修改用户的缩放比例。
         center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
         document = self._document
-        dirty = self._measure_dirty
+        dirty = self._detail_measurement_changes(document, self._measure_dirty)
         if dirty is None or self._visual_document is None:
-            visuals, sizes = self.factory.measure(document)
+            visuals, sizes = self.factory.measure(document, detail_page_resolver=self.engine.resolve_detail_page)
         else:
             visuals, sizes = self._visuals, self._measurements
-            self.factory.update_measurements(document, dirty, visuals, sizes)
+            self.factory.update_measurements(
+                document, dirty, visuals, sizes, detail_page_resolver=self.engine.resolve_detail_page)
         self._visual_document, self._visuals = document, visuals
         self._measure_dirty = ()
         self._measurements = sizes
@@ -1957,6 +2004,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             layout_registry=self.layout_registry,
             expand_all=expand_all,
             scale=scale,
+            detail_page_resolver=self.engine.resolve_detail_page,
         )
 
     @document_interaction
@@ -1969,13 +2017,24 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.engine.set_layout(config, page_id=self._current_page_id)
 
     def validate_document(self, document: MindMapDocument) -> None:
-        """替换前验证算法、图片、测量与布局结果，失败时当前引擎和画布不变。"""
+        """替换前验证算法、图片及包含共享图标的实际尺寸，失败时保留正式状态。
+
+        完整文件使用独立候选引擎解析其自身页面关系，不借用旧文档的同名标识。
+        单页候选缺少页外归属表，已有节点借用当前解析，新粘贴节点使用候选自身
+        引用；普通内容、外观及布局仍完全取候选。查询不提交引擎历史或导航。
+        """
         document.validate()
+        if isinstance(document, MindMapPageView):
+            def resolver(key):
+                return (self.engine.resolve_detail_page(key) if key in self._book_document.nodes
+                        else (key, document.nodes[key].detail_page_id))
+        else:
+            resolver = MindMapEngine(document).resolve_detail_page if document.submaps else None
         # 完整文件装载时逐页校验；页内候选仍只测量当前页，禁止混排所有页面节点。
         pages = [document.page_view()] + [document.page_view(page.id) for page in document.iter_pages()]
         for page in pages:
             self.layout_registry.validate_config(page.layout)
-            _, sizes = self.factory.measure(page)
+            _, sizes = self.factory.measure(page, detail_page_resolver=resolver)
             self.layout_registry.layout(page, sizes)
 
     def context_menu(self, global_position):

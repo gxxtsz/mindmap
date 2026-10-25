@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -338,13 +339,19 @@ class VisualFactory:
         self._node_visuals: dict[str, tuple[tuple, NodeVisual]] = {}
         self.pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
 
-    def visual(self, node: Node, theme: Theme, document: MindMapDocument, *, is_root=False) -> NodeVisual:
+    def visual(
+        self, node: Node, theme: Theme, document: MindMapDocument, *, is_root=False,
+        detail_page_resolver: Callable[[str], tuple[str, str | None]] | None = None,
+    ) -> NodeVisual:
         """取得单个节点的测量与绘制数据，返回值由本工厂缓存并只读共享。
 
         document 提供图片资源，is_root 决定根节点的默认字号及粗体。正文、图片和
         有效外观未变时复用原视觉；分支样式不影响节点尺寸，不使文字测量缓存失效。
         普通图文内容区上下各保留 8 个逻辑像素，图片、标签和备注按实际内容撑高；
         附页入口需要的最小高度及居中偏移统一由 with_content_size 处理。
+        detail_page_resolver 可提供核心共享详情解析接口，返回归属节点及页面 ID；
+        仅根节点和子导图入口需要额外解析，普通主题仍取自身字段。省略时沿用
+        原有测量行为。解析结果只以是否存在进入缓存，不缓存具体页面或修改节点。
         纯图片节点仅按 image_width 和原始像素比例测量，无正文、留白、填充及常驻
         边框，也不使用普通附件的宽高限制；图片字节无效时抛出 MindMapError。
         宿主先创建 QApplication，并在 GUI 线程使用返回的文字文档和图片对象。
@@ -352,6 +359,9 @@ class VisualFactory:
         标签和原地编辑继续借用同一策略。倍率与设备像素密度由实际绘制设备处理，
         不进入视觉缓存键，也不在缩放时重新排版或生成节点位图。
         """
+        detail_page_id = node.detail_page_id
+        if detail_page_resolver is not None and (is_root or node.submap_id):
+            detail_page_id = detail_page_resolver(node.id)[1]
         key = (
             node.text,
             node.text_format,
@@ -365,7 +375,7 @@ class VisualFactory:
             bool(node.children),
             bool(node.note),
             bool(node.hyperlink),
-            bool(node.detail_page_id),
+            bool(detail_page_id),
             bool(node.submap_id),
             is_root,
             repr(theme),
@@ -460,7 +470,7 @@ class VisualFactory:
             tag_font,
             font,
             bool(node.children),
-            page_kinds=tuple(kind for kind, page in (("detail", node.detail_page_id), ("submap", node.submap_id))
+            page_kinds=tuple(kind for kind, page in (("detail", detail_page_id), ("submap", node.submap_id))
                              if page),
             content_height=content_height,
             image_only=node.is_image_node,
@@ -476,7 +486,8 @@ class VisualFactory:
         return visual
 
     def measure(
-        self, document: MindMapDocument, *, changed_node_ids=None, previous_document=None, previous_visuals=None
+        self, document: MindMapDocument, *, changed_node_ids=None, previous_document=None,
+        previous_visuals=None, detail_page_resolver: Callable[[str], tuple[str, str | None]] | None = None,
     ) -> tuple[dict, dict]:
         """一次取得节点视觉及完整尺寸，画布与导出共用；未变化节点直接复用排版。
 
@@ -485,6 +496,8 @@ class VisualFactory:
         previous_visuals，以及相对该快照的完整 changed_node_ids；未变化节点直接
         复用传入的正式视觉。不能从最近试算的缓存推断未变化节点，避免被拒绝的候选
         污染正式画面。省略任一条件或主题变化时逐节点检查，兼容可变候选文档。
+        detail_page_resolver 同 visual，仅影响页面图标；增量调用时，调用方须把
+        共享详情发生变化的可见别名也加入 changed_node_ids，防止复用过期的宽度。
         """
         for key in self._node_visuals.keys() - document.nodes.keys():
             del self._node_visuals[key]
@@ -499,18 +512,21 @@ class VisualFactory:
             key: (
                 previous_visuals[key]
                 if changed is not None and key not in changed and key in previous_visuals
-                else self.visual(node, document.theme, document, is_root=key in document.root_ids)
+                else self.visual(node, document.theme, document, is_root=key in document.root_ids,
+                                 detail_page_resolver=detail_page_resolver)
             )
             for key, node in document.nodes.items()
         }
         sizes = {key: (value.width, value.height) for key, value in visuals.items()}
         return visuals, sizes
 
-    def update_measurements(self, document, node_ids, visuals, sizes) -> None:
+    def update_measurements(self, document, node_ids, visuals, sizes, *, detail_page_resolver=None) -> None:
         """原地更新正式读模型对应的视觉和尺寸，只处理提交差量。
 
         调用方必须保证主题和根未变化，且 node_ids 覆盖所有变化实体。试算不能
         使用本接口修改正式字典；主题变化、装载与导出仍调用完整 measure。
+        可选 detail_page_resolver 沿用 visual 的共享详情查询契约；node_ids 必须
+        包含本次共享详情变化影响的页内别名。仅更新传入字典，不修改文档或历史。
         """
         for key in node_ids:
             node = document.nodes.get(key)
@@ -519,7 +535,8 @@ class VisualFactory:
                 sizes.pop(key, None)
                 self._node_visuals.pop(key, None)
             else:
-                visual = self.visual(node, document.theme, document, is_root=key in document.root_ids)
+                visual = self.visual(node, document.theme, document, is_root=key in document.root_ids,
+                                     detail_page_resolver=detail_page_resolver)
                 visuals[key] = visual
                 sizes[key] = visual.width, visual.height
 

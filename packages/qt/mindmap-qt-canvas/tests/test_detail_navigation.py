@@ -175,7 +175,8 @@ def test_detail_breadcrumb_uses_type_icons_after_theme_change(details):
     canvas, _, _, leaf, errors = details
     submap = canvas.engine.create_submap(leaf)
     root = canvas.engine.page_document(submap).root_id
-    page = canvas.engine.create_detail_page(root)
+    owner = canvas.engine.add_child(root, "详情入口")
+    page = canvas.engine.create_detail_page(owner)
     canvas.navigate_to(page)
     QApplication.processEvents()
 

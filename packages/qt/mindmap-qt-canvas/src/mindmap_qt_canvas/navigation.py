@@ -265,6 +265,7 @@ class PageNavigationMixin:
 
     def _init_page_navigation(self, layout):
         self._current_page_id = None
+        self._detail_origin = None
         self._page_states = {}
         self._inspiration_root_id = None
         self._last_inspiration_root = None
@@ -453,8 +454,14 @@ class PageNavigationMixin:
         self._page_states[self._view_key()] = PageViewState(
             transform, QPointF(center), tuple(self.selected_node_ids()), self.focus_id)
 
-    def _switch_page(self, page_id, *, notify=True, cache=True, inspiration_root_id=None):
-        """只切换页内读模型和视图；撤销导致页面消失时由调用方先选择有效祖先。"""
+    def _switch_page(
+        self, page_id, *, notify=True, cache=True, inspiration_root_id=None, detail_origin=None,
+    ):
+        """切换页内读模型及视图；detail_origin 临时记录打开详情的页面和想法根。
+
+        来源仅属于当前画布，不进入文件或会话快照；其他导航清除旧来源，避免
+        再次从不同入口进入同一详情时返回错误页面。撤销删除仍由调用方选择有效祖先。
+        """
         if not self._book_document.has_page(page_id):
             raise MindMapError("导图页面不存在")
         event = ChangeEvent("切换导图页面", (), self.engine.revision, "navigation")
@@ -473,6 +480,7 @@ class PageNavigationMixin:
         # 先停用旧页的视口同步；refresh 会用新页的布局重新确定是否启用虚拟化并重建图元。
         self._virtualized = False
         self._current_page_id = page_id
+        self._detail_origin = detail_origin if self.current_page_kind == "detail" else None
         if page_id == self.engine.inspiration_id:
             self._inspiration_root_id = self._choose_inspiration_root(
                 inspiration_root_id or self._inspiration_root_id)
@@ -598,20 +606,29 @@ class PageNavigationMixin:
         self.set_submap_favorite(node.submap_id, not self.engine.is_submap_favorite(node.submap_id))
 
     def enter_detail_page(self, node_id=None):
-        """查看节点详情；只读也可进入，重新进入恢复该页自己的视图现场。"""
+        """查看共享详情，返回时恢复发起页面；只读同样允许导航。
+
+        node_id 省略时使用当前选择，显式标识须在文档中存在。解析得到的实际归属可在
+        其他页，当前选择仍保留发起节点；目标不存在时抛出中文 MindMapError。
+        仅切换当前画布的临时导航，不改变详情归属、文档、历史或保存标记。
+        """
         key = node_id or self.current_node_id()
-        node = self.engine.get_node(key)
-        if not node.detail_page_id:
+        _, page_id = self.engine.resolve_detail_page(key)
+        if not page_id:
             raise MindMapError("此节点没有详情页")
         self._prepare_page_navigation()
+        _, page_id = self.engine.resolve_detail_page(key)
+        if not page_id:
+            raise MindMapError("此节点没有详情页")
         self.select_nodes([key])
-        self._switch_page(node.detail_page_id)
+        self._switch_page(page_id, detail_origin=(self.current_page_id, self.current_inspiration_root_id))
 
     @document_interaction
     def create_detail_page(self):
         """为当前普通节点添加详情并进入，返回新页面 ID。
 
-        无参数；纯图片、只读、已有详情或详情页内目标及输入法候选抛出
+        无参数；入口与子导图根共用同一详情，从根创建时使用当前外观并归属
+        最外层入口，返回详情后恢复发起页。纯图片、只读、已有详情或详情页内目标及输入法候选抛出
         MindMapError，纯图片检查先于草稿提交。仅在 GUI 线程、画布存活时调用；
         页面由文档管理，切页会释放旧图元，外部只保存稳定页面 ID。
         """
@@ -620,7 +637,7 @@ class PageNavigationMixin:
             raise MindMapError("纯图片节点不能拥有详情页或子导图")
         self._prepare_page_navigation()
         page_id = self.engine.create_detail_page(self.current_node_id())
-        self._switch_page(page_id)
+        self._switch_page(page_id, detail_origin=(self.current_page_id, self.current_inspiration_root_id))
         return page_id
 
     @document_interaction
@@ -628,10 +645,10 @@ class PageNavigationMixin:
         """确认详情删除范围，保留入口、原分支及子导图；取消不触碰文档或历史。"""
         self._ensure_editable()
         key = self.current_node_id()
-        node = self.engine.get_node(key)
-        if not node.detail_page_id:
+        _, page_id = self.engine.resolve_detail_page(key)
+        if not page_id:
             raise MindMapError("此节点没有详情页")
-        page = self._book_document.detail_pages[node.detail_page_id]
+        page = self._book_document.detail_pages[page_id]
         count = len(self._book_document.descendants(page.root_id))
         generation, revision = self.engine.document_generation, self.engine.revision
         choice = QMessageBox.question(
@@ -646,8 +663,13 @@ class PageNavigationMixin:
         self.engine.remove_detail_page(key)
 
     def return_to_parent_page(self):
-        """按页面所有权返回一层，不等同于编辑撤销或浏览历史后退。"""
+        """详情优先返回有效发起页并恢复视图，其余情况按实际所有权返回一层。"""
         if self._current_page_id is None:
+            return
+        origin = self._detail_return_origin()
+        if origin is not None:
+            self._prepare_page_navigation()
+            self._switch_page(origin[0], inspiration_root_id=origin[1])
             return
         if self.current_page_kind == "inspiration":
             self._prepare_page_navigation()
@@ -692,12 +714,33 @@ class PageNavigationMixin:
             pages.insert(0, path[1])
         return pages
 
+    def _detail_return_origin(self):
+        """借用当前详情的有效来源；来源删除后立即丢弃，不因撤销而复活旧导航。
+
+        返回（页面 ID，想法根 ID）或 None；None 页面 ID 表示有效的主导图。
+        仅查询本画布的临时状态，不修改文档或缓存的视图现场。
+        """
+        origin = self._detail_origin
+        if self.current_page_kind != "detail" or origin is None:
+            return None
+        page, root = origin
+        if (not self._book_document.has_page(page) or page == self.current_page_id
+                or self._book_document.page_kind(page) == "detail"
+                or page == self.engine.inspiration_id and root not in self._book_document.inspiration.root_ids):
+            self._detail_origin = None
+            return None
+        return origin
+
     def _back_button_text(self):
         """按实际返回目标生成提示，区分主导图、所属想法及不同层级的附属页面。"""
         if self.current_page_id is None:
             return "已在主导图"
         if self.current_page_kind == "inspiration":
             return "返回主导图"
+        origin = self._detail_return_origin()
+        if origin is not None:
+            return {"main": "返回主导图", "inspiration": "返回所属想法",
+                    "submap": "返回所属子导图"}[self._book_document.page_kind(origin[0])]
         owner = self._book_document.page_record(self.current_page_id).owner_id
         parent_kind = self._book_document.page_kind(self.engine.node_page_id(owner))
         return {"main": "返回主导图", "inspiration": "返回所属想法",

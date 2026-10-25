@@ -217,7 +217,7 @@ class PageControlItem(QGraphicsObject):
         if rect != self._rect:
             self.prepareGeometryChange()
             self._rect = rect
-        self.setVisible(bool(getattr(item.node, self.field_name)))
+        self.setVisible(self.kind in item.visual.page_kinds)
         if not self.isVisible():
             self.hovered = False
         self.update()
@@ -225,8 +225,12 @@ class PageControlItem(QGraphicsObject):
     def can_activate(self):
         """只读仍允许导航；文字编辑、拖动和销毁期间的迟到点击保持原位。"""
         item = self.node_item
-        return bool(item and item.owner and not item.owner._disposed and getattr(item.node, self.field_name)
-                    and item.owner.editor is None and not item.owner.view.node_drag.active)
+        if not (item and item.owner and not item.owner._disposed and not item.owner._applying_engine_event
+                and item.owner.editor is None and not item.owner.view.node_drag.active):
+            return False
+        page_id = (item.owner.engine.resolve_detail_page(item.node.id)[1] if self.kind == "detail"
+                   else item.node.submap_id)
+        return bool(page_id)
 
     def boundingRect(self):
         """返回与共享测量一致的 32×32 点击区域，始终位于所属节点内部。"""

@@ -244,28 +244,51 @@ class DocumentEditor(InspirationEditorMixin):
             if remaining != values:
                 self._set_submap_favorite_ids(remaining)
 
+    def resolve_detail_page(self, node_id):
+        """只沿入口与子导图根的别名链解析详情，不跨越普通父子关系。
+
+        返回实际归属节点和已有详情 ID；整条链都没有详情时，返回最外层入口
+        及 None，供创建操作使用。旧文件可能在链上保存多张详情：查询节点自己
+        的详情优先，否则取从外到内遇到的第一张，查询不迁移或删除任何内容。
+        根索引和子导图引用均为字典访问，开销只随关联链长度增长。
+        """
+        node = self.node(node_id)
+        if node.detail_page_id:
+            return node_id, node.detail_page_id
+        outer = node_id
+        while (page_id := self._state.root_pages.get(outer)) in self.document.submaps:
+            outer = self.document.submaps[page_id].owner_id
+        current = outer
+        while True:
+            node = self.node(current)
+            if node.detail_page_id:
+                return current, node.detail_page_id
+            if not node.submap_id:
+                return outer, None
+            current = self.document.submaps[node.submap_id].root_id
+
     def create_detail_page(self, node_id):
-        """为任意非详情页节点创建单层详情，普通后代与已有子导图均保持原位。"""
-        owner = self.node(node_id)
+        """在共享入口创建单层详情，初始外观取发起节点及其所在页。"""
+        source_node = self.node(node_id)
         self.require_page_owner(node_id)
-        if owner.detail_page_id:
+        owner_id, existing = self.resolve_detail_page(node_id)
+        if existing:
             raise MindMapError("此节点已有详情页")
         source = self._state.page(node_id)
-        root = Node(owner.text, style=deepcopy(owner.style))
+        root = Node(source_node.text, style=deepcopy(source_node.style))
         key = new_id()
         self._state.put_node(root)
-        self._state.set_page(key, MindMapPage(key, root.id, node_id, source.layout, source.theme), kind="detail")
-        self.edit(node_id).detail_page_id = key
+        self._state.set_page(key, MindMapPage(key, root.id, owner_id, source.layout, source.theme), kind="detail")
+        self.edit(owner_id).detail_page_id = key
         return key
 
     def remove_detail_page(self, node_id):
         """删除详情内容但保留入口和其子导图，实体及资源随同一次事务一起恢复。"""
-        owner = self.node(node_id)
-        if not owner.detail_page_id:
+        owner_id, page_id = self.resolve_detail_page(node_id)
+        if not page_id:
             raise MindMapError("此节点没有详情页")
-        page_id = owner.detail_page_id
         keys = self.document.owned_descendants(self.document.detail_pages[page_id].root_id)
-        self.edit(node_id).detail_page_id = None
+        self.edit(owner_id).detail_page_id = None
         self._remove_owned_nodes(keys)
         self._state.set_page(page_id, None)
 

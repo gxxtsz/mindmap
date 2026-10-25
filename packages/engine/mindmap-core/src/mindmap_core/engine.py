@@ -278,17 +278,38 @@ class MindMapEngine:
         self._execute("set_submap_favorite", self._editor.set_submap_favorite,
                       page_id=page_id, favorite=favorite)
 
+    def resolve_detail_page(self, node_id: str) -> tuple[str, str | None]:
+        """解析节点可操作的共享详情，返回（实际归属节点 ID，详情页 ID 或 None）。
+
+        node_id 必须存在，失效标识抛出中文 MindMapError。入口与其子导图根，
+        包括连续下钻的根节点，共用关联链中已有的详情；普通子主题不会继承。
+        无详情时返回最外层入口，新增页面将归属该节点。旧数据存在多张独立
+        详情时，查询节点自己的详情优先，否则使用从外到内的首张详情，保留
+        其他页面及归属。详情页内节点不会沿详情归属关系继续解析。
+
+        本接口只读运行时索引，不复制整份文档、不改历史或修改标记，也不发送
+        事件。仅在引擎所属线程同步调用；返回值为独立的稳定标识，可跨快照保存。
+        """
+        return self._editor.resolve_detail_page(node_id)
+
     def create_detail_page(self, node_id: str) -> str:
         """为主图或子导图节点创建详情页并返回页面 ID；详情页内调用会原子失败。
 
-        node_id 必须存在且不是纯图片节点，不限制普通子节点或已有子导图，每个节点
-        最多一张详情页；非法目标抛出 MindMapError，不留下部分修改。页面切换由宿主
-        负责，接口不依赖 Qt，仅在引擎所属线程同步调用，返回 ID 的生命周期由文档管理。
+        node_id 必须存在且不是纯图片节点，不限制普通子节点或已有子导图。入口
+        及子导图根共用一张详情，归属由 resolve_detail_page 解析，已有详情时拒绝
+        重复创建；初始样式、布局和主题取发起位置。非法目标抛出 MindMapError，不
+        留下部分修改。页面切换由宿主负责，接口不依赖 Qt，仅在引擎所属线程同步调用，
+        返回 ID 的生命周期由文档管理。
         """
         return self._execute("create_detail_page", self._editor.create_detail_page, node_id=node_id)
 
     def remove_detail_page(self, node_id: str) -> None:
-        """删除节点拥有的详情内容，保留原节点、普通分支与子导图，可一次撤销恢复。"""
+        """删除解析后的共享详情，保留入口、普通分支与子导图，可一次撤销恢复。
+
+        node_id 可以是入口或其子导图根；实际删除 resolve_detail_page 返回的
+        页面及全部内容。目标不存在或没有详情时抛出 MindMapError，不留下部分
+        修改。仅在引擎所属线程同步调用；成功返回 None，历史与资源由引擎管理。
+        """
         self._execute("remove_detail_page", self._editor.remove_detail_page, node_id=node_id)
 
     def subscribe(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:

@@ -906,7 +906,8 @@ class NodeDragController(QObject):
                 book.assets, book.metadata)
             # 使用单节点工厂入口，不让独立影像的测量清理当前目标页的正式缓存。
             visuals = {key: self.owner.factory.visual(node, document.theme, document,
-                                                      is_root=key in document.root_ids)
+                                                      is_root=key in document.root_ids,
+                                                      detail_page_resolver=self.owner.engine.resolve_detail_page)
                        for key, node in document.nodes.items()}
             sizes = {key: (visual.width, visual.height) for key, visual in visuals.items()}
             layout = self.owner.layout_registry.layout(document, sizes)
@@ -1291,6 +1292,7 @@ class NodeDragController(QObject):
             _, sizes = self.owner.factory.measure(
                 candidate, changed_node_ids=changed_ids,
                 previous_document=drop.document, previous_visuals=self.owner._visuals,
+                detail_page_resolver=scratch.resolve_detail_page,
             )
             self.owner.layout_registry.layout(candidate, sizes, focus_id=drop.focus_id)
         else:
@@ -1306,7 +1308,9 @@ class NodeDragController(QObject):
                     node = candidate.nodes.get(key)
                     if node is not None:
                         visual = self.owner.factory.visual(node, candidate.theme, candidate,
-                                                           is_root=key == candidate.root_id)
+                                                           is_root=key == candidate.root_id,
+                                                           detail_page_resolver=
+                                                           self.owner.engine.resolve_detail_page)
                         changed_sizes[key] = visual.width, visual.height
                 geometry = self.owner._incremental_layout.geometry.snapshot()
                 geometry.sync(candidate, ChainMap(changed_sizes, self.owner._measurements), touched)

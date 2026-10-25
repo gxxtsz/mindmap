@@ -15,11 +15,17 @@ from .items import NodeItem
 from .rendering import BranchItem, VisualFactory
 
 
-def export_document(document, path, *, layout_registry: LayoutRegistry, expand_all=False, scale=1.0):
+def export_document(
+    document, path, *, layout_registry: LayoutRegistry, expand_all=False, scale=1.0,
+    detail_page_resolver=None,
+):
     """导出 PNG/SVG/PDF。矢量输出使用画布尺寸，PDF 为完整导图单页。
 
     scale 控制 PNG 分辨率；图片、文字和线条统一复用屏幕绘制逻辑。
     所有输出先在内存完成，再原子替换文件，失败不会截断原有目标。
+    detail_page_resolver 是可选的只读共享详情解析函数，接收节点 ID 并返回
+    （实际归属节点 ID，详情页 ID 或 None），供单页快照显示页外共享入口。
+    省略时取节点自身引用；解析只影响图标与尺寸，不修改快照或保存文件内容。
     """
     target = Path(path).absolute()
     if not document.nodes:
@@ -31,7 +37,7 @@ def export_document(document, path, *, layout_registry: LayoutRegistry, expand_a
     if not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
         raise MindMapError("导出缩放必须是正有限数值")
     factory = VisualFactory()
-    visuals, sizes = factory.measure(document)
+    visuals, sizes = factory.measure(document, detail_page_resolver=detail_page_resolver)
     layout = layout_registry.layout(document, sizes, expand_all=expand_all)
     scene = QGraphicsScene()
     scene.setBackgroundBrush(QColor(document.theme.background))

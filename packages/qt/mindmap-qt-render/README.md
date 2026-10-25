@@ -80,6 +80,13 @@ Windows 视觉验收使用原生 `windows` 平台；`offscreen` 可用于功能�
 `page_icon_body(kind)` 提供 main、detail、submap 的共享 SVG 图形体，`paint_page_icon()` 在指定矩形
 直接绘制矢量图形，节点、路径栏和图形导出复用同一份定义。新增视觉字段均有默认值，兼容既有构造调用。
 
+`VisualFactory.visual()`、`measure()`、`update_measurements()` 和 `export_document()`
+接受可选的 `detail_page_resolver`，可传入 `engine.resolve_detail_page`。解析函数接收节点 ID，
+返回实际归属节点及详情页 ID；根节点和子导图入口据此展示共享详情，普通主题仍取自身引用。
+省略参数保持原有行为；具体页面 ID 不进入视觉缓存，单页快照、编辑草稿、拖动影像和三种
+图形导出可共用同一套图标几何。增量测量的变化节点列表必须包含共享详情变化影响的页内
+别名，避免复用旧宽度。解析只读，不向节点快照写入借用的页面引用。
+
 本包的运行依赖只有 `mindmap-core` 和 PySide6，不安装内置布局、格式或交互组件。
 上述默认树布局示例需另行安装 `mindmap-layouts`；自定义宿主也可只实现核心 `LayoutAlgorithm`
 并注册到 `LayoutRegistry` 后传入导出器。独立安装验收使用自定义布局验证三种图形输出。

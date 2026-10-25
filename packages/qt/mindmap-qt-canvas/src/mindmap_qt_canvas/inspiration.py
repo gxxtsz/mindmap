@@ -276,7 +276,8 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
             root = self._choose_inspiration_root(preferred, old_roots)
         if not self._book_document.has_page(page):
             page = self.engine.inspiration_id
-        self._switch_page(page, notify=False, cache=False, inspiration_root_id=root)
+        self._switch_page(page, notify=False, cache=False, inspiration_root_id=root,
+                          detail_origin=self._detail_origin if page == self.current_page_id else None)
         if self.editor is not None:
             self.editor.base_layout = self.layout_result
             if self.editor.node_id not in self._document.nodes:

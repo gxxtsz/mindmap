@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import asdict
 
 import pytest
-from mindmap_core import MindMapEngine, MindMapError, Node
+from mindmap_core import MindMapEngine, MindMapError, MindMapPage, Node
 from mindmap_formats import can_process_snapshot, from_dict, load_document, save_document, to_dict
 
 
@@ -37,7 +37,10 @@ def test_both_page_types_roundtrip_with_images_and_process_snapshot(tmp_path):
     owner = engine.add_child(engine.root_id, "双入口")
     detail = engine.create_detail_page(owner)
     submap = engine.create_submap(owner)
-    engine.create_detail_page(engine.page_document(submap).root_id)
+    root = engine.page_document(submap).root_id
+    child = engine.add_child(root, "子图内部主题")
+    engine.create_detail_page(child)
+    assert engine.resolve_detail_page(root) == (owner, detail)
     engine.attach_image(engine.page_document(detail).root_id, b"image")
     document = engine.document
     assert from_dict(to_dict(document)) == document
@@ -45,6 +48,33 @@ def test_both_page_types_roundtrip_with_images_and_process_snapshot(tmp_path):
     save_document(document, path)
     assert load_document(path) == document
     assert can_process_snapshot(engine.capture_save_snapshot().document)
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_legacy_root_details_roundtrip_without_migration(tmp_path, conflict):
+    """旧版根独立详情原样读写，多详情保留归属，单详情从外层入口也可访问。"""
+    engine = MindMapEngine()
+    owner = engine.add_child(engine.root_id, "Rust")
+    submap = engine.create_submap(owner)
+    root = engine.page_document(submap).root_id
+    outer_detail = engine.create_detail_page(owner) if conflict else None
+    document = engine.document
+    legacy_root = Node("Rust")
+    legacy = MindMapPage("旧版独立详情", legacy_root.id, root)
+    document.nodes[legacy_root.id] = legacy_root
+    document.nodes[root].detail_page_id = legacy.id
+    document.detail_pages[legacy.id] = legacy
+    path = tmp_path / "旧版详情.mindmap"
+    save_document(document, path)
+    original = path.read_bytes()
+    loaded = load_document(path)
+    restored = MindMapEngine(loaded)
+    assert loaded == document and path.read_bytes() == original
+    assert to_dict(loaded)["schema_version"] == 5
+    assert restored.resolve_detail_page(root) == (root, legacy.id)
+    assert restored.resolve_detail_page(owner) == ((owner, outer_detail) if conflict else (root, legacy.id))
+    save_document(loaded, path)
+    assert load_document(path) == document
 
 
 @pytest.mark.parametrize("corruption", ["missing", "owner", "name", "orphan", "shared_id", "nested_detail", "nested_submap"])
