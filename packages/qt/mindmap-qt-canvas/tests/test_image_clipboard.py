@@ -14,7 +14,7 @@ from mindmap_qt_canvas.clipboard import (
 from mindmap_qt_canvas.widget import CLIPBOARD_MIME
 from mindmap_qt_panels import MindMapPanels
 from mindmap_qt_ui.dialogs import EdrawPasteOptions
-from PySide6.QtCore import QBuffer, QIODevice, QMimeData, QPoint, Qt
+from PySide6.QtCore import QBuffer, QIODevice, QMimeData, QPoint, Qt, QUrl
 from PySide6.QtGui import QColor, QImage, QInputMethodEvent, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu
 
@@ -124,6 +124,75 @@ def test_text_and_image_addresses_are_not_read_as_images():
     assert read_clipboard_image(mime) is None
 
 
+@pytest.mark.parametrize("kind", ["PNG", "JPEG", "BMP"])
+def test_copied_local_image_file_preserves_original_bytes(image, tmp_path, kind):
+    """资源管理器提供文件 URL 和路径文字时，应读取图片并保留原始编码。"""
+    data = encoded(image, kind)
+    path = tmp_path / f"本地 图片 #百分号%.{kind}"
+    path.write_bytes(data)
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    mime.setText(str(path))
+    assert not mime.hasImage()
+    assert has_clipboard_image(mime)
+    assert read_clipboard_image(mime) == (data, "image/" + kind.lower())
+
+
+def test_file_copy_can_supply_a_fallback_image(image, tmp_path):
+    """来源同时声明坏的编码表示时，仍可从明确复制的图片文件恢复原图。"""
+    path = tmp_path / "原图.png"
+    data = encoded(image)
+    path.write_bytes(data)
+    mime = QMimeData()
+    mime.setData("image/png", b"invalid image")
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    assert read_clipboard_image(mime) == (data, "image/png")
+
+
+def test_copied_file_does_not_override_valid_bitmap_data(image, tmp_path):
+    """同一载荷提供位图和文件时保留既有优先级，文件失效也不影响有效位图。"""
+    mime = QMimeData()
+    mime.setImageData(image)
+    mime.setUrls([QUrl.fromLocalFile(str(tmp_path / "已删除.png"))])
+    data, media_type = read_clipboard_image(mime)
+    assert media_type == "image/png"
+    assert QImage.fromData(data).pixelColor(1, 0) == image.pixelColor(1, 0)
+
+
+def test_copied_image_file_respects_read_limit(image, tmp_path, monkeypatch):
+    path = tmp_path / "超出限制.png"
+    data = encoded(image)
+    path.write_bytes(data)
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path))])
+    monkeypatch.setattr("mindmap_qt_canvas.clipboard.MAX_ARCHIVE_BYTES", len(data) - 1)
+    with pytest.raises(MindMapError, match="大小超过读取限制"):
+        read_clipboard_image(mime)
+
+
+@pytest.mark.parametrize("source", ["text_path", "text_url", "remote_url", "other_file", "mixed_files"])
+def test_file_image_detection_preserves_text_and_non_image_url_paste(image, tmp_path, source):
+    """只接管明确复制的本地图片文件，普通路径文字、网址及混合文件仍走原入口。"""
+    path = tmp_path / "本地图片.png"
+    path.write_bytes(encoded(image))
+    other = tmp_path / "说明.txt"
+    other.write_text("普通文件", encoding="utf-8")
+    mime = QMimeData()
+    if source == "text_path":
+        mime.setText(str(path))
+    elif source == "text_url":
+        mime.setText(QUrl.fromLocalFile(str(path)).toString())
+    elif source == "remote_url":
+        mime.setUrls([QUrl("https://example.com/image.png")])
+    else:
+        urls = [QUrl.fromLocalFile(str(other))]
+        if source == "mixed_files":
+            urls.insert(0, QUrl.fromLocalFile(str(path)))
+        mime.setUrls(urls)
+    assert not has_clipboard_image(mime)
+    assert read_clipboard_image(mime) is None
+
+
 def test_image_fallback_does_not_keep_borrowed_mime_alive(image):
     """表示回退成功后立即释放借用对象，不把异常回溯及 Qt 载荷留给循环垃圾回收。"""
     mime = QMimeData()
@@ -136,14 +205,18 @@ def test_image_fallback_does_not_keep_borrowed_mime_alive(image):
     assert media_type == "image/png" and not QImage.fromData(data).isNull()
 
 
-@pytest.mark.parametrize("source", ["qimage", "png"])
-def test_image_reader_rejects_more_than_forty_million_pixels(qapp, source):
+@pytest.mark.parametrize("source", ["qimage", "png", "file"])
+def test_image_reader_rejects_more_than_forty_million_pixels(qapp, source, tmp_path):
     # 单色图占用约 5 MB，仍能用真实图像覆盖像素上限，而不分配大型彩色位图。
     image = QImage(6400, 6251, QImage.Format.Format_Mono)
     image.fill(0)
     mime = QMimeData()
     if source == "qimage":
         mime.setImageData(image)
+    elif source == "file":
+        path = tmp_path / "超出像素限制.png"
+        path.write_bytes(encoded(image))
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
     else:
         mime.setData("image/png", encoded(image))
     with pytest.raises(MindMapError, match="四千万"):
@@ -152,8 +225,9 @@ def test_image_reader_rejects_more_than_forty_million_pixels(qapp, source):
 
 @pytest.mark.parametrize("page_kind", ["main", "submap", "detail"])
 @pytest.mark.parametrize("entry", ["shortcut", "action", "context"])
+@pytest.mark.parametrize("source", ["bitmap", "file"])
 def test_paste_image_uses_existing_entries_on_every_page(
-    canvas, clipboard, image, page_kind, entry, qtbot, monkeypatch,
+    canvas, clipboard, image, page_kind, entry, source, qtbot, monkeypatch, tmp_path,
 ):
     widget, first, second = canvas
     widget.select_nodes([second])
@@ -169,7 +243,12 @@ def test_paste_image_uses_existing_entries_on_every_page(
     selection = widget.selected_node_ids()
     before = widget.engine.document
     mime = QMimeData()
-    mime.setImageData(image)
+    if source == "file":
+        path = tmp_path / "复制的图片.png"
+        path.write_bytes(encoded(image))
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
+    else:
+        mime.setImageData(image)
     mime.setText("图片说明不能变成新节点")
     clipboard.setMimeData(mime)
     imported = []
@@ -266,12 +345,21 @@ def test_paste_image_without_selection_uses_fallback_and_restores_selection_on_u
     assert widget.focus_id == (target if temporary_focus else None)
 
 
-def test_text_editor_pastes_image_after_committing_text_with_separate_undo(canvas, clipboard, image, qtbot):
+@pytest.mark.parametrize("source", ["bitmap", "file"])
+def test_text_editor_pastes_image_after_committing_text_with_separate_undo(
+    canvas, clipboard, image, source, qtbot, tmp_path,
+):
     widget, first, second = canvas
     widget.begin_edit(first)
     widget.editor.setPlainText("已完成的文字草稿")
     mime = QMimeData()
-    mime.setImageData(image)
+    if source == "file":
+        path = tmp_path / "编辑时复制的图片.png"
+        path.write_bytes(encoded(image))
+        mime.setUrls([QUrl.fromLocalFile(str(path))])
+        mime.setText(str(path))
+    else:
+        mime.setImageData(image)
     clipboard.setMimeData(mime)
     qtbot.keyClick(widget.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
     assert widget.editor is None
@@ -316,9 +404,11 @@ def test_text_editor_keeps_normal_text_paste_and_other_controls_keep_their_paste
         panels.dispose()
 
 
-@pytest.mark.parametrize("source", ["broken", "null", "encode_failure"])
+@pytest.mark.parametrize("source", [
+    "broken", "null", "encode_failure", "missing_file", "broken_file", "directory", "multiple_files",
+])
 def test_invalid_image_preserves_editor_draft_and_never_falls_back_to_text(
-    canvas, clipboard, image, source, monkeypatch, qtbot,
+    canvas, clipboard, image, source, monkeypatch, qtbot, tmp_path,
 ):
     widget, first, second = canvas
     widget.begin_edit(first)
@@ -329,6 +419,20 @@ def test_invalid_image_preserves_editor_draft_and_never_falls_back_to_text(
     mime.setText("不能降级粘贴的文字")
     if source == "broken":
         mime.setData("image/png", b"not an image")
+    elif source in ("missing_file", "broken_file", "directory", "multiple_files"):
+        path = tmp_path / "失效的图片.png"
+        if source == "broken_file":
+            path.write_bytes(b"not an image")
+        elif source == "directory":
+            path.mkdir()
+        elif source == "multiple_files":
+            path.write_bytes(encoded(image))
+        urls = [QUrl.fromLocalFile(str(path))]
+        if source == "multiple_files":
+            other = tmp_path / "第二张图片.png"
+            other.write_bytes(encoded(image))
+            urls.append(QUrl.fromLocalFile(str(other)))
+        mime.setUrls(urls)
     else:
         mime.setImageData(QImage() if source == "null" else image)
         if source == "encode_failure":
@@ -455,14 +559,22 @@ def test_node_fragments_take_precedence_over_images(canvas, clipboard, image, so
     assert widget.engine.document == before
 
 
-def test_pasted_image_roundtrips_and_appears_in_export(canvas, clipboard, image, tmp_path):
+@pytest.mark.parametrize("source", ["encoded", "file"])
+def test_pasted_image_roundtrips_and_appears_in_export(canvas, clipboard, image, tmp_path, source):
     widget, first, second = canvas
     widget.select_nodes([first])
     mime = QMimeData()
     data = encoded(image)
-    mime.setData("image/png", data)
+    if source == "file":
+        original = tmp_path / "可删除的原图.png"
+        original.write_bytes(data)
+        mime.setUrls([QUrl.fromLocalFile(str(original))])
+    else:
+        mime.setData("image/png", data)
     clipboard.setMimeData(mime)
     created, = widget.paste()
+    if source == "file":
+        original.unlink()
     target = tmp_path / "剪贴板图片.mindmap"
     save_document(widget.engine.document, target)
     reopened = load_document(target)
