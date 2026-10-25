@@ -8,7 +8,15 @@ from weakref import ref
 from mindmap_layouts import resolve_tree_spacing
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFontMetricsF, QKeySequence, QPainterPath, QTextCursor, QTextOption
+from PySide6.QtGui import (
+    QColor,
+    QFontMetricsF,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QTextCursor,
+    QTextOption,
+)
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -361,6 +369,13 @@ class NodeEditor(QGraphicsTextItem):
     """
 
     def __init__(self, owner, node, visual):
+        """以正式视觉的字体和正文宽度创建独立草稿，统一编辑前后的排版度量。
+
+        owner 提供画布及提交入口，node 只用于取得节点标识、原文和最大宽度，
+        visual 为工厂发布的只读视觉。编辑器继承其抗锯齿、像素对齐及字体样式，
+        文本文档启用相同的设计度量，避免进入编辑时因设备像素取整改变换行。
+        构造不修改节点、共享视觉或撤销历史，实例由画布在 GUI 线程管理。
+        """
         super().__init__()
         self.owner, self.node_id = owner, node.id
         self.composing = False
@@ -378,6 +393,7 @@ class NodeEditor(QGraphicsTextItem):
         self.document().setDocumentMargin(0)
         option = QTextOption()
         option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        option.setUseDesignMetrics(True)
         self.document().setDefaultTextOption(option)
         self.setTextWidth(visual.text.textWidth())
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
@@ -393,10 +409,17 @@ class NodeEditor(QGraphicsTextItem):
 
         拷贝样式参数再清除绘制标记，避免影响其他图元；键盘和输入法仍由原生
         文本控件处理。编辑状态统一由节点现有的蓝色圆角选中边框表达。
+        painter 为当前活动绘图器，option 和 widget 沿用 Qt 图元接口；独立绘制
+        时也显式启用文字抗锯齿，正常完成或异常时均恢复调用方的绘图状态。
         """
         text_option = QStyleOptionGraphicsItem(option)
         text_option.state &= ~QStyle.StateFlag.State_HasFocus
-        super().paint(painter, text_option, widget)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            super().paint(painter, text_option, widget)
+        finally:
+            painter.restore()
 
     def sync_geometry(self, *_args, force=False):
         """按当前正文及候选实时换行、调整节点，不复制或修改引擎中的文档。

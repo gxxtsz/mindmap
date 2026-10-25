@@ -68,6 +68,66 @@ def test_short_text_uses_node_width_and_focus_does_not_draw_a_frame(canvas):
     assert editor.hasFocus() and editor.textCursor().hasSelection()
 
 
+@pytest.mark.parametrize("zoom", [0.5, 0.75, 1, 1.15, 1.25, 1.5, 2, 4])
+def test_mixed_text_keeps_geometry_and_painter_state_when_editing_at_different_zoom(canvas, zoom):
+    """中英文及粗斜体进入、确认、取消编辑后保持换行，独立绘制不依赖视图提示。"""
+    widget, child = canvas
+    widget.engine.update_node(child, text="中英文 Prefill → Decode 0123，字体渲染保持清晰。",
+                              style={"font_size": 11.5, "bold": True, "italic": True, "width": 160})
+    visual = widget.node_items[child].visual
+    expected_size = (visual.width, visual.height)
+    expected_text_size = visual.text.size()
+    widget.view.zoom(zoom / widget.view.transform().m11())
+    widget.begin_edit(child)
+    editor = widget.editor
+    editor.sync_geometry(force=True)
+    assert editor.font() == visual.font
+    assert editor.document().size() == expected_text_size
+    assert (editor.preview_visual.width, editor.preview_visual.height) == pytest.approx(expected_size)
+    assert_editor_fits(widget)
+
+    def painted(antialias):
+        image = QImage(400, 160, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.white)
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, antialias)
+            before = (painter.renderHints(), painter.font(), painter.pen(), painter.transform())
+            editor.paint(painter, QStyleOptionGraphicsItem())
+            assert (painter.renderHints(), painter.font(), painter.pen(), painter.transform()) == before
+        finally:
+            painter.end()
+        return image
+
+    assert painted(False) == painted(True)
+    widget.finish_edit(commit=True)
+    actual = widget.node_items[child].visual
+    assert (actual.width, actual.height) == pytest.approx(expected_size)
+    widget.begin_edit(child)
+    widget.editor.setPlainText("临时输入 ABC" * 8)
+    widget.finish_edit(commit=False)
+    assert widget.node_items[child].visual is actual
+
+
+def test_zoom_reuses_existing_text_layouts_without_remeasurement(canvas, monkeypatch):
+    """实际视图连续缩放、重绘及平移时复用正文缓存，不触发全图字体测量。"""
+    from mindmap_qt_render import rendering
+
+    widget, _ = canvas
+    before = dict(widget._visuals)
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("视图缩放不应重新测量文字")
+
+    monkeypatch.setattr(rendering, "make_text", unexpected)
+    for zoom in (0.1, 0.5, 0.75, 1, 1.15, 1.25, 1.5, 2, 4):
+        widget.view.zoom(zoom / widget.view.transform().m11())
+        QApplication.processEvents()
+        assert not widget.view.viewport().grab().isNull()
+        assert widget._visuals.keys() == before.keys()
+        assert all(widget._visuals[key] is visual for key, visual in before.items())
+
+
 @pytest.mark.parametrize("text", ["中文长文本自动换行" * 10, "unbrokenword" * 20])
 @pytest.mark.parametrize("width", [120, 280])
 def test_draft_wraps_resizes_and_cancel_restores_geometry(canvas, text, width):

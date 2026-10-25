@@ -74,11 +74,20 @@ class _TextDocument(QTextDocument):
 
 
 def make_text(text: str, font: QFont, width: float, *, markdown=False) -> QTextDocument:
+    """创建按逻辑像素排版的独立文本，供节点缓存、拖动预览及导出共享。
+
+    text 为正文或 Markdown 源码，font 为工厂已配置抗锯齿和像素对齐策略的
+    字体，width 为不含节点留白的最大正文宽度。markdown 为真时保留现有的
+    GitHub Markdown 解析规则并禁止 HTML；本函数不修改输入字体或读取外部资源。
+    使用字体设计度量计算换行，避免绘制倍率和设备像素取整影响缓存布局。
+    返回的 QTextDocument 由调用方在 Qt GUI 线程持有，发布进视觉缓存后只读使用。
+    """
     document = _TextDocument()
     document.setDocumentMargin(0)
     document.setDefaultFont(font)
     option = QTextOption()
     option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    option.setUseDesignMetrics(True)
     document.setDefaultTextOption(option)
     if markdown:
         document.setMarkdown(
@@ -93,14 +102,23 @@ def make_text(text: str, font: QFont, width: float, *, markdown=False) -> QTextD
 
 
 def draw_text(painter: QPainter, document: QTextDocument, position: QPointF, color: QColor) -> None:
-    """使用显式文本调色板绘制，避免深色导出依赖当前系统主题。"""
+    """在局部坐标绘制缓存文本，显式开启文字抗锯齿并使用指定的文本颜色。
+
+    painter 必须处于活动状态，其变换负责画布倍率和设备像素密度；position
+    为正文相对节点的逻辑坐标，color 提供明暗主题下的默认文本调色板。
+    不改变 document 的布局、宽度或格式，也不将文字预先转成位图。
+    正常完成或绘制异常时均恢复调用方的变换、字体及绘图提示；异常继续向外传播。
+    """
     painter.save()
-    painter.translate(position)
-    context = QAbstractTextDocumentLayout.PaintContext()
-    context.palette.setColor(QPalette.ColorRole.Text, color)
-    context.palette.setColor(QPalette.ColorRole.WindowText, color)
-    document.documentLayout().draw(painter, context)
-    painter.restore()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.translate(position)
+        context = QAbstractTextDocumentLayout.PaintContext()
+        context.palette.setColor(QPalette.ColorRole.Text, color)
+        context.palette.setColor(QPalette.ColorRole.WindowText, color)
+        document.documentLayout().draw(painter, context)
+    finally:
+        painter.restore()
 
 
 def decode_image(data: bytes) -> tuple[QPixmap, str]:
@@ -214,50 +232,56 @@ class NodeVisual:
         拖动影像一样传入 False。直接绘制时默认在右侧显示标记，调用方须将外侧
         标记计入自己的绘图范围。page_controls 独立控制内嵌页面图标，默认
         开启以供静态导出与拖动影像复用；画布通过独立子图元绘制时传入 False。
+        正文、标签和备注均显式开启文字抗锯齿，不依赖调用方的视图配置。
+        绘制结束、纯图片提前返回或绘制异常时均恢复 painter 的全部绘图状态。
         """
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.image_only:
+        painter.save()
+        try:
+            painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
+            if self.image_only:
+                if self.image is not None:
+                    painter.drawPixmap(self.image_rect, self.image, QRectF(self.image.rect()))
+                if selected:
+                    painter.setPen(QPen(QColor(accent), 1.5))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(self.image_rect)
+                if node.children and controls:
+                    self.paint_fold_control(painter, node)
+                return
+            # 文本控件借用焦点或鼠标选区时，节点选择标记可能暂时变化；整个编辑
+            # 会话仍保留同一条圆角高亮边框，不再依赖额外的文本焦点虚线表达状态。
+            highlighted = selected or editing
+            painter.setPen(
+                QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
+            )
+            painter.setBrush(self.background)
+            painter.drawRoundedRect(QRectF(1, 1, self.width - 2, self.height - 2), 7, 7)
             if self.image is not None:
                 painter.drawPixmap(self.image_rect, self.image, QRectF(self.image.rect()))
-            if selected:
-                painter.setPen(QPen(QColor(accent), 1.5))
+            if not editing:
+                draw_text(painter, self.text, self.text_position, self.text_color)
+            painter.setFont(self.tag_font)
+            for value, rect in self.tags:
+                painter.setPen(QPen(self.border, 0.8))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(self.image_rect)
+                painter.drawRoundedRect(rect, 4, 4)
+                painter.setPen(self.text_color)
+                painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.AlignmentFlag.AlignVCenter, value)
+            if node.note or node.hyperlink:
+                painter.setPen(self.text_color)
+                painter.drawText(
+                    QRectF(12, self.height - self.content_offset - 22,
+                           self.width - self.page_controls_width - 30, 18),
+                    Qt.AlignmentFlag.AlignLeft,
+                    ("≡ " if node.note else "") + ("↗" if node.hyperlink else ""),
+                )
             if node.children and controls:
                 self.paint_fold_control(painter, node)
-            return
-        # 文本控件借用焦点或鼠标选区时，节点选择标记可能暂时变化；整个编辑
-        # 会话仍保留同一条圆角高亮边框，不再依赖额外的文本焦点虚线表达状态。
-        highlighted = selected or editing
-        painter.setPen(
-            QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
-        )
-        painter.setBrush(self.background)
-        painter.drawRoundedRect(QRectF(1, 1, self.width - 2, self.height - 2), 7, 7)
-        if self.image is not None:
-            painter.drawPixmap(self.image_rect, self.image, QRectF(self.image.rect()))
-        if not editing:
-            draw_text(painter, self.text, self.text_position, self.text_color)
-        painter.setFont(self.tag_font)
-        for value, rect in self.tags:
-            painter.setPen(QPen(self.border, 0.8))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(rect, 4, 4)
-            painter.setPen(self.text_color)
-            painter.drawText(rect.adjusted(5, 0, -5, 0), Qt.AlignmentFlag.AlignVCenter, value)
-        if node.note or node.hyperlink:
-            painter.setPen(self.text_color)
-            painter.drawText(
-                QRectF(12, self.height - self.content_offset - 22,
-                       self.width - self.page_controls_width - 30, 18),
-                Qt.AlignmentFlag.AlignLeft,
-                ("≡ " if node.note else "") + ("↗" if node.hyperlink else ""),
-            )
-        if node.children and controls:
-            self.paint_fold_control(painter, node)
-        if page_controls:
-            for kind in self.page_kinds:
-                self.paint_page_control(painter, kind)
+            if page_controls:
+                for kind in self.page_kinds:
+                    self.paint_page_control(painter, kind)
+        finally:
+            painter.restore()
 
     def fold_rect(self, direction: str = "right", *, child_count: int = 0) -> QRectF:
         """返回节点局部坐标中的外侧按钮矩形，不扩大正文的测量尺寸。
@@ -284,20 +308,23 @@ class NodeVisual:
         rect 必须来自同一视觉的 fold_rect；省略时按右侧计算。background 由画布
         传入当前场景底色，静态调用默认使用节点背景。圆框、符号和数字均采用节点
         边框颜色；计数实时读取 node.children，不依赖可跨节点共享的视觉缓存。
+        单独绘制时也开启文字抗锯齿，完成或异常后恢复调用方的绘图状态。
         """
         if rect is None:
             rect = self.fold_rect(child_count=0 if node.expanded else len(node.children))
         painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(self.border, 1))
-        painter.setBrush(self.background if background is None else background)
-        painter.drawRoundedRect(rect, 10, 10)
-        if node.expanded:
-            painter.drawLine(rect.left() + 5, rect.center().y(), rect.right() - 5, rect.center().y())
-        else:
-            painter.setFont(self.tag_font)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(len(node.children)))
-        painter.restore()
+        try:
+            painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
+            painter.setPen(QPen(self.border, 1))
+            painter.setBrush(self.background if background is None else background)
+            painter.drawRoundedRect(rect, 10, 10)
+            if node.expanded:
+                painter.drawLine(rect.left() + 5, rect.center().y(), rect.right() - 5, rect.center().y())
+            else:
+                painter.setFont(self.tag_font)
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(len(node.children)))
+        finally:
+            painter.restore()
 
 
 class VisualFactory:
@@ -321,6 +348,9 @@ class VisualFactory:
         纯图片节点仅按 image_width 和原始像素比例测量，无正文、留白、填充及常驻
         边框，也不使用普通附件的宽高限制；图片字节无效时抛出 MindMapError。
         宿主先创建 QApplication，并在 GUI 线程使用返回的文字文档和图片对象。
+        字体保持节点所选的字族、字号和样式，统一优先抗锯齿并减轻像素网格对齐；
+        标签和原地编辑继续借用同一策略。倍率与设备像素密度由实际绘制设备处理，
+        不进入视觉缓存键，也不在缩放时重新排版或生成节点位图。
         """
         key = (
             node.text,
@@ -353,6 +383,10 @@ class VisualFactory:
         font.setBold(bool(node.style.get("bold", is_root)))
         font.setItalic(bool(node.style.get("italic", False)))
         font.setUnderline(bool(node.style.get("underline", False)))
+        # 默认完整 hinting 会把中英文细笔画过度吸附到像素网格；减少对齐后，
+        # 非整数倍率下的曲线和字距过渡更自然，系统字体回退及 ClearType 仍由 Qt 管理。
+        font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+        font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         text = (" ".join(node.icons) + " " if node.icons else "") + node.text
         max_width = float(node.style.get("width", 280))
         metrics = QFontMetricsF(font)

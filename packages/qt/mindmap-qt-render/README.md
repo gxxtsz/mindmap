@@ -25,6 +25,39 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 `VisualFactory` 维护文字及图片缓存，返回的 `NodeVisual` 只读共享。
 `NodeItem` 是静态图元，不持有编辑宿主；交互节点和文本编辑器属于画布包。
+
+## 字体渲染与多倍率验收
+
+`VisualFactory` 保留节点选择的字族、字号、粗体、斜体及下划线，统一使用
+`QFont.PreferAntialias` 和 `QFont.PreferNoHinting`，减轻非整数倍率下笔画过度贴合像素网格
+造成的生硬边缘。标签、折叠计数和原地编辑沿用同一字体策略，系统字体回退及
+ClearType 仍由 Qt 和操作系统处理，不修改宿主的全局字体或系统设置。
+
+静态正文和原地编辑都启用 `QTextOption.setUseDesignMetrics(True)`，宽度测量仍使用相同
+字体的 `QFontMetricsF`，使换行不依赖绘制时的像素取整。节点尺寸可能随新度量略有变化，
+但改变画布倍率或设备像素比不会重新测量全图。视觉缓存保存字体和文本布局，不保存节点位图，
+绘制时由 Qt 使用当前变换和设备像素密度生成字形；PNG、SVG、PDF 复用同一套视觉。
+
+正文、标签、备注和折叠计数的独立绘制均显式开启文字抗锯齿；节点、文本及编辑器绘制
+在正常完成、提前返回或异常时恢复调用方的绘图状态，避免影响相邻图元。
+
+在仓库根目录运行下面的视觉验收命令。`--baseline-ref` 指向修改前的本地提交，省略该参数
+时只生成当前版本的样例；输出写入 `.artifacts/text-rendering`，不读取用户导图或本机偏好。
+
+```powershell
+uv run --locked --all-packages python scripts/verify_text_rendering.py --platform windows --baseline-ref <修改前的提交哈希>
+```
+
+验收覆盖明暗主题，中文、英文、混排、数字标点、粗斜体、下划线、字体回退和 Markdown，
+画布倍率为 10%、50%、75%、100%、115%、125%、150%、200%、400%，设备像素比为
+1、1.25、1.5、2。每张对照图的样例以原始物理像素并排排列，不再缩放；同时生成四种
+分辨率的 PNG 及保留矢量文字的 SVG、PDF，并记录布局及缓存检查结果。
+隐藏画布还会在全部九个倍率下验证原地编辑几何、输入法候选隔离、确认、取消和撤销。
+Windows 视觉验收使用原生 `windows` 平台；`offscreen` 可用于功能回归，字体渲染效果
+可能因离屏字体库及后端不同而与桌面环境有差异。
+
+## 节点与附页标记
+
 纯图片节点按 `image_width` 与资源像素比例测量，不受图文附件的文本宽度及限高影响，图片边界就是节点边界。
 `NodeVisual.image_only` 默认为 False，兼容旧构造；为 True 时只绘制图片及可选的临时选中轮廓，透明度原样保留，不绘制正文、背景、边框和附加标记。
 尺寸手柄和拖动预览由画布视图前景提供，不写入本包缓存，不进入正式 PNG、SVG、PDF 导出。
