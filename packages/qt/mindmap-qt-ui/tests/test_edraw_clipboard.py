@@ -12,7 +12,8 @@ from PySide6.QtWidgets import QAbstractButton, QApplication, QDialog, QLabel, QP
 
 @pytest.mark.parametrize("root_count", [1, 3])
 @pytest.mark.parametrize("replace_root", [False, True])
-def test_actual_dialog_defaults_switches_and_cancel(qtbot, root_count, replace_root):
+@pytest.mark.parametrize("title", [None, "粘贴缩进大纲", "粘贴 Markdown 大纲"])
+def test_actual_dialog_defaults_switches_and_cancel(qtbot, root_count, replace_root, title):
     """根节点和后代选择独立记忆，追加及多来源隐藏两组处理选项，取消不返回结果。"""
     canvas = QWidget()
     qtbot.addWidget(canvas)
@@ -21,7 +22,7 @@ def test_actual_dialog_defaults_switches_and_cancel(qtbot, root_count, replace_r
     def inspect_dialog():
         dialog = QApplication.activeModalWidget()
         try:
-            assert isinstance(dialog, QDialog) and dialog.windowTitle() == "粘贴亿图脑图"
+            assert isinstance(dialog, QDialog) and dialog.windowTitle() == (title or "粘贴亿图脑图")
             assert any("目标节点：<原目标>" in label.text() for label in dialog.findChildren(QLabel))
             append = dialog.findChild(QAbstractButton, "edraw_append")
             replace = dialog.findChild(QAbstractButton, "edraw_replace")
@@ -65,7 +66,7 @@ def test_actual_dialog_defaults_switches_and_cancel(qtbot, root_count, replace_r
     QTimer.singleShot(0, inspect_dialog)
     result = edraw_paste_options(widget, target_text="<原目标>", root_count=root_count, node_count=8,
                                  mode="replace", keep_children=False, replace_root=replace_root,
-                                 theme=Theme.dark())
+                                 theme=Theme.dark(), **({"title": title} if title is not None else {}))
     assert result == EdrawPasteOptions("replace" if root_count == 1 else "append", root_count == 1,
                                       not replace_root if root_count == 1 else replace_root)
     QTimer.singleShot(0, lambda: QApplication.activeModalWidget().reject())

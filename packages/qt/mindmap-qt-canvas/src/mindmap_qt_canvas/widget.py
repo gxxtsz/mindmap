@@ -25,7 +25,12 @@ from mindmap_core import (
     branch_style_targets,
     get_branch_style,
 )
-from mindmap_formats import create_default_format_registry, decode_document, encode_document
+from mindmap_formats import (
+    create_default_format_registry,
+    decode_document,
+    detect_outline_format,
+    encode_document,
+)
 from mindmap_layouts import (
     create_default_layout_registry,
     create_incremental_layout,
@@ -428,24 +433,26 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
 
     @property
     def edraw_paste_options(self) -> tuple[str, bool, bool]:
-        """返回亿图粘贴的方式、保留原后代及替换根节点开关，初始为 (append, True, True)。
+        """返回亿图、缩进文本与 Markdown 共用的粘贴选项，初始为 (append, True, True)。
 
+        三项分别为粘贴方式、保留原后代及替换根节点；接口名沿用亿图版本保持兼容。
         此值只属于当前组件，不进入导图文件或撤销历史。宿主可监听
         edraw_paste_options_changed(str, bool, bool) 保存，再通过 setter 恢复跨重启偏好。
-        根节点指当前选中的目标主题；每次亿图粘贴仍会询问，多根追加不会覆盖单树偏好。
+        根节点指当前选中的目标主题；三种来源每次均询问，多根追加不会覆盖单树偏好。
         """
         return self._edraw_paste_options
 
     def set_edraw_paste_options(self, mode: str, keep_children: bool, replace_root: bool = True) -> None:
-        """设置亿图粘贴默认选项；非法值抛出 MindMapError，且不产生任何文档变化。
+        """设置三种外部大纲共用的默认选项；非法值抛出 MindMapError，不修改文档。
 
         mode 仅允许 append、replace，keep_children 和 replace_root 必须是布尔值。
         replace_root 默认 True，已有二参数调用仍沿用替换目标正文的行为。实际改变时
         才发送三参数信号，适合宿主 QSettings 持久化；恢复偏好不受只读或编辑状态限制。
+        沿用亿图接口名和信号，宿主继续使用既有配置项同步所有画布，无需迁移。
         """
         if (mode not in ("append", "replace") or not isinstance(keep_children, bool)
                 or not isinstance(replace_root, bool)):
-            raise MindMapError("亿图粘贴方式必须为 append 或 replace，保留后代及替换根节点选项必须为布尔值")
+            raise MindMapError("粘贴方式必须为 append 或 replace，保留后代及替换根节点选项必须为布尔值")
         options = (mode, keep_children, replace_root)
         if options != self._edraw_paste_options:
             self._edraw_paste_options = options
@@ -1490,13 +1497,18 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.engine.remove_nodes(self.selected_node_ids())
 
     def paste(self) -> list[str]:
-        """同步粘贴节点片段、图片或文本，返回本次新增节点的标识列表。
+        """同步粘贴节点片段、图片或文本，返回本次应选中的主题标识列表。
 
         无参数；按项目片段、亿图片段、图像、文本的优先级解析，无可处理内容返回空列表。
         图片在编辑中的节点或 current_node_id() 下追加纯图片子节点，多选仅处理首个父节点。
         图片校验通过后才提交有效草稿；输入法候选、只读、失效目标或坏图抛出 MindMapError，
         不改变草稿、文档或历史。成功后选中新图片子节点，创建独立参与撤销、重做及保存。
         片段继续使用注入的格式注册表，返回新增标识并选中它们；格式及文件读取错误向上传递。
+        文本按首个非空行自动识别 Markdown 或缩进大纲；缩进文本以 as_fragment=True
+        委托注入的编解码器解析多根片段，完整校验后显示与亿图共用偏好的配置弹窗。
+        追加或替换共用一次撤销记录；替换时返回目标标识，追加时返回新增顶层标识。
+        灵感区无选择时直接创建游离树，不显示选项或更新共享偏好。
+        文本格式确定后不降级重试，缩进及层级错误包含原文行号，失败不改变选择或历史。
         仅在 GUI 线程、画布释放前调用；剪贴板载荷只在同步调用期间借用，不保留其所有权。
         界面入口通过 call() 将异常交给统一错误信号，普通文本编辑仍由文本控件处理。
         """
@@ -1504,6 +1516,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         mime = QApplication.clipboard().mimeData()
         if mime is None:
             return []
+        outline_title = None
         if mime.hasFormat(CLIPBOARD_MIME):
             fragment = decode_document(bytes(mime.data(CLIPBOARD_MIME)), registry=self.format_registry)
         elif mime.hasFormat(EDRAW_CLIPBOARD_MIME):
@@ -1515,15 +1528,21 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             return self._paste_image(mime)
         elif mime.hasText():
             text = mime.text()
-            first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+            format_id = detect_outline_format(text)
+            outline_title = "粘贴缩进大纲" if format_id == "text" else "粘贴 Markdown 大纲"
             document = decode_document(
                 text.encode("utf-8"),
                 registry=self.format_registry,
-                format_id="markdown" if first.startswith(("#", "- ", "* ")) else "text",
+                format_id=format_id,
+                options={"as_fragment": True} if format_id == "text" else None,
             )
-            fragment = MindMapDocument.new("剪贴板")
-            fragment.root.children = [document.root_id]
-            fragment.nodes.update(document.nodes)
+            if format_id == "text":
+                # 纯文本编码器已返回带合成根的片段，不能再次包装而增加可见容器节点。
+                fragment = document
+            else:
+                fragment = MindMapDocument.new("剪贴板")
+                fragment.root.children = [document.root_id]
+                fragment.nodes.update(document.nodes)
         else:
             return []
         include_pages = True
@@ -1545,6 +1564,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                     or self.current_page_kind != "detail" or self.current_node_id() != target_id):
                 raise MindMapError("粘贴期间导图或目标已发生变化，请重新粘贴")
             include_pages = False
+        if outline_title is not None and (self.current_page_kind != "inspiration" or self.selected_node_ids()):
+            return self._paste_outline(fragment, title=outline_title, include_pages=include_pages)
         revision = self.engine.revision
         if self.current_page_kind == "inspiration" and not self.selected_node_ids():
             with self.engine.transaction("粘贴游离分支"):
@@ -1655,38 +1676,59 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         return key
 
     def _paste_edraw(self, fragment: MindMapDocument) -> list[str]:
-        """询问亿图片段的放置方式，并原子地更新树、选择和成功后的默认偏好。"""
+        """兼容原亿图入口；委托共用流程收集选项并一次提交片段、选择和共享偏好。"""
+        return self._paste_outline(fragment, title="粘贴亿图脑图")
+
+    def _paste_outline(
+        self, fragment: MindMapDocument, *, title: str, include_pages: bool = True,
+    ) -> list[str]:
+        """询问外部大纲的放置方式，原子地追加或替换，并返回应选中的主题标识。
+
+        fragment 为带合成根的独立片段，先校验再弹窗；title 用于来源标题及事务说明。
+        include_pages 沿用主粘贴入口的附属页面确认结果，False 时仅导入普通分支。
+        单根允许替换目标正文或仅导入子树，原有后代可独立保留；多根仅允许追加。
+        片段只在副本上继承目标分支样式，调用方的数据及系统剪贴板始终保持原样。
+        取消返回空列表；只读、失效现场、非法选项或引擎拒绝抛出中文 MindMapError，
+        本次操作不改变文档、选择、历史或偏好。确认后重新检查文档代次、修订、页面
+        与目标；成功后以一次事务提交，并且只为单根粘贴记忆三种来源共用的偏好。
+        无内容变化不新增撤销记录，但成功确认的单根选项仍可记忆。仅在 GUI 线程、
+        画布有效且具有目标时调用；灵感区无选择的游离树创建由 paste 另行处理。
+        """
+        self._ensure_editable()
+        fragment.validate()
         target_id = self.current_node_id()
         target = self.engine.get_node(target_id)
+        page_id = self.current_page_id
         generation, revision = self.engine.document_generation, self.engine.revision
         roots = fragment.root.children
         mode, keep_children, replace_root = self.edraw_paste_options
         choice = edraw_paste_options(
             self, target_text=target.text, root_count=len(roots), node_count=len(fragment.nodes) - 1,
             mode=mode, keep_children=keep_children, replace_root=replace_root,
-            theme=self._ui_colors_override or self._document.theme,
+            theme=self._ui_colors_override or self._document.theme, title=title,
         )
         if choice is None:
             return []
         self._ensure_editable()
-        # 模态弹窗仍会处理定时器和宿主事件，禁止将确认前的目标套用到已替换的文档。
+        # 模态弹窗仍会处理宿主事件，即使未修改内容，切页或切换目标也会使本次选择失效。
         if self._disposed or (generation, revision) != (
             self.engine.document_generation, self.engine.revision
-        ):
-            raise MindMapError("粘贴期间导图已发生变化，请重新粘贴")
+        ) or self.current_page_id != page_id or self.current_node_id() != target_id:
+            raise MindMapError("粘贴期间导图、页面或目标已发生变化，请重新粘贴")
         if (choice.mode not in ("append", "replace") or not isinstance(choice.keep_children, bool)
                 or not isinstance(choice.replace_root, bool)):
-            raise MindMapError("亿图粘贴选项无效")
+            raise MindMapError("粘贴选项无效")
         if choice.mode == "replace" and len(roots) != 1:
             raise MindMapError("多个并列主题只能追加到选中节点下")
 
         # 新主题沿用正常 add_child 的分支继承规则，字体、颜色、方向等保持项目默认值。
         # 每个节点分别深拷贝，避免之后编辑某条分支时连带改变其他新主题。
+        fragment = deepcopy(fragment)
         if "branch" in target.style:
             for node in fragment.nodes.values():
                 if node.id != fragment.root_id:
                     node.style["branch"] = deepcopy(target.style["branch"])
-        with self.engine.transaction("粘贴亿图脑图"):
+        with self.engine.transaction(title):
             if choice.mode == "replace":
                 source = fragment.nodes[roots[0]]
                 if not choice.keep_children:
@@ -1700,10 +1742,10 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 replacement = deepcopy(fragment)
                 del replacement.nodes[replacement.root_id]
                 replacement.root_id = source.id
-                self.engine.paste_fragment(target_id, replacement)
+                self.engine.paste_fragment(target_id, replacement, include_pages=include_pages)
                 ids = [target_id]
             else:
-                ids = self.engine.paste_fragment(target_id, fragment)
+                ids = self.engine.paste_fragment(target_id, fragment, include_pages=include_pages)
         self.select_nodes(ids)
         # 引擎通知默认选中新插入的后代；替换后应选中目标，重做时也必须恢复同一选择。
         if self.engine.revision != revision and self._selection_undo:

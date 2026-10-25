@@ -5,7 +5,7 @@ from .files import decode_document, encode_document, load_document, save_documen
 from .json_codec import JsonCodec, dumps, loads
 from .limits import MAX_ARCHIVE_BYTES
 from .mindmap import MindmapCodec
-from .outline import export_outline, import_outline
+from .outline import detect_outline_format, export_outline, import_indented_fragment, import_outline
 from .processing import can_process_snapshot, supports_process_save
 from .registry import OutlineCodec, create_default_format_registry
 from .schema import SCHEMA_VERSION, from_dict, to_dict
@@ -19,11 +19,13 @@ __all__ = [
     "can_process_snapshot",
     "create_default_format_registry",
     "decode_document",
+    "detect_outline_format",
     "dumps",
     "encode_document",
     "export_outline",
     "from_dict",
     "import_outline",
+    "import_indented_fragment",
     "import_edraw_xml",
     "load_document",
     "loads",

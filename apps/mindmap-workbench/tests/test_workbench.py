@@ -557,9 +557,26 @@ def test_outline_invalid_preferences_use_default(qtbot, tmp_path, value):
     restored.close()
 
 
+def external_outline_mime(source):
+    """构建全新的外部大纲载荷，避免再次使用已经交给系统剪贴板的 Qt 对象。"""
+    from mindmap_qt_canvas.clipboard import EDRAW_CLIPBOARD_MIME
+    from PySide6.QtCore import QMimeData
+
+    mime = QMimeData()
+    if source == "edraw":
+        mime.setData(EDRAW_CLIPBOARD_MIME, b'<Clipboard><Shapes><Shape Type="MainIdea" ID="1">'
+                     b'<Text><HtmlText>&lt;p&gt;Edraw&lt;/p&gt;</HtmlText></Text></Shape></Shapes></Clipboard>')
+    else:
+        mime.setText("文本根\n  文本子节点" if source == "text" else "# Markdown 根\n- Markdown 子节点")
+    return mime
+
+
+@pytest.mark.parametrize("source", ["edraw", "text", "markdown"])
 @pytest.mark.parametrize("replace_root", [False, True])
-def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatch, qtbot, replace_root):
-    """真实粘贴保存三项偏好；取消或引擎拒绝不覆盖，重建工作台后恢复根节点选择。"""
+def test_external_outline_paste_preferences_are_saved_only_after_success(
+    window, monkeypatch, qtbot, replace_root, source,
+):
+    """三种来源共用三项偏好；取消、解析或引擎失败不覆盖，重建工作台后恢复。"""
     from mindmap_qt_canvas.clipboard import EDRAW_CLIPBOARD_MIME
     from mindmap_qt_ui.dialogs import EdrawPasteOptions
     from PySide6.QtCore import QMimeData
@@ -569,10 +586,7 @@ def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatc
     if current is not None:
         for fmt in current.formats():
             original.setData(fmt, current.data(fmt))
-    mime = QMimeData()
-    mime.setData(EDRAW_CLIPBOARD_MIME, b'<Clipboard><Shapes><Shape Type="MainIdea" ID="1">'
-                 b'<Text><HtmlText>&lt;p&gt;Edraw&lt;/p&gt;</HtmlText></Text></Shape></Shapes></Clipboard>')
-    QApplication.clipboard().setMimeData(mime)
+    QApplication.clipboard().setMimeData(external_outline_mime(source))
     try:
         assert window.canvas.edraw_paste_options == ("append", True, True)
         monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
@@ -587,6 +601,18 @@ def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatc
         assert window.canvas.paste() == []
         assert window.canvas.edraw_paste_options == expected
         assert tuple(window.preferences.value(key) for key in preference_keys) == expected
+        invalid = QMimeData()
+        if source == "edraw":
+            invalid.setData(EDRAW_CLIPBOARD_MIME, b"<Clipboard><broken>")
+        else:
+            invalid.setText("甲\n   乙" if source == "text" else "# 根\n      - 跳级")
+        QApplication.clipboard().setMimeData(invalid)
+        before = window.engine.document
+        with pytest.raises(MindMapError):
+            window.canvas.paste()
+        assert window.engine.document == before and window.canvas.edraw_paste_options == expected
+        assert tuple(window.preferences.value(key) for key in preference_keys) == expected
+        QApplication.clipboard().setMimeData(external_outline_mime(source))
         before = window.engine.document
         monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
                             lambda *args, **kwargs: EdrawPasteOptions("append", True, not replace_root))
@@ -604,6 +630,68 @@ def test_edraw_paste_preferences_are_saved_only_after_success(window, monkeypatc
             assert restored.canvas.edraw_paste_options == expected
             assert not restored.engine.is_dirty and not restored.engine.can_undo
             assert not restored.engine.document.metadata
+        finally:
+            restored.close()
+    finally:
+        if QApplication.platformName() == "offscreen":
+            QApplication.clipboard().clear()
+        else:
+            QApplication.clipboard().setMimeData(original)
+
+
+def test_external_outline_paste_preferences_are_shared_between_sources_sessions_and_restart(
+    window, monkeypatch, qtbot, tmp_path,
+):
+    """亿图、文本和 Markdown 相互继承成功选择，已有、新建及重启会话读取同一套默认值。"""
+    from mindmap_qt_ui.dialogs import EdrawPasteOptions
+    from PySide6.QtCore import QMimeData
+
+    original = QMimeData()
+    current = QApplication.clipboard().mimeData()
+    if current is not None:
+        for kind in current.formats():
+            original.setData(kind, current.data(kind))
+    first = window.active_session
+    assert window.new_document(tmp_path / "共享配置第二张.mindmap")
+    second = window.active_session
+    expected = ("append", True, True)
+    cases = [
+        (first, "edraw", "粘贴亿图脑图", ("replace", False, False)),
+        (second, "text", "粘贴缩进大纲", ("append", True, False)),
+        (first, "markdown", "粘贴 Markdown 大纲", ("replace", True, True)),
+        (second, "edraw", "粘贴亿图脑图", ("append", False, True)),
+    ]
+    prompts = []
+
+    def choose(*args, **kwargs):
+        prompts.append((kwargs["title"], kwargs["mode"], kwargs["keep_children"], kwargs["replace_root"]))
+        return EdrawPasteOptions(*choice)
+
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options", choose)
+    try:
+        for session, source, title, choice in cases:
+            QApplication.clipboard().setMimeData(external_outline_mime(source))
+            session.canvas.paste()
+            assert prompts[-1] == (title, *expected)
+            expected = choice
+            assert all(item.canvas.edraw_paste_options == expected for item in window.sessions.values())
+            assert window.preferences.value("clipboard/edraw_mode") == expected[0]
+            assert window.preferences.value("clipboard/edraw_keep_children", type=bool) is expected[1]
+            assert window.preferences.value("clipboard/edraw_replace_root", type=bool) is expected[2]
+            assert not session.engine.document.metadata
+        assert window.new_document(tmp_path / "共享配置第三张.mindmap")
+        assert window.canvas.edraw_paste_options == expected
+        QApplication.clipboard().setText("甲\n乙")
+        choice = ("append", True, False)
+        window.canvas.paste()
+        assert window.canvas.edraw_paste_options == expected
+        assert all(item.canvas.edraw_paste_options == expected for item in window.sessions.values())
+
+        restored = build_window(storage_dir=window.manager.storage_dir, restore=False)
+        qtbot.addWidget(restored)
+        try:
+            assert restored.new_document(tmp_path / "重启共享配置.mindmap")
+            assert restored.canvas.edraw_paste_options == expected
         finally:
             restored.close()
     finally:

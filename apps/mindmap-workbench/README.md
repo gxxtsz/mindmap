@@ -130,10 +130,12 @@ Escape 取消原地文字编辑、拖动或关闭菜单，空闲时不改变视�
 外壳的应用主题与导图主题独立，窗口布局和滚轮偏好不进入导图文件。
 本机布局与偏好位于 Qt 用户配置位置下的 `mindmap/mindmap-workbench/`；
 其中 `preferences.ini` 保存滚轮和大纲层级等偏好，`outline/display_depth` 的0表示所有层、1～9表示指定层数，缺失或非法值回退2层。
-亿图粘贴的方式、保留原后代和替换根节点分别保存在 `clipboard/edraw_mode`、
-`clipboard/edraw_keep_children`、`clipboard/edraw_replace_root`，成功粘贴后同步所有会话并在重启后恢复。
+亿图、缩进文本和 Markdown 共用粘贴方式、保留原后代和替换根节点三项偏好，继续保存在
+`clipboard/edraw_mode`、`clipboard/edraw_keep_children`、`clipboard/edraw_replace_root`，无需迁移旧配置。
+每次有效粘贴均显示对应来源标题的配置弹窗；单根成功确认后，三种来源相互继承选择，同步所有会话并在重启后恢复。
 根节点指当前选中的目标主题；选择保留时维持其文字和格式，仅导入复制内容的子树。
 首次默认替换根节点，旧配置缺少此项或值无效时也使用此默认值；取消、失败及多根来源强制追加不改写单树偏好。
+灵感区无选择时直接创建游离树，不显示配置且不更新偏好；文字编辑中的普通文本粘贴仍由编辑器处理。
 `documents-v1.json` 独立保存最近文件路径及退出时的会话标识、文件路径、标签顺序和活动标识；每个 `open_documents` 条目可包含 `view_state` 页面视图。
 视图记录包含 `page_id`、`zoom`、场景坐标 `center`、`selection` 和导航临时范围 `focus_id`，不含Qt对象或其他页面缓存；配置继续使用版本1，旧记录缺少视图时从主导图默认视图开始。
 布局文件继续只保存外壳，不保存导图路径、页面视图或内容。

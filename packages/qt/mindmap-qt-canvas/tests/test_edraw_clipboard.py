@@ -265,6 +265,8 @@ def test_native_json_priority_and_text_regression(canvas, monkeypatch):
     assert widget.engine.get_node(ids[0]).style == widget.engine.get_node(target).style
     assert len(widget.engine.get_node(ids[0]).children) == 1
     assert widget.engine.get_node(old_child).image_id in widget.engine.document.assets
+    # 外部文本现在与亿图共用配置弹窗；项目原生片段仍在上面验证为直接粘贴。
+    choose(monkeypatch)
     for text, title in [("纯文本\n  子节点", "纯文本"), ("# Markdown\n- 子节点", "Markdown")]:
         QApplication.clipboard().setText(text)
         ids = widget.paste()

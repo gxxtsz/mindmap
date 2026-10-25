@@ -5,7 +5,7 @@ from mindmap_core import FormatInfo, FormatRegistry, MindMapError
 from .json_codec import JsonCodec
 from .limits import MAX_ARCHIVE_BYTES
 from .mindmap import MindmapCodec
-from .outline import export_outline, import_outline
+from .outline import export_outline, import_indented_fragment, import_outline
 
 
 class OutlineCodec:
@@ -15,11 +15,25 @@ class OutlineCodec:
         self.markdown = markdown
 
     def read(self, stream, *, options):
-        """大纲导入会创建新节点标识，样式和附件不属于此交换格式。"""
+        """限量读取 UTF-8 大纲，返回独立的新文档或纯文本多根片段。
+
+        stream 为调用方提供的二进制流，本方法只读取，不关闭或保存它。options 中
+        as_fragment 是纯文本导入专用布尔选项，默认 False，维持首行为根的单根约定；
+        True 时自动识别 Tab、2／4 空格，返回可直接粘贴的带合成根片段。Markdown
+        继续沿用原有导入语义。超限、非法选项及解析失败抛出中文 MindMapError，
+        缩进／层级错误包含原文行号；不修改宿主文档、文件或撤销历史。
+        """
         content = stream.read(MAX_ARCHIVE_BYTES + 1)
         if len(content) > MAX_ARCHIVE_BYTES:
             raise MindMapError("文档大小超过读取限制")
-        return import_outline(content.decode("utf-8-sig"), markdown=self.markdown)
+        text = content.decode("utf-8-sig")
+        if not self.markdown:
+            as_fragment = options.get("as_fragment", False)
+            if not isinstance(as_fragment, bool):
+                raise MindMapError("文本导入选项 as_fragment 必须为布尔值")
+            if as_fragment:
+                return import_indented_fragment(text)
+        return import_outline(text, markdown=self.markdown)
 
     def write(self, document, stream, *, options):
         """只输出层级与文字，不建立保存标记。"""

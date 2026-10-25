@@ -328,6 +328,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         depth = str(self.preferences.value("outline/display_depth", 2))
         depth = int(depth) if depth in {str(n) for n in range(10)} else 2
         panels.outline.set_display_depth(None if depth == 0 else depth)
+        # 亿图、缩进文本及 Markdown 共用原有配置键；保留名称避免迁移及丢失历史偏好。
         mode = self.preferences.value("clipboard/edraw_mode", "append")
         keep = self.preferences.value("clipboard/edraw_keep_children", True)
         if isinstance(keep, str) and keep in ("true", "false"):
@@ -365,7 +366,12 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._sync_document()
 
     def _save_edraw_paste_options(self, mode, keep_children, replace_root):
-        """保存画布成功粘贴后的三项偏好并同步所有会话；重入保护避免信号相互循环。"""
+        """保存三种外部大纲成功粘贴后的共享偏好，同步会话；重入保护避免信号循环。
+
+        三项参数来自画布既有信号，仅单根成功确认后更新，不写入导图或撤销历史。
+        保留 clipboard/edraw_* 键，使亿图、缩进文本及 Markdown 的下次默认值一致，
+        并兼容旧版本保存的偏好；preferences.sync 保证重启后可以恢复。
+        """
         if self._updating_preferences:
             return
         self._updating_preferences = True

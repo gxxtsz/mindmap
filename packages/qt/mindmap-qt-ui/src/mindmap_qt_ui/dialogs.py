@@ -1,4 +1,4 @@
-"""宿主无关的节点属性与亿图粘贴弹窗；只收集选择，由画布负责提交文档。"""
+"""宿主无关的节点属性与外部大纲粘贴弹窗；只收集选择，由画布负责提交文档。"""
 
 from dataclasses import dataclass
 
@@ -34,11 +34,12 @@ class NodePropertiesResult:
 
 @dataclass(frozen=True)
 class EdrawPasteOptions:
-    """一次粘贴的用户选择，记忆和事务由调用者处理。
+    """亿图、缩进文本及 Markdown 共用的一次粘贴选择，记忆和事务由调用者处理。
 
     mode 为 append 或 replace；keep_children 控制是否保留目标原有后代。
     replace_root 仅在替换模式生效，根节点指当前选中的目标主题；False 时保留
     目标文字及文字格式，仅导入来源根的子树。默认 True 兼容已有的二参数调用。
+    类型名沿用亿图接口以保持兼容，实例不可变，不持有文档或界面对象。
     """
 
     mode: str
@@ -136,18 +137,22 @@ class _PasteChoiceCard(QAbstractButton):
 
 def edraw_paste_options(
     parent, *, target_text, root_count, node_count, mode="append", keep_children=True,
-    replace_root=True, theme=None
+    replace_root=True, theme=None, title="粘贴亿图脑图"
 ):
-    """显示亿图粘贴选项，确认返回选项，取消返回 None；不会修改文档或本机偏好。
+    """显示外部大纲粘贴选项，确认返回 EdrawPasteOptions，取消返回 None。
 
+    parent 是所属画布，target_text 为按纯文本显示的目标正文；root_count、node_count
+    为已经解析校验的来源顶层主题数及正文节点数。title 可区分亿图、缩进文本和
+    Markdown，默认仍为「粘贴亿图脑图」，旧调用方式及控件标识保持兼容。
     多棵来源树只能追加，界面暂时禁用替换；调用者须保留先前的单树粘贴偏好。
     根节点与后代处理相互独立，replace_root 默认替换当前主题文字，关闭后仅导入子树。
     追加模式隐藏并禁用这两组处理选项，但保留内存中的选择，切回替换时继续恢复。
     theme 接受当前组件的界面色板或导图主题，使独立画布及桌面宿主均保持局部配色。
+    仅在 GUI 线程同步调用；弹窗只收集选择，不解析或修改文档，也不保存本机偏好。
     """
     dialog = QDialog(parent)
     dialog.setObjectName("edraw_paste_dialog")
-    dialog.setWindowTitle("粘贴亿图脑图")
+    dialog.setWindowTitle(title)
     dialog.setMinimumWidth(480)
     # 仅调整本弹窗的中文界面字体和点字号；保持真实文本绘制，避免拉伸截图式控件。
     font = QFont(dialog.font())
