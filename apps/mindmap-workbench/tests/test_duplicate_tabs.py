@@ -174,6 +174,52 @@ def test_edit_and_history_sync_content_without_changing_other_view(windows, tmp_
     assert first.engine.can_redo == second.engine.can_redo
 
 
+@pytest.mark.parametrize("shared_document", [False, True])
+@pytest.mark.parametrize("copy_text", [False, True])
+def test_copy_from_right_split_then_paste_into_clicked_left_node(
+    windows, tmp_path, qtbot, shared_document, copy_text,
+):
+    """跨分屏复制文字或分支后，真实点击决定粘贴目标，失焦提交不得抢回键盘焦点。"""
+    window = windows()
+    target = new(window, tmp_path / "粘贴目标.mindmap")
+    target_node = target.engine.add_child(target.engine.root_id, "左侧目标")
+    source = duplicate(window, target) if shared_document else new(window, tmp_path / "复制来源.mindmap")
+    owner = source.engine.add_child(source.engine.root_id, "右侧入口")
+    page = source.engine.create_detail_page(owner)
+    source.canvas.navigate_to(page)
+    source_node = source.engine.add_child(source.canvas.document_view.root_id, "待复制文字")
+    window.host.editor.split_token(source.id, Qt.Orientation.Horizontal)
+    window.activateWindow()
+    QApplication.processEvents()
+    for session, node in ((target, target_node), (source, source_node)):
+        session.canvas.view.centerOn(session.canvas.node_items[node])
+    source.canvas.view.setFocus()
+    source.canvas.select_nodes([source_node])
+    if copy_text:
+        source.canvas.begin_edit(source_node)
+    QApplication.processEvents()
+    qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    if copy_text:
+        assert QApplication.clipboard().text() == "待复制文字"
+
+    item = target.canvas.node_items[target_node]
+    point = target.canvas.view.mapFromScene(item.sceneBoundingRect().center())
+    assert target.canvas.view.viewport().rect().contains(point)
+    qtbot.mouseClick(target.canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    QApplication.processEvents()
+    assert source.canvas.editor is None
+    assert target.canvas.selected_node_ids() == [target_node]
+    # 不调用 setFocus 或直接触发粘贴动作，防止测试掩盖用户点击后被旧编辑器抢焦点的问题。
+    assert QApplication.focusWidget() is target.canvas.view
+    assert window.active_session is target
+    qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    QApplication.processEvents()
+    children = target.engine.get_node(target_node).children
+    assert len(children) == 1 and target.engine.get_node(children[0]).text == "待复制文字"
+    assert source.engine.get_node(source_node).children == []
+    assert target.canvas.current_page_id is None and source.canvas.current_page_id == page
+
+
 def test_inspiration_transfer_keeps_other_root_and_unrelated_page(windows, tmp_path):
     window = windows()
     first = new(window, tmp_path / "迁移.mindmap")

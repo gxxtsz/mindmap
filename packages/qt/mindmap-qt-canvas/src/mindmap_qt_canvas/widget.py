@@ -1478,10 +1478,15 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
 
         commit=False 仍允许宿主显式放弃编辑。整次有效正文提交只产生一条修改记录，
         失焦或其他标签的保存检查不得把输入法候选当作已确认文字。
+        仅在本视图原本持有键盘焦点时恢复画布焦点；失焦提交及后台保存必须保留
+        用户刚点击的其他画布或侧栏焦点，避免后续快捷键重新作用于旧编辑器。
         """
         editor = self.editor
         if editor is None or (commit and editor.composing):
             return
+        # 文字图元的失焦回调延迟到下一轮事件循环；此时用户可能已经切换画布，
+        # 必须在移除图元和提交引擎更新前记录焦点归属，不能无条件聚焦旧视图。
+        restore_view_focus = self.view.hasFocus()
         editor.finishing = True
         node_id, text = editor.node_id, editor.toPlainText()
         self.editor = None
@@ -1495,7 +1500,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         if commit and self.editable:
             self.call(lambda: self.engine.update_node(node_id, text=text))
         self._update_actions()
-        self.view.setFocus()
+        if restore_view_focus:
+            self.view.setFocus()
         self.view.update_cursor()
         self.editing_changed.emit(False)
 
