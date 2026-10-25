@@ -71,6 +71,7 @@ from .clipboard import (
     read_edraw_clipboard,
 )
 from .inspiration import InspirationCanvasMixin
+from .interactions import document_interaction
 from .items import NodeEditor, NodeItem
 from .navigation import PageNavigationMixin
 from .view import MIN_ZOOM, MindMapView
@@ -152,6 +153,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._disposed = False
         self._applying_engine_event = False
         self._branch_drag_token = uuid4().hex
+        # 宿主在同一文档绑定多个标签时启用；独立画布维持原有事件定位规则。
+        self.shared_views = False
         # 保存通知也递增引擎修订号；拖放只冻结最近一次内容修订，自动保存不能使手势失效。
         self._branch_content_revision = self.engine.revision
         self._native_branch_drag = None
@@ -297,6 +300,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         """关闭未提交的分支菜单及预览；标签切换前调用，不撤销已经提交的修改。"""
         self._cancel_branch_menu()
 
+    @document_interaction
     def reveal_nodes(self, node_ids: Sequence[str]) -> None:
         """将完整树中的节点定位到视口，供大纲及其他宿主导航入口共同使用。
 
@@ -338,6 +342,25 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 bounds = bounds.united(self.node_items[key].sceneBoundingRect())
             self.view.ensureVisible(bounds, 35, 35)
 
+    @property
+    def interaction_id(self) -> str:
+        """返回画布生命周期内稳定的交互来源标识；不属于文件内容或历史。
+
+        面板可在直接调用引擎时使用 engine.event_source(interaction_id) 标记来源，
+        异步回调须在实际提交时重新进入作用域。查询不分配资源或改变活动标签。
+        """
+        return self._branch_drag_token
+
+    def is_external_event(self, event) -> bool:
+        """判断是否为其他共享视图的内容提交；独立模式始终返回 False。
+
+        shared_views 由宿主随关联视图数量更新。多视图下无来源的外部引擎更新也
+        仅同步内容；saved、reset 与纯导航通知继续使用其原有生命周期语义。
+        """
+        return (self.shared_views and event.kind in {"change", "undo", "redo"}
+                and event.source_id != self.interaction_id)
+
+    @document_interaction
     def call(self, callback):
         """界面动作的异常边界：通过错误信号报告失败，不弹出阻塞宿主的对话框。"""
         try:
@@ -727,6 +750,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 QDrag.cancel()
             related = event.changes is not None and (
                 self.current_page_kind == "inspiration" or "inspiration" in event.changes.settings)
+            related = related and not self.is_external_event(event)
             before = self._history_view_snapshot() if event.kind == "change" and related else None
             self._apply_engine_event(event)
             if event.kind == "change":
@@ -740,7 +764,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                     pair = source.pop()
                     target.append(pair)
                     snapshot = pair[0 if event.kind == "undo" else 1]
-                    if snapshot is not None:
+                    if snapshot is not None and not self.is_external_event(event):
                         self._restore_history_view(snapshot)
             elif event.kind == "reset":
                 self._view_undo.clear()
@@ -752,6 +776,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
     def _apply_engine_event(self, event):
         if self._disposed:
             return
+        external = self.is_external_event(event)
         if event.kind != "saved" and event.changes is not None and (
                 self.current_page_kind == "inspiration" or "inspiration" in event.changes.settings):
             self._apply_inspiration_event(event)
@@ -768,7 +793,13 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             old_parents = {key: self._node_parents.get(key) for key in before}
             old_layout, old_theme = self._document.layout, self._document.theme
             if self.editor is not None:
-                self.finish_edit(commit=False)
+                pair = (event.changes.collections.get("nodes", {}).get(self.editor.node_id)
+                        if event.changes is not None else None)
+                removed = pair is not None and pair[1 if event.forward else 0] is None
+                # 已删除实体不能再查询页归属；reset 也无需对旧编辑节点做引擎查询。
+                if (not external or event.changes is None or removed
+                        or self.engine.node_page_id(self.editor.node_id) != self.current_page_id):
+                    self.finish_edit(commit=False)
             changes = event.changes
             switched = False
             local_changes = None
@@ -777,7 +808,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 delta = changes.collections.get("nodes", {})
                 changes.apply(self._book_document, forward=event.forward)
                 target_page = self._current_page_id
-                if event.kind in ("undo", "redo"):
+                if event.kind in ("undo", "redo") and not external:
                     target_page = changes.page_id
                 if not self._book_document.has_page(target_page):
                     target_page = next((page for page in reversed(self._page_chain)
@@ -845,12 +876,12 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             self._node_order = None
             after = [key for key in before if key in self._document.nodes]
             parents = self._node_parents
-            if new_ids:
+            if new_ids and not external:
                 new_set = set(new_ids)
                 after = [
                     key for key in new_ids if parents.get(key) not in new_set
                 ]
-            if not after:
+            if not after and (before or not external):
                 after = [old_parents[key] for key in before if old_parents.get(key) in self._document.nodes]
                 after = after or [self._document.root_id]
             if event.kind == "reset":
@@ -861,11 +892,13 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             elif event.kind == "undo" and self._selection_undo:
                 selection = self._selection_undo.pop()
                 self._selection_redo.append(selection)
-                after = selection[0]
+                if not external:
+                    after = selection[0]
             elif event.kind == "redo" and self._selection_redo:
                 selection = self._selection_redo.pop()
                 self._selection_undo.append(selection)
-                after = selection[1]
+                if not external:
+                    after = selection[1]
             elif event.kind == "change":
                 self._selection_undo.append((before, after))
                 del self._selection_undo[: -self.engine.history_limit]
@@ -873,10 +906,13 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             if self.focus_id not in self._document.nodes:
                 self.focus_id = None
             self.refresh()
+            if self.editor is not None:
+                self.editor.base_layout = self.layout_result
+                self._update_edit_preview(self.editor, force=True)
             after = [key for key in after if key in self._document.nodes]
             self.select_nodes(after)
             event = ChangeEvent(event.operation, tuple(local_changes.node_ids) if local_changes else (),
-                                event.revision, event.kind, local_changes, event.forward)
+                                event.revision, event.kind, local_changes, event.forward, event.source_id)
         self._update_actions()
         self.history_changed.emit(self.engine.can_undo, self.engine.can_redo, self.engine.is_dirty)
         self.document_changed.emit(event)
@@ -1202,6 +1238,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._preview_layout = result
         self._show_branch_layout(result)
 
+    @document_interaction
     def set_branch_style(self, kind: BranchStyle | str | None, *, scope: str = "subtree") -> None:
         """先试算再一次提交发出的连接线设置，失败不改变文档、历史与选择。
 
@@ -1318,7 +1355,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         只生成一次引擎操作。提交错误向上传递。仅在 GUI 线程、画布存活时使用，
         编辑器由本画布和场景管理，调用方不得在结束编辑或切页后保留其引用。
         """
-        if (not self.editable or node_id not in self.layout_result.nodes
+        if (not self.editable or self.is_composing or node_id not in self.layout_result.nodes
                 or self._document.nodes[node_id].is_image_node):
             return
         self.finish_edit(commit=True)
@@ -1390,9 +1427,13 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             self.scene.blockSignals(blocked)
 
     def finish_edit(self, *, commit=True):
-        """移除草稿并恢复正式几何后提交或取消；整次编辑只产生一条修改记录。"""
+        """移除草稿并恢复正式几何后提交或取消；候选未完成时拒绝提交并保留编辑器。
+
+        commit=False 仍允许宿主显式放弃编辑。整次有效正文提交只产生一条修改记录，
+        失焦或其他标签的保存检查不得把输入法候选当作已确认文字。
+        """
         editor = self.editor
-        if editor is None:
+        if editor is None or (commit and editor.composing):
             return
         editor.finishing = True
         node_id, text = editor.node_id, editor.toPlainText()
@@ -1415,6 +1456,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         """编辑当前节点的正文；具体只读与输入法处理由节点编辑器负责。"""
         self.begin_edit(self.current_node_id())
 
+    @document_interaction
     def add_child(self):
         """为当前节点添加子节点并开始编辑正文，返回新节点标识。
 
@@ -1425,6 +1467,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.begin_edit(key)
         return key
 
+    @document_interaction
     def add_sibling(self):
         """在当前节点旁添加同级主题并开始正文编辑，返回新节点标识。
 
@@ -1435,6 +1478,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.begin_edit(key)
         return key
 
+    @document_interaction
     def insert_parent(self):
         """为当前节点插入父主题并开始编辑，返回新增主题标识。
 
@@ -1445,6 +1489,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.begin_edit(key)
         return key
 
+    @document_interaction
     def delete_selected(self):
         """一次删除选择的节点子树，节点和图片资源共用一条撤销记录。"""
         self._ensure_editable()
@@ -1467,6 +1512,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                     raise MindMapError("确认期间导图发生变化，请重新删除")
             self.engine.remove_nodes(ids)
 
+    @document_interaction
     def toggle_expanded(self):
         """切换当前节点的文档折叠状态，通过引擎提交，支持撤销、重做及自动保存。"""
         self._ensure_editable()
@@ -1485,6 +1531,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         )
         QApplication.clipboard().setMimeData(mime)
 
+    @document_interaction
     def cut(self):
         """先按注入格式复制当前选择，再删除相应子树；只读或选中根节点时拒绝。
 
@@ -1496,6 +1543,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.copy()
         self.engine.remove_nodes(self.selected_node_ids())
 
+    @document_interaction
     def paste(self) -> list[str]:
         """同步粘贴节点片段、图片或文本，返回本次应选中的主题标识列表。
 
@@ -1636,6 +1684,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         if self.engine.get_node(node_id).submap_id:
             raise MindMapError("此节点已有子导图，请进入子导图添加图片")
 
+    @document_interaction
     def _insert_image_child(self, node_id: str, data: bytes, media_type: str) -> str:
         """先验证图片及输入，再原子创建纯图片子节点，返回新节点 ID。
 
@@ -1890,6 +1939,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             scale=scale,
         )
 
+    @document_interaction
     def set_layout(self, config: LayoutConfig) -> None:
         """在提交前试算新布局，缺失算法、非法参数或计算失败均不产生部分修改。"""
         self._ensure_editable()

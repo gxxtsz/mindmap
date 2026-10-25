@@ -107,6 +107,8 @@ class DocumentSpec:
     on_closed 在页面从标签区移除后调用；默认关闭保留实例，启用 dispose_on_close
     或显式 close_document(..., dispose=True) 才移除注册并延迟销毁控件。批量关闭
     在所有 can_close 通过后才执行 on_closed，拒绝时不移除任何目标页面。
+    on_duplicate 可选，返回是否成功创建新视图；提供后标签右键显示“复制标签”。
+    回调由宿主注册新标识及独立控件，负责插入位置和输入检查，不进入布局快照。
     """
 
     id: str
@@ -118,10 +120,14 @@ class DocumentSpec:
     modified: bool = False
     # 默认保留关闭后的控件；多文档宿主可选择关闭即销毁，避免隐藏会话持续占用资源。
     dispose_on_close: bool = False
+    # 可选的业务复制入口；返回是否创建成功。框架不复制 QWidget，也不猜测文档语义。
+    on_duplicate: Callable[[], bool] | None = None
 
     def __post_init__(self):
         if not self.id or self.id.startswith("tool:") or not self.title:
             raise ValueError("文档标识和标题不能为空，且标识不能使用保留前缀 tool:")
+        if self.on_duplicate is not None and not callable(self.on_duplicate):
+            raise TypeError("文档复制回调必须可调用或为 None")
 
 
 @dataclass

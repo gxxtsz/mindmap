@@ -7,6 +7,7 @@ from PySide6.QtGui import QDrag
 from shiboken6 import isValid
 
 from .dragging import _apply_move, _DropProposal
+from .interactions import document_interaction
 
 
 class BranchTransferMixin:
@@ -89,6 +90,7 @@ class BranchTransferMixin:
             return root not in data.node_ids
         return any(key not in self._book_document.inspiration.root_ids for key in data.node_ids)
 
+    @document_interaction
     def detach_branch_drag(self, mime) -> bool:
         """将画布分支拆入侧栏，一次提交并留在原画布；失败抛出异常且不提交。
 
@@ -149,6 +151,7 @@ class BranchTransferMixin:
             return False
         return not any(parent_id in self._book_document.owned_descendants(key) for key in data.node_ids)
 
+    @document_interaction
     def receive_branch_drag(self, mime, parent_id: str, *, index: int | None = None,
                             direction: str | None = None) -> bool:
         """把有效分支迁入当前父主题的指定位置，留在目标画布并选中移动分支。

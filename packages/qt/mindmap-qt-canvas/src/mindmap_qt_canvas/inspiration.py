@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from .inspiration_state import InspirationViewStateMixin
+from .interactions import document_interaction
 from .transfers import BranchTransferMixin
 
 
@@ -64,6 +65,7 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
         else:
             self.inspiration_sidebar_requested.emit()
 
+    @document_interaction
     def add_inspiration(self, position=None):
         """新建游离主题并编辑正文，返回稳定 ID；position 为可选逻辑像素坐标。
 
@@ -89,6 +91,7 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
         self.begin_edit(key)
         return key
 
+    @document_interaction
     def move_selected_to_inspiration(self):
         """整条移出当前选中分支，所有坐标和归属在一次引擎提交中完成。"""
         self._ensure_editable()
@@ -110,6 +113,7 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
         finally:
             self._inspiration_target_root = None
 
+    @document_interaction
     def group_selected_inspirations(self):
         """为选中主题创建共同父节点并进入改名，重叠选择由引擎归并。"""
         self._ensure_editable()
@@ -219,6 +223,7 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
         finally:
             dialog.deleteLater()
 
+    @document_interaction
     def attach_selected_inspirations(self):
         """选择父主题后原地迁入导图，取消及迟到的失效选择不提交修改。"""
         self._ensure_editable()
@@ -235,6 +240,7 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
 
     def _apply_inspiration_event(self, event):
         """区域及跨区提交后重建当前页成员，包含未发生字段变化的随行后代。"""
+        external = self.is_external_event(event)
         self.document_changing.emit(event)
         self.view.node_drag.document_changed()
         self._cancel_branch_menu()
@@ -243,17 +249,17 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
         old_roots = list(self._book_document.inspiration.root_ids)
         old_root = self._inspiration_root_id
         old_parents = dict(self._node_parents)
-        if self.editor is not None:
+        if self.editor is not None and not external:
             self.finish_edit(commit=False)
         event.changes.apply(self._book_document, forward=event.forward)
         page = self.current_page_id
         root = old_root
         moves = event.changes.moves
         transfers = [move for move in moves if move.before.page_id != move.after.page_id]
-        if transfers and not self._inspiration_stay:
+        if transfers and not self._inspiration_stay and not external:
             placement = transfers[0].after if event.forward else transfers[0].before
             page = placement.page_id
-        elif event.kind in ("undo", "redo") and not self._inspiration_stay:
+        elif event.kind in ("undo", "redo") and not self._inspiration_stay and not external:
             page = event.changes.page_id
         fresh = [key for key, pair in event.changes.collections.get("nodes", {}).items()
                  if pair[0] is None and pair[1] is not None]
@@ -266,13 +272,19 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
             moved = [move.node_id for move in transfers]
             fresh_roots = [key for key in fresh if key in self._book_document.inspiration.root_ids]
             preferred = (pending_root or (fresh_roots or moved or [old_root])[0]
-                         if not self._inspiration_stay else old_root)
+                         if not self._inspiration_stay and not external else old_root)
             root = self._choose_inspiration_root(preferred, old_roots)
         if not self._book_document.has_page(page):
             page = self.engine.inspiration_id
         self._switch_page(page, notify=False, cache=False, inspiration_root_id=root)
+        if self.editor is not None:
+            self.editor.base_layout = self.layout_result
+            if self.editor.node_id not in self._document.nodes:
+                self.finish_edit(commit=False)
+            else:
+                self._update_edit_preview(self.editor, force=True)
         after = [key for key in before if key in self._document.nodes]
-        if transfers:
+        if transfers and not external:
             after = [move.node_id for move in transfers if move.node_id in self._document.nodes]
         if event.kind in ("undo", "redo"):
             source = self._selection_undo if event.kind == "undo" else self._selection_redo
@@ -280,28 +292,30 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
             if source:
                 pair = source.pop()
                 target.append(pair)
-                if not transfers:
+                if not transfers and not external:
                     after = [key for key in pair[0 if event.kind == "undo" else 1] if key in self._document.nodes]
         if event.kind == "change":
             fresh = [key for key, pair in event.changes.collections.get("nodes", {}).items()
                      if pair[0] is None and pair[1] is not None and key in self._document.nodes]
             fresh_set = set(fresh)
-            after = [key for key in fresh if self._node_parents.get(key) not in fresh_set] or after
+            if not external:
+                after = [key for key in fresh if self._node_parents.get(key) not in fresh_set] or after
             self._selection_undo.append((before, after))
             del self._selection_undo[:-self.engine.history_limit]
             self._selection_redo.clear()
-        if not after:
+        if not after and (before or not external):
             after = [old_parents[key] for key in before if old_parents.get(key) in self._document.nodes]
             after = after or list(self._document.root_ids[:1])
         self.select_nodes(after)
-        if transfers and after:
+        if transfers and after and not external:
             self.view.ensureVisible(self.node_items[after[0]], 35, 35)
         self._update_actions()
         self.history_changed.emit(self.engine.can_undo, self.engine.can_redo, self.engine.is_dirty)
         # 成员可能整棵进入或离开，面板应重载页内视图，不能仅合并节点字段差量。
-        local = ChangeEvent(event.operation, (), event.revision, event.kind, None, event.forward)
+        local = ChangeEvent(event.operation, (), event.revision, event.kind, None, event.forward, event.source_id)
         self.document_changed.emit(local)
 
+    @document_interaction
     def expand_all_trees(self):
         """在同一事务中展开当前区域的全部树，空区不提交修改。"""
         with self.engine.transaction("展开全部"):

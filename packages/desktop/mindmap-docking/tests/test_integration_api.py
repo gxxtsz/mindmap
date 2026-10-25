@@ -8,8 +8,56 @@ import sys
 import pytest
 from mindmap_docking import DockTarget, DocumentSpec, ToolWindowSpec, ViewMode
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QContextMenuEvent
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QMenu
+
+
+def test_document_duplicate_callback_is_optional_and_uses_requested_id(docking):
+    """复制交给指定业务回调，普通文档、工具和关闭文档不执行复制。"""
+    manager = docking.manager
+    calls = []
+    manager.register_document(DocumentSpec("copyable", "可复制", lambda: QLabel("独立内容"),
+                                          on_duplicate=lambda: calls.append("copyable") or True))
+    manager.activate_document("doc")
+    assert manager.duplicate_document("copyable") and calls == ["copyable"]
+    assert manager.active_document_id == "doc"
+    assert not manager.duplicate_document("doc")
+    assert not manager.duplicate_document("tool:alpha")
+    assert not manager.duplicate_document("unknown")
+    assert manager.close_document("copyable")
+    assert not manager.duplicate_document("copyable") and calls == ["copyable"]
+
+
+def test_duplicate_callback_failure_reports_message(docking):
+    """回调异常只报告失败，不替换原内容或改变已注册文档集合。"""
+    manager = docking.manager
+
+    def fail():
+        raise ValueError("业务拒绝复制")
+
+    manager.register_document(DocumentSpec("rejected", "失败", lambda: QLabel("保留"), on_duplicate=fail))
+    messages = []
+    manager.message.connect(messages.append)
+    before = set(manager.documents)
+    assert not manager.duplicate_document("rejected")
+    assert set(manager.documents) == before and "业务拒绝复制" in messages[-1]
+
+
+def test_document_without_callback_does_not_show_copy_entry(docking, monkeypatch):
+    """未接入复制能力的宿主保持原标签菜单；不出现无效或工具复制入口。"""
+    from mindmap_docking import editors
+
+    shown = []
+
+    class InspectMenu(QMenu):
+        def exec(self, *args):
+            shown.extend(action.text() for action in self.actions())
+
+    monkeypatch.setattr(editors, "QMenu", InspectMenu)
+    bar = docking.host.editor.find_token("doc")[0].tabBar()
+    point = bar.tabRect(0).center()
+    bar.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, bar.mapToGlobal(point)))
+    assert "关闭" in shown and "复制标签" not in shown
 
 
 def test_tool_header_actions_share_state_and_ownership(docking, qtbot):

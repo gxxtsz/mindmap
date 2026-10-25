@@ -28,6 +28,8 @@ class ChangeEvent:
     # 分发时每个监听器获得独立差量，避免修改历史或其他监听器的数据。
     changes: ChangeSet | None = None
     forward: bool = True
+    # 可选的运行期交互来源；仅供多个视图区分自身操作，不写入历史或导图文件。
+    source_id: str | None = None
 
 
 class EventDispatcher:

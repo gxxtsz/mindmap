@@ -65,6 +65,7 @@ finally:
 - `toggle(id)` 与侧栏按钮、工具快捷键按显隐状态切换：面板已显示时一次操作即隐藏，无需先取得焦点；隐藏时显示并激活。`activate(id)` 用于显式显示并激活面板。
 - `set_tools_suspended(ids, suspended)` 根据业务上下文临时暂停或恢复工具，暂停时隐藏面板和入口并禁用快捷键，保留原有布局偏好；暂停状态不写入快照，布局恢复不会解除暂停。`is_tool_available(id)` 查询综合可用性。
 - `DocumentSpec` 注册文档，支持取消关闭、修改标记、主窗口内分屏及标签迁移；`dispose_on_close=False` 默认关闭后缓存重用，设为 `True` 则关闭后移除注册并延迟销毁控件。
+- `DocumentSpec.on_duplicate` 是可选的无参布尔回调，提供后标签右键显示“复制标签”；`duplicate_document(id)` 调用指定标签回调，未注册、已关闭或未提供回调时返回 False，异常通过 `message` 报告。宿主负责创建独立控件、分配新标识及插入位置，框架不复制业务内容，工具标签不提供此入口。
 - `active_document_id`、`document_activated` 跟踪活动文档；`activate_document(id)` 只切换原标签和焦点，不移动分屏位置，侧栏焦点不覆盖活动文档。
 - `close_documents(ids)` 先检查全部目标，全部通过后才移除页面；`on_closed` 可停止业务计时器和订阅。
 - `host.editor.set_empty_widget_factory(factory)` 为空分组创建独立页面；整个编辑区无标签时只保留一个欢迎页，空白页不占用标签、文档标识或快照。

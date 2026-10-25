@@ -69,10 +69,18 @@ class NodePropertiesPanel(NodePropertiesForm):
         self.sync()
 
     def _document_changing(self, event):
+        if getattr(self.canvas, "is_external_event", lambda _: False)(event):
+            delta = event.changes.collections.get("nodes", {}) if event.changes is not None else {}
+            index = 1 if event.forward else 0
+            if not any(key in delta and delta[key][index] is None for key in self._ids):
+                # 其他视图更新有效节点时保留本面板草稿，后续提交重新读取正式实体合并。
+                return
         if not self._applying and event.kind != "saved":
             self.discard_pending()
 
     def _document_changed(self, event):
+        if self._pending and getattr(self.canvas, "is_external_event", lambda _: False)(event):
+            return
         if not self._applying and event.kind != "saved":
             self.sync()
 
@@ -190,7 +198,8 @@ class NodePropertiesPanel(NodePropertiesForm):
                 )
             self.canvas.validate_document(candidate)
             self._applying = True
-            with engine.transaction("修改节点属性"):
+            with (engine.event_source(getattr(self.canvas, "interaction_id", None)),
+                  engine.transaction("修改节点属性")):
                 for node_id, patch in patches.items():
                     if patch:
                         engine.update_node(node_id, **patch)

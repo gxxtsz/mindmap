@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -23,6 +24,18 @@ class PendingEdits(Protocol):
         ...
 
 
+@dataclass
+class MindMapFileState:
+    """多个文件控制器共同持有的保存位置，不拥有画布、引擎或 Qt 对象。
+
+    同一文档的视图传入同一实例；控制器仅在实际写入成功后更新 path，其他视图
+    立即读取新路径。宿主负责统一保存调度和状态通知，不能把不同引擎绑定到同一
+    实例。未显式传入时，每个控制器创建独立状态，保持原有单画布用法。
+    """
+
+    path: Path | None = None
+
+
 class MindMapFileController(QObject):
     """绑定一个画布和面板组合，不拥有画布、不读写应用偏好。
 
@@ -38,14 +51,32 @@ class MindMapFileController(QObject):
     # 打开和保存只使用原生容器；额外编解码器仍供剪贴板等内存交换使用。
     OPEN_FILTER = "思维导图 (*.mindmap)"
 
-    def __init__(self, canvas, panels: PendingEdits, dialog_parent=None, *, writer=save_document):
+    def __init__(self, canvas, panels: PendingEdits, dialog_parent=None, *, writer=save_document,
+                 state: MindMapFileState | None = None):
+        """绑定视图与写入器，可通过 state 共享路径；状态实例由调用方和控制器共同持有。
+
+        省略 state 时行为与原接口一致；共享状态不自动共享引擎或提交其他视图输入，
+        这些由宿主协调。所有方法及信号在 GUI 线程执行。
+        """
         super().__init__(dialog_parent)
         self.canvas, self.engine, self.panels = canvas, canvas.engine, panels
         self.dialog_parent = dialog_parent
         self.writer = writer
-        self.path: Path | None = None
+        self.state = state if state is not None else MindMapFileState()
         # 宿主如有后台写入，可注入 GUI 线程等待边界；路径切换和显式保存先收束旧写入。
         self.wait_for_pending_write = None
+        # 多视图宿主可在显式保存前统一检查候选并提交所有关联标签；False 取消保存。
+        self.prepare_save = None
+
+    @property
+    def path(self) -> Path | None:
+        """返回共享保存位置；查询不访问磁盘，也不改变文件状态。"""
+        return self.state.path
+
+    @path.setter
+    def path(self, value: Path | None) -> None:
+        """设置所属文档的共享路径；宿主初始化可赋值，保存流程仅在写入成功后赋值。"""
+        self.state.path = value
 
     @property
     def is_dirty(self) -> bool:
@@ -175,6 +206,8 @@ class MindMapFileController(QObject):
         对话框固定为 .mindmap，忽略返回的格式名称；缺少原生编解码器时在弹窗前
         报告失败。取消不改变绑定路径，错误扩展名不会触发写入或静默改名。
         """
+        if self.prepare_save is not None and not self.prepare_save():
+            return False
         self.panels.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
         try:

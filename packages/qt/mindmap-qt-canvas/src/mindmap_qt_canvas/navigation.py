@@ -11,6 +11,7 @@ from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QToolButton, QWidget
 
+from .interactions import document_interaction
 from .view import MIN_ZOOM
 
 
@@ -545,6 +546,7 @@ class PageNavigationMixin:
         self.select_nodes([key])
         self._switch_page(node.submap_id)
 
+    @document_interaction
     def create_submap(self):
         """为当前普通叶子创建并进入子导图，返回新页面 ID。
 
@@ -560,6 +562,7 @@ class PageNavigationMixin:
         self._switch_page(page_id)
         return page_id
 
+    @document_interaction
     def set_submap_favorite(self, page_id: str, favorite: bool) -> None:
         """通过画布修改指定子导图收藏，返回 None，不切换当前页面或强制定位。
 
@@ -604,6 +607,7 @@ class PageNavigationMixin:
         self.select_nodes([key])
         self._switch_page(node.detail_page_id)
 
+    @document_interaction
     def create_detail_page(self):
         """为当前普通节点添加详情并进入，返回新页面 ID。
 
@@ -619,6 +623,7 @@ class PageNavigationMixin:
         self._switch_page(page_id)
         return page_id
 
+    @document_interaction
     def delete_detail_page(self):
         """确认详情删除范围，保留入口、原分支及子导图；取消不触碰文档或历史。"""
         self._ensure_editable()
@@ -653,6 +658,7 @@ class PageNavigationMixin:
         page = self.engine.node_page_id(owner)
         self._switch_page(page, inspiration_root_id=self._inspiration_root_for(owner))
 
+    @document_interaction
     def delete_submap(self):
         """确认影响范围后删除所有下级页面，取消不改变内容、选择和历史。"""
         self._ensure_editable()

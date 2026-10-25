@@ -56,6 +56,7 @@ class MindMapEngine:
         self.document_generation = 0
         self._previewing = False
         self._snapshot_owner = object()
+        self._event_source_id: str | None = None
 
     @property
     def document(self) -> MindMapDocument:
@@ -300,7 +301,26 @@ class MindMapEngine:
 
     def _notify(self, operation: str, ids=(), kind="change", *, changes=None, forward=True) -> None:
         self.revision += 1
-        self._events.publish(ChangeEvent(operation, tuple(ids), self.revision, kind, changes, forward))
+        self._events.publish(ChangeEvent(operation, tuple(ids), self.revision, kind, changes, forward,
+                                        self._event_source_id))
+
+    @contextmanager
+    def event_source(self, source_id: str | None) -> Iterator[None]:
+        """为同步作用域内发出的事件标记交互来源，不修改文档或撤销历史。
+
+        source_id 是宿主自定的非空视图标识，None 表示未指定来源；非法参数抛出
+        ValueError。允许嵌套，正常退出或异常退出均恢复外层来源。标识在事件创建时
+        捕获，因此重入排队通知也保留实际来源；撤销使用本次触发者而非原编辑者。
+        仅在引擎所属线程同步使用；异步任务应在实际提交时重新进入作用域。
+        """
+        if source_id is not None and (not isinstance(source_id, str) or not source_id):
+            raise ValueError("事件来源必须为非空字符串或 None")
+        previous = self._event_source_id
+        self._event_source_id = source_id
+        try:
+            yield
+        finally:
+            self._event_source_id = previous
 
     def _guard(self, name: str, parameters: dict) -> None:
         if self._previewing:

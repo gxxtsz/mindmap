@@ -722,14 +722,23 @@ class DockManager(QObject):
             drag.deleteLater()
 
     def add_document(self, document_id, title, widget, host_id="main", icon="document", *,
-                     can_close=None, on_closed=None, modified=False, dispose_on_close=False):
-        """注册已有文档控件并显示；标识必须唯一，文档内容不进入布局配置。"""
+                     can_close=None, on_closed=None, modified=False, dispose_on_close=False,
+                     on_duplicate=None):
+        """注册已有文档控件并显示；标识必须唯一，文档内容不进入布局配置。
+
+        on_duplicate 可选，签名为无参回调并返回是否成功；提供后显示标签复制
+        入口，回调负责新控件、标识及位置，原控件仍由本管理器持有。关闭决策及
+        释放规则沿用 can_close、on_closed、dispose_on_close，仅限 GUI 线程。
+        """
         if document_id in self.documents or not document_id or document_id.startswith("tool:"):
             raise ValueError(f"文档标识重复：{document_id}")
         if host_id not in self.hosts or not isinstance(widget, QWidget):
             raise ValueError("文档内容或目标宿主无效")
+        if on_duplicate is not None and not callable(on_duplicate):
+            raise TypeError("文档复制回调必须可调用或为 None")
         self.documents[document_id] = {"title": title, "widget": widget, "icon": icon,
                                        "can_close": can_close, "on_closed": on_closed,
+                                       "on_duplicate": on_duplicate,
                                        "dispose_on_close": bool(dispose_on_close),
                                        "modified": bool(modified), "closed": False, "host_id": host_id}
         self.move_document(document_id, host_id)
@@ -742,8 +751,24 @@ class DockManager(QObject):
         widget = spec.factory()
         self.add_document(spec.id, spec.title, widget, host_id, spec.icon,
                           can_close=spec.can_close, on_closed=spec.on_closed, modified=spec.modified,
-                          dispose_on_close=spec.dispose_on_close)
+                          dispose_on_close=spec.dispose_on_close, on_duplicate=spec.on_duplicate)
         return widget
+
+    def duplicate_document(self, document_id: str) -> bool:
+        """调用指定标签的业务复制回调，返回是否成功创建新视图。
+
+        不依赖活动标签，也不自行复制内容或移动原标签；插入位置、输入检查及
+        新文档注册由回调负责。未注册、已关闭或未提供回调时返回 False；回调
+        异常通过 message 报告并返回 False。仅限 GUI 线程，不持久化回调。
+        """
+        document = self.documents.get(document_id)
+        if document is None or document["closed"] or document.get("on_duplicate") is None:
+            return False
+        try:
+            return bool(document["on_duplicate"]())
+        except Exception as error:
+            self.message.emit(f"复制标签失败：{error}")
+            return False
 
     def set_document_title(self, document_id: str, title: str) -> None:
         """更新已注册文档的显示标题，并保留修改标记和控件实例。

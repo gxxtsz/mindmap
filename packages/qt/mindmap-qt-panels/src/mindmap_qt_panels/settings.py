@@ -371,6 +371,13 @@ class GlobalSettingsPanel(QWidget):
     def _document_changing(self, event):
         if event.kind == "saved":
             return
+        if getattr(self.canvas, "is_external_event", lambda _: False)(event):
+            page = getattr(self.canvas, "current_page_id", None)
+            collections = event.changes.collections if event.changes is not None else {}
+            index = 1 if event.forward else 0
+            if not any(page in collections.get(name, {}) and collections[name][page][index] is None
+                       for name in ("submaps", "detail_pages")):
+                return
         if not self._applying:
             self.discard_pending()
         self._close_popups()
@@ -450,7 +457,8 @@ class GlobalSettingsPanel(QWidget):
             "theme": "切换主题",
             "branch": "统一全局分支样式",
         }
-        with engine.transaction(labels[key]):
+        with (engine.event_source(getattr(self.canvas, "interaction_id", None)),
+              engine.transaction(labels[key])):
             if key in ("direction", "compact", "spacing"):
                 engine.set_layout(candidate.layout, page_id=page_id)
             elif key == "theme":

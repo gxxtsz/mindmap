@@ -30,8 +30,14 @@ finally:
 `branch_kinds()`、`reveal_nodes()` 等公开接口集成。借用文档禁止修改，查询不会
 复制整图；候选编辑应另取引擎快照并调用 `validate_document()`。
 
-`MindMapFileController(canvas, panels, dialog_parent=None, *, writer=...)` 保持原签名。
+`MindMapFileController(canvas, panels, dialog_parent=None, *, writer=..., state=None)` 兼容原调用。
 第二参数仅要求提供 `flush_pending_edits()`，无侧栏时可以为空实现，不要求安装面板包。
+多个同引擎控制器可传入同一个 `MindMapFileState` 共享路径；省略时仍各自独立。
+`prepare_save` 可设置为无参布尔回调，显式保存前由宿主统一检查并提交关联视图输入；返回 False 取消，自动保存不调用。
+共享状态只管理路径，宿主负责合并保存调度和成功、失败通知；写入成功才更新共享路径。
+共享引擎的宿主将关联画布的 `shared_views` 设为 True，使其他视图的提交只更新内容，保留各自有效页面、选择和视口。
+`interaction_id` 是画布的稳定来源标识，直接引擎提交可通过 `engine.event_source(canvas.interaction_id)` 标记；内置画布、面板和异步图片提交已处理来源。
+`is_external_event(event)` 判断其他视图或无来源的外部内容通知；独立模式默认 False，保持原有单画布行为。
 退出宿主前调用 `dispose()` 解除引擎订阅并取消未完成下载；该方法可重复调用。
 折叠按钮由 Qt 的父图元关系管理，只通过弱引用借用所属节点；删除、折叠或替换导图时，
 移出场景的节点可立即释放，不依赖循环垃圾回收，也不会被外部保留的按钮包装对象拖延销毁。

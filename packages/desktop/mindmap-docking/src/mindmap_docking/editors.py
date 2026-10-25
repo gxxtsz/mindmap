@@ -164,6 +164,10 @@ class EditorTabBar(QTabBar):
             return
         token = self.tabData(index)
         menu = QMenu(self)
+        document = self.group.manager.documents.get(token)
+        if document is not None and document.get("on_duplicate") is not None:
+            menu.addAction("复制标签", lambda: self.group.manager.duplicate_document(token))
+            menu.addSeparator()
         menu.addAction("关闭", lambda: self.group.close_token(token))
         menu.addAction("关闭其他标签", lambda: self.group.close_others(token))
         menu.addSeparator()

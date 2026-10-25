@@ -59,7 +59,7 @@ class DocumentState:
         if not isinstance(recent, list) or not isinstance(documents, list) or not isinstance(active, str):
             raise ValueError("最近文件或退出会话格式无效")
         normalized_recent, normalized_documents = [], []
-        recent_keys, document_keys, identifiers = set(), set(), set()
+        recent_keys, identifiers = set(), set()
         for value in recent:
             path = _document_path(value)
             key = path_key(path)
@@ -73,11 +73,10 @@ class DocumentState:
             if not isinstance(identifier, str) or re.fullmatch(r"mindmap\.[0-9a-f]{32}", identifier) is None:
                 raise ValueError("退出会话标识无效")
             path = _document_path(item.get("path"))
-            key = path_key(path)
-            if identifier in identifiers or key in document_keys:
-                raise ValueError("退出会话包含重复的文件或标识")
+            # 同一路径可以有多个独立标签；稳定标签标识仍必须唯一。
+            if identifier in identifiers:
+                raise ValueError("退出会话包含重复的标签标识")
             identifiers.add(identifier)
-            document_keys.add(key)
             record = {"id": identifier, "path": path}
             if isinstance(item.get("view_state"), dict):
                 record["view_state"] = deepcopy(item["view_state"])
