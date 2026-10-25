@@ -483,7 +483,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             status = "保存失败" if session.last_error else "待保存" if session.files.is_dirty else "已保存"
             title = session.files.path.name
             self.setWindowTitle(f"{'* ' if session.files.is_dirty else ''}{title} — 原生思维导图")
-            self.status_label.setText(f"  {session.engine.node_count} 个节点 · "
+            # 只统计活动画布当前页的只读节点集合，包含根节点、折叠节点和屏幕外节点。
+            # 不跨子导图、详情页或其他想法累计；直接取长度，避免复制文档或受图元虚拟化影响。
+            self.status_label.setText(f"  {len(session.canvas.document_view.nodes)} 个节点 · "
                                       f"{len(session.canvas.selected_node_ids())} 个选中 · {status} · "
                                       f"文件大小：{_format_file_size(session._file_size_bytes)}")
         else:
