@@ -12,6 +12,7 @@ from .config import LayoutConfig
 from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent, EventDispatcher
 from .history import HistoryManager
+from .loading import ValidatedDocument
 from .models import MindMapDocument, Node, PathEntry, Theme
 from .operations import DocumentEditor
 from .transactions import DocumentState, TransactionManager
@@ -454,6 +455,22 @@ class MindMapEngine:
         SaveSnapshot 交回 mark_saved_snapshot。写入失败不得标记保存成功。
         """
         self._require_idle("事务提交前不能取得保存快照")
+        return SaveSnapshot(self.capture_read_snapshot(), self._snapshot_owner,
+                            self.document_generation, self._history._state)
+
+    def capture_read_snapshot(self) -> MindMapDocument:
+        """为受信任的画布、面板和编码器捕获稳定的只读版本，不深拷贝所有节点。
+
+        节点、资源及页面记录借用当前已提交实体；引擎后续写入采用写时复制，旧版本
+        不会被正式编辑或历史重放改写。顶层集合及文档配置独立，订阅者可通过
+        ChangeSet.apply 替换其中的实体以维护自己的读模型，但禁止修改借用实体及其
+        嵌套字段。需要自由修改的独立副本时必须使用 document 属性或显式 deepcopy。
+
+        只能在引擎所属线程且没有活动事务时同步调用，事务期间抛出 MindMapError。
+        查询不发送事件、不改变修订号或历史，也不建立保存凭据；只读约定由受信任
+        调用方遵守，返回对象不是递归冻结的公共可写文档。
+        """
+        self._require_idle("事务提交前不能取得只读快照")
         source = self._state.document
         document = copy(source)
         document.nodes, document.assets = source.nodes.copy(), source.assets.copy()
@@ -462,7 +479,7 @@ class MindMapEngine:
         document.layout, document.theme = deepcopy(source.layout), deepcopy(source.theme)
         document.metadata = deepcopy(source.metadata)
         document.inspiration = deepcopy(source.inspiration)
-        return SaveSnapshot(document, self._snapshot_owner, self.document_generation, self._history._state)
+        return document
 
     def mark_saved_snapshot(self, snapshot: SaveSnapshot) -> bool:
         """标记实际写入的版本，期间的新编辑仍保持未保存。
@@ -483,10 +500,36 @@ class MindMapEngine:
 
     def replace_document(self, document: MindMapDocument) -> None:
         """校验新快照后原子替换并清空历史；算法是否可用由宿主布局服务检查。"""
+        self._replace_document(document, copy_input=True)
+
+    def adopt_document(self, document: MindMapDocument, *, validation: ValidatedDocument | None = None) -> None:
+        """接管调用方独占的新文档，完整校验后替换并清空历史，避免再次复制整图。
+
+        仅用于受信任的原生读取流程：文档及其可变实体必须从未向其他拥有者发布，
+        成功后调用方必须放弃修改及复用这些对象。需要继续持有可写来源时应使用
+        replace_document；本接口不提供外部输入的别名隔离，也不把只读视图变成完整
+        文档。结构校验、操作钩子、事务限制、修订号及 reset 通知与普通替换一致。
+        失败时引擎保持原文档和历史，来源仍归调用方；所有调用在引擎所属线程执行。
+
+        validation 可携带加载器产生的一次性完整校验结果，避免在只读预检后重复扫描。
+        使用前必须保证候选从凭据生成后未被修改或交给扩展；凭据须对应同一文档，
+        成功接管后失效。省略凭据仍执行完整校验，公共替换入口始终复制并重新校验。
+        """
+        self._replace_document(document, copy_input=False, validation=validation)
+
+    def _replace_document(self, document, *, copy_input, validation=None):
+        """两种所有权入口共用提交边界；完成校验及钩子检查前不改引擎状态。"""
         self._require_idle("事务期间不能替换文档")
-        candidate = deepcopy(document)
-        candidate.validate()
+        candidate = deepcopy(document) if copy_input else document
+        if validation is None:
+            candidate.validate()
+        else:
+            if type(validation) is not ValidatedDocument:
+                raise TypeError("加载校验凭据必须为 ValidatedDocument")
+            validation.require_document(candidate)
         self._guard("replace_document", {})
+        if validation is not None:
+            validation.consume(candidate)
         self._state.reset(candidate)
         self._history.reset()
         self.document_generation += 1

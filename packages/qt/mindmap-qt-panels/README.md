@@ -49,7 +49,7 @@ wheel_menu = panels.settings.create_menu(canvas)
 
 ### 组合与显示
 
-- `MindMapPanels(host, parent=None)` 生成 `outline`、`properties`、`settings` 三个业务对象。
+- `MindMapPanels(host, parent=None, ui_colors=None)` 生成 `outline`、`properties`、`settings` 三个业务对象；`ui_colors` 为仅限关键字的可选宿主色板，首次同步即使用最终配色，避免随后整批控件再次换肤。省略时继续跟随文档主题，后续切换仍使用 `set_ui_colors()`。
 
 - 三个面板均可由宿主放入布局，设置还通过 `settings.create_menu(parent)` 加入宿主菜单。
 

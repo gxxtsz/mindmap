@@ -5,7 +5,7 @@ import json
 from mindmap_core import MindMapDocument, MindMapError
 
 from .limits import MAX_ARCHIVE_BYTES
-from .schema import from_dict, to_dict
+from .schema import _from_dict, to_dict
 
 
 def dumps(document: MindMapDocument) -> str:
@@ -15,11 +15,14 @@ def dumps(document: MindMapDocument) -> str:
 
 def _parse_json(text: str) -> dict:
     def unique_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise MindMapError(f"JSON 字段重复：{key}")
-            result[key] = value
+        # 正常对象由 C 层一次构造，长度变化才沿错误路径定位重复键；保留原错误语义。
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            seen = set()
+            for key, _ in pairs:
+                if key in seen:
+                    raise MindMapError(f"JSON 字段重复：{key}")
+                seen.add(key)
         return result
 
     try:
@@ -30,7 +33,7 @@ def _parse_json(text: str) -> dict:
 
 def loads(text: str) -> MindMapDocument:
     """从独立 JSON 文本创建经过完整校验的文档。"""
-    return from_dict(_parse_json(text))
+    return _from_dict(_parse_json(text))
 
 
 class JsonCodec:

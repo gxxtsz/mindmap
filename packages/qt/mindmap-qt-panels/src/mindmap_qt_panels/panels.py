@@ -19,7 +19,12 @@ class MindMapPanels(QObject):
     不销毁画布或面板。宿主真正退出时再调用 canvas.dispose()。
     """
 
-    def __init__(self, canvas: PanelHost, parent=None):
+    def __init__(self, canvas: PanelHost, parent=None, *, ui_colors: UiColors | None = None):
+        """建立面板组合，可让三个面板直接按最终宿主色板完成首次初始化。
+
+        ui_colors 仅影响界面，省略时保持跟随文档主题；不改变公共宿主协议、输入
+        生命周期或引擎状态。后续主题切换继续通过 set_ui_colors 同步。
+        """
         super().__init__(parent)
         self.canvas = canvas
         self._disposed = False
@@ -28,9 +33,9 @@ class MindMapPanels(QObject):
         # 未被激活的面板也不会成为无主顶层窗口或覆盖画布。
         self._parking = QWidget(canvas if isinstance(canvas, QWidget) else None)
         self._parking.hide()
-        self.outline = OutlinePanel(canvas, self._parking)
-        self.properties = NodePropertiesPanel(canvas, self._parking)
-        self.settings = GlobalSettingsPanel(canvas, self._parking)
+        self.outline = OutlinePanel(canvas, self._parking, ui_colors=ui_colors)
+        self.properties = NodePropertiesPanel(canvas, self._parking, ui_colors=ui_colors)
+        self.settings = GlobalSettingsPanel(canvas, self._parking, ui_colors=ui_colors)
         self.outline.nodes_selected.connect(self._outline_selected)
         canvas.edits_flush_requested.connect(self.flush_pending_edits)
         # 新版画布可在切页前检查全部面板的输入法状态；旧的独立宿主无需增加接口。

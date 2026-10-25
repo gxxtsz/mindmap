@@ -27,10 +27,11 @@ def run_offscreen(arguments):
 
 @pytest.mark.parametrize("test_path", [
     "packages/qt/mindmap-qt-canvas/tests/test_extensions.py::test_clipboard_uses_injected_codec_and_rejects_old_version",
-    "packages/qt/mindmap-qt-canvas/tests/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo",
+    "packages/qt/mindmap-qt-canvas/tests/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo[bitmap]",
+    "packages/qt/mindmap-qt-canvas/tests/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo[file]",
 ])
 def test_clipboard_pytest_process_exits_normally(tmp_path, test_path):
-    """原始崩溃场景不仅要通过断言，pytest 完成析构后也必须正常退出。"""
+    """每个参数场景独立运行一次，既要通过断言，pytest 完成析构后也须正常退出。"""
     result = run_offscreen([
         "-m", "pytest", "-q", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "child"),
         test_path,

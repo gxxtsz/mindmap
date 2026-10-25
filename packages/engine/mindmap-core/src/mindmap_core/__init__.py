@@ -17,6 +17,7 @@ from .extensions import (
 )
 from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point, Rect
 from .history import ChangeSet, NodeMove, NodePlacement
+from .loading import ValidatedDocument
 from .models import (
     Asset,
     InspirationArea,
@@ -64,6 +65,7 @@ __all__ = [
     "Point",
     "Rect",
     "Theme",
+    "ValidatedDocument",
     "apply_branch_style",
     "branch_style_targets",
     "get_branch_style",

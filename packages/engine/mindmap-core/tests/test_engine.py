@@ -36,6 +36,43 @@ def test_snapshots_cannot_bypass_history(tree):
     assert not engine.can_undo
 
 
+def test_node_copy_keeps_flat_aliases_and_nested_cycles():
+    """扁平容器快速复制仍保持跨字段别名、对象状态回指及嵌套自引用。"""
+    node = Node("容器复制", children=["甲", "乙"])
+    node.alias = node.children
+    node.metadata["对象状态"] = node.__dict__
+    cycle = []
+    cycle.append(cycle)
+    node.metadata["循环"] = cycle
+    copied = deepcopy(node)
+    assert copied.children is copied.alias and copied.children is not node.children
+    assert copied.metadata["对象状态"] is copied.__dict__
+    assert copied.metadata["循环"][0] is copied.metadata["循环"]
+    copied.children.append("丙")
+    assert node.children == ["甲", "乙"]
+
+
+def test_adopt_document_transfers_exclusive_input_without_copy(monkeypatch):
+    """受信任读取结果可以转移所有权，结构检查及干净历史仍与普通替换一致。"""
+    engine = MindMapEngine()
+    document = MindMapDocument.new("独占读取结果")
+
+    def reject_copy(*args):
+        raise AssertionError("所有权转移不应复制节点")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Node, "__deepcopy__", reject_copy)
+        engine.adopt_document(document)
+    assert engine.get_node(engine.root_id).text == "独占读取结果"
+    assert not engine.can_undo and not engine.is_dirty
+    invalid = MindMapDocument.new("损坏的来源")
+    invalid.root.children.append("不存在")
+    before, revision = engine.document, engine.revision
+    with pytest.raises(MindMapError):
+        engine.adopt_document(invalid)
+    assert engine.document == before and engine.revision == revision
+
+
 def test_node_copy_preserves_aliases_and_extended_slot_fields():
     """快照加速仍要隔离嵌套内容，保留同一副本内的共享引用及扩展字段。"""
     class ExtendedNode(Node):

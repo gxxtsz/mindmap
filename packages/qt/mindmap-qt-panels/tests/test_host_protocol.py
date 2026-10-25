@@ -57,6 +57,31 @@ def test_public_panel_lifecycle_reports_composition_without_changing_document(pa
     panels.close_popups()
 
 
+def test_initial_host_palette_applies_before_first_sync_and_preserves_document(panel_host_factory):
+    """预设深色外壳时，首次同步直接使用宿主色板；恢复后仍能跟随原文档主题。"""
+    from mindmap_core import Theme
+    from mindmap_qt_ui.ui_style import ui_colors
+
+    host = panel_host_factory()
+    before, revision = host.engine.document, host.engine.revision
+    colors = ui_colors(Theme.dark())
+    panels = MindMapPanels(host, ui_colors=colors)
+    try:
+        for panel in (panels.outline, panels.properties, panels.settings):
+            assert panel._ui_colors_override == colors
+            assert colors.text in panel.styleSheet()
+        panels.properties.fields["style.font_size"].setValue(24)
+        assert panels.properties.timer.isActive()
+        panels.set_ui_colors(None)
+        assert panels.properties.timer.isActive()
+        assert host.engine.document == before and host.engine.revision == revision
+        panels.flush_pending_edits()
+        assert host.engine.get_node(host.engine.root_id).style["font_size"] == 24
+        assert host.engine.document.theme == before.theme
+    finally:
+        panels.dispose()
+
+
 def test_dispose_discards_pending_form_draft_before_closing_popups(panel_host_factory):
     """销毁组件只取消未提交输入，不能因弹层失焦追加一条编辑或历史记录。"""
     host = panel_host_factory()

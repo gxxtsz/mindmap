@@ -152,6 +152,14 @@ fragment = decode_document(
 
 - 结构损坏、循环、多父节点或重复标识抛出中文 `MindMapError`，不修补或猜测损坏的树。
 
+- 原生容器及 JSON 解码直接接管内部解析对象，避免整份 JSON 邻接表再次深拷贝；公开 `from_dict()` 仍完整隔离调用方的嵌套字典和列表。
+
+- `supports_owned_load(registry)` 只读判断原生读取链是否为未覆写的内置实现。只有刚读取且尚未发布的独占结果可以交给引擎 `adopt_document()`；扩展注册表、编解码器或覆写入口继续使用 `replace_document()` 的隔离副本。此能力判断不会跳过结构、资源或画布校验。
+
+- `load_validated_document(path, registry=None) -> ValidatedDocument` 只用于标准原生打开链路，返回独占文档的一次性完整校验凭据。容器、容量、JSON 重复字段、全部页面结构及资源哈希校验保持不变，同一结果不再被注册表重复遍历；扩展读取器在读盘前被拒绝，应改用 `load_document()`。
+
+- 宿主只读预检 `receipt.document` 后，可通过 `engine.adopt_document(receipt.document, validation=receipt)` 接管。凭据不能用于其他对象或修改过的文档；接管成功即失效，取消和错误均不改写源文件。接口不依赖 Qt，可在工作线程独占准备，再将凭据移交引擎所属线程。
+
 ## 独立进程保存能力
 
 ### 编码链能力

@@ -313,12 +313,14 @@ class MindMapSession(QObject):
         self.document = document if document is not None else MindMapDocumentSession(owner)
         self.engine = self.document.engine
         self.disposed = False
+        colors = owner.window.ui_colors
         # 历史动作由标签栏承载，视图操作由主窗口状态栏承载，画布不再创建浮条。
         self.canvas = MindMapWidget(self.engine, toolbar=False, view_controls=False, embedded=True,
+                                    ui_colors=colors,
                                     layout_registry=owner.window.layout_registry,
                                     format_registry=owner.window.format_registry)
         self.canvas.setFocusProxy(self.canvas.view)
-        self.panels = MindMapPanels(self.canvas, self)
+        self.panels = MindMapPanels(self.canvas, self, ui_colors=colors)
         # 收藏面板单独接入会话，不扩大独立宿主的 PanelHost 必需接口；候选会话在
         # 完成文件读取前先隐藏面板，安装后由共享停靠容器接管 QWidget 所有权。
         self.favorites = SubmapFavoritesPanel(self.engine, self.canvas)
@@ -354,7 +356,8 @@ class MindMapSession(QObject):
         self.canvas.inspiration_sidebar_requested.connect(self._show_inspiration)
         self._sync_inspiration()
         self.files = MindMapFileController(self.canvas, self.panels, owner.window,
-                                           writer=self.document._write, state=self.document.file_state)
+                                           writer=self.document._write, state=self.document.file_state,
+                                           background_open=True)
         self.canvas.error_occurred.connect(self._canvas_failed)
         self.files.message.connect(self._file_message)
         self.document.attach(self)

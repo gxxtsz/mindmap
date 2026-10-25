@@ -6,10 +6,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from mindmap_core import FormatRegistration, MindMapDocument, MindMapError
-from mindmap_formats import load_document, save_document
+from mindmap_core import FormatRegistration, MindMapDocument, MindMapEngine, MindMapError
+from mindmap_formats import load_document, load_validated_document, save_document, supports_owned_load
+from mindmap_layouts import supports_incremental_layout
+from mindmap_qt_render.rendering import VisualFactory
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+from . import loading
+from .widget import MindMapWidget
+
+_REPLACE_DOCUMENT = MindMapEngine.replace_document
+_ADOPT_DOCUMENT = MindMapEngine.adopt_document
+_VALIDATE_DOCUMENT = MindMapWidget.validate_document
+_MEASURE_DOCUMENT = VisualFactory.measure
+_LOAD_DOCUMENT = load_document
 
 
 class PendingEdits(Protocol):
@@ -52,17 +63,23 @@ class MindMapFileController(QObject):
     OPEN_FILTER = "思维导图 (*.mindmap)"
 
     def __init__(self, canvas, panels: PendingEdits, dialog_parent=None, *, writer=save_document,
-                 state: MindMapFileState | None = None):
+                 state: MindMapFileState | None = None, background_open: bool = False):
         """绑定视图与写入器，可通过 state 共享路径；状态实例由调用方和控制器共同持有。
 
         省略 state 时行为与原接口一致；共享状态不自动共享引擎或提交其他视图输入，
         这些由宿主协调。所有方法及信号在 GUI 线程执行。
+
+        background_open=True 时大于 1 MiB 的标准原生文件在工作线程解析及校验，等待
+        期间 GUI 继续处理事件并提供取消；返回值仍表示本次打开已完成。普通文件和
+        扩展读取器保持同步，后台线程不访问画布、面板或引擎，取消不提交候选。
         """
         super().__init__(dialog_parent)
         self.canvas, self.engine, self.panels = canvas, canvas.engine, panels
         self.dialog_parent = dialog_parent
         self.writer = writer
         self.state = state if state is not None else MindMapFileState()
+        self._background_open = background_open
+        self._opening = False
         # 宿主如有后台写入，可注入 GUI 线程等待边界；路径切换和显式保存先收束旧写入。
         self.wait_for_pending_write = None
         # 多视图宿主可在显式保存前统一检查候选并提交所有关联标签；False 取消保存。
@@ -171,14 +188,61 @@ class MindMapFileController(QObject):
         容器验证，不能通过扩展名绕过内容校验。失败不修改当前文档或保存标记。
         """
         source = self.validate_open_path(path)
+        if self._opening:
+            return False
+        self._opening = True
+        try:
+            return self._open_path(source)
+        finally:
+            self._opening = False
+
+    def _open_path(self, source):
+        """在禁止同一控制器重入的边界内准备候选，全部预检成功后才提交。"""
         registry = self.canvas.format_registry
-        document = load_document(source, registry=registry, format_id="mindmap")
-        self.canvas.validate_document(document)
+        # 宿主替换通用加载入口时继续调用它，避免原生优化绕过注入的读取调度。
+        owned = load_document is _LOAD_DOCUMENT and supports_owned_load(registry)
+        background = False
+        if owned and self._background_open:
+            try:
+                background = source.stat().st_size > loading.BACKGROUND_OPEN_BYTES
+            except OSError as exc:
+                raise MindMapError(f"读取文档失败：{exc}") from exc
+        if background:
+            validation = loading.load_native_in_background(source, self.dialog_parent)
+            if validation is None:
+                return False
+        else:
+            validation = load_validated_document(source, registry=registry) if owned else None
+        document = validation.document if validation is not None else load_document(
+            source, registry=registry, format_id="mindmap")
+        # 只有标准只读预检可以延续加载凭据；扩展可能修改候选，仍须逐层重新校验。
+        reuse_validation = (
+            validation is not None and type(self.canvas) is MindMapWidget
+            and getattr(self.canvas.validate_document, "__func__", None) is _VALIDATE_DOCUMENT
+            and type(self.canvas.factory) is VisualFactory
+            and getattr(self.canvas.factory.measure, "__func__", None) is _MEASURE_DOCUMENT
+            and all(supports_incremental_layout(self.canvas.layout_registry, record.layout.algorithm_id)
+                    for record in (document, *document.iter_pages(), document.inspiration)))
+        if reuse_validation:
+            self.canvas.validate_document(document, defer_inactive_pages=True, validation=validation)
+        else:
+            validation = None
+            self.canvas.validate_document(document, defer_inactive_pages=True)
         if not self.confirm_replace():
             return False
         if self.wait_for_pending_write is not None:
             self.wait_for_pending_write()
-        self.engine.replace_document(document)
+        if (owned and type(self.engine) is MindMapEngine
+                and getattr(self.engine.replace_document, "__func__", None) is _REPLACE_DOCUMENT):
+            # 内置解码结果尚未发布，校验只读使用后直接交给引擎；扩展读取或引擎
+            # 覆写仍走原有隔离入口，不把扩展拥有的实体借给正式编辑状态。
+            if (validation is not None
+                    and getattr(self.engine.adopt_document, "__func__", None) is _ADOPT_DOCUMENT):
+                self.engine.adopt_document(document, validation=validation)
+            else:
+                self.engine.adopt_document(document)
+        else:
+            self.engine.replace_document(document)
         self.path = source
         self.state_changed.emit()
         # 初始视图使用正常倍率；由画布等待实际显示后居中，避免大型导图被整图

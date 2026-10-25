@@ -11,6 +11,7 @@ from mindmap_formats import (
     from_dict,
     import_outline,
     load_document,
+    load_validated_document,
     loads,
     save_document,
     to_dict,
@@ -109,7 +110,7 @@ def test_atomic_save_failure_preserves_old_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("corruption", ["version", "duplicate", "reference", "resource", "cycle", "hash"])
-def test_reject_corrupt_document(corruption):
+def test_reject_corrupt_document(corruption, tmp_path):
     data = to_dict(example())
     if corruption == "version":
         data["schema_version"] = 999
@@ -125,6 +126,21 @@ def test_reject_corrupt_document(corruption):
         data["assets"][0]["data"] = "bm90LXRoZS1pbWFnZQ=="
     with pytest.raises(MindMapError):
         from_dict(data)
+    path = tmp_path / "独占读取仍须拒绝损坏.mindmap"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("document.json", json.dumps(data))
+    with pytest.raises(MindMapError):
+        load_validated_document(path)
+
+
+@pytest.mark.parametrize("text, key", [
+    ('{"format":"mindmap","metadata":{"键":1,"键":1}}', "键"),
+    ('{"format":"mindmap","metadata":{"键":1,"\\u952e":2}}', "键"),
+    ('{"format":"mindmap","nodes":[{"id":"甲","id":"乙"}]}', "id"),
+])
+def test_duplicate_keys_are_rejected_in_nested_json_even_with_equal_values(text, key):
+    with pytest.raises(MindMapError, match=f"JSON 字段重复：{key}"):
+        loads(text)
 
 
 def test_bad_zip_and_duplicate_json_keys(tmp_path):

@@ -182,12 +182,15 @@ class OutlinePanel(QTreeView):
     nodes_selected = Signal(list)
     display_depth_changed = Signal(object)
 
-    def __init__(self, canvas: PanelHost, parent=None):
+    def __init__(self, canvas: PanelHost, parent=None, *, ui_colors: UiColors | None = None):
+        """创建大纲，可在首次设置样式前指定宿主色板，不改变文档及展开偏好。"""
+        if ui_colors is not None and not isinstance(ui_colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
         super().__init__(parent)
         self.canvas = canvas
         self._syncing = False
         self._theme_signature = None
-        self._ui_colors_override = None
+        self._ui_colors_override = ui_colors
         self._branch_hover_position = None
         self._display_depth = 2
         # 菜单和标题栏共用动作；动作由面板持有，宿主只创建按钮，不接管生命周期。

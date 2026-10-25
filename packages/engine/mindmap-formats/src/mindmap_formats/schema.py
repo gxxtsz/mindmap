@@ -18,6 +18,7 @@ from mindmap_core import (
     MindMapPageView,
     Node,
     Theme,
+    ValidatedDocument,
 )
 
 SCHEMA_VERSION = 5
@@ -57,10 +58,23 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
 def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindMapDocument:
     """读取当前多页格式或版本 2 单页格式，校验全部引用后返回独立文档。"""
+    return _from_dict(data, resources=resources, copy_input=True)
+
+
+def _from_dict(data: dict, *, resources=None, copy_input=False,
+               with_validation=False) -> MindMapDocument | ValidatedDocument:
+    """解析内部持有的 JSON 对象，避免对刚解码的整份邻接表再次深拷贝。
+
+    只有本包 JSON 解码器可以省略复制：解析对象未向外暴露，节点中的列表、样式和
+    元数据可直接移交给返回文档。公共 from_dict 始终传入 copy_input=True，保证调用方
+    后续修改原始字典不会影响文档。容量、字段、树结构及资源哈希校验保持一致。
+    with_validation 仅供原生独占加载返回一次性凭据；两种返回方式均完整校验一次。
+    """
     try:
         if not isinstance(data, dict) or data.get("format") != "mindmap":
             raise MindMapError("不是本项目的思维导图文档")
-        data = deepcopy(data)
+        if copy_input:
+            data = deepcopy(data)
         if type(data.get("schema_version")) is not int or data["schema_version"] not in (2, 3, 4, SCHEMA_VERSION):
             raise MindMapError("不支持的文档格式版本")
 
@@ -143,8 +157,8 @@ def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindM
                                                    LayoutConfig(**record["layout"]), Theme(**record["theme"]))
         else:
             document.inspiration = InspirationArea(layout=deepcopy(document.layout), theme=deepcopy(document.theme))
-        document.validate()
-        return document
+        validation = ValidatedDocument(document)
+        return validation if with_validation else validation.document
     except MindMapError:
         raise
     except (

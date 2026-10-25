@@ -152,7 +152,14 @@ class NodePropertiesForm(QWidget):
     scope_changed = Signal(str)
     composition_finished = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, ui_colors: UiColors | None = None):
+        """创建属性表单，可预先指定宿主色板，避免构造后整批控件再次换肤。
+
+        省略 ui_colors 时沿用文档主题；非 UiColors、None 参数抛出 TypeError。
+        初始化只创建表单，不提交节点修改，后续仍可通过 set_ui_colors 切换色板。
+        """
+        if ui_colors is not None and not isinstance(ui_colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
         super().__init__(parent)
         self.setObjectName("node_properties_form")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
@@ -160,7 +167,7 @@ class NodePropertiesForm(QWidget):
         self._loading = False
         self._editable = False
         self._composing = set()
-        self._ui_colors_override = None
+        self._ui_colors_override = ui_colors
         self._theme_signature = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

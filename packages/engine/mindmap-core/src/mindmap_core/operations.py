@@ -8,7 +8,7 @@ from dataclasses import fields
 from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
 from .inspiration import InspirationEditorMixin
-from .models import Asset, MindMapDocument, MindMapPage, Node, new_id
+from .models import Asset, MindMapDocument, MindMapPage, Node, _resolve_detail_page, new_id
 from .transactions import DocumentState
 
 
@@ -252,20 +252,7 @@ class DocumentEditor(InspirationEditorMixin):
         的详情优先，否则取从外到内遇到的第一张，查询不迁移或删除任何内容。
         根索引和子导图引用均为字典访问，开销只随关联链长度增长。
         """
-        node = self.node(node_id)
-        if node.detail_page_id:
-            return node_id, node.detail_page_id
-        outer = node_id
-        while (page_id := self._state.root_pages.get(outer)) in self.document.submaps:
-            outer = self.document.submaps[page_id].owner_id
-        current = outer
-        while True:
-            node = self.node(current)
-            if node.detail_page_id:
-                return current, node.detail_page_id
-            if not node.submap_id:
-                return outer, None
-            current = self.document.submaps[node.submap_id].root_id
+        return _resolve_detail_page(self.document, node_id, self._state.root_pages)
 
     def create_detail_page(self, node_id):
         """在共享入口创建单层详情，初始外观取发起节点及其所在页。"""

@@ -1,4 +1,4 @@
-"""格式层声明独立进程保存能力；不导入 Qt，也不持有宿主的活动编辑状态。"""
+"""格式层声明原生读写的可选优化能力；不导入 Qt，也不持有宿主的活动编辑状态。"""
 
 from dataclasses import fields
 
@@ -19,6 +19,30 @@ _NODE_FIELDS = frozenset(item.name for item in fields(Node))
 # 固定原始入口身份，避免类方法在运行中被替换后仍被误认成默认实现。
 _REGISTRY_METHODS = {name: getattr(FormatRegistry, name) for name in ("get", "resolve", "write")}
 _NATIVE_WRITE = MindmapCodec.write
+_NATIVE_READ = MindmapCodec.read
+_NATIVE_READ_VALIDATED = MindmapCodec.read_validated
+_READ_METHODS = {name: getattr(FormatRegistry, name) for name in ("get", "resolve", "read")}
+
+
+def supports_owned_load(registry: FormatRegistry) -> bool:
+    """检查原生读取是否必然返回由解析器独占的新文档，供宿主转移所有权。
+
+    只接受标准注册表和未覆写的内置 MindmapCodec.read；子类、实例或类方法替换
+    一律返回 False，宿主继续通过 replace_document 建立隔离副本。此查询不读取
+    文件、不跳过任何校验；True 只允许宿主接管刚读取且尚未向外发布的结果，不能
+    用来接管任意现存快照。准入判断归格式实现所有，Qt 层无需访问注册表私有字段。
+    """
+    if type(registry) is not FormatRegistry:
+        return False
+    for name, method in _READ_METHODS.items():
+        if getattr(getattr(registry, name), "__func__", None) is not method:
+            return False
+    try:
+        importer = registry.get("mindmap").importer
+    except MindMapError:
+        return False
+    return (type(importer) is MindmapCodec and getattr(importer.read, "__func__", None) is _NATIVE_READ
+            and getattr(importer.read_validated, "__func__", None) is _NATIVE_READ_VALIDATED)
 
 
 def supports_process_save(registry: FormatRegistry, *, format_id: str = "mindmap") -> bool:

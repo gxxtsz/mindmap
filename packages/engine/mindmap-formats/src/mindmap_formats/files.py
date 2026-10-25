@@ -5,9 +5,10 @@ import tempfile
 from io import BytesIO
 from pathlib import Path
 
-from mindmap_core import FormatRegistry, MindMapDocument, MindMapError
+from mindmap_core import FormatRegistry, MindMapDocument, MindMapError, ValidatedDocument
 
 from .limits import MAX_ARCHIVE_BYTES
+from .processing import supports_owned_load
 from .registry import create_default_format_registry
 
 
@@ -26,6 +27,31 @@ def load_document(
     except MindMapError:
         raise
     except OSError as exc:
+        raise MindMapError(f"读取文档失败：{exc}") from exc
+
+
+def load_validated_document(path: str | Path, *, registry: FormatRegistry | None = None) -> ValidatedDocument:
+    """读取标准原生容器，返回独占文档的一次性完整校验凭据，不提交宿主状态。
+
+    仅支持未覆写的标准注册表及内置原生读取器，拒绝扩展时不会读取文件。容器、
+    容量、JSON、全部页面结构及资源哈希检查与 load_document 完全相同；由内置
+    读取器校验一次，省去注册表对同一结果的第二次扫描。宿主只能只读借用文档，
+    完成画布预检后将凭据交给引擎；不能发布可写引用或用于已修改的候选。
+    读取失败抛出中文 MindMapError，不修改源文件、宿主历史及保存状态。
+    """
+    registry = registry if registry is not None else create_default_format_registry()
+    if not supports_owned_load(registry):
+        raise MindMapError("当前原生读取器不支持独占校验凭据，请使用普通加载入口")
+    target = Path(path)
+    entry = registry.resolve(target, format_id="mindmap")
+    try:
+        if target.stat().st_size > MAX_ARCHIVE_BYTES:
+            raise MindMapError("文档大小超过读取限制")
+        with target.open("rb") as stream:
+            return entry.importer.read_validated(stream, options={})
+    except MindMapError:
+        raise
+    except Exception as exc:
         raise MindMapError(f"读取文档失败：{exc}") from exc
 
 

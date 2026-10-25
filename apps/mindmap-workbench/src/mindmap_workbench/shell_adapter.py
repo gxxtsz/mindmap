@@ -212,14 +212,18 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._settings_visible = False
         manager.layout_changed.connect(self._layout_changed)
         if restore:
-            failures = self.sessions.restore_documents(self.document_state.open_documents,
-                                                      self.document_state.active_id)
-            restored_active = self.sessions.active_id
-            # 必须先注册文件，再按相同会话标识恢复外壳；反向顺序会把旧文档 token
-            # 作为未知项过滤，导致全部文件挤进同一个标签组。
-            manager.load_session()
-            if restored_active:
-                manager.activate_document(restored_active)
+            # 大文件后台等待会处理 Qt 事件，旧的 250 毫秒自动保存可能在读取布局前
+            # 把默认布局写回磁盘。整个文件恢复和布局恢复共用持久化屏障，期间仍可
+            # 正常刷新界面；全部状态恢复后才重新安排保存，不能只暂停第一份文件。
+            with manager.defer_session_saving():
+                failures = self.sessions.restore_documents(self.document_state.open_documents,
+                                                          self.document_state.active_id)
+                restored_active = self.sessions.active_id
+                # 必须先注册文件，再按相同会话标识恢复外壳；反向顺序会把旧文档 token
+                # 作为未知项过滤，导致全部文件挤进同一个标签组。
+                manager.load_session()
+                if restored_active:
+                    manager.activate_document(restored_active)
             if failures:
                 startup_messages.append("部分导图未能恢复：" + "；".join(failures))
         self.refresh_theme()
@@ -346,11 +350,19 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         panels.outline.depth_action.changed.connect(self._sync_depth_action)
         session.inspiration.new_action.changed.connect(self._sync_new_inspiration_action)
         canvas.set_properties_handler(lambda: self._show_properties(session))
-        colors = ui_colors_from_shell(self.manager.theme)
+        colors = self.ui_colors
         canvas.set_ui_colors(colors)
         panels.set_ui_colors(colors)
         session.favorites.set_ui_colors(colors)
         session.inspiration.set_ui_colors(colors)
+
+    @property
+    def ui_colors(self) -> UiColors:
+        """返回当前外壳色板，供会话在创建控件时直接采用最终配色。
+
+        查询不缓存主题、不修改偏好或导图，后续主题切换仍由 refresh_theme 统一同步。
+        """
+        return ui_colors_from_shell(self.manager.theme)
 
     def _save_wheel_mode(self, mode):
         if self._updating_preferences:

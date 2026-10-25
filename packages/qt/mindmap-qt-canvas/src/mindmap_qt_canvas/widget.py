@@ -22,6 +22,7 @@ from mindmap_core import (
     MindMapError,
     MindMapPageView,
     Rect,
+    ValidatedDocument,
     apply_branch_style,
     branch_style_targets,
     get_branch_style,
@@ -80,6 +81,7 @@ from .view_controls import _ViewControls
 
 CLIPBOARD_MIME = "application/x-python-mindmap+json"
 VIRTUALIZATION_NODE_LIMIT = 1000
+_ENGINE_DOCUMENT = MindMapEngine.document
 
 
 class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
@@ -120,6 +122,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         toolbar=True,
         view_controls=False,
         embedded=False,
+        ui_colors: UiColors | None = None,
         layout_registry: LayoutRegistry | None = None,
         format_registry: FormatRegistry | None = None,
     ):
@@ -132,12 +135,17 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
 
         embedded=True 表示宿主提供编辑器外层圆角：移除内部卡片圆角和留白，
         并用界面色板的 field 作为显示背景。仅影响视图，文档主题和导出保持原值。
+
+        ui_colors 可预设宿主的最终界面色板，避免构造后立即再次换肤；省略时沿用
+        文档主题。参数与 set_ui_colors 语义相同，不改变导图内容或撤销历史。
         """
+        if ui_colors is not None and not isinstance(ui_colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
         super().__init__(parent)
         self.setObjectName("mindmap_canvas")
         self.setAutoFillBackground(True)
         self._ui_colors = None
-        self._ui_colors_override = None
+        self._ui_colors_override = ui_colors
         self._embedded = embedded
         self.engine = engine or MindMapEngine()
         self.editable = editable
@@ -198,7 +206,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._virtualized = False
         self._viewport_signature = None
         self._selection_undo, self._selection_redo = [], []
-        self._book_document = self.engine.document
+        self._book_document = self._read_engine_document()
         self._document = self._book_document.page_view()
         self._page_chain = [None]
         self._node_parents = self._document.parents()
@@ -241,6 +249,16 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._unsubscribe()
         for reply in tuple(self._downloads):
             reply.abort()
+
+    def _read_engine_document(self) -> MindMapDocument:
+        """标准引擎捕获只读版本；扩展引擎继续经过原有 document 入口。
+
+        子类可能在快照属性中附加投影或统计，不能因读取优化绕过宿主覆写；
+        运行中替换标准类的属性也回退隔离快照，保持已有扩展的分发行为。
+        """
+        if type(self.engine) is MindMapEngine and MindMapEngine.document is _ENGINE_DOCUMENT:
+            return self.engine.capture_read_snapshot()
+        return self.engine.document
 
     @property
     def document_view(self) -> MindMapDocument:
@@ -871,7 +889,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                     local_changes = ChangeSet({"nodes": delta, "assets": changes.collections.get("assets", {})},
                                               settings, self._current_page_id)
             else:
-                self._book_document = self.engine.document
+                self._book_document = self._read_engine_document()
                 self._current_page_id = None
                 self._inspiration_root_id = self._last_inspiration_root = None
                 self._page_states.clear()
@@ -2023,26 +2041,66 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.validate_document(candidate)
         self.engine.set_layout(config, page_id=self._current_page_id)
 
-    def validate_document(self, document: MindMapDocument) -> None:
+    def validate_document(self, document: MindMapDocument, *, defer_inactive_pages: bool = False,
+                          validation: ValidatedDocument | None = None) -> None:
         """替换前验证算法、图片及包含共享图标的实际尺寸，失败时保留正式状态。
 
-        完整文件使用独立候选引擎解析其自身页面关系，不借用旧文档的同名标识。
+        完整文件使用候选快照的只读解析器解析页面关系，不借用旧文档的同名标识。
         单页候选缺少页外归属表，已有节点借用当前解析，新粘贴节点使用候选自身
         引用；普通内容、外观及布局仍完全取候选。查询不提交引擎历史或导航。
+
+        文件打开可传 defer_inactive_pages=True：全文件结构、所有页面配置及使用中的
+        图片仍立即验证；内置树布局的非活动页面延迟到首次进入时排版。自定义算法、
+        注册表覆写及单页编辑候选始终保留完整试算，避免绕过宿主的校验及副作用隔离。
+
+        validation 仅供标准原生打开链路复用完整结构校验，须持有同一独占且未修改的
+        文档。预检只读借用凭据，不消费或发布可写引用；图片解码、页面配置和几何
+        数值检查照常执行。扩展布局或修改候选的调用方须省略凭据以重新完整校验。
         """
-        document.validate()
+        if validation is None:
+            document.validate()
+        else:
+            if type(validation) is not ValidatedDocument:
+                raise TypeError("加载校验凭据必须为 ValidatedDocument")
+            validation.require_document(document)
         if isinstance(document, MindMapPageView):
             def resolver(key):
                 return (self.engine.resolve_detail_page(key) if key in self._book_document.nodes
                         else (key, document.nodes[key].detail_page_id))
         else:
-            resolver = MindMapEngine(document).resolve_detail_page if document.submaps else None
-        # 完整文件装载时逐页校验；页内候选仍只测量当前页，禁止混排所有页面节点。
-        pages = [document.page_view()] + [document.page_view(page.id) for page in document.iter_pages()]
+            resolver = document.detail_page_resolver() if document.submaps else None
+        if defer_inactive_pages and not isinstance(document, MindMapPageView):
+            # 配置及图片不依赖正文排版，先逐项校验，损坏的非活动页也必须在替换前拒绝。
+            records = [document, *document.iter_pages(), document.inspiration]
+            for record in records:
+                self.layout_registry.validate_config(record.layout)
+            image_ids = {node.image_id for node in document.nodes.values() if node.image_id}
+            for key in image_ids:
+                if key not in self.factory.pixmaps:
+                    self.factory.pixmaps[key] = decode_image(document.assets[key].data)[0]
+                    if len(self.factory.pixmaps) > 128:
+                        self.factory.pixmaps.popitem(last=False)
+            pages = [document.page_view()]
+            pages.extend(document.page_view(page.id) for page in document.iter_pages()
+                         if not supports_incremental_layout(self.layout_registry, page.layout.algorithm_id))
+        else:
+            pages = [document.page_view()] + [document.page_view(page.id) for page in document.iter_pages()]
+        # 单页候选只测量当前页；文件打开只预排主图及扩展页面，禁止混排所有页面节点。
         for page in pages:
             self.layout_registry.validate_config(page.layout)
             _, sizes = self.factory.measure(page, detail_page_resolver=resolver)
-            self.layout_registry.layout(page, sizes)
+            if (defer_inactive_pages
+                    and supports_incremental_layout(self.layout_registry, page.layout.algorithm_id)):
+                # 与正式画布共用几何服务，避免为首帧不会绘制的连接线构造全部路径。
+                prepared = create_incremental_layout(self.layout_registry, page, sizes)
+                # 冻结结果会检查摘要边界，数值溢出也必须在替换前拒绝；此处不会
+                # 展开节点坐标或连接线路径，成本与视口外路径数量无关。
+                if prepared is not None:
+                    prepared.result()
+                else:
+                    self.layout_registry.layout(page, sizes)
+            else:
+                self.layout_registry.layout(page, sizes)
 
     def context_menu(self, global_position):
         """在指定全局位置显示复用内置及扩展 QAction 的右键菜单。

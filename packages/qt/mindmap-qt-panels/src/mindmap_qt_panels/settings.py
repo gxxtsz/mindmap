@@ -50,7 +50,13 @@ class GlobalSettingsPanel(QWidget):
 
     SPACING_PRESETS = (("紧凑", (32.0, 10.0)), ("适中", (64.0, 22.0)), ("宽松", (96.0, 36.0)))
 
-    def __init__(self, canvas: PanelHost, parent=None):
+    def __init__(self, canvas: PanelHost, parent=None, *, ui_colors: UiColors | None = None):
+        """建立设置控件并应用可选宿主色板，避免首次同步后再次整体换肤。
+
+        省略色板时跟随画布文档主题；初始化及换肤均不提交布局、外观或撤销历史。
+        """
+        if ui_colors is not None and not isinstance(ui_colors, UiColors):
+            raise TypeError("界面色板必须为 UiColors 或 None")
         super().__init__(parent)
         self.canvas = canvas
         self._loading = False
@@ -63,7 +69,7 @@ class GlobalSettingsPanel(QWidget):
         self.timer.setInterval(400)
         self.timer.timeout.connect(self.flush)
         self._theme_signature = None
-        self._ui_colors_override = None
+        self._ui_colors_override = ui_colors
         self._menus = {}
         self.sections = {}
         self.setObjectName("global_settings_panel")

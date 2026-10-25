@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from mindmap_core import MindMapError, apply_branch_style
 from mindmap_qt_ui.properties import NodePropertiesForm, normalize_property
-from mindmap_qt_ui.ui_style import sidebar_surface
+from mindmap_qt_ui.ui_style import UiColors, sidebar_surface
 from PySide6.QtCore import QTimer
 
 from .contracts import PanelHost
@@ -19,8 +19,9 @@ class NodePropertiesPanel(NodePropertiesForm):
     后以一次事务提交，从而保留标准撤销、操作钩子、保存标记和错误回滚语义。
     """
 
-    def __init__(self, canvas: PanelHost, parent=None):
-        super().__init__(parent)
+    def __init__(self, canvas: PanelHost, parent=None, *, ui_colors: UiColors | None = None):
+        """绑定画布并按可选宿主色板初始化表单；默认继续跟随文档主题。"""
+        super().__init__(parent, ui_colors=ui_colors)
         self.canvas = canvas
         self._ids = []
         self._generation = canvas.engine.document_generation

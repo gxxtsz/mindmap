@@ -4,6 +4,7 @@ import copy
 import json
 import re
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import asdict, fields
 from pathlib import Path
 from uuid import uuid4
@@ -92,6 +93,7 @@ class DockManager(QObject):
         self._dragging = False
         self.session_token = uuid4().hex
         self._default_snapshot = None
+        self._session_save_depth = 0
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(250)
@@ -1268,8 +1270,29 @@ class DockManager(QObject):
         self._select_remaining_document()
         self.theme_changed.emit(self.theme.name)
 
+    @contextmanager
+    def defer_session_saving(self):
+        """在 GUI 线程暂缓布局持久化，防止异步启动过程把半成品覆盖到旧配置。
+
+        进入时停止已排队的防抖计时；作用域内仍可处理 Qt 事件、注册文档及恢复布局，
+        但自动保存和显式 save_session 均不写入存储。不修改 refreshing，因此正常
+        布局刷新、焦点通知及业务信号继续运行。允许嵌套，最外层正常退出后安排一次
+        延迟保存，记录最终完整状态；异常退出不主动补写，内存布局不在此处回滚。
+        宿主应把文件会话恢复及 load_session 放入同一作用域，不能在中途提前释放。
+        """
+        self._session_save_depth += 1
+        self._save_timer.stop()
+        completed = False
+        try:
+            yield
+            completed = True
+        finally:
+            self._session_save_depth -= 1
+            if completed and self._session_save_depth == 0:
+                self.schedule_save()
+
     def schedule_save(self):
-        if not self.closing and not self.refreshing:
+        if not self.closing and not self.refreshing and self._session_save_depth == 0:
             self._save_timer.start()
 
     def save_session(self):
@@ -1278,7 +1301,7 @@ class DockManager(QObject):
         保留版本 1 的会话外层及快照格式，不再写入命名布局集合或当前布局名称。
         读取旧配置后的下一次正常保存也会自然清除这些废弃字段。
         """
-        if self.closing or not self.hosts:
+        if self.closing or self._session_save_depth or not self.hosts:
             return
         payload = {"schema_version": 1, "session": self.capture_layout()}
         try:

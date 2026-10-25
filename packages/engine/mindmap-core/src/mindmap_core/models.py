@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,10 +13,53 @@ from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError
 
+_ATOMIC_TYPES = frozenset((str, int, float, bool, bytes, type(None)))
+
+
+def _copy_node_field(value, memo):
+    """快速复制纯标量列表及字典，嵌套或扩展对象继续使用标准深拷贝。
+
+    先查询和登记 memo，保留跨字段共享容器及自引用语义；原容器保活到整个复制
+    结束，避免扩展对象产生临时字段时出现对象标识复用。仅精确匹配内置容器类型，
+    容器子类的自定义复制行为不进入快速路径。
+    """
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
+    flat = ((type(value) is list and all(type(item) in _ATOMIC_TYPES for item in value))
+            or (type(value) is dict and all(type(key) in _ATOMIC_TYPES and type(item) in _ATOMIC_TYPES
+                                           for key, item in value.items())))
+    if not flat:
+        return deepcopy(value, memo)
+    result = value.copy()
+    memo[identity] = result
+    memo.setdefault(id(memo), []).append(value)
+    return result
+
 
 def new_id() -> str:
     """生成不依赖节点内容的稳定标识，复制节点时必须重新生成。"""
     return uuid4().hex
+
+
+def _resolve_detail_page(document, node_id, root_pages):
+    """由完整文档和所属根索引解析共享详情，供编辑器及独立只读解析器共用。"""
+    if node_id not in document.nodes:
+        raise MindMapError(f"节点不存在：{node_id}")
+    node = document.nodes[node_id]
+    if node.detail_page_id:
+        return node_id, node.detail_page_id
+    outer = node_id
+    while (page_id := root_pages.get(outer)) in document.submaps:
+        outer = document.submaps[page_id].owner_id
+    current = outer
+    while True:
+        node = document.nodes[current]
+        if node.detail_page_id:
+            return current, node.detail_page_id
+        if not node.submap_id:
+            return outer, None
+        current = document.submaps[node.submap_id].root_id
 
 
 @dataclass
@@ -94,12 +138,13 @@ class Node:
         if state is not None:
             result.__dict__ = state
         else:
-            memo[id(self.__dict__)] = result.__dict__
-            atomic = (str, int, float, bool, bytes, type(None))
-            result.__dict__.update(
-                (name, value if type(value) in atomic else deepcopy(value, memo))
-                for name, value in self.__dict__.items()
-            )
+            # 一次复制字段表，标量直接保留；空列表、ID 列表及扁平样式不再进入
+            # 通用 deepcopy 分发器。嵌套 JSON、循环和扩展属性仍保持完整隔离。
+            state = self.__dict__.copy()
+            memo[id(self.__dict__)] = result.__dict__ = state
+            for name, value in state.items():
+                if type(value) not in _ATOMIC_TYPES:
+                    state[name] = _copy_node_field(value, memo)
         if type(self) is not Node:
             # 普通节点没有 slots；扩展节点若声明了槽字段，同样保持原有深拷贝能力。
             for base in type(self).__mro__:
@@ -276,6 +321,17 @@ class MindMapDocument:
         """依次借用两类附属页面；只用于完整装载、校验和显式全文件操作。"""
         yield from self.submaps.values()
         yield from self.detail_pages.values()
+
+    def detail_page_resolver(self) -> Callable[[str], tuple[str, str | None]]:
+        """为已通过 validate 的完整快照建立共享详情只读查询函数。
+
+        只为子导图根建立索引，不复制节点或图片，也不创建编辑引擎及历史；每次查询
+        仅遍历入口与子导图根的关联链，失效节点抛出中文 MindMapError。返回函数借用
+        本快照，调用方不得在使用期间修改其页面关系；文档替换后应重新创建解析器。
+        此接口不负责结构校验，不应对未校验的外部字典直接构造文档后调用。
+        """
+        roots = {page.root_id: page.id for page in self.submaps.values()}
+        return lambda node_id: _resolve_detail_page(self, node_id, roots)
 
     def page_view(self, page_id: str | None = None, *,
                   inspiration_root_id: str | None = None) -> MindMapPageView:

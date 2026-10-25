@@ -118,6 +118,44 @@ def test_save_snapshot_is_stable_across_changes_and_old_save_preserves_new_dirty
     assert not engine.mark_saved_snapshot(saved) and engine.is_dirty
 
 
+def test_read_snapshot_avoids_entity_copy_and_remains_stable_during_edits(monkeypatch):
+    """读版本不遍历复制节点，后续文字、结构及历史重放均不改写已捕获内容。"""
+    document, keys = document_with_nodes(30)
+    engine = MindMapEngine(document)
+
+    def reject_copy(*args):
+        raise AssertionError("捕获只读版本不应复制节点")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Node, "__deepcopy__", reject_copy)
+        snapshot = engine.capture_read_snapshot()
+    expected = deepcopy(snapshot)
+    engine.update_node(keys[1], text="新的正式内容")
+    engine.move_nodes([keys[-1]], keys[2])
+    assert snapshot == expected
+    assert engine.undo() and engine.redo()
+    assert snapshot == expected
+    with pytest.raises(MindMapError, match="事务"):
+        with engine.transaction():
+            engine.capture_read_snapshot()
+
+
+def test_read_model_can_apply_events_without_mutating_engine():
+    """只读版本的顶层映射独立，事件重放替换实体时不会污染引擎及其他读版本。"""
+    document, keys = document_with_nodes(20)
+    engine = MindMapEngine(document)
+    first, second = engine.capture_read_snapshot(), engine.capture_read_snapshot()
+    before = deepcopy(second)
+    unsubscribe = engine.subscribe(lambda event: event.changes.apply(first, forward=event.forward))
+    try:
+        engine.update_node(keys[1], text="已提交的正文")
+        assert first == engine.document and second == before
+        first.nodes.pop(keys[-1])
+        assert keys[-1] in engine.document.nodes and keys[-1] in second.nodes
+    finally:
+        unsubscribe()
+
+
 def test_unused_asset_restored_by_undo_is_pruned_by_next_commit():
     document = MindMapDocument.new()
     asset = Asset.from_bytes("未关联资源".encode())

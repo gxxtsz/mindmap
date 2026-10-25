@@ -72,6 +72,28 @@ def test_nested_root_aliases_share_details_but_regular_children_do_not():
     engine.document.validate()
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_document_resolver_matches_engine_without_building_another_engine(legacy):
+    """候选排版借用快照解析别名，与正式引擎在多级根及旧版多详情上保持一致。"""
+    engine = MindMapEngine()
+    owner = engine.add_child(engine.root_id, "页面入口")
+    page = engine.create_submap(owner)
+    root = engine.page_document(page).root_id
+    nested = engine.create_submap(root)
+    nested_root = engine.page_document(nested).root_id
+    engine.add_child(nested_root, "普通主题")
+    engine = legacy_details(engine, owner, root) if legacy else engine
+    if not legacy:
+        engine.create_detail_page(owner)
+    document = engine.document
+    resolver = document.detail_page_resolver()
+    revision = engine.revision
+    assert all(resolver(key) == engine.resolve_detail_page(key) for key in document.nodes)
+    with pytest.raises(MindMapError, match="节点不存在"):
+        resolver("失效标识")
+    assert engine.revision == revision and engine.document == document
+
+
 @pytest.mark.parametrize("conflict", [False, True])
 def test_legacy_root_details_remain_accessible_without_merging(conflict):
     """旧文件单详情双向复用，多详情各自入口优先，删除和撤销不丢失其他内容。"""
