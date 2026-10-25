@@ -1,4 +1,4 @@
-"""文本大纲的自动识别、共用配置弹窗、多根插入及一次撤销重做验收。"""
+"""单行文本直贴、大纲自动识别、共用配置弹窗及一次撤销重做验收。"""
 
 from copy import deepcopy
 
@@ -191,9 +191,9 @@ def test_indented_paste_keeps_redo_on_parse_or_engine_failure(canvas):
     assert widget.selected_node_ids() == selection and engine.can_redo
 
 
-def test_indented_paste_in_readonly_and_text_editor_preserves_existing_behavior(canvas, qtbot, monkeypatch):
+@pytest.mark.parametrize("text", ["单行主题", "# 单行主题", "甲\n  孩子\n乙"])
+def test_indented_paste_in_readonly_and_text_editor_preserves_existing_behavior(canvas, qtbot, monkeypatch, text):
     widget, target = canvas
-    text = "甲\n  孩子\n乙"
     QApplication.clipboard().setText(text)
     before = widget.engine.document
     monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
@@ -367,40 +367,188 @@ def test_text_replacement_on_other_pages_keeps_identity_and_history(canvas, monk
     assert widget.selected_node_ids() == [target] and widget.current_page_id == page
 
 
-@pytest.mark.parametrize("text", ["单行主题", "# 单行主题"])
-@pytest.mark.parametrize("keep_children", [False, True])
-@pytest.mark.parametrize("replace_root", [False, True])
-def test_single_line_replacement_respects_noop_and_shared_preferences(
-    canvas, monkeypatch, text, keep_children, replace_root,
+@pytest.mark.parametrize("text", ["单行主题", "# 单行主题", "- 单行主题"])
+@pytest.mark.parametrize("page_kind", ["main", "submap", "detail", "inspiration"])
+@pytest.mark.parametrize("entry", ["shortcut", "context"])
+def test_single_line_appends_without_dialog_with_one_undo(
+    canvas, qtbot, monkeypatch, text, page_kind, entry,
 ):
-    """无来源后代时仍询问；保留目标且不移除已有内容的空操作仅记忆选项。"""
+    """四类页面的两种入口均直接追加单行，保留目标、后代、分支样式及共享偏好。"""
     widget, target = canvas
     engine = widget.engine
+    if page_kind == "submap":
+        widget.create_submap()
+    elif page_kind == "detail":
+        widget.create_detail_page()
+    elif page_kind == "inspiration":
+        target = engine.add_inspiration("独立想法", position=(40, 60))
+        widget.show_inspiration(target)
+    target = widget.current_node_id()
     old_child = engine.add_child(target, "旧后代")
-    engine.replace_document(engine.document)
+    engine.add_child(old_child, "旧孙节点")
+    engine.update_node(target, style={"font_size": 19, "branch": {"kind": "line"}},
+                       text_format="markdown", tags=["目标标签"], note="目标备注")
+    engine.set_expanded(target, False)
     widget.select_nodes([target])
-    before, revision = engine.document, engine.revision
-    prompts = []
+    widget.set_edraw_paste_options("replace", False, True)
+    changes, errors = [], []
+    widget.edraw_paste_options_changed.connect(lambda *values: changes.append(values))
+    widget.error_occurred.connect(errors.append)
+    before, revision, page = engine.document, engine.revision, widget.current_page_id
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+                        lambda *args, **kwargs: pytest.fail("单行文本不能弹出配置"))
+    QApplication.clipboard().setText(text)
+
+    paste_from_entry(widget, entry, qtbot, monkeypatch)
+
+    after = engine.document
+    added = after.nodes.keys() - before.nodes.keys()
+    assert len(added) == 1 and not errors
+    inserted, = added
+    node = after.nodes[inserted]
+    assert node.text == "单行主题" and node.text_format == "plain" and not node.children
+    assert node.style["branch"] == {"kind": "line"}
+    expected = deepcopy(before.nodes[target])
+    expected.children.append(inserted)
+    expected.expanded = True
+    assert after.nodes[target] == expected
+    assert after.nodes[old_child] == before.nodes[old_child]
+    assert widget.selected_node_ids() == [inserted] and widget.current_page_id == page
+    assert engine.revision == revision + 1 and widget.edraw_paste_options == ("replace", False, True)
+    assert QApplication.clipboard().text() == text
+    assert engine.undo() and engine.document == before
+    assert widget.selected_node_ids() == [target] and widget.current_page_id == page
+    assert engine.redo() and engine.document == after
+    assert widget.selected_node_ids() == [inserted] and widget.current_page_id == page
+    assert not changes and widget.edraw_paste_options == ("replace", False, True)
+
+
+@pytest.mark.parametrize("mode", ["append", "replace"])
+@pytest.mark.parametrize("keep_children", [False, True])
+@pytest.mark.parametrize("replace_root", [False, True])
+def test_single_line_does_not_read_or_update_shared_preferences(
+    canvas, monkeypatch, mode, keep_children, replace_root,
+):
+    """直贴固定追加，不读取任何共享偏好，也不把追加结果写回或发出变更信号。"""
+    widget, target = canvas
+    options = (mode, keep_children, replace_root)
+    widget.set_edraw_paste_options(*options)
+    changes = []
+    widget.edraw_paste_options_changed.connect(lambda *values: changes.append(values))
+
+    def reject_options(*args, **kwargs):
+        pytest.fail("单行直贴不能读取或询问共享偏好")
+
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options", reject_options)
+    QApplication.clipboard().setText("单行主题")
+    with monkeypatch.context() as guard:
+        guard.setattr(MindMapWidget, "edraw_paste_options", property(reject_options))
+        inserted, = widget.paste()
+    assert widget.engine.get_node(target).children == [inserted]
+    assert widget.engine.get_node(target).text == "粘贴目标"
+    assert not changes and widget.edraw_paste_options == options
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("单行主题\n", "单行主题"),
+    ("单行主题\r\n", "单行主题"),
+    ("单行主题\r", "单行主题"),
+    ("\ufeff单行主题", "单行主题"),
+    ("\n \t\n  单行主题  \n\n", "单行主题"),
+    ("\ufeff\r\n \t\r\n  单行主题 \r\n\r\n", "单行主题"),
+    ("\ufeff\n# 单行主题\n\n", "单行主题"),
+    ("\r\n- 单行主题\r\n", "单行主题"),
+    ("* 单行主题", "单行主题"),
+    ("+ 单行主题", "单行主题"),
+    ("1. 单行主题", "单行主题"),
+    ("1) 单行主题", "单行主题"),
+    ("#标签", "#标签"),
+    ("-正文", "-正文"),
+    ("文字 内部\t空格", "文字 内部\t空格"),
+])
+def test_single_line_keeps_existing_text_normalization(canvas, monkeypatch, text, expected):
+    """单行判断忽略 BOM 和空白行，正文空白及 Markdown 标记沿用既有解析规则。"""
+    widget, target = canvas
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+                        lambda *args, **kwargs: pytest.fail("有效单行不能弹出配置"))
+    QApplication.clipboard().setText(text)
+    inserted, = widget.paste()
+    assert widget.engine.get_node(inserted).text == expected
+    assert widget.engine.get_node(target).children == [inserted]
+
+
+@pytest.mark.parametrize("selection", ["multiple", "none"])
+def test_single_line_preserves_existing_target_resolution(canvas, monkeypatch, selection):
+    """多选取树序首个目标，主画布无选择时仍回退到当前页根节点。"""
+    widget, target = canvas
+    engine = widget.engine
+    if selection == "multiple":
+        other = engine.get_node(engine.root_id).children[-1]
+        widget.select_nodes([other, target])
+    else:
+        widget.select_nodes([])
+        target = engine.root_id
+    children = engine.get_node(target).children
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+                        lambda *args, **kwargs: pytest.fail("单行直贴不能弹出配置"))
+    QApplication.clipboard().setText("单行主题")
+    inserted, = widget.paste()
+    assert engine.get_node(target).children == children + [inserted]
+    assert widget.selected_node_ids() == [inserted]
+
+
+@pytest.mark.parametrize("text", ["单行想法", "# 单行想法"])
+def test_single_line_without_inspiration_selection_creates_floating_tree(canvas, monkeypatch, text):
+    """灵感区无目标时单行仍创建游离树，并支持一次撤销、重做。"""
+    widget, _ = canvas
+    widget.show_inspiration()
+    before, revision = widget.engine.document, widget.engine.revision
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+                        lambda *args, **kwargs: pytest.fail("无目标的单行游离树不能弹出配置"))
+    QApplication.clipboard().setText(text)
+    inserted, = widget.paste()
+    after = widget.engine.document
+    assert after.inspiration.root_ids == [inserted] and after.nodes[inserted].text == "单行想法"
+    assert len(after.nodes) == len(before.nodes) + 1 and widget.engine.revision == revision + 1
+    assert set(after.inspiration.positions) == {inserted}
+    assert widget.selected_node_ids() == [inserted]
+    assert widget.engine.undo() and widget.engine.document == before
+    assert not widget.selected_node_ids()
+    assert widget.engine.redo() and widget.engine.document == after
+    assert widget.selected_node_ids() == [inserted]
+
+
+@pytest.mark.parametrize("text,child_text", [("扩展片段", "来源后代"), ("甲\n乙", None)])
+def test_custom_text_codec_keeps_options_for_nontrivial_outline(canvas, monkeypatch, text, child_text):
+    """单行解析为多节点或多行解析为单节点时都保留配置，不改写导入器返回的片段。"""
+    widget, _ = canvas
+    source = MindMapEngine()
+    branch = source.add_child(source.root_id, "来源")
+    if child_text is not None:
+        source.add_child(branch, child_text)
+    fragment = source.copy_fragment([branch])
+    original = deepcopy(fragment)
+    reads, prompts = [], []
+
+    class FragmentCodec:
+        def read(self, stream, *, options):
+            reads.append(options)
+            return fragment
+
+    registry = FormatRegistry()
+    registry.register(create_default_format_registry().get("text").info, importer=FragmentCodec())
+    widget.format_registry = registry
 
     def choose(*args, **kwargs):
         prompts.append(kwargs)
-        return EdrawPasteOptions("replace", keep_children, replace_root)
+        return EdrawPasteOptions("append", True, True)
 
     monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options", choose)
     QApplication.clipboard().setText(text)
-    assert widget.paste() == [target]
-    after = engine.document
-    assert len(prompts) == 1 and prompts[0]["root_count"] == prompts[0]["node_count"] == 1
-    assert (old_child in after.nodes) == keep_children
-    assert engine.get_node(target).text == ("单行主题" if replace_root else "粘贴目标")
-    changed = replace_root or not keep_children
-    assert engine.revision == revision + int(changed) and engine.can_undo == changed
-    assert widget.edraw_paste_options == ("replace", keep_children, replace_root)
-    if changed:
-        assert engine.undo() and engine.document == before
-        assert engine.redo() and engine.document == after
-    else:
-        assert after == before and not engine.is_dirty and not widget._selection_undo
+    inserted, = widget.paste()
+    assert reads == [{"as_fragment": True}] and len(prompts) == 1
+    assert prompts[0]["node_count"] == len(fragment.nodes) - 1
+    assert widget.engine.get_node(inserted).text == "来源" and fragment == original
 
 
 def paste_snapshot(widget):
@@ -409,6 +557,45 @@ def paste_snapshot(widget):
     return (engine.document, engine.revision, engine.is_dirty, engine.can_undo, engine.can_redo,
             widget.current_page_id, widget.selected_node_ids(), deepcopy(widget._selection_undo),
             deepcopy(widget._selection_redo), widget.edraw_paste_options)
+
+
+@pytest.mark.parametrize("text", ["单行主题", "# 单行主题"])
+@pytest.mark.parametrize("failure", ["readonly", "engine"])
+def test_single_line_failure_preserves_complete_state(canvas, monkeypatch, text, failure):
+    """直贴在只读或引擎拒绝时保持文档、选择、历史、剪贴板及共享偏好。"""
+    widget, target = canvas
+    engine = widget.engine
+    engine.add_child(target, "可重做节点")
+    engine.undo()
+    widget.set_edraw_paste_options("replace", False, True)
+    if failure == "readonly":
+        widget.set_editable(False)
+    else:
+        engine.before_operation = lambda operation, args: operation != "paste_fragment"
+    changes = []
+    widget.edraw_paste_options_changed.connect(lambda *values: changes.append(values))
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+                        lambda *args, **kwargs: pytest.fail("单行直贴失败不能弹出配置"))
+    QApplication.clipboard().setText(text)
+    before = paste_snapshot(widget)
+    with pytest.raises(MindMapError):
+        widget.paste()
+    assert paste_snapshot(widget) == before and QApplication.clipboard().text() == text and not changes
+
+
+@pytest.mark.parametrize("text", ["", " \t", "\ufeff\n \t\r\n"])
+def test_blank_text_keeps_existing_error_without_changes(canvas, monkeypatch, text):
+    """空白输入仍由原解析器报告空内容，不能误建空节点或询问粘贴配置。"""
+    widget, _ = canvas
+    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+                        lambda *args, **kwargs: pytest.fail("空白输入不能弹出配置"))
+    QApplication.clipboard().setText(text)
+    # Qt 读取文本时可能去除开头 BOM，比较粘贴前后的实际文本以排除系统规范化差异。
+    clipboard_text = QApplication.clipboard().text()
+    before = paste_snapshot(widget)
+    with pytest.raises(MindMapError, match="不能为空"):
+        widget.paste()
+    assert paste_snapshot(widget) == before and QApplication.clipboard().text() == clipboard_text
 
 
 @pytest.mark.parametrize("text,title", SINGLE_TREE_SOURCES)
