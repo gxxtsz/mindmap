@@ -122,8 +122,8 @@ class _WindowsFrame:
         self.user32.SetWindowPos.restype = wintypes.BOOL
         self.user32.IsZoomed.argtypes = [wintypes.HWND]
         self.user32.IsZoomed.restype = wintypes.BOOL
-        self.user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
-        self.user32.MonitorFromWindow.restype = wintypes.HANDLE
+        self.user32.MonitorFromRect.argtypes = [ctypes.POINTER(wintypes.RECT), wintypes.DWORD]
+        self.user32.MonitorFromRect.restype = wintypes.HANDLE
         self.user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_MonitorInfo)]
         self.user32.GetMonitorInfoW.restype = wintypes.BOOL
         self.dwm.DwmIsCompositionEnabled.argtypes = [ctypes.POINTER(wintypes.BOOL)]
@@ -188,20 +188,25 @@ class _WindowsFrame:
 
         address 指向 NCCALCSIZE_PARAMS；其首字段就是待计算的窗口 RECT。
         使用 Win32 的物理坐标，避免在高 DPI 或副屏上混用 Qt 逻辑像素。
+        必须按消息中的目标矩形选择显示器：从最小化恢复时，HWND 尚可能停留在
+        (-32000, -32000)，MonitorFromWindow 会选到另一块屏幕，将客户区裁成零宽。
         普通窗口和无法读取显示器信息的情况交给 Qt 的无边框计算处理。
         """
         if not self.user32.IsZoomed(self.hwnd):
             return
-        monitor = self.user32.MonitorFromWindow(self.hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        client = wintypes.RECT.from_address(address)
+        monitor = self.user32.MonitorFromRect(ctypes.byref(client), 2)  # MONITOR_DEFAULTTONEAREST
         info = _MonitorInfo()
         info.size = ctypes.sizeof(info)
         if not self.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
             return
-        client = wintypes.RECT.from_address(address)
-        client.left = max(client.left, info.work.left)
-        client.top = max(client.top, info.work.top)
-        client.right = min(client.right, info.work.right)
-        client.bottom = min(client.bottom, info.work.bottom)
+        left, top = max(client.left, info.work.left), max(client.top, info.work.top)
+        right, bottom = min(client.right, info.work.right), min(client.bottom, info.work.bottom)
+        if right <= left or bottom <= top:
+            # 显示器拓扑切换期间工作区也可能暂时无效；不把异常裁剪结果写回系统。
+            _FRAME_LOG.warning("目标窗口与显示器工作区没有有效交集，保留原客户区")
+            return
+        client.left, client.top, client.right, client.bottom = left, top, right, bottom
 
 
 def _create_windows_frame(hwnd: int) -> _WindowsFrame | None:

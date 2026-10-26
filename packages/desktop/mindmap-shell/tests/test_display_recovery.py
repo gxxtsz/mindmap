@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from mindmap_shell import AppSpec, WorkbenchWindow
-from mindmap_shell._windows_frame import _WindowsFrame
+from mindmap_shell._windows_frame import _MonitorInfo, _WindowsFrame
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
@@ -153,3 +153,56 @@ def test_failed_frame_extension_keeps_fallback_outline_available(caplog):
     frame.refresh(maximized=False, fullscreen=False, dark=False, border_color=0x123456)
     assert not frame.native_border
     assert "恢复系统边框扩展失败" in caplog.text and "0x80004005" in caplog.text
+
+
+@pytest.mark.parametrize("proposed,expected", [
+    ((-10, -10, 3850, 2110), (0, 0, 3840, 2088)),
+    ((-3850, -10, 10, 2110), (-3840, 0, 0, 2088)),
+])
+def test_maximized_client_uses_destination_monitor_after_minimize(proposed, expected):
+    """模拟恢复时HWND仍指向左屏的旧位置，裁剪必须跟随消息中的目标矩形。
+
+    两块屏幕在物理坐标中左右相邻，左屏使用负坐标。旧实现查询HWND所在屏幕，
+    恢复到右屏时会把客户区右边界裁为0；同一用例也验证左屏仍能正确保留负坐标。
+    """
+    frame = object.__new__(_WindowsFrame)
+    frame.hwnd = 1
+    monitors = {1: (-3840, 0, 0, 2088), 2: (0, 0, 3840, 2088)}
+
+    def monitor_from_rect(address, flags):
+        rect = ctypes.cast(address, ctypes.POINTER(wintypes.RECT)).contents
+        return 1 if rect.left + rect.right < 0 else 2
+
+    def get_monitor_info(monitor, address):
+        info = ctypes.cast(address, ctypes.POINTER(_MonitorInfo)).contents
+        info.work = wintypes.RECT(*monitors[monitor])
+        return True
+
+    frame.user32 = SimpleNamespace(
+        IsZoomed=lambda hwnd: True,
+        MonitorFromWindow=lambda hwnd, flags: 1,
+        MonitorFromRect=monitor_from_rect,
+        GetMonitorInfoW=get_monitor_info,
+    )
+    client = wintypes.RECT(*proposed)
+    frame.constrain_maximized_client(ctypes.addressof(client))
+    assert (client.left, client.top, client.right, client.bottom) == expected
+    assert client.right > client.left and client.bottom > client.top
+
+
+def test_invalid_monitor_work_area_does_not_zero_client(caplog):
+    """显示器拓扑切换时即使系统临时返回不相交的工作区，也不提交空客户区。"""
+    frame = object.__new__(_WindowsFrame)
+    frame.hwnd = 1
+
+    def get_monitor_info(monitor, address):
+        info = ctypes.cast(address, ctypes.POINTER(_MonitorInfo)).contents
+        info.work = wintypes.RECT(-3840, 0, 0, 2088)
+        return True
+
+    frame.user32 = SimpleNamespace(IsZoomed=lambda hwnd: True, MonitorFromRect=lambda *args: 1,
+                                   GetMonitorInfoW=get_monitor_info)
+    client = wintypes.RECT(0, 0, 3840, 2088)
+    frame.constrain_maximized_client(ctypes.addressof(client))
+    assert (client.left, client.top, client.right, client.bottom) == (0, 0, 3840, 2088)
+    assert "没有有效交集" in caplog.text

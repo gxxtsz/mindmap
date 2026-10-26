@@ -164,3 +164,63 @@ def test_native_border_follows_theme_and_window_state(frame_window, qtbot, monke
         assert_decoration(0xFFFFFFFE, 1)
         window.showNormal()
         assert_decoration(native_color, 2)
+
+
+@pytest.mark.parametrize("destination", ["primary", "negative"])
+def test_maximized_window_restores_via_system_without_empty_client(frame_window, qtbot, destination):
+    """覆盖任务栏恢复最大化的真实系统路径，不能用showNormal绕开最大化恢复。
+
+    最小化期间HWND通常被系统移到(-32000, -32000)，多屏环境中查询旧HWND会
+    选错显示器。测试以实际客户区和屏幕输出为准，避免QWidget.grab重新绘制后
+    掩盖客户区已经被裁成零宽的故障；主屏与负坐标屏分别验收。
+    """
+    if QApplication.platformName() != "windows":
+        pytest.skip("系统恢复路径需要真实Windows窗口")
+    if destination == "primary":
+        screen = QApplication.primaryScreen()
+    else:
+        screen = next((item for item in QApplication.screens() if item.geometry().left() < 0), None)
+        if screen is None:
+            pytest.skip("当前环境没有负坐标显示器")
+    window = frame_window
+    available = screen.availableGeometry()
+    original = QRect(available.topLeft() + QPoint(30, 30),
+                     QSize(min(1120, available.width() - 60), min(760, available.height() - 60)))
+    window.setGeometry(original)
+    window.show()
+    qtbot.waitUntil(lambda: window.screen() is screen)
+    window.showMaximized()
+    qtbot.waitUntil(lambda: window.geometry() == available and window._native_frame is not None)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.ShowWindow.restype = wintypes.BOOL
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetClientRect.restype = wintypes.BOOL
+    hwnd = int(window.winId())
+    before = wintypes.RECT()
+    assert user32.GetClientRect(hwnd, ctypes.byref(before))
+    window.showMinimized()
+    qtbot.waitUntil(lambda: window.isMinimized() and not window.windowHandle().isExposed())
+    qtbot.waitUntil(lambda: not window._frame_update_timer.isActive())
+    # SW_RESTORE保留系统记录的“恢复到最大化”；只操作本测试窗口，不广播系统消息。
+    user32.ShowWindow(hwnd, 9)
+    qtbot.waitUntil(lambda: window.isMaximized() and not window.isMinimized())
+    after = wintypes.RECT()
+    assert user32.GetClientRect(hwnd, ctypes.byref(after))
+    assert after.right > after.left and after.bottom > after.top
+    assert (after.right, after.bottom) == (before.right, before.bottom)
+    qtbot.waitUntil(lambda: window.geometry() == available)
+    qtbot.waitUntil(window.windowHandle().isExposed)
+
+    def screen_has_content():
+        """直接采样原生窗口输出，不调用会重新绘制控件的QWidget.grab。"""
+        image = screen.grabWindow(hwnd).toImage()
+        if image.isNull() or image.width() <= 0 or image.height() <= 0:
+            return False
+        return any(image.pixelColor(image.width() * x // 4, image.height() * y // 4).lightness() > 0
+                   for x in (1, 2, 3) for y in (1, 2, 3))
+
+    qtbot.waitUntil(screen_has_content)
+    assert int(window.winId()) == hwnd
+    window.showNormal()
+    qtbot.waitUntil(lambda: window.geometry() == original)
