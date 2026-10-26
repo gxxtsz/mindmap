@@ -6,11 +6,14 @@
 """
 
 import ctypes
+import logging
 import sys
 from contextlib import contextmanager
 from ctypes import wintypes
 
 from PySide6.QtWidgets import QApplication
+
+_FRAME_LOG = logging.getLogger("mindmap_shell.display")
 
 
 class _Margins(ctypes.Structure):
@@ -163,7 +166,9 @@ class _WindowsFrame:
         旧系统或合成失败时为 False，继续使用自绘边框，不影响窗口内容及几何。
         """
         policy = ctypes.c_int(2)  # DWMWA_NCRENDERING_POLICY / DWMNCRP_ENABLED
-        self.dwm.DwmSetWindowAttribute(self.hwnd, 2, ctypes.byref(policy), ctypes.sizeof(policy))
+        result = self.dwm.DwmSetWindowAttribute(self.hwnd, 2, ctypes.byref(policy), ctypes.sizeof(policy))
+        if result < 0:
+            _FRAME_LOG.warning("设置系统边框合成策略失败：HRESULT=0x%08X", result & 0xFFFFFFFF)
         # 普通窗口请求系统圆角；最大化和全屏保持直角且不额外描边。
         corner = ctypes.c_int(1 if maximized or fullscreen else 2)  # DWMWCP_DONOTROUND / ROUND
         self.dwm.DwmSetWindowAttribute(self.hwnd, 33, ctypes.byref(corner), ctypes.sizeof(corner))
@@ -173,7 +178,10 @@ class _WindowsFrame:
         appearance = wintypes.BOOL(dark)  # DWMWA_USE_IMMERSIVE_DARK_MODE
         self.dwm.DwmSetWindowAttribute(self.hwnd, 20, ctypes.byref(appearance), ctypes.sizeof(appearance))
         margin = 0 if maximized or fullscreen else 1
-        self.dwm.DwmExtendFrameIntoClientArea(self.hwnd, ctypes.byref(_Margins(*([margin] * 4))))
+        result = self.dwm.DwmExtendFrameIntoClientArea(self.hwnd, ctypes.byref(_Margins(*([margin] * 4))))
+        if result < 0:
+            self.native_border = False
+            _FRAME_LOG.warning("恢复系统边框扩展失败：HRESULT=0x%08X", result & 0xFFFFFFFF)
 
     def constrain_maximized_client(self, address: int) -> None:
         """在 WM_NCCALCSIZE 中将最大化客户区裁到当前显示器的可用工作区。
@@ -208,4 +216,5 @@ def _create_windows_frame(hwnd: int) -> _WindowsFrame | None:
         frame = _WindowsFrame(hwnd)
         return frame if frame.enable() else None
     except (OSError, AttributeError):
+        _FRAME_LOG.warning("启用 Windows 系统边框失败，保留 Qt 自绘轮廓", exc_info=True)
         return None

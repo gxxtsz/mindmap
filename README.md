@@ -713,4 +713,6 @@ uv run --locked --all-packages python scripts/verify_branch_transfer_drag.py
 
 - [桌面框架说明](docs/桌面框架.md)：两个基础包的接口、依赖方向和应用配置。
 
+- [显示异常排查](docs/显示异常排查.md)：闲置后黑屏的已知线索、显示恢复与本机诊断日志。
+
 - [资源与许可](docs/资源与许可.md)：代码与资源许可。

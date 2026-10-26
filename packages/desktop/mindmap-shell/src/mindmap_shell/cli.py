@@ -9,6 +9,7 @@ from typing import Callable
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+from .diagnostics import runtime_diagnostics
 from .window import WorkbenchWindow
 
 
@@ -41,7 +42,6 @@ def run_desktop(builder: Callable[[argparse.Namespace], WorkbenchWindow], argv=N
     if options.compact:
         window.manager.set_option("compact", True)
     window.resize(width, height)
-    window.show()
     failed = []
     if options.screenshot:
         def capture():
@@ -58,15 +58,17 @@ def run_desktop(builder: Callable[[argparse.Namespace], WorkbenchWindow], argv=N
                 failed.append(str(error))
             app.quit()
         QTimer.singleShot(700, capture)
-    try:
-        result = app.exec()
-    finally:
-        window.manager.shutdown()
-        window.close()
-        # 离屏平台没有外部剪贴板服务；必须在 QApplication 和 Python 绑定仍有效时
-        # 释放自定义 MIME，避免退出时的原生访问冲突。原生平台保留系统剪贴板内容。
-        if app.platformName() == "offscreen":
-            app.clipboard().clear()
+    with runtime_diagnostics(window):
+        window.show()
+        try:
+            result = app.exec()
+        finally:
+            window.manager.shutdown()
+            window.close()
+            # 离屏平台没有外部剪贴板服务；必须在 QApplication 和 Python 绑定仍有效时
+            # 释放自定义 MIME，避免退出时的原生访问冲突。原生平台保留系统剪贴板内容。
+            if app.platformName() == "offscreen":
+                app.clipboard().clear()
     if failed:
         print(failed[0], file=sys.stderr)
         return 1

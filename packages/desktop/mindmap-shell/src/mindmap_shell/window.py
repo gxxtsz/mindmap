@@ -1,5 +1,6 @@
 """可配置的通用工作台外壳；业务通过规格、工厂和 QAction 注入。"""
 
+import logging
 import sys
 
 from mindmap_docking import DockHost, DockManager
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import (
 
 from ._windows_frame import _create_windows_frame, _preserve_windows_placement, _track_nonclient_mouse_leave
 from .specs import ActionSpec, AppSpec
+
+_DISPLAY_LOG = logging.getLogger("mindmap_shell.display")
 
 
 class _WindowOutline(QWidget):
@@ -338,6 +341,12 @@ class WorkbenchWindow(QMainWindow):
         self._frame_update_timer = QTimer(self)
         self._frame_update_timer.setSingleShot(True)
         self._frame_update_timer.timeout.connect(self._sync_native_frame)
+        # 显示设备／桌面合成器的通知可能成批到达。退出原生消息栈后只恢复一次，
+        # 避免在系统仍计算客户区时绘制，或在休眠恢复期间连续重建窗口装饰。
+        self._display_recovery_timer = QTimer(self)
+        self._display_recovery_timer.setSingleShot(True)
+        self._display_recovery_timer.timeout.connect(self._recover_display)
+        self._display_recovery_reason = ""
         self._frame_outline = _WindowOutline(self)
         self.refresh_theme()
 
@@ -438,11 +447,41 @@ class WorkbenchWindow(QMainWindow):
             )
         self._refresh_frame_outline()
 
+    def _request_display_recovery(self, reason: str) -> None:
+        """合并显示恢复请求；只安排 GUI 线程绘制，不重开文件、不重建业务控件。
+
+        reason 是程序内定义的系统事件名称，用于诊断日志，不包含导图正文。
+        隐藏、最小化或正在关闭时不抢先显示窗口，后续显示／激活事件会再次请求。
+        """
+        if self.manager.closing or not self.isVisible() or self.isMinimized():
+            return
+        self._display_recovery_reason = reason
+        self._display_recovery_timer.start(0)
+
+    def _recover_display(self) -> None:
+        """显示环境稳定后重新提交装饰，并将可见内容全部标为需要重绘。
+
+        DWM 外观刷新只更新系统边框，不能恢复 Qt 已丢失的客户区内容。尤其是
+        画布、列表等不透明子控件，单独更新主窗口可能被 Qt 的遮挡优化跳过，
+        因此分别请求更新可见子控件；update 会合并脏区域，不同步进入 paintEvent。
+        """
+        if self.manager.closing or not self.isVisible() or self.isMinimized():
+            return
+        if QApplication.platformName() == "windows" and not self.spec.native_title_bar:
+            self._sync_native_frame()
+        self.update()
+        for child in self.findChildren(QWidget):
+            if not child.isWindow() and child.isVisibleTo(self):
+                child.update()
+        _DISPLAY_LOG.info("已请求整窗重绘：%s", self._display_recovery_reason)
+
     def showEvent(self, event):
         """窗口可见后安排同步装饰，保持 Qt 自身的显示与最大化流程完整。"""
         super().showEvent(event)
         self._sync_always_on_top_window_flag()
         self._refresh_window_frame()
+        if QApplication.platformName() == "windows":
+            self._request_display_recovery("窗口重新显示")
 
     def resizeEvent(self, event):
         """覆盖层随窗口边界更新，中央布局、停靠尺寸和状态栏位置均由原布局负责。"""
@@ -456,9 +495,13 @@ class WorkbenchWindow(QMainWindow):
         if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "_frame_outline"):
             self.title_bar.refresh_theme()
             self._refresh_window_frame()
-        elif event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
-            if hasattr(self, "title_bar"):
+            if QApplication.platformName() == "windows" and event.oldState() & Qt.WindowState.WindowMinimized:
+                self._request_display_recovery("窗口从最小化恢复")
+        elif event.type() == QEvent.Type.ActivationChange and hasattr(self, "title_bar"):
+            if not self.isActiveWindow():
                 self.title_bar.maximize.finish_native_press()
+            elif QApplication.platformName() == "windows":
+                self._request_display_recovery("窗口重新激活")
 
     @Slot(str)
     def show_status_message(self, text):
@@ -593,9 +636,21 @@ class WorkbenchWindow(QMainWindow):
 
     def nativeEvent(self, event_type, message):
         """处理自绘边框与原生窗口按钮消息，保留系统缩放及最大化贴靠菜单。"""
-        if sys.platform == "win32" and not self.spec.native_title_bar:
+        if sys.platform == "win32":
             from ctypes import wintypes
             msg = wintypes.MSG.from_address(int(message))
+            if hasattr(self, "_display_recovery_timer"):
+                # 不消费系统显示／电源通知，Qt 仍需更新自己的屏幕和曝光状态。
+                # 这些消息可能发生在用户闲置、锁屏或显示器节能之后，不能仅刷新阴影。
+                if msg.message == 0x031E:  # WM_DWMCOMPOSITIONCHANGED
+                    self._request_display_recovery("桌面合成器变化")
+                elif msg.message == 0x007E:  # WM_DISPLAYCHANGE
+                    self._request_display_recovery("显示设备变化")
+                elif msg.message == 0x0218 and msg.wParam in (6, 7, 18):
+                    # WM_POWERBROADCAST：休眠／挂起恢复及自动恢复。
+                    self._request_display_recovery("系统从节能状态恢复")
+            if self.spec.native_title_bar:
+                return super().nativeEvent(event_type, message)
             if hasattr(self, "title_bar") and self._handle_native_maximize_mouse(msg):
                 return True, 0
             if msg.message == 0x0083 and msg.wParam and self._native_frame is not None:
@@ -604,10 +659,7 @@ class WorkbenchWindow(QMainWindow):
                 if not self.isFullScreen():
                     self._native_frame.constrain_maximized_client(msg.lParam)
                 return True, 0
-            if msg.message == 0x031E and self._native_frame is not None:
-                # WM_DWMCOMPOSITIONCHANGED：系统重启合成器后重新提交阴影设置。
-                self._refresh_window_frame()
-            elif msg.message == 0x0084:
+            if msg.message == 0x0084:
                 # 集成标题栏仍将边框与最大化按钮的命中结果交给 Windows，保留系统缩放和贴靠。
                 point = self.mapFromGlobal(QCursor.pos())
                 button = self.title_bar.maximize
