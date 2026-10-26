@@ -576,7 +576,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         for title, keys in (
             ("编辑", ("undo", "redo", "add_inspiration", "move_to_inspiration", "attach_inspirations",
                     "group_inspirations", "add_child", "add_sibling", "insert_parent", "edit", "properties",
-                    "delete", "copy", "cut", "paste", "image", "image_url")),
+                    "delete", "convert_descendants_to_submap", "convert_submap_to_descendants",
+                    "copy", "cut", "paste", "image", "image_url")),
             ("视图", ("zoom_in", "zoom_out", "expand_all", "collapse_all")),
         ):
             section = QMenu(title, menu)

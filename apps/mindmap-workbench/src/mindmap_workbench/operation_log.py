@@ -54,6 +54,8 @@ _OPERATION_NAMES = {
     "add_image_child": "新增图片节点", "attach_image": "关联节点图片",
     "paste_fragment": "粘贴节点", "copy_nodes": "复制节点到导图",
     "create_submap": "创建子导图", "remove_submap": "删除子导图",
+    "convert_descendants_to_submap": "后代转为子导图",
+    "convert_submap_to_descendants": "子导图转为节点后代",
     "create_detail_page": "创建详情页", "remove_detail_page": "删除详情页",
     "set_submap_favorite": "修改子导图收藏",
 }

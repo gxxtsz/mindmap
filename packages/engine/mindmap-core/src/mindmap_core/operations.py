@@ -191,6 +191,65 @@ class DocumentEditor(InspirationEditorMixin):
         self.edit(node_id).submap_id = key
         return key
 
+    def convert_descendants_to_submap(self, node_id):
+        """原地迁移普通后代，仅新增页面及包装根，不复制后代或其附属页面。"""
+        owner = self.node(node_id)
+        self.require_page_owner(node_id)
+        if owner.submap_id:
+            raise MindMapError("此节点已有子导图")
+        if not owner.children:
+            raise MindMapError("此节点没有普通后代，请使用创建子导图")
+        source = self._state.page(node_id)
+        root = Node(owner.text, children=list(owner.children), style=deepcopy(owner.style))
+        page_id = new_id()
+        # put_node 同时登记直接子节点的旧父引用；普通后代及其图片、详情、子图
+        # 都继续使用原实体。页面和入口在同一事务内改写，不能调用级联删除接口。
+        self._state.put_node(root)
+        self._state.set_page(
+            page_id, MindMapPage(page_id, root.id, node_id, source.layout, source.theme), kind="submap")
+        owner = self.edit(node_id)
+        owner.children = []
+        owner.submap_id = page_id
+        return page_id
+
+    @staticmethod
+    def _submap_root_has_independent_content(root, owner):
+        """判断移除包装根是否会丢内容；入口已有的相同属性不必再保留一层。
+
+        标识、同步标题、普通子列表及展开状态只用于结构，不作为独立内容。
+        空属性沿用入口即可；非默认且不同的属性保守保留，不尝试覆盖或拼接。
+        图片尺寸仅在根实际引用图片时有意义，避免空图片宽度制造多余层级。
+        """
+        if root.submap_id or root.detail_page_id:
+            return True
+        if root.image_id and (root.image_id != owner.image_id or root.image_width != owner.image_width):
+            return True
+        defaults = Node()
+        return any(getattr(root, name) != getattr(defaults, name)
+                   and getattr(root, name) != getattr(owner, name)
+                   for name in ("note", "hyperlink", "tags", "icons", "style", "metadata", "text_format",
+                                "direction"))
+
+    def convert_submap_to_descendants(self, node_id):
+        """移除当前一层页面，将完整分支接回入口，独立根内容以普通子节点保留。"""
+        owner = self.node(node_id)
+        if not owner.submap_id:
+            raise MindMapError("此节点没有子导图")
+        page_id = owner.submap_id
+        root = self.node(self.document.submaps[page_id].root_id)
+        keep_root = self._submap_root_has_independent_content(root, owner)
+        owner = self.edit(node_id)
+        owner.children = [root.id] if keep_root else list(root.children)
+        owner.submap_id = None
+        owner.expanded = True
+        # 只撤销这一层页面边界；根上仍有附页或独立属性时保留根实体及其归属。
+        # 收藏由提交阶段按删除的页面差量清理，撤销时与页面一同恢复。
+        self._state.set_page(page_id, None)
+        for child in owner.children:
+            self._state.set_parent(child, node_id)
+        if not keep_root:
+            self._state.delete_node(root.id)
+
     def require_page_owner(self, node_id):
         """验证页面归属节点；纯图片节点及详情页内节点抛出 MindMapError。
 

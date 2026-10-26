@@ -555,6 +555,10 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             ),
             ("hyperlink", "打开超链接", None, lambda w: w.open_hyperlink(), False),
             ("create_submap", "创建子导图", None, lambda w: w.create_submap(), True),
+            ("convert_descendants_to_submap", "后代转为子导图", None,
+             lambda w: w.convert_descendants_to_submap(), True),
+            ("convert_submap_to_descendants", "子导图转为节点后代", None,
+             lambda w: w.convert_submap_to_descendants(), True),
             ("enter_submap", "进入子导图", None, lambda w: w.enter_submap(), False),
             ("favorite_submap", "收藏子导图", None, lambda w: w.toggle_submap_favorite(), True),
             ("delete_submap", "删除子导图…", None, lambda w: w.delete_submap(), True),
@@ -668,6 +672,16 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             self.editable and not editing and single and node and not node.children and not node.submap_id
             and not in_detail and not image_only))
         self._actions["create_submap"].setToolTip("仅没有普通子节点和子导图的叶子节点可创建")
+        converting = self._actions["convert_descendants_to_submap"]
+        converting.setVisible(not in_detail and not image_only)
+        converting.setEnabled(bool(self.editable and not editing and len(selected) == 1 and node
+                                   and node.children and not node.submap_id and not in_detail and not image_only))
+        converting.setToolTip("保留当前节点，将全部普通后代迁入同名子导图并进入")
+        restoring = self._actions["convert_submap_to_descendants"]
+        restoring.setVisible(not in_detail and not image_only)
+        restoring.setEnabled(bool(self.editable and not editing and len(selected) == 1 and node
+                                  and node.submap_id and not in_detail and not image_only))
+        restoring.setToolTip("仅转换当前一层；根有独立内容时保留为普通子节点")
         self._actions["enter_submap"].setEnabled(bool(not editing and single and node and node.submap_id))
         self._actions["delete_submap"].setEnabled(bool(
             self.editable and not editing and single and node and node.submap_id))
@@ -836,6 +850,21 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             if changes is not None:
                 index = 1 if event.forward else 0
                 delta = changes.collections.get("nodes", {})
+                # 页面边界变化可能迁移整棵分支，但随行后代自身没有字段差量。
+                # 普通分支通过移动记录识别；复用的包装根没有普通移动记录，
+                # 由其仍存在的实体识别。空页创建和级联删除没有存量成员迁移，
+                # 继续走字段差量，避免大图里给叶子创建空子图也重排整个父页。
+                topology = [page for old, new in changes.collections.get("submaps", {}).values()
+                            if old is None or new is None or (old.root_id, old.owner_id) != (new.root_id, new.owner_id)
+                            for page in (old, new) if page is not None]
+                retained_roots = [page for page in topology if page.root_id not in delta
+                                  or all(node is not None for node in delta[page.root_id])]
+                reproject = any(move.before.page_id != move.after.page_id
+                                and self.current_page_id in (move.before.page_id, move.after.page_id)
+                                for move in changes.moves)
+                reproject = reproject or any(
+                    page.id == self.current_page_id or page.owner_id in self._document.nodes
+                    or page.root_id in self._document.nodes for page in retained_roots)
                 changes.apply(self._book_document, forward=event.forward)
                 target_page = self._current_page_id
                 if event.kind in ("undo", "redo") and not external:
@@ -843,11 +872,26 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 if not self._book_document.has_page(target_page):
                     target_page = next((page for page in reversed(self._page_chain)
                                         if self._book_document.has_page(page)), None)
-                if target_page != self._current_page_id:
-                    self._switch_page(target_page, notify=False, cache=False)
-                    switched = True
-                    before = self.selected_node_ids()
-                    old_parents = {key: self._node_parents.get(key) for key in before}
+                switched = target_page != self._current_page_id
+                if switched or reproject:
+                    inspiration_root = None
+                    if switched and target_page == self.engine.inspiration_id:
+                        # 从收藏等入口直接打开想法的子图时，本视图记住的上一个
+                        # 想法可能无关。页面消失后沿旧页面链的实际入口找所属根，
+                        # 不能误回到另一棵想法；不存在时仍沿用常规空态回退。
+                        changed_pages = {page.id: page for page in topology}
+                        for page_id in reversed(self._page_chain):
+                            page = changed_pages.get(page_id)
+                            if page is not None:
+                                inspiration_root = self._inspiration_root_for(page.owner_id)
+                                if inspiration_root is not None:
+                                    break
+                    self._switch_page(target_page, notify=False, cache=False,
+                                      inspiration_root_id=inspiration_root,
+                                      detail_origin=self._detail_origin if not switched else None)
+                    if switched:
+                        before = self.selected_node_ids()
+                        old_parents = {key: self._node_parents.get(key) for key in before}
                 # 全局差量只合并属于当前页的节点；其他页的新增节点不能漏进画布或大纲。
                 local_delta = {key: pair for key, pair in delta.items()
                                if key in self._document.nodes or (pair[index] is not None
@@ -879,8 +923,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                     if node is not None and (old is None or old.children != node.children):
                         for child in node.children:
                             self._node_parents[child] = key
-                self._measure_dirty = None if old_theme != source.theme or switched else tuple(delta)
-                if not switched:
+                self._measure_dirty = None if old_theme != source.theme or switched or reproject else tuple(delta)
+                if not switched and not reproject:
                     settings = {}
                     for name, old, new in (("layout", old_layout, source.layout),
                                            ("theme", old_theme, source.theme)):
@@ -2111,7 +2155,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         groups = [
             ("add_inspiration", "move_to_inspiration", "attach_inspirations", "group_inspirations"),
             ("add_child", "add_sibling", "insert_parent", "edit", "properties", "delete"),
-            ("create_submap", "enter_submap", "favorite_submap", "delete_submap"),
+            ("create_submap", "convert_descendants_to_submap", "enter_submap", "convert_submap_to_descendants",
+             "favorite_submap", "delete_submap"),
             ("create_detail_page", "enter_detail_page", "delete_detail_page"),
             ("copy", "cut", "paste", "undo", "redo"),
             ("move_up", "move_down", "fold", "expand_all", "collapse_all"),

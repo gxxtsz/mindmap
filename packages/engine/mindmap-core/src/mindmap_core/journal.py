@@ -225,9 +225,14 @@ class TransactionJournal:
             elif page_id == document.inspiration.id:
                 layout = old_area.layout if before else document.inspiration.layout
             else:
-                page = document.page_record(page_id)
-                if before:
-                    page = self.submaps.get(page_id, self.detail_pages.get(page_id, page))
+                # 转回普通后代时来源页已经移除，必须先读事务前值，不能提前
+                # 求值当前文档的 page_record；普通配置修改仍复用同一条路径。
+                if before and page_id in self.submaps:
+                    page = self.submaps[page_id]
+                elif before and page_id in self.detail_pages:
+                    page = self.detail_pages[page_id]
+                else:
+                    page = document.page_record(page_id)
                 layout = page.layout
             if layout.direction != "both":
                 return layout.direction
@@ -268,6 +273,11 @@ class TransactionJournal:
         for key, old_parent in candidates.items():
             new_parent = parent(key, False)
             if node(key, True) is None or node(key, False) is None:
+                continue
+            # 包装根可能因保留独立内容而变成普通子节点。页面根没有普通父级，
+            # 不属于拖动位置记录，更不能按 parent=None 把它当作灵感区游离根。
+            if ((key in root_pages and root_pages[key] != old_area.id)
+                    or (key in self.state.root_pages and self.state.root_pages[key] != document.inspiration.id)):
                 continue
             old = placement(key, old_parent, True)
             new = placement(key, new_parent, False)

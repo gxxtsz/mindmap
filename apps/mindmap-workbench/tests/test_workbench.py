@@ -1322,3 +1322,45 @@ def test_escape_keeps_canvas_cancel_without_changing_navigation(window, qtbot):
     assert field.hasFocus()
     window.manager.hide("properties")
     assert canvas.view.hasFocus()
+
+
+def test_submap_conversion_edit_menu_status_log_and_autosave(window):
+    """从真实编辑菜单执行两种转换，核对页内统计、中文日志及自动保存落盘。"""
+    session = window.active_session
+    canvas, engine = session.canvas, session.engine
+    owner = engine.add_child(engine.root_id, "课程章节")
+    child = engine.add_child(owner, "子主题")
+    deep = engine.add_child(child, "后代主题")
+    sibling = engine.add_child(engine.root_id, "其他章节")
+    canvas.select_nodes([owner])
+    menu = window.main_menu()
+    edit_menu = next(action.menu() for action in menu.actions() if action.text() == "编辑")
+    extract = canvas.action("convert_descendants_to_submap")
+    restore = canvas.action("convert_submap_to_descendants")
+    assert extract in edit_menu.actions() and restore in edit_menu.actions()
+    assert extract.isEnabled() and not restore.isEnabled()
+    extract.trigger()
+    page = engine.get_node(owner).submap_id
+    root = engine.page_document(page).root_id
+    assert canvas.current_page_id == page
+    assert set(canvas.document_view.nodes) == {root, child, deep}
+    assert "3 个节点" in window.status_label.text()
+    assert "后代转为子导图" in window.operation_log.plain_text()
+    assert session.autosave()
+    assert load_document(session.files.path) == engine.document
+    canvas.return_to_parent_page()
+    assert set(canvas.document_view.nodes) == {engine.root_id, owner, sibling}
+    restore.trigger()
+    assert canvas.selected_node_ids() == [owner]
+    assert "5 个节点" in window.status_label.text()
+    assert "子导图转为节点后代" in window.operation_log.plain_text()
+    assert "操作失败" not in window.operation_log.plain_text()
+    assert session.autosave()
+    assert load_document(session.files.path) == engine.document
+    canvas.action("undo").trigger()
+    assert engine.get_node(owner).submap_id == page
+    assert "撤销" in window.operation_log.plain_text()
+    canvas.action("redo").trigger()
+    assert engine.get_node(owner).children == [child]
+    assert "重做" in window.operation_log.plain_text()
+    menu.deleteLater()

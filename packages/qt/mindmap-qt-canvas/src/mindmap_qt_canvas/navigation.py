@@ -535,14 +535,23 @@ class PageNavigationMixin:
         elif page_id != self._current_page_id:
             self._switch_page(page_id)
         if node_id is not None:
-            if node_id not in self.layout_result.nodes:
-                self.focus_id = None
-                self.refresh()
-            if node_id not in self.layout_result.nodes:
-                self.focus_id = node_id
-                self.refresh()
-            self.select_nodes([node_id])
-            self.view.ensureVisible(self.node_items[node_id].sceneBoundingRect(), 35, 35)
+            self._locate_page_node(node_id)
+
+    def _locate_page_node(self, node_id):
+        """在已通过导航检查的当前页定位有效节点，不再次提交草稿或检查候选。
+
+        折叠及临时范围外的目标只临时显示，不修改普通后代的折叠状态。转换操作
+        已在提交前完成输入检查，提交后复用此处定位，避免第二次检查把已成功的
+        转换报告为失败；调用方必须保证节点确实属于当前页。
+        """
+        if node_id not in self.layout_result.nodes:
+            self.focus_id = None
+            self.refresh()
+        if node_id not in self.layout_result.nodes:
+            self.focus_id = node_id
+            self.refresh()
+        self.select_nodes([node_id])
+        self.view.ensureVisible(self.node_items[node_id].sceneBoundingRect(), 35, 35)
 
     def enter_submap(self, node_id=None):
         """进入入口拥有的子导图，曾访问的页面恢复视图，首次访问使用原始倍率。"""
@@ -569,6 +578,48 @@ class PageNavigationMixin:
         page_id = self.engine.create_submap(self.current_node_id())
         self._switch_page(page_id)
         return page_id
+
+    @document_interaction
+    def convert_descendants_to_submap(self) -> str:
+        """把当前单选节点的后代转为子导图并进入，返回新页面 ID。
+
+        无参数；只读、多选、非法节点及输入法候选抛出中文 MindMapError。
+        结构条件先于草稿提交检查，正式提交时由引擎再次校验结构，防止草稿提交
+        改变结构后继续使用旧实体。转换只记一条内容历史，进入属于临时导航；
+        必须在 GUI 线程及画布存活期间调用，页面及节点仍由文档持有。
+        """
+        self._ensure_editable()
+        if len(self.selected_node_ids()) != 1:
+            raise MindMapError("请选择一个有普通后代的节点")
+        key = self.current_node_id()
+        node = self.engine.get_node(key)
+        if self.current_page_kind == "detail" or node.is_image_node:
+            raise MindMapError("纯图片节点及详情页内节点不能转换为子导图")
+        if not node.children or node.submap_id:
+            raise MindMapError("请选择有普通后代且尚无子导图的节点")
+        self._prepare_page_navigation()
+        page_id = self.engine.convert_descendants_to_submap(key)
+        self._switch_page(page_id)
+        return page_id
+
+    @document_interaction
+    def convert_submap_to_descendants(self) -> None:
+        """将当前单选入口的子导图接回后代，返回 None，并定位展开后的入口。
+
+        无参数；只读、多选、无子导图或输入法候选时抛出 MindMapError。
+        草稿和正文沿用切页前检查，根节点独立内容的保留由引擎统一决定。
+        仅转换当前一层，恢复入口所在页的视口后保证入口可见；操作及来源标识
+        只属于当前画布，不强制其他共享视图跟随导航。仅在 GUI 线程调用。
+        """
+        self._ensure_editable()
+        if len(self.selected_node_ids()) != 1:
+            raise MindMapError("请选择一个拥有子导图的入口节点")
+        key = self.current_node_id()
+        if not self.engine.get_node(key).submap_id:
+            raise MindMapError("此节点没有子导图")
+        self._prepare_page_navigation()
+        self.engine.convert_submap_to_descendants(key)
+        self._locate_page_node(key)
 
     @document_interaction
     def set_submap_favorite(self, page_id: str, favorite: bool) -> None:
@@ -757,6 +808,10 @@ class PageNavigationMixin:
         pages = self._page_path_entries(self._document.root_id) if self._document.nodes else []
         pages = [replace(entry, text=f"{entry.text} · 详情")
                  if self._book_document.page_kind(entry.page_id) == "detail" else entry for entry in pages]
+        # 上级子图转换后，本页可能仍存在而归属路径已经改变；刷新回退链，避免
+        # 之后删除本页时继续返回已经失效的祖先页面。灵感区空态也保留有效回退点。
+        self._page_chain = ([self.current_page_id] if self.current_page_kind == "inspiration"
+                            else [entry.page_id for entry in pages])
         back_text = self._back_button_text()
         self.path_navigation.back_button.setToolTip(back_text)
         self.path_navigation.back_button.setAccessibleName(back_text)

@@ -73,3 +73,34 @@ def test_invalid_page_reference_is_rejected(corruption):
         payload["submaps"].append(extra)
     with pytest.raises(MindMapError):
         from_dict(payload)
+
+
+@pytest.mark.parametrize("keep_root", [False, True])
+def test_converted_pages_roundtrip_without_changing_format_version(tmp_path, keep_root):
+    """双向转换仍使用版本 5；图片、嵌套收藏及旧页面标识不需要格式迁移。"""
+    engine = MindMapEngine()
+    owner = engine.add_child(engine.root_id, "章节")
+    child = engine.add_child(owner, "原有后代")
+    engine.attach_image(child, b"image")
+    nested = engine.create_submap(child)
+    engine.create_detail_page(child)
+    engine.set_submap_favorite(nested, True)
+    page = engine.convert_descendants_to_submap(owner)
+    engine.set_submap_favorite(page, True)
+    path = tmp_path / "双向转换.mindmap"
+    save_document(engine.document, path)
+    loaded = load_document(path)
+    assert loaded == engine.document and to_dict(loaded)["schema_version"] == 5
+    engine = MindMapEngine(loaded)
+    root = loaded.submaps[page].root_id
+    if keep_root:
+        engine.update_node(root, note="根的独立内容")
+    engine.convert_submap_to_descendants(owner)
+    save_document(engine.document, path)
+    restored = load_document(path)
+    assert restored == engine.document
+    assert (root in restored.nodes) == keep_root
+    assert restored.nodes[child].submap_id == nested
+    assert restored.metadata["submap_favorites"] == [nested]
+    assert restored.assets == loaded.assets
+    assert to_dict(restored)["schema_version"] == 5

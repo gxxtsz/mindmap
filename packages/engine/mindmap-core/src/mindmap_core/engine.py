@@ -247,6 +247,28 @@ class MindMapEngine:
         """删除入口拥有的全部子导图，一次撤销可完整恢复，入口节点保持原位。"""
         self._execute("remove_submap", self._editor.remove_submap, node_id=node_id)
 
+    def convert_descendants_to_submap(self, node_id: str) -> str:
+        """将普通后代原地迁入同名子导图，返回新增页面的稳定 ID。
+
+        node_id 必须有普通子节点、没有子导图，且不是纯图片或详情页内节点；
+        主图根、子图根和灵感区节点均可使用。后代标识、顺序及附属内容保持不变，
+        新页复制来源页的布局和主题。失败抛出中文 MindMapError 并整体回滚；
+        成功只产生一次历史，导航由界面负责。仅在引擎所属线程同步调用。
+        """
+        return self._execute("convert_descendants_to_submap", self._editor.convert_descendants_to_submap,
+                             node_id=node_id)
+
+    def convert_submap_to_descendants(self, node_id: str) -> None:
+        """将入口拥有的当前一层子导图接回普通后代，成功返回 None。
+
+        node_id 必须拥有子导图，否则抛出中文 MindMapError。重复包装根会移除，
+        根有独立属性或附属页面时作为普通子节点保留；更深层页面及其收藏不变。
+        入口展开，后代使用入口所在页的配置。页面、父引用及该页收藏共用一次
+        可撤销事务，失败不留部分修改；不导航，仅在引擎所属线程同步调用。
+        """
+        self._execute("convert_submap_to_descendants", self._editor.convert_submap_to_descendants,
+                      node_id=node_id)
+
     def favorite_submaps(self) -> tuple[PathEntry, ...]:
         """按最近收藏在前的顺序返回子导图根路径项，不建立整份文档快照。
 
