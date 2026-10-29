@@ -347,6 +347,11 @@ class OutlinePanel(QTreeView):
             self._syncing = False
 
     def _document_changed(self, event):
+        """同步宿主当前页；新增分支按所选层级初始化，已有分支保留手动展开状态。
+
+        宿主可提供增量变化或整页快照，两种通知都必须识别新分支及首次拥有孩子的
+        原叶节点。只有替换文档、切页或根列表变化才对整棵树重新应用层级预设。
+        """
         # 保存只改变历史保存标记，既不改变树也不改变主题；无需重新扫描所有节点。
         if event.kind == "saved":
             return
@@ -358,8 +363,14 @@ class OutlinePanel(QTreeView):
             if event.changes is not None:
                 changed, fresh = self.tree_model.apply_changes(event)
             else:
-                changed = self.tree_model.replace_document(self.canvas.document_view)
-                fresh = set()
+                document = self.canvas.document_view
+                old_nodes = self.tree_model.document.nodes
+                # 灵感及跨页成员变动会只通知整页快照。必须在替换模型前比较新旧节点，
+                # 否则粘贴出的分支与刚获得孩子的原叶节点会一直保持重置后的收起状态，
+                # 即使已选择“所有层”也不显示后代。普通增量通知仍沿用上面的差量路径。
+                fresh = {key for key, node in document.nodes.items()
+                         if node.children and (key not in old_nodes or not old_nodes[key].children)}
+                changed = self.tree_model.replace_document(document)
             # reset 即使结构完全相同，也代表整份导图替换，必须重新应用预设。
             if event.kind in ("reset", "navigation") or page_changed:
                 self._expanded_ids.clear()

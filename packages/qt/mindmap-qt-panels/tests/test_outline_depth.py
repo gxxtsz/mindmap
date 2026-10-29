@@ -1,13 +1,15 @@
 """大纲层级的真实可见行、选择联动与结构变化验收。"""
 
+from dataclasses import replace
+
 import pytest
 from mindmap_core import MindMapDocument, MindMapEngine, Theme
 from mindmap_qt_panels.outline import OutlinePanel
 from PySide6.QtWidgets import QApplication
 
 
-@pytest.fixture
-def outline(qtbot, panel_host_factory):
+@pytest.fixture(params=["delta", "snapshot"])
+def outline(qtbot, panel_host_factory, request):
     """构造超过菜单上限的深链和旁支，保证所有层确实能展示第10层之后的节点。"""
     engine = MindMapEngine(MindMapDocument.new("根主题"))
     chain = [engine.root_id]
@@ -17,6 +19,11 @@ def outline(qtbot, panel_host_factory):
         sibling = engine.add_child(engine.root_id, "旁支")
     engine.mark_saved()
     canvas = panel_host_factory(engine)
+    if request.param == "snapshot":
+        # 灵感等宿主刷新整页时不提供差量；通过公开通知协议覆盖这一合法路径，
+        # 确保层级初始化、手动展开保留与历史恢复不依赖某一种宿主更新方式。
+        canvas.unsubscribe()
+        canvas.unsubscribe = engine.subscribe(lambda event: canvas.changed(replace(event, changes=None)))
     qtbot.addWidget(canvas)
     tree = OutlinePanel(canvas)
     qtbot.addWidget(tree)
