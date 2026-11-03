@@ -172,7 +172,9 @@ engine.undo()
 
 ### 只读查询
 
-- `favorite_submaps() -> tuple[PathEntry, ...]` 按最近收藏在前返回独立、不可变的页面根路径项，包含页面 ID、根节点 ID 和实时名称。
+- `favorite_submaps(*, order="recent") -> tuple[PathEntry, ...]` 按最近收藏在前返回独立、不可变的页面根路径项，包含页面 ID、根节点 ID 和实时名称。
+
+- `order="document"` 改为按导图原有分支先序返回，祖先页在后代页之前，主导图分支先于灵感区；灵感区按游离根及分支的原有顺序排列。排序只沿收藏项的祖先链读取相关兄弟列表，不扫描无关后代、不建立全文件快照，也不改写收藏元数据；不支持的排序值抛出中文 `ValueError`。
 
 - 通过 `node_path(entry.node_id)` 的 `page_root` 项可以得到完整页面层级路径，查询不建立整份文档副本或修改文件。
 

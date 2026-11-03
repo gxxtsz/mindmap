@@ -464,7 +464,7 @@ class MindMapSession(QObject):
         self.favorites.set_editable(self.canvas.editable and not self.canvas.is_editing)
 
     def _navigate_favorite(self, page_id):
-        """复用画布输入检查与页面现场恢复；失败后还原列表高亮，不伪装已经切页。"""
+        """复用画布输入检查与页面现场恢复；失败后还原收藏树高亮，不伪装已经切页。"""
         self.canvas.call(lambda: self.canvas.navigate_to(page_id))
         self._sync_favorites()
 

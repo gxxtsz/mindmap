@@ -215,16 +215,36 @@ def child(scale, platform):
                     window.manager.activate("favorites", focus=False)
                     app.processEvents()
                     favorites = window.active_session.favorites
-                    checks["收藏按最近时间排序"] = [row[0].page_id for row in favorites.model.rows] == [nested, page]
+                    parent_index = favorites.model.index_for(page)
+                    nested_index = favorites.model.index_for(nested)
+                    checks["收藏按导图原有顺序"] = [row[0].page_id for row in favorites.model.rows] == [page, nested]
+                    checks["收藏树按最近已收藏祖先分层"] = (
+                        favorites.model.rowCount() == 1 and favorites.model.rowCount(parent_index) == 1
+                        and favorites.model.parent(nested_index) == parent_index)
                     checks["当前子导图显示已收藏星标"] = (
                         canvas.path_navigation.favorite_button.isVisible()
                         and canvas.path_navigation.favorite_button.isChecked())
                     checks["收藏侧栏属于当前会话"] = (
                         favorites.isVisible() and window._favorites_stack.currentWidget() is favorites)
-                    checks["收藏完整页面路径"] = favorites.model.rows[0][1] == expected
+                    checks["收藏完整页面路径"] = nested_index.data(Qt.ItemDataRole.ToolTipRole).endswith("\n" + expected)
+                    checks["收藏统一32像素单行展示"] = all(
+                        favorites.tree_view.visualRect(index).height() == 32 for index in (parent_index, nested_index))
+                    checks["收藏无障碍保留完整路径"] = nested_index.data(
+                        Qt.ItemDataRole.AccessibleDescriptionRole) == nested_index.data(Qt.ItemDataRole.ToolTipRole)
                     assert window.grab().save(str(output / (label + "-favorites.png")))
                     canvas.navigate_to(None)
-                    favorites.list_view.clicked.emit(favorites.model.index(0, 0))
+                    # 使用真实分支命中区验证展开操作，禁止把它误判为页面导航；
+                    # 再单击真实的嵌套行，避免扁平列表时代的第 0 行假设掩盖目标错误。
+                    tree = favorites.tree_view
+                    parent_rect = tree.visualRect(parent_index)
+                    marker = QPoint(parent_rect.left() - tree.indentation() // 2, parent_rect.center().y())
+                    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=marker)
+                    app.processEvents()
+                    checks["收藏树收起不跳页"] = not tree.isExpanded(parent_index) and canvas.current_page_id is None
+                    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=marker)
+                    app.processEvents()
+                    checks["收藏树展开不跳页"] = tree.isExpanded(parent_index) and canvas.current_page_id is None
+                    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=tree.visualRect(nested_index).center())
                     checks["点击收藏进入目标页"] = canvas.current_page_id == nested
                     checks["收藏保存在原生文件"] = window.save_all() and (
                         load_document(window.files.path).metadata["submap_favorites"] == [nested, page])
@@ -358,7 +378,8 @@ def child(scale, platform):
                         not canvas.path_navigation.favorite_button.isEnabled()
                         and not favorites.remove_action.isEnabled())
                     canvas.navigate_to(None, branch)
-                    favorites.list_view.clicked.emit(favorites.model.index(0, 0))
+                    QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton,
+                                     pos=tree.visualRect(favorites.model.index_for(nested)).center())
                     checks["只读可通过收藏跳转"] = canvas.current_page_id == nested
                     canvas.navigate_to(None, branch)
                     checks["只读路径跳转"] = canvas.current_page_id is None

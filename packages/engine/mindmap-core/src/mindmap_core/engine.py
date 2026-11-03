@@ -6,6 +6,7 @@ from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
+from typing import Literal
 
 from .branch_styles import BranchStyle
 from .config import LayoutConfig
@@ -269,18 +270,61 @@ class MindMapEngine:
         self._execute("convert_submap_to_descendants", self._editor.convert_submap_to_descendants,
                       node_id=node_id)
 
-    def favorite_submaps(self) -> tuple[PathEntry, ...]:
-        """按最近收藏在前的顺序返回子导图根路径项，不建立整份文档快照。
+    def favorite_submaps(self, *, order: Literal["recent", "document"] = "recent") -> tuple[PathEntry, ...]:
+        """只读返回子导图根路径项，默认按最近收藏在前，不建立整份文档快照。
 
         返回元组中的 PathEntry 均为独立、不可变的页面描述，包含页面 ID、根节点
         ID 和当前名称；完整页面路径可再通过 node_path(entry.node_id) 查询。
+        order="document" 按原导图的分支先序排列，祖先页在后代页之前；主导图
+        分支先于灵感区，灵感区按游离根及普通分支的原顺序排列。只沿收藏项的
+        祖先链读取父索引和相关兄弟列表，不扫描无关后代，也不改变收藏存储顺序。
+        不支持的 order 抛出中文 ValueError；接口应在引擎所属线程同步调用。
         缺少收藏元数据时返回空元组，忽略旧程序删除页面后遗留的无效引用；
-        查询不会修补文件、改变排序、发送事件或增加撤销记录。
+        查询不会修补文件、发送事件或增加撤销记录。
         """
+        if order not in ("recent", "document"):
+            raise ValueError("收藏排序必须为 recent 或 document")
         document = self._state.document
+        favorites = self._editor.favorite_submap_ids()
+        if order == "document" and len(favorites) > 1:
+            # 同一父级的孩子序号仅在本次查询中建立一次；宽兄弟列表不会因多个
+            # 收藏项反复线性查找，也无需长期缓存及额外的索引失效机制。
+            sibling_rows = {}
+
+            def document_key(page_id):
+                """迭代跨越页内父链与子导图入口，以整数路径比较原始分支顺序。"""
+                key = document.submaps[page_id].root_id
+                steps = []
+                while True:
+                    parent = self._state.parents.get(key)
+                    if parent is not None:
+                        if parent not in sibling_rows:
+                            sibling_rows[parent] = {
+                                child: row for row, child in enumerate(document.nodes[parent].children)
+                            }
+                        steps.append(sibling_rows[parent][key])
+                        key = parent
+                        continue
+                    region = self._state.root_pages[key]
+                    if region is None:
+                        return (0, *reversed(steps))
+                    if region == document.inspiration.id:
+                        # None 专门代表游离根列表，不把区域 ID 混入节点 ID 缓存；
+                        # 两类标识属于不同命名空间，合法文档中允许文字相同。
+                        if None not in sibling_rows:
+                            sibling_rows[None] = {
+                                root: row for row, root in enumerate(document.inspiration.root_ids)
+                            }
+                        return (1, sibling_rows[None][key], *reversed(steps))
+                    # 页面根和入口是两个稳定节点。保留这一层负序号边，既可区分
+                    # 连续根节点子导图，也使祖先页面的路径严格成为后代的前缀。
+                    steps.append(-1)
+                    key = document.submaps[region].owner_id
+
+            favorites = sorted(favorites, key=document_key)
         return tuple(PathEntry(key, document.submaps[key].root_id,
                                document.nodes[document.submaps[key].root_id].text, True)
-                     for key in self._editor.favorite_submap_ids())
+                     for key in favorites)
 
     def is_submap_favorite(self, page_id: str) -> bool:
         """查询指定子导图是否已收藏，不修改文档或历史。

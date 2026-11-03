@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 import pytest
-from mindmap_core import MindMapEngine, MindMapError
+from mindmap_core import MindMapDocument, MindMapEngine, MindMapError, MindMapPage, Node
 
 
 def favorite_book():
@@ -108,3 +108,100 @@ def test_legacy_metadata_is_read_without_mutating_the_document():
     assert engine.document == document and not engine.is_dirty
     engine.set_submap_favorite(second, True)
     assert engine.document.metadata == {"other": {"value": 1}, "submap_favorites": [second, first]}
+
+
+def test_document_order_preserves_recent_order_storage_and_readonly_state():
+    """展示排序不能改写收藏顺序、保存标记、历史或发送修改通知。"""
+    engine, owner, first, inner, second = favorite_book()
+    for page in (first, second, inner):
+        engine.set_submap_favorite(page, True)
+    engine.mark_saved()
+    before = engine.document, engine.revision, engine.undo_label
+    events = []
+    unsubscribe = engine.subscribe(events.append)
+    try:
+        assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [first, inner, second]
+        assert [entry.page_id for entry in engine.favorite_submaps()] == [inner, second, first]
+        assert (engine.document, engine.revision, engine.undo_label) == before
+        assert not engine.is_dirty and not events
+        with pytest.raises(ValueError, match="收藏排序"):
+            engine.favorite_submaps(order="unknown")
+    finally:
+        unsubscribe()
+
+
+def test_document_order_follows_ordinary_ancestors_reordering_and_history():
+    """跨未收藏页面及普通分组时按原分支顺序比较，不能按页面创建时间或标题比较。"""
+    engine, owner, first, inner, second = favorite_book()
+    second_owner = engine.document.submaps[second].owner_id
+    group = engine.add_child(engine.root_id, "普通分组", index=0)
+    engine.move_nodes([owner], group)
+    for page in (inner, second):
+        engine.set_submap_favorite(page, True)
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [inner, second]
+    engine.move_nodes([group], second_owner, "after")
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [second, inner]
+    assert engine.undo()
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [inner, second]
+    assert engine.redo()
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [second, inner]
+
+
+def test_document_order_places_main_before_inspiration_and_tracks_attachment():
+    """区域间顺序固定，灵感区遵循游离根顺序，并正确处理连续根节点子导图。"""
+    document = MindMapDocument.new()
+    # 区域标识与节点标识可以同名，排序不能把两者的兄弟序号表混在一起。
+    document.inspiration.id = document.root_id
+    engine = MindMapEngine(document)
+    first_root = engine.add_inspiration("同名", position=(0, 0))
+    second_root = engine.add_inspiration("同名", position=(200, 0))
+    second = engine.create_submap(second_root)
+    first = engine.create_submap(first_root)
+    nested = engine.create_submap(engine.page_document(first).root_id)
+    main_owner = engine.add_child(engine.root_id, "同名")
+    main = engine.create_submap(main_owner)
+    for page in (nested, main, first, second):
+        engine.set_submap_favorite(page, True)
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [main, first, nested, second]
+    engine.attach_inspirations([first_root], engine.root_id)
+    engine.move_nodes([first_root], main_owner, "before")
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [first, nested, main, second]
+
+
+def test_document_order_does_not_scan_collections_or_capture_document_snapshots(monkeypatch):
+    """直接禁止枚举节点、页面及父索引，确保查询只访问收藏祖先和相关兄弟列表。"""
+    engine, owner, first, inner, second = favorite_book()
+    for page in (first, second, inner):
+        engine.set_submap_favorite(page, True)
+
+    class NoScan(dict):
+        def forbidden(self, *args, **kwargs):
+            raise AssertionError("收藏排序不能枚举整份文档")
+
+        __iter__ = keys = values = items = forbidden
+
+    def no_document_copy(self, memo):
+        raise AssertionError("收藏排序不能复制整份文档")
+
+    engine._state.document.nodes = NoScan(engine._state.document.nodes)
+    engine._state.document.submaps = NoScan(engine._state.document.submaps)
+    engine._state.parents = NoScan(engine._state.parents)
+    monkeypatch.setattr(MindMapDocument, "__deepcopy__", no_document_copy, raising=False)
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [first, inner, second]
+
+
+def test_document_order_supports_page_chains_beyond_python_recursion_limit():
+    """直接构造长链以单独验证排序，避免把大量编辑和历史构建混进该测试。"""
+    document = MindMapDocument.new("连续根")
+    owner, pages = document.root_id, []
+    for depth in range(1100):
+        root = Node("连续根")
+        page = MindMapPage(f"page-{depth}", root.id, owner)
+        document.nodes[owner].submap_id = page.id
+        document.nodes[root.id] = root
+        document.submaps[page.id] = page
+        pages.append(page.id)
+        owner = root.id
+    document.metadata["submap_favorites"] = [pages[-1], pages[400], pages[0]]
+    engine = MindMapEngine(document)
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [pages[0], pages[400], pages[-1]]

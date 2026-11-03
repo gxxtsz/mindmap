@@ -29,14 +29,14 @@ _SUBTITLE_ROLE = Qt.ItemDataRole.UserRole + 2
 
 
 class _InspirationDelegate(QStyledItemDelegate):
-    """参照收藏列表绘制双行想法，不接管列表的选择、导航或原生拖放事件。
+    """以标题和子主题计数绘制双行想法，不接管列表的选择、导航或原生拖放事件。
 
     parent 为所属 InspirationPanel，仅读取其色板及宿主同步的当前根标识。
     所有几何均使用 Qt 逻辑像素，由 Qt 负责显示缩放，避免高 DPI 下重复缩放。
     """
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
-        """返回与收藏项一致的建议宽度及 58 像素行高，不受标题长度影响。
+        """返回固定 58 逻辑像素行高的建议尺寸，不受标题长度影响。
 
         option、index 保留 Qt 代理接口约定；实际绘制宽度由列表视口决定，长文字
         在 paint 中省略，完整双行文本与悬停提示仍由原列表项持有。
@@ -67,7 +67,7 @@ class _InspirationDelegate(QStyledItemDelegate):
             icon = toolbar_icon("inspiration", colors.accent if current else colors.muted,
                                 colors.muted, colors.accent)
             icon.paint(painter, QRect(rect.left() + 8, rect.top() + 10, 16, 16))
-            # 图标、两行文字的起点和间距与收藏项保持一致；字体使用副本，避免修改 option。
+            # 图标与双行文字使用固定起点和间距；字体使用副本，避免修改 option。
             text_rect = rect.adjusted(32, 7, -8, -6)
             text_width = max(0, text_rect.width())
             font = QFont(option.font)

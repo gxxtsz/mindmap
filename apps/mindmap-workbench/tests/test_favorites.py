@@ -36,6 +36,9 @@ def test_favorites_follow_active_session_and_preserve_views(favorite_window, tmp
     assert not window.manager.states["favorites"].visible
     assert window._favorites_stack.currentIndex() == 0
     first, first_page = add_favorite(window, tmp_path / "甲.mindmap")
+    nested = first.engine.create_submap(first.engine.add_child(
+        first.engine.page_document(first_page).root_id, "嵌套收藏"))
+    first.canvas.set_submap_favorite(nested, True)
     second, second_page = add_favorite(window, tmp_path / "乙.mindmap")
     if split:
         window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
@@ -44,15 +47,19 @@ def test_favorites_follow_active_session_and_preserve_views(favorite_window, tmp
     QApplication.processEvents()
     assert window._favorites_stack.currentWidget() is first.favorites and first.favorites.isVisible()
     assert first.favorites.model.rows[0][0].page_id == first_page
+    first.favorites.tree_view.collapse(first.favorites.model.index_for(first_page))
     first.canvas.navigate_to(first_page)
     QApplication.processEvents()
     first.canvas.view.zoom(1.3)
     transform = first.canvas.view.transform()
+    first.canvas.navigate_to(nested)
+    assert first.favorites.tree_view.currentIndex() == first.favorites.model.index_for(nested)
+    assert not first.favorites.tree_view.isExpanded(first.favorites.model.index_for(first_page))
     first.canvas.navigate_to(None)
     first.canvas.set_editable(False)
-    index = first.favorites.model.index(0, 0)
-    qtbot.mouseClick(first.favorites.list_view.viewport(), Qt.MouseButton.LeftButton,
-                     pos=first.favorites.list_view.visualRect(index).center())
+    index = first.favorites.model.index_for(first_page)
+    qtbot.mouseClick(first.favorites.tree_view.viewport(), Qt.MouseButton.LeftButton,
+                     pos=first.favorites.tree_view.visualRect(index).center())
     assert first.canvas.current_page_id == first_page and first.canvas.view.transform() == transform
     assert not first.favorites.remove_action.isEnabled()
     window.manager.activate_document(second.id)
@@ -61,6 +68,9 @@ def test_favorites_follow_active_session_and_preserve_views(favorite_window, tmp
     second.favorites.remove_action.setData(second_page)
     second.favorites.remove_action.trigger()
     assert not second.engine.favorite_submaps() and first.engine.is_submap_favorite(first_page)
+    window.manager.activate_document(first.id)
+    assert not first.favorites.tree_view.isExpanded(first.favorites.model.index_for(first_page))
+    window.manager.activate_document(second.id)
     assert window.manager.close_document(first.id)
     assert first.favorites._disposed and window._favorites_stack.count() == 2
     assert window.manager.close_document(second.id)
@@ -70,8 +80,12 @@ def test_favorites_follow_active_session_and_preserve_views(favorite_window, tmp
 def test_favorites_shortcut_autosave_save_as_and_restart(favorite_window, tmp_path, qtbot, monkeypatch):
     window = favorite_window
     session, page = add_favorite(window, tmp_path / "原文件.mindmap")
+    nested = session.engine.create_submap(session.engine.add_child(
+        session.engine.page_document(page).root_id, "嵌套收藏"))
+    session.canvas.set_submap_favorite(nested, True)
+    session.favorites.tree_view.collapse(session.favorites.model.index_for(page))
     qtbot.waitUntil(lambda: not session.files.is_dirty, timeout=5000)
-    assert load_document(session.files.path).metadata["submap_favorites"] == [page]
+    assert load_document(session.files.path).metadata["submap_favorites"] == [nested, page]
     window.activateWindow()
     session.canvas.view.setFocus()
     QApplication.processEvents()
@@ -83,7 +97,7 @@ def test_favorites_shortcut_autosave_save_as_and_restart(favorite_window, tmp_pa
     copied = tmp_path / "另存副本.mindmap"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(copied), ""))
     assert window.save(save_as=True)
-    assert load_document(copied).metadata["submap_favorites"] == [page]
+    assert load_document(copied).metadata["submap_favorites"] == [nested, page]
     window.close()
     restored = build_window(storage_dir=tmp_path / "配置", restore=True)
     qtbot.addWidget(restored)
@@ -94,6 +108,9 @@ def test_favorites_shortcut_autosave_save_as_and_restart(favorite_window, tmp_pa
         assert active.files.path == copied
         assert active.canvas.current_page_id is None and not active.files.is_dirty
         assert active.favorites.model.rows[0][0].page_id == page
+        parent_index = active.favorites.model.index_for(page)
+        assert active.favorites.model.parent(active.favorites.model.index_for(nested)) == parent_index
+        assert active.favorites.tree_view.isExpanded(parent_index)
         assert restored.manager.states["favorites"].visible and active.favorites.isVisible()
     finally:
         restored.close()

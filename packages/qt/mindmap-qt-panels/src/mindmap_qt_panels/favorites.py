@@ -1,20 +1,29 @@
-"""子导图收藏列表：只读查询引擎，以信号把导航和内容修改交回宿主。"""
+"""子导图收藏树：只读查询引擎，以信号把导航和内容修改交回宿主。"""
 
 from __future__ import annotations
 
 from mindmap_core import MindMapEngine, Theme
 from mindmap_qt_ui.icons import toolbar_icon
 from mindmap_qt_ui.ui_style import UiColors, apply_ui_palette, menu_styles, scrollbar_styles, ui_colors
-from PySide6.QtCore import QAbstractListModel, QModelIndex, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QPainter, QPen
+from PySide6.QtCore import (
+    QAbstractItemModel,
+    QItemSelectionModel,
+    QModelIndex,
+    QPointF,
+    QRect,
+    QSize,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QLabel,
-    QListView,
     QMenu,
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -24,21 +33,75 @@ _PATH_ROLE = Qt.ItemDataRole.UserRole + 2
 _CURRENT_ROLE = Qt.ItemDataRole.UserRole + 3
 
 
-class _FavoritesModel(QAbstractListModel):
-    """仅持有不可变路径项及路径文字，不借用引擎内部文档、节点或页面记录。"""
+class _FavoritesModel(QAbstractItemModel):
+    """以页面 ID 关联收藏父子，只持有不可变路径项及独立的显示索引。
+
+    rows 保留文档先序的扁平摘要，供数量和路径检查使用；Qt 行号始终相对于
+    当前父项，导航必须通过 index_for(page_id) 定位，不能把摘要序号当作根行号。
+    """
 
     def __init__(self, parent):
         super().__init__(parent)
         self.rows = ()
         self.current_page_id = None
+        self._entries = {}
+        self._parents = {}
+        self._children = {None: ()}
+        self._row_numbers = {}
+        self._identifiers = {}
+        self._keys = {}
+        self._next_identifier = 1
 
     def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.rows)
+        """返回指定父项的直接孩子数；无效父索引表示隐藏根。"""
+        if parent.isValid() and (parent.model() is not self or parent.column() != 0):
+            return 0
+        return len(self._children.get(self.page_id(parent), ()))
+
+    def columnCount(self, parent=QModelIndex()):
+        """收藏树只有一列，单行显示标题，完整路径保留在悬停及无障碍描述中。"""
+        return 1
+
+    def index(self, row, column, parent=QModelIndex()):
+        """按局部行号建立整数索引，不向 Qt 交出可能被 Python 回收的对象指针。"""
+        if column != 0 or row < 0:
+            return QModelIndex()
+        if parent.isValid() and (parent.model() is not self or parent.column() != 0):
+            return QModelIndex()
+        children = self._children.get(self.page_id(parent), ())
+        if row >= len(children):
+            return QModelIndex()
+        return self.createIndex(row, column, self._identifiers[children[row]])
+
+    def parent(self, index):
+        """返回最近的已收藏祖先；顶层项及无效索引返回无效父索引。"""
+        return self.index_for(self._parents.get(self.page_id(index)))
+
+    def page_id(self, index):
+        """解析属于本模型的有效索引；不持有 QModelIndex 内的 Python 对象指针。"""
+        if not index.isValid() or index.model() is not self:
+            return None
+        return self._keys.get(index.internalId())
+
+    def index_for(self, page_id: str | None) -> QModelIndex:
+        """按稳定页面 ID 定位任意层的收藏项，不展开、不选择、不滚动。
+
+        未收藏、已删除及 None 返回无效索引；返回索引只适用于当前模型结构，
+        调用方在模型重置后应再次按页面 ID 查询，不保存过期的行号或索引。
+        """
+        if page_id not in self._identifiers:
+            return QModelIndex()
+        return self.createIndex(self._row_numbers[page_id], 0, self._identifiers[page_id])
+
+    def branch_ids(self):
+        """迭代当前有孩子的收藏页面，供视图在模型重置前后保存展开状态。"""
+        return (page_id for page_id, children in self._children.items() if page_id is not None and children)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or not 0 <= index.row() < len(self.rows):
+        page_id = self.page_id(index)
+        if page_id not in self._entries:
             return None
-        entry, path = self.rows[index.row()]
+        entry, path = self._entries[page_id]
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
             return entry.text.replace("\n", " ")
         if role in (Qt.ItemDataRole.ToolTipRole, Qt.ItemDataRole.AccessibleDescriptionRole):
@@ -51,24 +114,98 @@ class _FavoritesModel(QAbstractListModel):
             return entry.page_id == self.current_page_id
         return None
 
-    def set_rows(self, rows):
-        if rows != self.rows:
+    def set_rows(self, rows, parents, *, reset=False):
+        """同步只读摘要及最近收藏祖先映射，返回是否重置了结构。
+
+        仅结构、顺序或整份文档替换才重置 Qt 模型；改名及路径变化逐项发出
+        dataChanged，使已有选择、键盘焦点和手动展开不被文本编辑打断。
+        """
+        entries = {entry.page_id: (entry, path) for entry, path in rows}
+        children = {None: [], **{page_id: [] for page_id in entries}}
+        for entry, _ in rows:
+            children[parents[entry.page_id]].append(entry.page_id)
+        children = {page_id: tuple(items) for page_id, items in children.items()}
+        structural = reset or children != self._children
+        old_entries = self._entries
+        if structural:
             self.beginResetModel()
-            self.rows = rows
+            # internalId 使用不重复的整数；存活页面跨重置保留标识，已移除页面
+            # 不会把标识立即让给别的页面，避免迟到索引意外指向同名的新页面。
+            self._identifiers = {key: value for key, value in self._identifiers.items() if key in entries}
+            for page_id in entries:
+                if page_id not in self._identifiers:
+                    self._identifiers[page_id] = self._next_identifier
+                    self._next_identifier += 1
+            self._keys = {value: key for key, value in self._identifiers.items()}
+            self._row_numbers = {key: row for items in children.values() for row, key in enumerate(items)}
+        self.rows, self._entries, self._parents, self._children = rows, entries, parents, children
+        if structural:
             self.endResetModel()
+        else:
+            for page_id, value in entries.items():
+                if value != old_entries[page_id]:
+                    index = self.index_for(page_id)
+                    self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole,
+                                                        Qt.ItemDataRole.ToolTipRole,
+                                                        Qt.ItemDataRole.AccessibleTextRole,
+                                                        Qt.ItemDataRole.AccessibleDescriptionRole, _PATH_ROLE])
+        return structural
+
+
+class _FavoritesTreeView(QTreeView):
+    """仅接管分支标记的绘制，展开命中、选择及键盘处理仍全部交由原生树。
+
+    分支区保持面板底色，选中底色只由条目委托绘制；直接给 ::branch 设置背景
+    会使 Qt 样式表接管原生标记并隐藏默认三角，因此在这里明确绘制同色三角。
+    """
+
+    def __init__(self, colors: UiColors, parent: QWidget):
+        """保存宿主色板；加入堆叠布局后 Qt 会更换父控件，绘制不依赖父链。"""
+        super().__init__(parent)
+        self.colors = colors
+
+    def drawBranches(self, painter, rect, index):
+        """用逻辑像素绘制最后一级分支标记，兼容缩进、左右布局及高 DPI。"""
+        if not index.isValid() or rect.isEmpty():
+            return
+        colors = self.colors
+        painter.save()
+        try:
+            painter.fillRect(rect, QColor(colors.surface))
+            if not self.model().hasChildren(index):
+                return
+            rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+            x = rect.left() + self.indentation() / 2 if rtl else rect.right() + 1 - self.indentation() / 2
+            y = rect.top() + rect.height() / 2
+            direction = -1 if rtl else 1
+            points = ((-3, -1.5), (3, -1.5), (0, 2)) if self.isExpanded(index) else (
+                (-1.5 * direction, -3), (-1.5 * direction, 3), (2 * direction, 0))
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(colors.muted))
+            painter.drawPolygon(QPolygonF([QPointF(x + dx, y + dy) for dx, dy in points]))
+        finally:
+            painter.restore()
 
 
 class _FavoriteDelegate(QStyledItemDelegate):
-    """用两行省略文字绘制收藏项；所有尺寸使用 Qt 逻辑像素，由 Qt 适配高 DPI。"""
+    """以紧凑单行绘制收藏标题，完整路径交给模型的悬停提示及无障碍描述。
+
+    所有尺寸使用 Qt 逻辑像素，由 Qt 适配高 DPI；图标、文字和展开三角共用
+    行中心，标题长度与路径层数均不增加行高，窄侧栏中的标题在末尾省略。
+    """
 
     def sizeHint(self, option, index):
-        return QSize(180, 58)
+        """返回统一的 32 逻辑像素行高，路径数据不参与可见行的尺寸计算。"""
+        return QSize(180, 32)
 
     def paint(self, painter, option, index):
+        """依次绘制状态底色、居中图标、单行标题和焦点轮廓，保持原有状态语义。"""
         colors = self.parent()._colors
         painter.save()
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setClipRect(option.rect)
             rect = option.rect.adjusted(3, 2, -3, -2)
             current = bool(index.data(_CURRENT_ROLE))
             if current or option.state & QStyle.StateFlag.State_MouseOver:
@@ -77,23 +214,17 @@ class _FavoriteDelegate(QStyledItemDelegate):
                 painter.drawRoundedRect(rect, 5, 5)
             icon = toolbar_icon("submap", colors.accent if current else colors.muted,
                                 colors.muted, colors.accent)
-            icon.paint(painter, QRect(rect.left() + 8, rect.top() + 10, 16, 16))
-            text_rect = rect.adjusted(32, 7, -8, -6)
-            font = option.font
+            # 用实际行高计算图标位置，文字则在同一高度内垂直居中；不再预留
+            # 路径副标题的空间。复制字体，避免将当前页的加粗状态传给其他行。
+            icon.paint(painter, QRect(rect.left() + 8, rect.top() + (rect.height() - 16) // 2, 16, 16))
+            text_rect = rect.adjusted(32, 0, -8, 0)
+            font = QFont(option.font)
             font.setBold(current)
             painter.setFont(font)
             painter.setPen(QColor(colors.text))
             title = painter.fontMetrics().elidedText(index.data(), Qt.TextElideMode.ElideRight,
                                                      max(0, text_rect.width()))
-            painter.drawText(QRect(text_rect.left(), text_rect.top(), text_rect.width(), 20),
-                             Qt.AlignmentFlag.AlignVCenter, title)
-            font.setBold(False)
-            painter.setFont(font)
-            painter.setPen(QColor(colors.muted))
-            path = painter.fontMetrics().elidedText(index.data(_PATH_ROLE), Qt.TextElideMode.ElideMiddle,
-                                                    max(0, text_rect.width()))
-            painter.drawText(QRect(text_rect.left(), text_rect.top() + 22, text_rect.width(), 18),
-                             Qt.AlignmentFlag.AlignVCenter, path)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, title)
             if option.state & QStyle.StateFlag.State_HasFocus:
                 painter.setPen(QPen(QColor(colors.accent), 1, Qt.PenStyle.DotLine))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -115,10 +246,11 @@ class SubmapFavoritesPanel(QWidget):
     unfavorite_requested = Signal(str)
 
     def __init__(self, engine: MindMapEngine, parent: QWidget | None = None):
-        """为借用的 engine 建立独立列表，parent 决定 Qt 控件所有权。
+        """为借用的 engine 建立独立收藏树，parent 决定 Qt 控件所有权。
 
-        构造不会改写收藏或产生历史；内容按收藏时间倒序查询，缺少收藏时显示中文
-        操作提示。永久关闭会话前必须调用 dispose() 解除引擎订阅，再由宿主销毁控件。
+        只显示已收藏页面，并挂到最近的已收藏祖先下，同级遵循导图原有顺序。
+        新分支默认展开，浏览状态只保留在当前控件；构造不会改写收藏或产生历史。
+        缺少收藏时显示中文操作提示，永久关闭会话前必须调用 dispose() 解除订阅。
         """
         super().__init__(parent)
         self.engine = engine
@@ -137,26 +269,32 @@ class SubmapFavoritesPanel(QWidget):
         self.empty_label.setWordWrap(True)
         self.empty_label.setMargin(12)
         self._stack.addWidget(self.empty_label)
-        self.list_view = QListView(self)
-        self.list_view.setAccessibleName("已收藏的子导图")
-        self.list_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.list_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.list_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.list_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list_view.setUniformItemSizes(True)
-        self.list_view.setMouseTracking(True)
-        self.list_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree_view = _FavoritesTreeView(self._colors, self)
+        # 保留旧宿主使用的控件引用；两者始终指向同一棵树，不维护另一份列表。
+        self.list_view = self.tree_view
+        self.tree_view.setAccessibleName("已收藏的子导图树")
+        self.tree_view.setHeaderHidden(True)
+        self.tree_view.setIndentation(16)
+        self.tree_view.setUniformRowHeights(True)
+        self.tree_view.setExpandsOnDoubleClick(False)
+        self.tree_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree_view.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.tree_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.tree_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tree_view.setMouseTracking(True)
+        self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.model = _FavoritesModel(self)
-        self.list_view.setModel(self.model)
-        self.list_view.setItemDelegate(_FavoriteDelegate(self))
-        self.list_view.clicked.connect(self._navigate)
-        self.list_view.activated.connect(self._navigate)
-        self._stack.addWidget(self.list_view)
+        self.tree_view.setModel(self.model)
+        self.tree_view.setItemDelegate(_FavoriteDelegate(self))
+        self.tree_view.clicked.connect(self._navigate)
+        self.tree_view.activated.connect(self._navigate)
+        self._stack.addWidget(self.tree_view)
         self._menu = QMenu(self)
         self.remove_action = QAction("取消收藏", self)
         self.remove_action.triggered.connect(self._unfavorite)
         self._menu.addAction(self.remove_action)
-        self.list_view.customContextMenuRequested.connect(self._show_context_menu)
+        self.tree_view.customContextMenuRequested.connect(self._show_context_menu)
         self._unsubscribe = engine.subscribe(self._engine_changed)
         self.set_ui_colors(None)
         self._refresh()
@@ -165,23 +303,31 @@ class SubmapFavoritesPanel(QWidget):
         """同步当前显示页并高亮对应收藏，返回 None，不触发导航或修改。
 
         主导图使用 None，详情页或未收藏页面会清除当前收藏高亮；无效 ID 同样视为
-        未命中。该调用不会自动滚动列表，保留用户浏览位置；释放后调用无操作。
+        未命中。隐藏项也保留当前索引，但不自动展开祖先或滚动；释放后调用无操作。
         """
         if self._disposed:
             return
-        scroll = self.list_view.verticalScrollBar().value()
+        scroll = self.tree_view.verticalScrollBar().value()
         self._current_page_id = page_id
         self.model.current_page_id = page_id
-        index = next((self.model.index(row, 0) for row, (entry, _) in enumerate(self.model.rows)
-                      if entry.page_id == page_id), QModelIndex())
-        self.list_view.setCurrentIndex(index)
-        if not index.isValid():
-            self.list_view.clearSelection()
-        self.list_view.verticalScrollBar().setValue(scroll)
-        self.list_view.viewport().update()
+        index = self.model.index_for(page_id)
+        # Qt 在当前项变化时也可能通过 currentChanged 自动定位。同步期间关闭
+        # 自动滚动，并直接操作选择模型，避免收起的祖先因高亮同步而被展开；
+        # 随后恢复设置，保留用户用上下键浏览时的原生自动滚动行为。
+        auto_scroll = self.tree_view.hasAutoScroll()
+        self.tree_view.setAutoScroll(False)
+        try:
+            self.tree_view.selectionModel().setCurrentIndex(
+                index, QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows)
+            if not index.isValid():
+                self.tree_view.clearSelection()
+        finally:
+            self.tree_view.setAutoScroll(auto_scroll)
+        self.tree_view.verticalScrollBar().setValue(scroll)
+        self.tree_view.viewport().update()
 
     def set_editable(self, editable: bool) -> None:
-        """同步取消收藏入口的可用状态，返回 None，列表浏览与导航仍可使用。
+        """同步取消收藏入口的可用状态，返回 None，树形浏览与导航仍可使用。
 
         宿主应传入只读及正文编辑约束合并后的布尔值；本接口只控制界面，实际修改
         仍由宿主在收到 unfavorite_requested 后再次校验，避免菜单期间权限发生变化。
@@ -193,7 +339,7 @@ class SubmapFavoritesPanel(QWidget):
         """应用宿主界面色板，None 使用默认浅色，返回 None，不修改导图主题。
 
         非 UiColors、None 的参数抛出 TypeError；已释放面板忽略有效调用。色板同时
-        覆盖列表、空态、滚动条和右键菜单，不依赖 QApplication 的全局样式。
+        覆盖树形视图、空态、滚动条和右键菜单，不依赖 QApplication 的全局样式。
         """
         if colors is not None and not isinstance(colors, UiColors):
             raise TypeError("界面色板必须为 UiColors 或 None")
@@ -201,16 +347,17 @@ class SubmapFavoritesPanel(QWidget):
             return
         self._colors = colors or ui_colors(Theme())
         colors = self._colors
+        self.tree_view.colors = colors
         apply_ui_palette(self, colors)
-        apply_ui_palette(self.list_view, colors)
+        apply_ui_palette(self.tree_view, colors)
         self.setStyleSheet(
             f"QWidget#mindmap_submap_favorites {{background:{colors.surface};}}"
-            f"QStackedWidget, QListView {{background:{colors.surface}; border:0; outline:0;}}"
+            f"QStackedWidget, QTreeView {{background:{colors.surface}; border:0; outline:0;}}"
             f"QLabel {{background:transparent; color:{colors.muted};}}" + scrollbar_styles(colors))
         self._menu.setStyleSheet(menu_styles(colors))
         apply_ui_palette(self._menu, colors)
         self.remove_action.setIcon(toolbar_icon("favorite", colors.muted, colors.border, colors.accent))
-        self.list_view.viewport().update()
+        self.tree_view.viewport().update()
 
     def close_popups(self) -> None:
         """关闭本面板菜单并清除待操作目标，返回 None，可重复调用。
@@ -224,7 +371,7 @@ class SubmapFavoritesPanel(QWidget):
     def dispose(self) -> None:
         """幂等解除引擎订阅并关闭菜单，返回 None，不销毁借用的引擎或本控件。
 
-        宿主应先调用本方法，再删除控件或释放引擎；释放后的列表不再更新或发送
+        宿主应先调用本方法，再删除控件或释放引擎；释放后的树不再更新或发送
         导航、取消收藏请求。最终 QWidget 所有权仍由 parent 或宿主布局管理。
         """
         if self._disposed:
@@ -237,30 +384,48 @@ class SubmapFavoritesPanel(QWidget):
     def _engine_changed(self, event):
         if not self._disposed and event.kind != "saved":
             self.close_popups()
-            self._refresh()
+            self._refresh(reset=event.kind == "reset")
 
-    def _refresh(self):
-        # 页面根投影与路径栏保持一致；普通祖先节点不混入页面层级。
-        rows = tuple((entry, " › ".join(item.text.replace("\n", " ")
-                                       for item in self.engine.node_path(entry.node_id) if item.page_root))
-                     for entry in self.engine.favorite_submaps())
-        scroll = self.list_view.verticalScrollBar().value()
-        self.model.set_rows(rows)
-        self._stack.setCurrentWidget(self.list_view if rows else self.empty_label)
+    def _refresh(self, *, reset=False):
+        """按稳定 ID 投影收藏树，已有分支保留展开状态，新分支默认展开。
+
+        普通祖先与未收藏页面只参与路径和父级计算，不插入树。整份文档替换时
+        清除旧浏览状态；保存事件由调用方跳过，不产生多余查询或布局。
+        """
+        favorites = self.engine.favorite_submaps(order="document")
+        favorite_ids = {entry.page_id for entry in favorites}
+        rows, parents = [], {}
+        for entry in favorites:
+            path = [item for item in self.engine.node_path(entry.node_id) if item.page_root]
+            rows.append((entry, " › ".join(item.text.replace("\n", " ") for item in path)))
+            parents[entry.page_id] = next(
+                (item.page_id for item in reversed(path[:-1]) if item.page_id in favorite_ids), None)
+        scroll = 0 if reset else self.tree_view.verticalScrollBar().value()
+        collapsed = set() if reset else {
+            page_id for page_id in self.model.branch_ids()
+            if not self.tree_view.isExpanded(self.model.index_for(page_id))
+        }
+        structural = self.model.set_rows(tuple(rows), parents, reset=reset)
+        self._stack.setCurrentWidget(self.tree_view if rows else self.empty_label)
+        if structural:
+            # 只对重置后的真实分支恢复状态。原叶节点首次拥有孩子时视为新分支，
+            # 即使祖先已手动收起也保存它的展开状态，不强行展开上面的祖先。
+            for page_id in self.model.branch_ids():
+                self.tree_view.setExpanded(self.model.index_for(page_id), page_id not in collapsed)
         self.set_current_page_id(self._current_page_id)
-        self.list_view.doItemsLayout()
-        self.list_view.verticalScrollBar().setValue(scroll)
+        self.tree_view.doItemsLayout()
+        self.tree_view.verticalScrollBar().setValue(scroll)
 
     def _navigate(self, index):
         if not self._disposed and index.isValid():
             self.navigate_requested.emit(index.data(_PAGE_ROLE))
 
     def _show_context_menu(self, position):
-        index = self.list_view.indexAt(position)
+        index = self.tree_view.indexAt(position)
         if not self._disposed and index.isValid():
             self.remove_action.setData(index.data(_PAGE_ROLE))
             self.remove_action.setEnabled(self._editable)
-            self._menu.popup(self.list_view.viewport().mapToGlobal(position))
+            self._menu.popup(self.tree_view.viewport().mapToGlobal(position))
 
     def _unfavorite(self):
         page_id = self.remove_action.data()
