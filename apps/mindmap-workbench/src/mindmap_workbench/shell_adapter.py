@@ -3,14 +3,15 @@
 from copy import deepcopy
 from pathlib import Path
 
+from mindmap_core import MindMapError
 from mindmap_docking import DockManager, DockPosition, Theme, ToolWindowSpec
 from mindmap_formats import create_default_format_registry
 from mindmap_layouts import create_default_layout_registry
 from mindmap_qt_render import ensure_fonts
 from mindmap_qt_ui import UiColors
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
-from PySide6.QtCore import QLibraryInfo, QSettings, QSignalBlocker, Qt, QTranslator
-from PySide6.QtGui import QAction, QIcon, QPalette
+from PySide6.QtCore import QLibraryInfo, QSettings, QSignalBlocker, Qt, QTranslator, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from .document_state import DocumentState
@@ -311,6 +312,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         for identifier, title, callback, shortcut, icon in (
             ("new", "新建", self.new_document, "Ctrl+N", "new-document"),
             ("open", "打开…", self.open_dialog, "Ctrl+O", "folder"),
+            ("open_directory", "打开所在文件夹", self.open_file_directory, "", "open-directory"),
             ("save", "保存", self.save, "Ctrl+S", "save"),
             ("save_all", "保存全部", self.save_all, "Ctrl+Alt+S", "save-all"),
             ("save_as", "另存为…", lambda: self.save(save_as=True), "Ctrl+Shift+S", "save-as"),
@@ -486,6 +488,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         session = self.active_session
         for identifier in ("save", "save_as"):
             self.action("app." + identifier).setEnabled(session is not None)
+        self.action("app.open_directory").setEnabled(session is not None and session.files.path is not None)
         self.action("app.save_all").setEnabled(bool(len(self.sessions)))
         self.settings_action.setEnabled(session is not None)
         self.read_only_action.setEnabled(session is not None)
@@ -532,6 +535,36 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
 
     def open_dialog(self):
         return self.sessions.open_dialog()
+
+    def open_file_directory(self, session_id: str | None = None) -> bool:
+        """通过系统文件管理器打开目标导图所在文件夹，返回打开请求是否被接受。
+
+        session_id 为 None 时使用触发时的活动会话，否则按稳定标签标识查找；窗口
+        已释放、标签失效或没有文件路径时返回 False。每次读取最新路径，另存为及
+        同文件多标签无需重新绑定回调。只检查父目录，文件已删除但目录存在仍可用。
+        该操作仅限 GUI 线程，不主动提交编辑、保存或切换标签，也不调整最近文件。
+        失败只显示中文状态提示并记录目标导图日志，不改变导图的保存错误状态。
+        """
+        if self._disposed:
+            return False
+        session = self.active_session if session_id is None else self.sessions.get(session_id)
+        if session is None or session.disposed or session.files.path is None:
+            return False
+        directory = session.files.path.parent
+        try:
+            if not directory.is_dir():
+                raise MindMapError(f"文件夹不存在或无法访问：{directory}")
+            # 使用本地文件 URL 保留中文、空格及 #、% 等字符，避免把路径解释为网址。
+            # 不要求文件仍然存在，也不借用保存流程，以保留草稿和既有保存状态。
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+                raise MindMapError(f"系统无法打开文件夹：{directory}")
+        except Exception as error:
+            message = f"打开所在文件夹失败：{error}"
+            self.record_operation(message, session=session, level="error")
+            self.show_status_message(message)
+            return False
+        self.record_operation(f"打开所在文件夹：{directory}", session=session)
+        return True
 
     def save(self, *, save_as=False):
         """保存动作按触发时的活动会话处理，成功后清除该会话自动保存错误。"""

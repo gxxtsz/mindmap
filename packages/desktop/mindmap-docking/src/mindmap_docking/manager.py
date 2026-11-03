@@ -725,12 +725,14 @@ class DockManager(QObject):
 
     def add_document(self, document_id, title, widget, host_id="main", icon="document", *,
                      can_close=None, on_closed=None, modified=False, dispose_on_close=False,
-                     on_duplicate=None):
+                     on_duplicate=None, on_open_directory=None):
         """注册已有文档控件并显示；标识必须唯一，文档内容不进入布局配置。
 
         on_duplicate 可选，签名为无参回调并返回是否成功；提供后显示标签复制
         入口，回调负责新控件、标识及位置，原控件仍由本管理器持有。关闭决策及
         释放规则沿用 can_close、on_closed、dispose_on_close，仅限 GUI 线程。
+        on_open_directory 为可选的无参布尔回调，提供后显示打开目录入口；宿主在
+        调用时解析自己的最新文件路径。回调不会触发标签激活，也不进入布局配置。
         """
         if document_id in self.documents or not document_id or document_id.startswith("tool:"):
             raise ValueError(f"文档标识重复：{document_id}")
@@ -738,9 +740,12 @@ class DockManager(QObject):
             raise ValueError("文档内容或目标宿主无效")
         if on_duplicate is not None and not callable(on_duplicate):
             raise TypeError("文档复制回调必须可调用或为 None")
+        if on_open_directory is not None and not callable(on_open_directory):
+            raise TypeError("打开所在文件夹回调必须可调用或为 None")
         self.documents[document_id] = {"title": title, "widget": widget, "icon": icon,
                                        "can_close": can_close, "on_closed": on_closed,
                                        "on_duplicate": on_duplicate,
+                                       "on_open_directory": on_open_directory,
                                        "dispose_on_close": bool(dispose_on_close),
                                        "modified": bool(modified), "closed": False, "host_id": host_id}
         self.move_document(document_id, host_id)
@@ -753,7 +758,8 @@ class DockManager(QObject):
         widget = spec.factory()
         self.add_document(spec.id, spec.title, widget, host_id, spec.icon,
                           can_close=spec.can_close, on_closed=spec.on_closed, modified=spec.modified,
-                          dispose_on_close=spec.dispose_on_close, on_duplicate=spec.on_duplicate)
+                          dispose_on_close=spec.dispose_on_close, on_duplicate=spec.on_duplicate,
+                          on_open_directory=spec.on_open_directory)
         return widget
 
     def duplicate_document(self, document_id: str) -> bool:
@@ -770,6 +776,22 @@ class DockManager(QObject):
             return bool(document["on_duplicate"]())
         except Exception as error:
             self.message.emit(f"复制标签失败：{error}")
+            return False
+
+    def open_document_directory(self, document_id: str) -> bool:
+        """调用指定标签的目录打开回调，返回系统是否接受了打开请求。
+
+        document_id 使用稳定标签标识；不依赖或改变活动文档，不提交输入、不保存
+        文件。未注册、已关闭或未提供回调时返回 False；回调异常通过 message
+        报告并返回 False。路径、日志及系统桌面服务由宿主负责，仅限 GUI 线程。
+        """
+        document = self.documents.get(document_id)
+        if document is None or document["closed"] or document.get("on_open_directory") is None:
+            return False
+        try:
+            return bool(document["on_open_directory"]())
+        except Exception as error:
+            self.message.emit(f"打开所在文件夹失败：{error}")
             return False
 
     def set_document_title(self, document_id: str, title: str) -> None:

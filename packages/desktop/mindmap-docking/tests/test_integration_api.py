@@ -44,7 +44,7 @@ def test_duplicate_callback_failure_reports_message(docking):
 
 
 def test_document_without_callback_does_not_show_copy_entry(docking, monkeypatch):
-    """未接入复制能力的宿主保持原标签菜单；不出现无效或工具复制入口。"""
+    """未接入业务能力的宿主保持原标签菜单，不出现复制或打开目录入口。"""
     from mindmap_docking import editors
 
     shown = []
@@ -58,6 +58,63 @@ def test_document_without_callback_does_not_show_copy_entry(docking, monkeypatch
     point = bar.tabRect(0).center()
     bar.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, bar.mapToGlobal(point)))
     assert "关闭" in shown and "复制标签" not in shown
+    assert "打开所在文件夹" not in shown
+
+
+@pytest.mark.parametrize("registration", ["spec", "direct"])
+def test_directory_callback_routes_requested_document_without_activation(docking, registration):
+    """两种注册入口均路由指定标签，关闭后的回调停用，布局快照不保存回调。"""
+    manager = docking.manager
+    calls = []
+
+    def open_directory():
+        calls.append("directory")
+        return True
+
+    if registration == "spec":
+        manager.register_document(DocumentSpec("directory", "业务目录", lambda: QLabel("内容"),
+                                              on_open_directory=open_directory))
+    else:
+        manager.add_document("directory", "业务目录", QLabel("内容"), on_open_directory=open_directory)
+    manager.activate_document("doc")
+    assert manager.open_document_directory("directory") and calls == ["directory"]
+    assert manager.active_document_id == "doc"
+    assert "on_open_directory" not in json.dumps(manager.capture_layout())
+    assert not manager.open_document_directory("doc")
+    assert not manager.open_document_directory("tool:alpha")
+    assert not manager.open_document_directory("unknown")
+    assert manager.close_document("directory")
+    assert not manager.open_document_directory("directory") and calls == ["directory"]
+
+
+def test_directory_callback_rejection_and_failure_keep_document_state(docking):
+    """宿主拒绝或抛出异常时返回 False，异常报告一次，不激活或替换目标文档。"""
+    manager = docking.manager
+
+    def fail():
+        raise OSError("系统拒绝打开目录")
+
+    manager.register_document(DocumentSpec("rejected_directory", "拒绝", lambda: QLabel("保留"),
+                                          on_open_directory=lambda: False))
+    manager.register_document(DocumentSpec("failed_directory", "失败", lambda: QLabel("保留"),
+                                          on_open_directory=fail))
+    manager.activate_document("doc")
+    messages = []
+    manager.message.connect(messages.append)
+    before = set(manager.documents)
+    assert not manager.open_document_directory("rejected_directory") and not messages
+    assert not manager.open_document_directory("failed_directory")
+    assert messages == ["打开所在文件夹失败：系统拒绝打开目录"]
+    assert set(manager.documents) == before and manager.active_document_id == "doc"
+
+
+def test_directory_callback_validation_prevents_partial_registration(docking):
+    """非法回调在声明及直接注册入口均被拒绝，不留下已注册的半成品。"""
+    with pytest.raises(TypeError, match="打开所在文件夹回调"):
+        DocumentSpec("invalid_directory", "无效", lambda: QLabel("内容"), on_open_directory=False)
+    with pytest.raises(TypeError, match="打开所在文件夹回调"):
+        docking.manager.add_document("invalid_directory", "无效", QLabel("内容"), on_open_directory=False)
+    assert "invalid_directory" not in docking.manager.documents
 
 
 def test_tool_header_actions_share_state_and_ownership(docking, qtbot):

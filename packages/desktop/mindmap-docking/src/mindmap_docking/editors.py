@@ -159,15 +159,23 @@ class EditorTabBar(QTabBar):
         super().mouseMoveEvent(event)
 
     def contextMenuEvent(self, event):
+        """按命中的稳定标签标识构建菜单，执行目录操作前不激活其他文档。"""
         index = self.tabAt(event.pos())
         if index < 0:
             return
         token = self.tabData(index)
         menu = QMenu(self)
         document = self.group.manager.documents.get(token)
-        if document is not None and document.get("on_duplicate") is not None:
-            menu.addAction("复制标签", lambda: self.group.manager.duplicate_document(token))
-            menu.addSeparator()
+        if document is not None:
+            if document.get("on_duplicate") is not None:
+                menu.addAction("复制标签", lambda: self.group.manager.duplicate_document(token))
+            if document.get("on_open_directory") is not None:
+                # 只捕获标签标识，不缓存路径；另存为和分屏迁移后仍由宿主读取最新位置。
+                action = menu.addAction("打开所在文件夹", lambda: self.group.manager.open_document_directory(token))
+                action.setIcon(self.group.manager.theme.icon("open-directory"))
+                action.setProperty("mindmap_icon", "open-directory")
+            if document.get("on_duplicate") is not None or document.get("on_open_directory") is not None:
+                menu.addSeparator()
         menu.addAction("关闭", lambda: self.group.close_token(token))
         menu.addAction("关闭其他标签", lambda: self.group.close_others(token))
         menu.addSeparator()

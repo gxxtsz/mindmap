@@ -595,6 +595,7 @@ class MindMapSessionManager(QObject):
             session.id, session.files.path.stem, lambda: session.canvas, icon=self.window.spec.icon,
             can_close=session.can_close, on_closed=lambda: self._closed(session), dispose_on_close=True,
             on_duplicate=lambda: self.duplicate_session(session.id),
+            on_open_directory=lambda: self.window.open_file_directory(session.id),
         ))
         if after is not None:
             group, index = self.window.host.editor.find_token(after)

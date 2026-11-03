@@ -348,7 +348,8 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     group = window.host.editor.groups[0]
     assert group.empty_widget.isVisible() and group.count() == 0
     assert {button.text() for button in group.empty_widget.findChildren(QPushButton)} == {"新建导图", "打开文件"}
-    assert not any(window.action("app." + key).isEnabled() for key in ("save", "save_all", "save_as"))
+    assert not any(window.action("app." + key).isEnabled()
+                   for key in ("open_directory", "save", "save_all", "save_as"))
     assert not window.settings_action.isEnabled()
     assert window.host.left.isHidden() and window.host.right.isHidden()
     assert not window._depth_action.isVisible()
@@ -359,9 +360,9 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     menu = window.main_menu()
     files = menu.actions()[0].menu()
     assert [action.text() for action in files.actions()] == [
-        "新建", "打开…", "保存", "保存全部", "另存为…", "导出图形", "退出",
+        "新建", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "退出",
     ]
-    assert not files.actions()[5].isEnabled()
+    assert not next(action for action in files.actions() if action.text() == "导出图形").isEnabled()
     assert not menu.actions()[1].menu().actions()[0].isEnabled()
     menu.deleteLater()
     session = create(window, tmp_path / "第一份.mindmap")

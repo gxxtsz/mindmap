@@ -109,6 +109,9 @@ class DocumentSpec:
     在所有 can_close 通过后才执行 on_closed，拒绝时不移除任何目标页面。
     on_duplicate 可选，返回是否成功创建新视图；提供后标签右键显示“复制标签”。
     回调由宿主注册新标识及独立控件，负责插入位置和输入检查，不进入布局快照。
+    on_open_directory 可选，为无参布尔回调；提供后标签右键显示“打开所在文件夹”。
+    宿主在触发时读取最新路径并打开目录，框架只路由命中的标签，不激活它，也不
+    保存文件路径或将回调写入布局快照。两个业务回调都只能在 GUI 线程调用。
     """
 
     id: str
@@ -122,12 +125,16 @@ class DocumentSpec:
     dispose_on_close: bool = False
     # 可选的业务复制入口；返回是否创建成功。框架不复制 QWidget，也不猜测文档语义。
     on_duplicate: Callable[[], bool] | None = None
+    # 路径及系统文件管理器归宿主处理，未接入此能力的普通文档和工具标签不显示入口。
+    on_open_directory: Callable[[], bool] | None = None
 
     def __post_init__(self):
         if not self.id or self.id.startswith("tool:") or not self.title:
             raise ValueError("文档标识和标题不能为空，且标识不能使用保留前缀 tool:")
         if self.on_duplicate is not None and not callable(self.on_duplicate):
             raise TypeError("文档复制回调必须可调用或为 None")
+        if self.on_open_directory is not None and not callable(self.on_open_directory):
+            raise TypeError("打开所在文件夹回调必须可调用或为 None")
 
 
 @dataclass
