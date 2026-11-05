@@ -122,7 +122,7 @@ fragment = decode_document(
 
 - Markdown 仍使用既有标题／列表导入语义，缩进或层级错误同样包含原文行号。
 
-- 现有文本导出保持两空格缩进，文件结构版本不变。
+- 文本导出默认每层缩进两个空格。传入 `format_id="text", options={"tab_indent": True}` 可输出当前页 TXT 格式，根节点顶格，后代每层缩进一个 Tab。也可直接调用 `export_outline(document, markdown=False, tab_indent=True)` 获取大纲字符串。
 
 ### 格式识别与宿主交互
 

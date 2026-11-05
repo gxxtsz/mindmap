@@ -861,30 +861,47 @@ def test_canvas_errors_and_disposed_session_signals_do_not_leak(log_window, tmp_
     assert len(entries(window)) == count
 
 
-@pytest.mark.parametrize("format_id", ["png", "svg", "pdf"])
+@pytest.mark.parametrize("format_id", ["png", "svg", "pdf", "txt"])
 def test_export_success_and_failure_are_logged_once(log_window, tmp_path, monkeypatch, format_id):
-    """从真实导出菜单执行各格式写入；扩展名失败与取消均不产生成功记录。"""
+    """从真实菜单验证导出结果、错误日志、原子替换失败及取消。"""
     window = log_window
     create(window, tmp_path / "导出源.mindmap")
     window.operation_log.clear_action.trigger()
-    target = tmp_path / f"图形.{format_id}"
+    target = tmp_path / f"导出.{format_id}"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
     menu = window.main_menu()
     files = next(action.menu() for action in menu.actions() if action.text() == "文件")
-    exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
-    action = next(action for action in exports.actions() if action.data() == format_id)
+    if format_id == "txt":
+        action = next(action for action in files.actions() if action.text() == "导出当前页为 TXT…")
+    else:
+        exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
+        action = next(action for action in exports.actions() if action.data() == format_id)
     action.trigger()
     assert target.is_file() and len(entries(window)) == 1
     assert "[信息] [导出源.mindmap] 已导出：" in entries(window)[0]
+
+    def fail_replace(source, destination):
+        assert destination == target
+        raise OSError("模拟写入失败")
+
+    original = target.read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr("os.replace", fail_replace)
+        action.trigger()
+    assert target.read_bytes() == original and not list(tmp_path.glob("*.tmp"))
+    assert len(entries(window)) == 2 and "[错误] [导出源.mindmap]" in entries(window)[-1]
+    assert "模拟写入失败" in window.statusBar().currentMessage()
+
     wrong = tmp_path / "错误后缀.xyz"
+    wrong.write_bytes(b"existing")
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(wrong), ""))
     action.trigger()
-    assert len(entries(window)) == 2 and "[错误] [导出源.mindmap]" in entries(window)[-1]
-    assert not wrong.exists()
+    assert len(entries(window)) == 3 and "[错误] [导出源.mindmap]" in entries(window)[-1]
+    assert wrong.read_bytes() == b"existing" and not wrong.with_suffix("." + format_id).exists()
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
     action.trigger()
-    assert len(entries(window)) == 2
+    assert len(entries(window)) == 3
     menu.deleteLater()
 
 

@@ -7,6 +7,7 @@ import pytest
 from mindmap_core import BranchStyle, LayoutConfig, MindMapDocument, MindMapEngine, MindMapError
 from mindmap_formats import (
     dumps,
+    encode_document,
     export_outline,
     from_dict,
     import_outline,
@@ -164,8 +165,28 @@ def test_outline_roundtrip_hierarchy(markdown):
     engine.add_child(a, "子项")
     engine.add_child(engine.root_id, "乙")
     outline = export_outline(engine.document, markdown=markdown)
+    expected = "# 根\n- 甲\n  - 子项\n- 乙\n" if markdown else "根\n  甲\n    子项\n  乙\n"
+    assert outline == expected
     imported = import_outline(outline, markdown=markdown)
     assert export_outline(imported, markdown=markdown) == outline
+
+
+def test_tab_indented_text_export_writes_one_line_per_node():
+    """验证 UTF-8 字节、根与同级顺序，以及多行正文和无正文节点的表示。"""
+    engine = MindMapEngine()
+    first = engine.add_inspiration("  甲根  ", position=(0, 0))
+    branch = engine.add_child(first, "\t第一行\r\n第二行\t补充\u2028第三行 ")
+    engine.update_node(branch, note="节点备注", tags=["节点标签"])
+    engine.add_child(branch, "孙节点")
+    engine.add_image_child(first, b"image", width=160)
+    engine.add_child(first, " \t\n ")
+    engine.add_inspiration("乙根", position=(200, 0))
+    page = engine.page_document(engine.inspiration_id)
+
+    data = encode_document(page, format_id="text", options={"tab_indent": True})
+
+    expected = "甲根\n\t第一行 第二行 补充 第三行\n\t\t孙节点\n\t[图片]\n\t[空节点]\n乙根\n"
+    assert data == expected.encode("utf-8")
 
 
 def test_bad_outline():

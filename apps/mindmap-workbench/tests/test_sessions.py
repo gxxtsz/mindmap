@@ -360,9 +360,10 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     menu = window.main_menu()
     files = menu.actions()[0].menu()
     assert [action.text() for action in files.actions()] == [
-        "新建", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "退出",
+        "新建", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "导出当前页为 TXT…", "退出",
     ]
-    assert not next(action for action in files.actions() if action.text() == "导出图形").isEnabled()
+    for title in ("导出图形", "导出当前页为 TXT…"):
+        assert not next(action for action in files.actions() if action.text() == title).isEnabled()
     assert not menu.actions()[1].menu().actions()[0].isEnabled()
     menu.deleteLater()
     session = create(window, tmp_path / "第一份.mindmap")

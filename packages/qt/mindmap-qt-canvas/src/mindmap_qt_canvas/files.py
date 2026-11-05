@@ -1,4 +1,4 @@
-"""宿主无关的文件生命周期：原生导图打开、保存及独立图形导出。"""
+"""提供原生导图打开、保存和当前页导出的宿主无关控制器。"""
 
 from __future__ import annotations
 
@@ -329,18 +329,27 @@ class MindMapFileController(QObject):
         return True
 
     def export_dialog(self, format_id: str = "svg"):
-        """为 png、svg 或 pdf 打开单格式保存对话框，默认使用 svg。
+        """提交有效输入，为 png、svg、pdf 或 txt 打开单格式保存对话框。
 
-        宿主菜单先选择格式，对话框只显示该格式并给出相应默认文件名；取消时
-        不询问折叠范围。输入提交和原有折叠范围选择继续保留，不改变保存位置。
-        无扩展名时补齐所选格式；不同扩展名直接报错，避免输出类型偏离菜单选择。
+        默认使用 svg。图形在选定文件后询问折叠范围。txt 读取当前页的完整快照，
+        选定文件后直接写入，空页抛出 MindMapError。无扩展名时补齐所选格式，
+        其他扩展名直接报错。取消时返回，文件写入成功后发出 message 信号。
         """
-        formats = {"png": "PNG 图片", "svg": "SVG 矢量图", "pdf": "PDF 文档"}
+        formats = {"png": "PNG 图片", "svg": "SVG 矢量图", "pdf": "PDF 文档", "txt": "TXT 文本"}
         if not isinstance(format_id, str) or format_id not in formats:
-            raise MindMapError("支持的图形导出格式为 PNG、SVG、PDF")
+            raise MindMapError("支持的导出格式为 PNG、SVG、PDF、TXT")
         label, extension = formats[format_id], "." + format_id
         self.panels.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
+        text_page = None
+        if format_id == "txt":
+            # 在打开文件选择框前固定页面范围。灵感区用当前想法的根限定快照，
+            # 普通页面只读取自身分支，快照包含折叠节点及屏外节点。
+            text_page = self.engine.page_document(
+                self.canvas.current_page_id, inspiration_root_id=self.canvas.current_inspiration_root_id,
+            )
+            if not text_page.root_ids:
+                raise MindMapError("暂无可导出的想法内容")
         path, _ = QFileDialog.getSaveFileName(
             self.dialog_parent, "导出 " + label, "思维导图" + extension, f"{label} (*{extension})"
         )
@@ -352,13 +361,17 @@ class MindMapFileController(QObject):
         elif target.suffix.lower() != extension:
             # 不静默改写用户输入的另一个文件名，防止绕过保存对话框的覆盖确认。
             raise MindMapError(f"已选择{label}，请使用 {extension} 扩展名")
-        expand = QMessageBox.question(
-            self.dialog_parent,
-            "导出范围",
-            "是否展开全部节点后导出？\n选择“否”将保留当前折叠状态。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        self.canvas.export(target, expand_all=expand == QMessageBox.StandardButton.Yes)
+        if text_page is not None:
+            # TXT 菜单使用约定的内置文本编码器，复用通用文件入口的临时写入与原子替换。
+            save_document(text_page, target, format_id="text", options={"tab_indent": True})
+        else:
+            expand = QMessageBox.question(
+                self.dialog_parent,
+                "导出范围",
+                "是否展开全部节点后导出？\n选择“否”将保留当前折叠状态。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            self.canvas.export(target, expand_all=expand == QMessageBox.StandardButton.Yes)
         self.message.emit(f"已导出：{target}")
 

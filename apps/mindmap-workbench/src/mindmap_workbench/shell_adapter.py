@@ -595,16 +595,25 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         """稳定的四个主菜单；空会话使用禁用占位，文件操作始终动态路由。"""
         menu = super().main_menu()
         files = next(action.menu() for action in menu.actions() if action.text() == "文件")
+        can_export = self.active_session is not None and bool(self.canvas.document_view.nodes)
         exports = QMenu("导出图形", files)
         exports.setIcon(self.manager.theme.icon("export-image"))
         exports.menuAction().setProperty("mindmap_icon", "export-image")
-        exports.setEnabled(self.active_session is not None and bool(self.canvas.document_view.nodes))
+        exports.setEnabled(can_export)
         for format_id, label in (("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档")):
             action = exports.addAction(label + "…")
             action.setData(format_id)
             action.triggered.connect(lambda checked=False, selected=format_id:
                                      self.call(lambda: self.files.export_dialog(selected)) if self.files else None)
         files.insertMenu(self.action("app.quit"), exports)
+        # TXT 与图形共用空态检查，触发时再取活动会话，支持分屏及只读页面。
+        export_text = QAction(self.manager.theme.icon("outline"), "导出当前页为 TXT…", files)
+        export_text.setProperty("mindmap_icon", "outline")
+        export_text.setEnabled(can_export)
+        export_text.triggered.connect(
+            lambda: self.call(lambda: self.files.export_dialog("txt")) if self.files else None
+        )
+        files.insertAction(self.action("app.quit"), export_text)
         anchor = next(action for action in menu.actions() if action.text() == "设置")
         for title, keys in (
             ("编辑", ("undo", "redo", "add_inspiration", "move_to_inspiration", "attach_inspirations",

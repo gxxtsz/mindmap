@@ -87,15 +87,33 @@ def import_indented_fragment(text: str) -> MindMapDocument:
     return fragment
 
 
-def export_outline(document: MindMapDocument, *, markdown: bool = True) -> str:
-    """导出层级与文本；节点样式、标签、备注和图片附件不属于大纲交换格式。"""
+def export_outline(document: MindMapDocument, *, markdown: bool = True, tab_indent: bool = False) -> str:
+    """按子节点顺序导出正文与层级，返回以 LF 结尾的大纲文本。
+
+    markdown=False 且 tab_indent=True 时，按页内根节点顺序输出每棵树，根节点
+    顶格，后代每层缩进一个 Tab。正文中的换行和 Tab 转成空格，去除首尾空白，
+    纯图片或空白正文用占位文字表示。其他调用沿用 Markdown 或两空格缩进格式。
+    本接口读取通过校验的文档或页面快照，遍历普通子节点，无需布局或 Qt。
+    """
     document.validate()
-    lines, stack = [], [(document.root_id, 0)]
+    use_tabs = not markdown and tab_indent
+    roots = document.root_ids if use_tabs else (document.root_id,)
+    if not roots:
+        raise MindMapError("暂无可导出的想法内容")
+    # 栈按后进先出处理，倒序压入根及同级节点，以原始顺序先输出父节点再输出后代。
+    lines, stack = [], [(root, 0) for root in reversed(roots)]
     while stack:
         node_id, depth = stack.pop()
         node = document.nodes[node_id]
-        text = node.text.replace("\r", "").replace("\n", " ")
-        prefix = ("# " if depth == 0 else "  " * (depth - 1) + "- ") if markdown else "  " * depth
+        if use_tabs:
+            # 将正文限制在一行，把实际的 Tab 留给层级，并为没有正文的节点保留位置。
+            text = " ".join(node.text.splitlines()).replace("\t", " ").strip()
+            if not text:
+                text = "[图片]" if node.is_image_node else "[空节点]"
+            prefix = "\t" * depth
+        else:
+            text = node.text.replace("\r", "").replace("\n", " ")
+            prefix = ("# " if depth == 0 else "  " * (depth - 1) + "- ") if markdown else "  " * depth
         lines.append(prefix + text)
         stack.extend((child, depth + 1) for child in reversed(node.children))
     return "\n".join(lines) + "\n"

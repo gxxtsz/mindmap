@@ -36,8 +36,15 @@ class OutlineCodec:
         return import_outline(text, markdown=self.markdown)
 
     def write(self, document, stream, *, options):
-        """只输出层级与文字，不建立保存标记。"""
-        stream.write(export_outline(document, markdown=self.markdown).encode("utf-8"))
+        """向调用方提供的二进制流写入 UTF-8 大纲。
+
+        纯文本格式接受布尔选项 tab_indent，默认使用两空格缩进，设为 True 时
+        启用当前页 TXT 格式。Markdown 由构造选项决定。文件提交由调用方负责。
+        """
+        tab_indent = not self.markdown and (options or {}).get("tab_indent", False)
+        if not isinstance(tab_indent, bool):
+            raise MindMapError("文本导出选项 tab_indent 必须为布尔值")
+        stream.write(export_outline(document, markdown=self.markdown, tab_indent=tab_indent).encode("utf-8"))
 
 
 def create_default_format_registry() -> FormatRegistry:

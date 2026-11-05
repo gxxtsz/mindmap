@@ -151,8 +151,9 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "设置"]
     files = next(action.menu() for action in main.actions() if action.text() == "文件")
     assert [action.text() for action in files.actions()] == [
-        "新建", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "退出",
+        "新建", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "导出当前页为 TXT…", "退出",
     ]
+    assert next(action for action in files.actions() if action.text() == "导出当前页为 TXT…").isEnabled()
     exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
     assert [action.text() for action in exports.actions()] == ["PNG 图片…", "SVG 矢量图…", "PDF 文档…"]
     assert all(action.isEnabled() for action in exports.actions())
@@ -978,6 +979,82 @@ def test_graphic_export_cancel_or_wrong_suffix_does_not_write(window, tmp_path, 
     with pytest.raises(MindMapError, match="请使用 .png 扩展名"):
         window.files.export_dialog("png")
     assert target.read_bytes() == b"original" and not target.with_suffix(".png").exists()
+
+
+def test_txt_export_menu_uses_active_page_and_keeps_document_state(window, tmp_path, monkeypatch):
+    """用同一菜单动作验证活动标签、四类页的正文范围及只读导出。"""
+    session = window.active_session
+    canvas, engine = session.canvas, session.engine
+    engine.update_node(engine.root_id, text="主导图")
+    branch = engine.add_child(engine.root_id, "普通分支")
+    hidden = engine.add_child(branch, "折叠节点")
+    engine.set_expanded(branch, False)
+    entry = engine.add_child(engine.root_id, "子图入口")
+    submap = engine.create_submap(entry)
+    engine.add_child(engine.page_document(submap).root_id, "子图内容")
+    detail = engine.create_detail_page(branch)
+    engine.add_child(engine.page_document(detail).root_id, "详情内容")
+    idea = engine.add_inspiration("当前想法", position=(0, 0))
+    engine.add_child(idea, "想法内容")
+    engine.add_inspiration("其他想法", position=(200, 0))
+    canvas.set_editable(False)
+    session.timer.stop()
+    source = session.files.path
+    original_file = source.read_bytes()
+    before, revision = engine.document, engine.revision
+    history = engine.can_undo, engine.can_redo
+    assert session.files.is_dirty
+
+    menu = window.main_menu()
+    action = next(action for action in menu.actions()[0].menu().actions() if action.text() == "导出当前页为 TXT…")
+    assert action.isEnabled()
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: pytest.fail("TXT 不应询问折叠范围"))
+
+    def select_file(*args):
+        assert args == (window, "导出 TXT 文本", "思维导图.txt", "TXT 文本 (*.txt)")
+        return str(filename), ""
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", select_file)
+    # 在只读标签创建菜单后切换标签，触发同一动作应提交新标签的编辑并读取其快照。
+    assert window.new_document(tmp_path / "其他标签.mindmap")
+    window.canvas.begin_edit(window.engine.root_id)
+    window.canvas.editor.setPlainText("已完成的节点编辑")
+    filename = tmp_path / "其他标签.txt"
+    action.trigger()
+    assert filename.read_bytes() == "已完成的节点编辑\n".encode("utf-8")
+    assert window.engine.document.root.text == "已完成的节点编辑" and window.files.is_dirty
+
+    window.manager.activate_document(session.id)
+    assert window.active_session is session
+
+    for index, (page_id, node_id, expected) in enumerate((
+        (None, hidden, "主导图\n\t普通分支\n\t\t折叠节点\n\t子图入口\n"),
+        (submap, None, "子图入口\n\t子图内容\n"),
+        (detail, None, "普通分支\n\t详情内容\n"),
+        (engine.inspiration_id, idea, "当前想法\n\t想法内容\n"),
+    )):
+        canvas.navigate_to(page_id, node_id)
+        target = tmp_path / (f"导出{index}.TXT" if index else "导出0.txt")
+        filename = target if index else target.with_suffix("")
+        action.trigger()
+        assert target.read_bytes() == expected.encode("utf-8")
+
+    assert engine.document == before and engine.revision == revision
+    assert (engine.can_undo, engine.can_redo) == history
+    assert session.files.path == source and source.read_bytes() == original_file and session.files.is_dirty
+    menu.deleteLater()
+
+
+def test_txt_export_is_disabled_in_empty_inspiration(window, monkeypatch):
+    """有活动文档但当前想法为空时，菜单及文件控制器均禁止导出。"""
+    window.canvas.show_inspiration()
+    menu = window.main_menu()
+    action = next(action for action in menu.actions()[0].menu().actions() if action.text() == "导出当前页为 TXT…")
+    assert not action.isEnabled()
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: pytest.fail("空想法不应打开文件选择框"))
+    with pytest.raises(MindMapError, match="暂无可导出的想法内容"):
+        window.files.export_dialog("txt")
+    menu.deleteLater()
 
 
 def test_file_save_flushes_properties_and_inline_text(window, tmp_path):
