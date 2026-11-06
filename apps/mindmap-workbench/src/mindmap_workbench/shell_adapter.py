@@ -1,16 +1,18 @@
 """桌面外壳接入边界：文档、停靠面板、应用动作与局部主题映射。"""
 
 from copy import deepcopy
+from os.path import isdir
 from pathlib import Path
 
 from mindmap_core import MindMapError
 from mindmap_docking import DockManager, DockPosition, Theme, ToolWindowSpec
 from mindmap_formats import create_default_format_registry
 from mindmap_layouts import create_default_layout_registry
+from mindmap_qt_canvas import MindMapFileController
 from mindmap_qt_render import ensure_fonts
 from mindmap_qt_ui import UiColors
 from mindmap_shell import ActionSpec, AppSpec, WorkbenchWindow, run_desktop
-from PySide6.QtCore import QLibraryInfo, QSettings, QSignalBlocker, Qt, QTranslator, QUrl
+from PySide6.QtCore import QEvent, QLibraryInfo, QSettings, QSignalBlocker, Qt, QTimer, QTranslator, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
@@ -231,6 +233,11 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._bind_session(self.active_session)
         if startup_messages:
             self.show_status_message("；".join(startup_messages))
+        self._opening_dropped_files = False
+        self.setAcceptDrops(True)
+        # 文本控件可能先接受文件 URL 并插入路径，父窗口收不到这些事件。
+        # 在应用层先识别导图拖放，接收范围仍限制在本窗口及其子控件内。
+        QApplication.instance().installEventFilter(self)
 
     @property
     def active_session(self):
@@ -536,6 +543,64 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def open_dialog(self):
         return self.sessions.open_dialog()
 
+    def eventFilter(self, watched, event):
+        """在主窗口内接收外部原生导图，返回是否已处理本次 Qt 拖放事件。
+
+        只提取有效文件 URL 的绝对路径，节点、停靠和文本拖放交还原控件。
+        进入与移动阶段只检查载荷；松手后仅保留独立的路径，避免延迟回调
+        使用已经失效的事件或 MIME 对象。
+        """
+        kind = event.type()
+        # 标题栏和空白页的 window 属性保存宿主引用，用 Qt 方法查询实际顶层窗口。
+        if (kind not in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop)
+                or not isinstance(watched, QWidget) or QWidget.window(watched) is not self
+                or event.source() is not None):
+            return super().eventFilter(watched, event)
+
+        paths = []
+        for url in event.mimeData().urls():
+            if not url.isValid() or not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if not path.is_absolute():
+                continue
+            try:
+                paths.append(MindMapFileController.validate_open_path(path))
+            except MindMapError:
+                continue
+        if not paths:
+            return super().eventFilter(watched, event)
+
+        # 显式选择复制动作，避免系统因默认移动动作而移动源文件。
+        if self._opening_dropped_files or not (event.possibleActions() & Qt.DropAction.CopyAction):
+            event.ignore()
+            return True
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        if kind == QEvent.Type.Drop:
+            # 先占用批次，再退出系统拖放事件；大文件打开可进入模态事件循环，
+            # 不能让第二个拖放回调在第一批尚未结束时重入会话管理器。
+            self._opening_dropped_files = True
+            QTimer.singleShot(0, self, lambda: self._open_dropped_files(paths))
+        return True
+
+    def _open_dropped_files(self, paths: list[Path]) -> None:
+        """松手后在 GUI 线程依次打开导图，复用标签、最近文件与错误处理流程。"""
+        try:
+            for path in paths:
+                if self._disposed:
+                    break
+                # 文件夹也可能以 .mindmap 结尾；松手后再查类型，失效路径
+                # 仍交给打开入口报告，以便在操作日志中定位失败文件。
+                if isdir(path):
+                    continue
+                # 读取异常由 call 报告并返回 None；False 表示用户取消加载，
+                # 此时停止余下文件，已打开的标签继续保留。
+                if self.call(lambda: self.open_path(path)) is False:
+                    break
+        finally:
+            self._opening_dropped_files = False
+
     def open_file_directory(self, session_id: str | None = None) -> bool:
         """通过系统文件管理器打开目标导图所在文件夹，返回打开请求是否被接受。
 
@@ -688,6 +753,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         """主窗口通过全部保存检查后停止所有会话；重复调用安全。"""
         if not self._disposed:
             self._disposed = True
+            QApplication.instance().removeEventFilter(self)
+            self.setAcceptDrops(False)
             # 先停用停靠层的全局焦点监听，再删除业务控件；显式释放入口也不能
             # 让延迟焦点回调继续访问已经销毁的画布。正常关闭时 shutdown 已执行。
             self.manager.shutdown()

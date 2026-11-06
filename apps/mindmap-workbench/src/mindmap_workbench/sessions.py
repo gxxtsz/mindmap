@@ -533,7 +533,9 @@ class MindMapSession(QObject):
                             (self.owner.window._inspiration_stack, self.inspiration),
                             (self.owner.window._properties_stack, self.panels.properties),
                             (self.owner.window._settings_stack, self.panels.settings)):
-            stack.removeWidget(page)
+            # 未安装的候选会话独立持有面板，后台读取结束时主窗口的停靠栈可能已释放。
+            if page.parentWidget() is stack:
+                stack.removeWidget(page)
             page.hide()
             page.deleteLater()
         self.canvas.dispose()
@@ -691,7 +693,10 @@ class MindMapSessionManager(QObject):
         candidate = MindMapSession(self, session_id=session_id,
                                    document=existing.document if existing is not None else None)
         try:
-            if existing is None and not candidate.files.open_path(source.resolve()):
+            opened = existing is not None or candidate.files.open_path(source.resolve())
+            # 大文件模态等待会处理关闭事件。窗口已释放时丢弃候选，避免加载结果
+            # 重新注册标签，或访问已经销毁的停靠容器。
+            if not opened or self.window._disposed:
                 candidate.dispose()
                 candidate.canvas.deleteLater()
                 return False

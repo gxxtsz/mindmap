@@ -12,10 +12,11 @@ from threading import Event, Timer, get_ident
 import pytest
 from mindmap_core import LayoutConfig, MindMapDocument, MindMapError, Node, Theme
 from mindmap_formats import load_document, save_document
+from mindmap_qt_canvas import loading as background_loading
 from mindmap_workbench.shell_adapter import build_window
-from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QImage, QInputMethodEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton, QToolButton
+from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QUrl
+from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QImage, QInputMethodEvent
+from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton, QToolButton, QWidget
 from shiboken6 import isValid
 
 
@@ -711,6 +712,156 @@ def test_open_dialog_and_old_format_parameter_cannot_bypass_native_limit(empty_w
             operation(source, format_id="json")
     assert selections == ["思维导图 (*.mindmap)"] * 2
     assert empty_window.active_session is first and len(empty_window.sessions) == 1
+
+
+def drop_file_urls(target, urls, *, actions=Qt.DropAction.CopyAction | Qt.DropAction.MoveAction):
+    """从窗口入口投递完整拖放序列，由 Qt 命中子控件；Shift 模拟来源建议移动。"""
+    mime = QMimeData()
+    mime.setUrls(urls)
+    window = QWidget.window(target)
+    position = QPointF(target.mapTo(window, target.rect().center()))
+    args = (position, actions, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier)
+    for event in (QDragEnterEvent(*args), QDragMoveEvent(*args), QDropEvent(*args)):
+        QApplication.sendEvent(window.windowHandle(), event)
+        if not event.isAccepted():
+            return False
+        assert event.dropAction() == Qt.DropAction.CopyAction
+    return True
+
+
+@pytest.mark.parametrize("drop_target", ["welcome", "canvas", "tabs", "search"])
+def test_file_drop_opens_native_document_from_main_window(empty_window, tmp_path, qtbot, drop_target):
+    """验证主窗口不同落点及文件名解码，能接收文本的搜索框也应打开导图。"""
+    window = empty_window
+    group = window.host.editor.groups[0]
+    previous = None
+    if drop_target == "welcome":
+        target = group.empty_widget
+    else:
+        previous = create(window, tmp_path / "原有.mindmap")
+        if drop_target == "canvas":
+            target = previous.canvas.view.viewport()
+        elif drop_target == "tabs":
+            target = group.tabBar()
+        else:
+            window.manager.activate("inspiration", focus=False)
+            target = previous.inspiration.search
+            target.setText("原搜索内容")
+    QApplication.processEvents()
+    assert target.isVisible()
+    source = tmp_path / "旅行 计划 #1.MINDMAP"
+    save_document(MindMapDocument.new("拖入的根主题"), source, format_id="mindmap")
+    original = source.read_bytes()
+    urls = [QUrl.fromLocalFile(str(source))]
+
+    assert not drop_file_urls(target, urls, actions=Qt.DropAction.MoveAction)
+    assert drop_file_urls(target, urls)
+    assert window.active_session is previous
+    qtbot.waitUntil(lambda: window.active_session is not previous)
+    assert window.active_session.files.path == source.resolve()
+    assert window.engine.document.root.text == "拖入的根主题"
+    assert window.document_state.recent_files[0] == str(source.resolve())
+    assert source.read_bytes() == original
+    if drop_target == "search":
+        assert target.text() == "原搜索内容"
+
+
+def test_file_drop_filters_batch_and_reuses_tabs(empty_window, tmp_path, qtbot, monkeypatch):
+    """批次内逐项打开，失败保留现有文档，最后一项重复打开时激活原标签。"""
+    window = empty_window
+    original = create(window, tmp_path / "原有.mindmap")
+    original.engine.update_node(original.engine.root_id, text="尚未保存的编辑")
+    original.timer.stop()
+    tab = window.host.editor.find_token(original.id)
+    first, last = tmp_path / "第一份.mindmap", tmp_path / "最后一份.mindmap"
+    for path in (first, last):
+        save_document(MindMapDocument.new(path.stem), path)
+    broken, missing = tmp_path / "损坏.mindmap", tmp_path / "缺失.mindmap"
+    broken.write_bytes(b"invalid")
+    directory, other = tmp_path / "目录.mindmap", tmp_path / "其他类型.txt"
+    directory.mkdir()
+    save_document(MindMapDocument.new("其他类型"), other, format_id="mindmap")
+    items = (first, directory, broken, other, missing, last, original.files.path)
+    urls = [QUrl.fromLocalFile(str(path)) for path in items]
+    urls.extend([QUrl("https://example.test/导图.mindmap"), QUrl("file:相对路径.mindmap")])
+    attempted = []
+    open_path = window.open_path
+
+    def track_open(path):
+        attempted.append(path)
+        return open_path(path)
+
+    monkeypatch.setattr(window, "open_path", track_open)
+    assert drop_file_urls(window.title_bar, urls)
+    qtbot.waitUntil(lambda: len(attempted) == 5)
+    assert attempted == [first, broken, missing, last, original.files.path]
+    assert [view.files.path for view in window.sessions.ordered()] == [original.files.path, first, last]
+    assert window.host.editor.find_token(original.id) == tab and window.active_session is original
+    assert original.files.is_dirty and original.engine.document.root.text == "尚未保存的编辑"
+    assert window.document_state.recent_files == [str(original.files.path), str(last), str(first)]
+    errors = [line for line in window.operation_log.plain_text().splitlines() if "打开导图失败" in line]
+    assert len(errors) == 2 and broken.name in errors[0] and missing.name in errors[1]
+    assert window.status.currentMessage()
+
+
+def test_file_drop_cancel_stops_batch_and_allows_retry(empty_window, tmp_path, qtbot, monkeypatch):
+    """后台打开取消后保留此前成功项，处理过程中拒绝重入，结束后可重新拖入。"""
+    window = empty_window
+    first, large, last = [tmp_path / f"{name}.mindmap" for name in ("已打开", "取消打开", "重新拖入")]
+    for path in (first, last):
+        save_document(MindMapDocument.new(path.stem), path)
+    limit = max(first.stat().st_size, last.stat().st_size)
+    large.write_bytes(b"0" * (limit + 1))
+    last_url = [QUrl.fromLocalFile(str(last))]
+    canceled = []
+
+    def cancel_load(path, parent):
+        assert parent is window
+        assert not drop_file_urls(window.title_bar, last_url)
+        canceled.append(path)
+        return None
+
+    monkeypatch.setattr(background_loading, "BACKGROUND_OPEN_BYTES", limit)
+    monkeypatch.setattr(background_loading, "load_native_in_background", cancel_load)
+    assert drop_file_urls(window.title_bar, [QUrl.fromLocalFile(str(path)) for path in (first, large, last)])
+    qtbot.waitUntil(lambda: canceled == [large])
+    assert [view.files.path for view in window.sessions.ordered()] == [first]
+    assert drop_file_urls(window.title_bar, last_url)
+    qtbot.waitUntil(lambda: len(window.sessions) == 2)
+    assert window.active_session.files.path == last
+
+
+def test_file_drop_queued_before_window_close_is_discarded(empty_window, tmp_path, monkeypatch):
+    """关闭窗口早于延迟回调时，已接收的拖放也不能继续打开文件。"""
+    window = empty_window
+    source = tmp_path / "关闭窗口时拖入.mindmap"
+    save_document(MindMapDocument.new("待打开"), source)
+    monkeypatch.setattr(window, "open_path", lambda *args: pytest.fail("窗口关闭后不能打开文件"))
+    assert drop_file_urls(window.title_bar, [QUrl.fromLocalFile(str(source))])
+    assert window.close()
+    QApplication.processEvents()
+    assert len(window.sessions) == 0 and not window.document_state.recent_files
+
+
+def test_file_drop_load_finishing_after_window_close_is_discarded(empty_window, tmp_path, qtbot, monkeypatch):
+    """模拟后台读取期间关闭窗口，迟到的加载结果不能访问已释放的停靠栈。"""
+    window = empty_window
+    source = tmp_path / "窗口关闭时完成读取.mindmap"
+    save_document(MindMapDocument.new("待打开"), source)
+    completed = []
+
+    def finish_after_close(path, parent):
+        assert parent is window and window.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        completed.append((path, window.status.currentMessage()))
+        return background_loading.load_validated_document(path)
+
+    monkeypatch.setattr(background_loading, "BACKGROUND_OPEN_BYTES", 0)
+    monkeypatch.setattr(background_loading, "load_native_in_background", finish_after_close)
+    assert drop_file_urls(window.title_bar, [QUrl.fromLocalFile(str(source))])
+    qtbot.waitUntil(lambda: not window._opening_dropped_files)
+    assert completed == [(source, window.status.currentMessage())]
+    assert len(window.sessions) == 0 and not window.document_state.recent_files
 
 
 def test_cli_explicit_file_creates_session_with_empty_startup(tmp_path):
