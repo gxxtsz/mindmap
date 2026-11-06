@@ -6,6 +6,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from importlib.util import find_spec
 from threading import Event, Timer, get_ident
 
 import pytest
@@ -83,10 +84,15 @@ def controlled_save_executor(monkeypatch):
         yield executor
 
 
-def test_real_background_process_saves_without_running_in_gui_process(empty_window, tmp_path, qtbot):
+def test_real_background_process_saves_without_running_in_gui_process(
+    empty_window, tmp_path, qtbot, monkeypatch,
+):
     """真实 spawn/pythonw 入口验收，覆盖 Windows venv 重定向及进程间模型传输。"""
     import mindmap_workbench.sessions as sessions_module
 
+    # 模拟工作台从包入口启动。spawn 会跳过包的 __main__ 模块，避免在无标准输出的
+    # pythonw 进程中重载 PyCharm 测试启动器；实际进程创建、快照传输及写盘照常执行。
+    monkeypatch.setattr(sys.modules["__main__"], "__spec__", find_spec("mindmap_workbench.__main__"))
     session = create_large_session(empty_window, tmp_path / "真实后台进程.mindmap")
     try:
         session.engine.update_node(session.engine.root_id, text="进程保存成功")
