@@ -99,7 +99,7 @@ class MindMapEngine:
         return self._history.undo_label
 
     def get_node(self, node_id: str) -> Node:
-        """按标识查询节点快照；无效标识使用中文异常报告。"""
+        """按标识查询原始节点快照；引用节点仍返回自己的正文，无效标识抛出 MindMapError。"""
         return deepcopy(self._editor.node(node_id))
 
     def parent_id(self, node_id: str) -> str | None:
@@ -122,7 +122,7 @@ class MindMapEngine:
 
         page_id 省略或为 None 时读取主导图；灵感区标识返回可为空的
         MindMapForestView，以 root_ids 枚举游离树，附属页面继续返回单根快照。
-        结果归调用方所有，修改不会写回引擎，不能作为整份文档保存；无效页面
+        引用节点的正文及格式取目标页根。结果归调用方所有，不能作为整份文档保存；无效页面
         抛出 MindMapError。查询不产生历史或修改标记，仅在引擎所属线程同步调用。
         inspiration_root_id 指定灵感区中有效的游离根时，只复制这一棵普通树，
         展示根坐标归零，实际总览坐标保持不变；省略仍返回全部游离树。
@@ -148,14 +148,14 @@ class MindMapEngine:
             if page_id == self.inspiration_id:
                 local = []
                 while True:
-                    local.append(PathEntry(page_id, key, self._editor.node(key).text))
+                    local.append(PathEntry(page_id, key, self._state.document.display_node(key).text))
                     if key not in self._state.parents:
                         break
                     key = self._state.parents[key]
                 return [PathEntry(page_id, None, "灵感区", True), *reversed(local), *result]
             local = []
             while True:
-                node = self._editor.node(key)
+                node = self._state.document.display_node(key)
                 local.append(PathEntry(page_id, key, node.text, key == page.root_id))
                 if key == page.root_id:
                     break
@@ -379,6 +379,36 @@ class MindMapEngine:
         """
         self._execute("remove_detail_page", self._editor.remove_detail_page, node_id=node_id)
 
+    def set_page_reference(self, node_id: str, target_root_id: str | None) -> None:
+        """为普通文字节点设置另一张本文件页面的引用，传入 None 解除引用。
+
+        目标使用页面根节点 ID（主导图也有根 ID），不能传页面名、当前页或灵感区。
+        该操作保留节点原文、格式和所属分支，设置、换绑、解除均支持一次撤销。
+        无效来源或目标抛出中文 MindMapError，失败不写入历史；请在引擎所属线程调用。
+        """
+        self._execute("set_page_reference", self._editor.set_page_reference,
+                      node_id=node_id, target_root_id=target_root_id)
+
+    def resolve_page_reference(self, node_id: str) -> PathEntry | None:
+        """查询引用指向的根路径项，无引用返回 None，无效节点抛出 MindMapError。
+
+        返回项不可变，page_id 为 None 时表示主导图，node_id 始终是目标根的 ID。
+        只查当前文档节点和根索引，不遍历页面，不修改文档或历史。
+        """
+        target = self._editor.node(node_id).page_reference_root_id
+        page_id = self._state.root_pages.get(target, self.inspiration_id)
+        if target is None or page_id == self.inspiration_id:
+            return None
+        return PathEntry(page_id, target, self._editor.node(target).text, True)
+
+    def page_reference_sources(self, target_root_id: str) -> frozenset[str]:
+        """返回已提交且引用此页根的节点 ID，供视图按变化刷新正文。
+
+        应在提交通知中或事务外调用。结果不借用引擎索引；无来源时返回空集合，
+        不枚举整张文档，查找开销只与该目标的引用数有关。
+        """
+        return frozenset(self._state.reference_sources.get(target_root_id, ()))
+
     def subscribe(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:
         """订阅已提交状态并返回取消函数，监听器异常不会撤销提交。
 
@@ -470,6 +500,7 @@ class MindMapEngine:
         removed = {key for key in journal.submaps if key not in self._state.document.submaps}
         if removed:
             self._editor.prune_submap_favorites(removed)
+        self._editor.prune_page_references(journal)
         validate_changes(self._state, journal)
 
     def _commit(self, delta, label: str) -> None:
@@ -616,7 +647,11 @@ class MindMapEngine:
         return self._execute("insert_parent", self._editor.insert_parent, node_id=node_id, text=text)
 
     def update_node(self, node_id: str, **patch) -> None:
-        """更新节点内容、样式或元数据；标识和子节点列表必须由结构操作修改。"""
+        """更新节点内容、样式或元数据；结构和引用由专用接口修改。
+
+        引用节点的正文和格式取目标页根，请修改目标根或先解除引用。其他属性仍可
+        通过本接口修改，失败抛出 MindMapError 且不会部分提交。
+        """
 
         def action(node_id, patch):
             self._editor.update_node(node_id, **patch)

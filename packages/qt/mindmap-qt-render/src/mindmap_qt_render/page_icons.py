@@ -1,4 +1,4 @@
-"""页面类型的共享矢量图形；节点、路径栏及导出使用同一份定义。"""
+"""页面类型和页面引用的共享矢量图形，供节点、路径栏及导出使用。"""
 
 from functools import lru_cache
 
@@ -9,6 +9,10 @@ from PySide6.QtSvg import QSvgRenderer
 _PAGE_ICON_BODIES = {
     "main": '<path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-8h6v8"/>',
     "detail": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
+    "reference": (
+        '<path d="M10 13a4 4 0 0 0 6 .4l4-4a4 4 0 0 0-5.7-5.7l-2 2"/>'
+        '<path d="M14 11a4 4 0 0 0-6-.4l-4 4a4 4 0 0 0 5.7 5.7l2-2"/>'
+    ),
     "submap": (
         '<rect x="9" y="2" width="6" height="6" rx="1"/>'
         '<rect x="2" y="16" width="6" height="6" rx="1"/>'
@@ -21,7 +25,7 @@ _PAGE_ICON_BODIES = {
 def page_icon_body(kind: str) -> str:
     """取得页面图标的 SVG 图形体，供共享 UI 的多状态图标工厂复用。
 
-    kind 只接受 main、detail、submap；返回值使用 24×24 坐标，调用方负责
+    kind 只接受 main、detail、submap、reference；返回值使用 24×24 坐标，调用方负责
     SVG 外壳、颜色、两单位描边及圆角端点。未知类别显式抛出 ValueError，
     不把数据错误静默显示成另一种页面。本接口不创建 Qt 对象或读取文档。
     """

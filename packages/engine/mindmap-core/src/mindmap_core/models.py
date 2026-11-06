@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -113,6 +113,8 @@ class Node:
     submap_id: str | None = None
     # 详情页与子导图分别归属当前节点；详情页不要求入口是叶子节点。
     detail_page_id: str | None = None
+    # 只保存目标页根的标识。引用不拥有该页，text 和 text_format 始终保存本节点原文。
+    page_reference_root_id: str | None = None
 
     @property
     def is_image_node(self) -> bool:
@@ -333,12 +335,28 @@ class MindMapDocument:
         roots = {page.root_id: page.id for page in self.submaps.values()}
         return lambda node_id: _resolve_detail_page(self, node_id, roots)
 
+    def display_node(self, node_id: str) -> Node:
+        """借用节点的显示内容；无效节点标识抛出 KeyError。
+
+        完整文档只沿一条引用边读取目标根的正文及格式，其余属性仍来自当前节点。
+        单页读模型已在构建时投影正文，不需要再次查询页外目标。返回的实体及嵌套
+        数据均为只读借用；修改和保存应使用引擎接口及完整文档的原始节点。
+        """
+        node = self.nodes[node_id]
+        if node.page_reference_root_id is not None:
+            target = self.nodes.get(node.page_reference_root_id)
+            if target is not None:
+                node = copy(node)
+                node.text, node.text_format = target.text, target.text_format
+        return node
+
     def page_view(self, page_id: str | None = None, *,
                   inspiration_root_id: str | None = None) -> MindMapPageView:
         """借用一页的节点与配置，供布局、渲染和面板只读使用。
 
         返回对象不拥有整份文档，不能作为文件保存；调用方不得修改借用的实体。
-        主导图使用 None 标识。两类页面引用保留在节点上，页内校验不跨页展开。
+        主导图使用 None 标识。保留附属页和页面引用标识；仅投影引用节点的正文，
+        不把页外根或分支加入读模型，页内校验不跨页展开。
         灵感区标识返回 MindMapForestView，允许没有任何节点，应通过 root_ids
         枚举普通树；附属页面不混入读模型。目标无效时抛出 KeyError。
 
@@ -354,12 +372,12 @@ class MindMapDocument:
                     raise KeyError(inspiration_root_id)
                 page = InspirationArea(page.id, [inspiration_root_id],
                                        {inspiration_root_id: (0.0, 0.0)}, page.layout, page.theme)
-            nodes = {key: self.nodes[key] for root in page.root_ids for key in self.descendants(root)}
+            nodes = {key: self.display_node(key) for root in page.root_ids for key in self.descendants(root)}
             assets = {n.image_id: self.assets[n.image_id] for n in nodes.values() if n.image_id}
             return MindMapForestView(page, nodes, assets, self.metadata)
         if inspiration_root_id is not None:
             raise KeyError(inspiration_root_id)
-        nodes = {key: self.nodes[key] for key in self.descendants(page.root_id)}
+        nodes = {key: self.display_node(key) for key in self.descendants(page.root_id)}
         assets = {node.image_id: self.assets[node.image_id] for node in nodes.values() if node.image_id}
         view = MindMapPageView(page.root_id, nodes, assets, page.layout, page.theme, self.metadata)
         # 页面类别只属于读模型上下文，不是文件字段；详情页单页校验仍执行嵌套禁令。

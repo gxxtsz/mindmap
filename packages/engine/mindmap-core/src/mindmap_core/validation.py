@@ -28,17 +28,22 @@ def validate_document(document, *, page_only=False) -> None:
     document.layout.validate()
     seen: set[str] = set()
     pages: set[str] = set()
-    # 栈中保留所属页面类别，普通后代沿用上下文；跨页时才改变类别。
-    # 因而完整导入同样不能把附属页面藏在详情页的深层节点中。
+    # 普通后代继承页标识；附属页进入新上下文。引用边不入栈，等真实的页面根
+    # 全部确认后再校验目标，避免把引用当成所有权或靠遍历顺序判断目标是否存在。
     roots = list(document.root_ids)
     if not page_only:
         validate_inspiration(document)
         roots.extend(document.inspiration.root_ids)
     elif forest:
         validate_inspiration(document)
-    stack = [(root, getattr(document, "kind", "main") == "detail") for root in roots]
+    root_pages = dict.fromkeys(roots, document.inspiration.id)
+    if not forest:
+        root_pages[document.root_id] = None
+    in_detail_view = page_only and getattr(document, "kind", "main") == "detail"
+    references = []
+    stack = [(root, root_pages[root]) for root in roots]
     while stack:
-        node_id, in_detail = stack.pop()
+        node_id, page_id = stack.pop()
         if node_id in seen:
             raise MindMapError("节点树包含循环或重复父节点")
         if node_id not in document.nodes:
@@ -46,26 +51,35 @@ def validate_document(document, *, page_only=False) -> None:
         seen.add(node_id)
         node = document.nodes[node_id]
         validate_node(document, node_id, node, json_data=False)
-        if in_detail and (node.submap_id or node.detail_page_id):
+        if (in_detail_view or page_id in document.detail_pages) and (node.submap_id or node.detail_page_id):
             raise MindMapError("详情页内不能拥有详情页或子导图")
-        stack.extend((child, in_detail) for child in reversed(node.children))
+        if node.page_reference_root_id is not None:
+            if page_only:
+                if node_id in root_pages:
+                    raise MindMapError("根节点不能引用页面")
+            else:
+                references.append((node_id, node.page_reference_root_id, page_id))
+        stack.extend((child, page_id) for child in reversed(node.children))
         if not page_only:
-            for kind, page_id, table in (("submap", node.submap_id, document.submaps),
-                                         ("detail", node.detail_page_id, document.detail_pages)):
-                if not page_id:
+            for kind, owned_id, table in (("submap", node.submap_id, document.submaps),
+                                          ("detail", node.detail_page_id, document.detail_pages)):
+                if not owned_id:
                     continue
-                page = table.get(page_id)
-                if not isinstance(page, MindMapPage) or page.id != page_id or page.owner_id != node_id:
+                page = table.get(owned_id)
+                if not isinstance(page, MindMapPage) or page.id != owned_id or page.owner_id != node_id:
                     raise MindMapError("页面引用不存在或页面归属无效")
                 if page.id in pages:
                     raise MindMapError("页面包含循环或重复入口")
                 pages.add(page.id)
                 validate_page(document, page, kind=kind)
-                stack.append((page.root_id, kind == "detail"))
+                root_pages[page.root_id] = page.id
+                stack.append((page.root_id, page.id))
     if seen != set(document.nodes):
         raise MindMapError("文档包含未连接到根节点的节点")
     if not page_only and pages != set(document.submaps) | set(document.detail_pages):
         raise MindMapError("文档包含没有入口的子导图或详情页")
+    for node_id, target_root_id, page_id in references:
+        validate_page_reference(node_id, target_root_id, page_id, root_pages, document.inspiration.id)
     for key, asset in document.assets.items():
         if not isinstance(asset.data, bytes) or not asset.data:
             raise MindMapError("图片数据必须为非空字节串")
@@ -114,6 +128,9 @@ def validate_node(document, node_id, node, *, json_data=True):
             raise MindMapError("此节点已有子导图，请进入子导图添加内容")
     if node.detail_page_id is not None and (not isinstance(node.detail_page_id, str) or not node.detail_page_id):
         raise MindMapError("详情页标识无效")
+    reference = node.page_reference_root_id
+    if reference is not None and (not isinstance(reference, str) or not reference):
+        raise MindMapError("引用页面的根节点标识无效")
     if not isinstance(node.expanded, bool) or node.direction not in (None, "left", "right"):
         raise MindMapError("节点展开状态或方向无效")
     if node.text_format not in ("plain", "markdown"):
@@ -130,6 +147,8 @@ def validate_node(document, node_id, node, *, json_data=True):
             raise MindMapError("纯图片节点不能包含正文文字")
         if node.submap_id or node.detail_page_id:
             raise MindMapError("纯图片节点不能拥有详情页或子导图")
+        if reference is not None:
+            raise MindMapError("纯图片节点不能引用页面")
     get_branch_style(node.style)
     for key in ("font_size", "width", "border_width"):
         if key in node.style:
@@ -148,6 +167,21 @@ def validate_node(document, node_id, node, *, json_data=True):
             json.dumps([node.metadata, node.style], allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise MindMapError("元数据与样式必须是有效的 JSON 数据") from exc
+
+
+def validate_page_reference(node_id, target_root_id, page_id, root_pages, inspiration_id):
+    """校验一个引用的来源及目标；root_pages 区分主导图的 None 和缺失标识。
+
+    普通节点可引用其他页面，但不能引用灵感区、普通主题或当前页。此函数只读，
+    完整导入和事务内校验共用；正文只读取一层，因为所有页面根都不能再设引用。
+    """
+    if node_id in root_pages:
+        raise MindMapError("根节点不能引用页面")
+    if (not isinstance(target_root_id, str) or target_root_id not in root_pages
+            or root_pages[target_root_id] == inspiration_id):
+        raise MindMapError("请选择本文件中有效的页面作为引用目标")
+    if root_pages[target_root_id] == page_id:
+        raise MindMapError("不能引用当前页")
 
 
 def validate_page(document, page, *, kind=None):
@@ -221,6 +255,9 @@ def validate_changes(state, journal):
         if node is None:
             continue
         validate_node(document, key, node)
+        if node.page_reference_root_id is not None:
+            validate_page_reference(key, node.page_reference_root_id, state.page_id(key),
+                                    state.root_pages, document.inspiration.id)
         if node.submap_id or node.detail_page_id:
             if document.page_kind(state.page_id(key)) == "detail":
                 raise MindMapError("详情页内不能拥有详情页或子导图")

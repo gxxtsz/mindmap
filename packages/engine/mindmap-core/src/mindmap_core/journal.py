@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from .errors import MindMapError
 from .history import ChangeSet, NodeMove, NodePlacement
-from .models import MindMapDocument
+from .models import MindMapDocument, new_id
 
 
 @dataclass
@@ -27,7 +27,16 @@ class DocumentState:
         self.parents = document.parents()
         self.root_pages = {document.root_id: None, **{p.root_id: p.id for p in document.iter_pages()}}
         self.root_pages.update(dict.fromkeys(document.inspiration.root_ids, document.inspiration.id))
-        self.asset_counts = Counter(node.image_id for node in document.nodes.values() if node.image_id)
+        # 引用反查表只记录已提交关系；回滚无需修补。复制片段的来源令牌随打开的
+        # 文档实例重建，防止另存的文件或重新打开的文件因恰好同 ID 而继承引用。
+        self.reference_sources: dict[str, set[str]] = {}
+        self.clipboard_token = new_id()
+        self.asset_counts = Counter()
+        for key, node in document.nodes.items():
+            if node.image_id:
+                self.asset_counts[node.image_id] += 1
+            if node.page_reference_root_id:
+                self.reference_sources.setdefault(node.page_reference_root_id, set()).add(key)
         self.unused_assets = set(document.assets) - self.asset_counts.keys()
 
     def edit_node(self, key):
@@ -95,6 +104,9 @@ class DocumentState:
         old = pages.get(key)
         getattr(self.journal, name).setdefault(key, old)
         if old is not None:
+            if page is None or old.root_id != page.root_id:
+                # 同一事务内新建再删除的页没有提交前记录，也要解除本次新设的引用。
+                self.journal.reference_targets_to_check.add(old.root_id)
             self.root_pages.pop(old.root_id, None)
         if page is None:
             pages.pop(key, None)
@@ -141,7 +153,7 @@ class DocumentState:
                 if node is not None:
                     for child in node.children:
                         self.parents[child] = key
-        for pair in nodes.values():
+        for key, pair in nodes.items():
             old, new = pair[1 - index], pair[index]
             if old is not None and old.image_id:
                 self.asset_counts[old.image_id] -= 1
@@ -149,6 +161,16 @@ class DocumentState:
                     del self.asset_counts[old.image_id]
             if new is not None and new.image_id:
                 self.asset_counts[new.image_id] += 1
+            old_target = old.page_reference_root_id if old is not None else None
+            new_target = new.page_reference_root_id if new is not None else None
+            if old_target != new_target:
+                if old_target is not None:
+                    sources = self.reference_sources[old_target]
+                    sources.discard(key)
+                    if not sources:
+                        self.reference_sources.pop(old_target)
+                if new_target is not None:
+                    self.reference_sources.setdefault(new_target, set()).add(key)
         for key in changes.collections.get("assets", {}):
             if key in self.document.assets and not self.asset_counts.get(key):
                 self.unused_assets.add(key)
@@ -163,6 +185,8 @@ class TransactionJournal:
         self.state = state
         self.nodes, self.assets, self.submaps, self.detail_pages = {}, {}, {}, {}
         self.settings, self.parents = {}, {}
+        # 记录被移除及接收跨页分支的根；提交前只检查引用这些页的节点。
+        self.reference_targets_to_check: set[str] = set()
         self.page_id = None
         self.has_origin = False
 

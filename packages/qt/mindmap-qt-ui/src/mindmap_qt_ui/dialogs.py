@@ -137,7 +137,7 @@ class _PasteChoiceCard(QAbstractButton):
 
 def edraw_paste_options(
     parent, *, target_text, root_count, node_count, mode="append", keep_children=True,
-    replace_root=True, theme=None, title="粘贴亿图脑图"
+    replace_root=True, theme=None, title="粘贴亿图脑图", can_replace_root=True,
 ):
     """显示外部大纲粘贴选项，确认返回 EdrawPasteOptions，取消返回 None。
 
@@ -146,6 +146,7 @@ def edraw_paste_options(
     Markdown，默认仍为「粘贴亿图脑图」，旧调用方式及控件标识保持兼容。
     多棵来源树只能追加，界面暂时禁用替换；调用者须保留先前的单树粘贴偏好。
     根节点与后代处理相互独立，replace_root 默认替换当前主题文字，关闭后仅导入子树。
+    can_replace_root 为假时强制保留正文，用于引用节点；后代处理仍可独立选择。
     追加模式隐藏并禁用这两组处理选项，但保留内存中的选择，切回替换时继续恢复。
     theme 接受当前组件的界面色板或导图主题，使独立画布及桌面宿主均保持局部配色。
     仅在 GUI 线程同步调用；弹窗只收集选择，不解析或修改文档，也不保存本机偏好。
@@ -221,8 +222,11 @@ def edraw_paste_options(
         button.setProperty("edraw_paste_choice", True)
         root_group.addButton(button)
         root_buttons.addWidget(button)
-    replace_root_button.setChecked(replace_root)
-    keep_root.setChecked(not replace_root)
+    replace_root_button.setChecked(replace_root and can_replace_root)
+    keep_root.setChecked(not replace_root_button.isChecked())
+    if not can_replace_root:
+        replace_root_button.setEnabled(False)
+        replace_root_button.setToolTip("此节点的正文来自引用页面")
     root_layout.addLayout(root_buttons)
     layout.addWidget(root_options)
     descendants = QWidget(dialog)
@@ -278,6 +282,8 @@ def edraw_paste_options(
         confirm.setText("替换粘贴" if replacing else "追加粘贴")
         root_summary = ("使用复制内容替换当前主题文字。" if replace_root_button.isChecked()
                         else "保留当前主题文字和格式，仅导入复制内容的子树。")
+        if not can_replace_root:
+            root_summary = "保留页面引用和原正文，仅导入复制内容的子树。"
         descendants_summary = ("保留已有分支，新分支追加在后。" if keep.isChecked()
                                else "移除已有分支，使用复制内容的子树；可通过撤销恢复。")
         result_hint.setText(root_summary + "\n" + descendants_summary)

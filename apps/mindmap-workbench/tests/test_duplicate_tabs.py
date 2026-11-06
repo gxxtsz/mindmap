@@ -391,6 +391,51 @@ def test_shared_save_rejects_other_tab_ime_and_autosave_keeps_draft(windows, tmp
     assert second.canvas.editor is editor
 
 
+def test_page_reference_edit_menu_shared_tab_and_autosave(windows, tmp_path, monkeypatch):
+    """从工作台编辑菜单创建引用；共享标签改名后同步显示并保存原始正文。"""
+    window = windows()
+    path = tmp_path / "页面引用.mindmap"
+    first = new(window, path)
+    engine = first.engine
+    source = engine.add_child(engine.root_id, "保留的原文")
+    owner = engine.add_child(engine.root_id, "章节")
+    page = engine.create_submap(owner)
+    root = engine.page_document(page).root_id
+    first.canvas.select_nodes([source])
+    menu = window.main_menu()
+    edit_menu = next(action.menu() for action in menu.actions() if action.text() == "编辑")
+    action = first.canvas.action("set_page_reference")
+    assert action in edit_menu.actions() and action.isEnabled()
+    monkeypatch.setattr("mindmap_qt_canvas.navigation.choose_reference_root", lambda *a, **k: root)
+    action.trigger()
+    assert first.canvas.document_view.nodes[source].text == "章节"
+    assert "设置页面引用" in window.operation_log.plain_text()
+    menu.deleteLater()
+
+    second = duplicate(window, first)
+    second.canvas.open_page_reference(source)
+    assert second.canvas.current_page_id == page and first.canvas.current_page_id is None
+    second.canvas.begin_edit(root)
+    second.canvas.editor.setPlainText("另一标签中的新标题")
+    second.canvas.call(second.canvas.finish_edit)
+    assert first.canvas.document_view.nodes[source].text == "另一标签中的新标题"
+    assert first.autosave()
+    saved = load_document(path)
+    assert saved.nodes[source].text == "保留的原文"
+    assert saved.nodes[source].page_reference_root_id == root
+    assert saved.nodes[root].text == "另一标签中的新标题"
+    second.canvas.return_to_parent_page()
+    assert second.canvas.current_page_id is None and second.canvas.selected_node_ids() == [source]
+    assert not engine.is_dirty
+
+    reopened = windows(storage=tmp_path / "重开配置")
+    assert reopened.open_path(path)
+    restored = reopened.active_session.canvas
+    assert restored.document_view.nodes[source].text == "另一标签中的新标题"
+    restored.open_page_reference(source)
+    assert restored.current_page_id == page and restored.selected_node_ids() == [root]
+
+
 @pytest.mark.parametrize("inspiration", [False, True])
 def test_other_view_updates_keep_live_text_and_input_method_draft(windows, tmp_path, inspiration):
     window = windows()

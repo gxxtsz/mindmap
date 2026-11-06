@@ -93,7 +93,7 @@ def export_outline(document: MindMapDocument, *, markdown: bool = True, tab_inde
     markdown=False 且 tab_indent=True 时，按页内根节点顺序输出每棵树，根节点
     顶格，后代每层缩进一个 Tab。正文中的换行和 Tab 转成空格，去除首尾空白，
     纯图片或空白正文用占位文字表示。其他调用沿用 Markdown 或两空格缩进格式。
-    本接口读取通过校验的文档或页面快照，遍历普通子节点，无需布局或 Qt。
+    本接口读取通过校验的文档或页面快照，引用输出其显示正文，仅遍历普通子节点。
     """
     document.validate()
     use_tabs = not markdown and tab_indent
@@ -104,7 +104,7 @@ def export_outline(document: MindMapDocument, *, markdown: bool = True, tab_inde
     lines, stack = [], [(root, 0) for root in reversed(roots)]
     while stack:
         node_id, depth = stack.pop()
-        node = document.nodes[node_id]
+        node = document.display_node(node_id)
         if use_tabs:
             # 将正文限制在一行，把实际的 Tab 留给层级，并为没有正文的节点保留位置。
             text = " ".join(node.text.splitlines()).replace("\t", " ").strip()

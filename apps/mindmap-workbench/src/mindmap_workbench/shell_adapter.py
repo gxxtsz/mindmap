@@ -619,6 +619,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ("编辑", ("undo", "redo", "add_inspiration", "move_to_inspiration", "attach_inspirations",
                     "group_inspirations", "add_child", "add_sibling", "insert_parent", "edit", "properties",
                     "delete", "convert_descendants_to_submap", "convert_submap_to_descendants",
+                    "set_page_reference", "open_page_reference", "clear_page_reference",
                     "copy", "cut", "paste", "image", "image_url")),
             ("视图", ("zoom_in", "zoom_out", "expand_all", "collapse_all")),
         ):

@@ -205,7 +205,7 @@ class NodeVisual:
     def page_control_rect(self, kind: str) -> QRectF:
         """返回节点内部的入口命中矩形；缺少该页面时返回空矩形。
 
-        页面顺序由 page_kinds 固定为详情、子导图；按钮为 32×32，间隔为 2，
+        页面按钮按详情、子导图、引用的顺序排列；按钮为 32×32，间隔为 2，
         最右侧保留 14 像素，与节点朝向无关。测量、绘制与命中共用此坐标。
         """
         if kind not in self.page_kinds:
@@ -352,6 +352,8 @@ class VisualFactory:
         detail_page_resolver 可提供核心共享详情解析接口，返回归属节点及页面 ID；
         仅根节点和子导图入口需要额外解析，普通主题仍取自身字段。省略时沿用
         原有测量行为。解析结果只以是否存在进入缓存，不缓存具体页面或修改节点。
+        单页读模型已经投影引用正文；直接绘制完整文档时在这里借用目标根的正文。
+        引用按钮只为自身预留几何，图片、标签、样式及其他入口仍取来源节点。
         纯图片节点仅按 image_width 和原始像素比例测量，无正文、留白、填充及常驻
         边框，也不使用普通附件的宽高限制；图片字节无效时抛出 MindMapError。
         宿主先创建 QApplication，并在 GUI 线程使用返回的文字文档和图片对象。
@@ -362,9 +364,11 @@ class VisualFactory:
         detail_page_id = node.detail_page_id
         if detail_page_resolver is not None and (is_root or node.submap_id):
             detail_page_id = detail_page_resolver(node.id)[1]
+        reference = node.page_reference_root_id
+        body = document.nodes.get(reference, node) if reference else node
         key = (
-            node.text,
-            node.text_format,
+            body.text,
+            body.text_format,
             # 连接线样式不改变节点文字或图片，切换/预览时复用原有测量缓存。
             repr({key: value for key, value in node.style.items() if key != "branch"}),
             tuple(node.tags),
@@ -377,6 +381,7 @@ class VisualFactory:
             bool(node.hyperlink),
             bool(detail_page_id),
             bool(node.submap_id),
+            bool(reference),
             is_root,
             repr(theme),
         )
@@ -397,14 +402,17 @@ class VisualFactory:
         # 非整数倍率下的曲线和字距过渡更自然，系统字体回退及 ClearType 仍由 Qt 管理。
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-        text = (" ".join(node.icons) + " " if node.icons else "") + node.text
+        markdown = body.text_format == "markdown"
+        # 引用处可有自己的图标；与 Markdown 分段可避免图标前缀破坏目标正文的标题、列表。
+        separator = "\n\n" if reference and markdown else " "
+        text = (" ".join(node.icons) + separator if node.icons else "") + body.text
         max_width = float(node.style.get("width", 280))
         metrics = QFontMetricsF(font)
         natural = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=40)
         text_width = max(36, min(max_width, natural + 3))
-        if node.text_format == "markdown":
+        if markdown:
             text_width = max(120, min(max_width, natural + 3))
-        text_document = make_text(text, font, text_width, markdown=node.text_format == "markdown")
+        text_document = make_text(text, font, text_width, markdown=markdown)
         image, image_rect = None, QRectF()
         y = _NODE_VERTICAL_PADDING
         width = text_width + 28
@@ -470,8 +478,9 @@ class VisualFactory:
             tag_font,
             font,
             bool(node.children),
-            page_kinds=tuple(kind for kind, page in (("detail", detail_page_id), ("submap", node.submap_id))
-                             if page),
+            page_kinds=tuple(kind for kind, target in (
+                ("detail", detail_page_id), ("submap", node.submap_id), ("reference", reference),
+            ) if target),
             content_height=content_height,
             image_only=node.is_image_node,
         )

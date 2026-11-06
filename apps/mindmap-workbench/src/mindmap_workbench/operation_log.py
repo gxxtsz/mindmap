@@ -58,6 +58,7 @@ _OPERATION_NAMES = {
     "convert_submap_to_descendants": "子导图转为节点后代",
     "create_detail_page": "创建详情页", "remove_detail_page": "删除详情页",
     "set_submap_favorite": "修改子导图收藏",
+    "set_page_reference": "设置页面引用",
 }
 _LEVEL_NAMES = {"info": "信息", "warning": "警告", "error": "错误"}
 
@@ -212,6 +213,13 @@ def describe_change(event: ChangeEvent) -> str:
         descriptions.extend(text for text in movements if text)
     nodes = event.changes.collections.get("nodes", {}) if event.changes is not None else {}
     pairs = list(nodes.values())
+    if event.operation == "set_page_reference" and pairs:
+        old, new = pairs[0]
+        if old is not None and new is not None:
+            if new.page_reference_root_id is None:
+                label = "解除页面引用"
+            elif old.page_reference_root_id is not None:
+                label = "更换引用页面"
     text_changes = list(dict.fromkeys((old.text, new.text) for old, new in pairs
                                       if old is not None and new is not None and old.text != new.text))
     if text_changes:

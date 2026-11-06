@@ -187,12 +187,17 @@ class FoldControlItem(QGraphicsObject):
 class PageControlItem(QGraphicsObject):
     """节点内部右侧的页面按钮；复用正式视觉几何，静态导出只复用其图形。"""
 
+    _kinds = {
+        "detail": ("detail_page_id", "查看详情页"),
+        "submap": ("submap_id", "进入子导图"),
+        "reference": ("page_reference_root_id", "打开引用页面"),
+    }
+
     def __init__(self, node_item, *, kind="submap"):
         """创建不抢焦点的页面入口；命中和导航由视图路由，子图元只维护悬停。"""
         super().__init__(node_item)
         self.kind = kind
-        self.field_name = "detail_page_id" if kind == "detail" else "submap_id"
-        self.label = "查看详情页" if kind == "detail" else "进入子导图"
+        self.field_name, self.label = self._kinds[kind]
         self._node_item_ref = ref(node_item)
         self._rect = QRectF()
         self.hovered = False
@@ -228,9 +233,9 @@ class PageControlItem(QGraphicsObject):
         if not (item and item.owner and not item.owner._disposed and not item.owner._applying_engine_event
                 and item.owner.editor is None and not item.owner.view.node_drag.active):
             return False
-        page_id = (item.owner.engine.resolve_detail_page(item.node.id)[1] if self.kind == "detail"
-                   else item.node.submap_id)
-        return bool(page_id)
+        target = (item.owner.engine.resolve_detail_page(item.node.id)[1] if self.kind == "detail"
+                  else getattr(item.node, self.field_name))
+        return bool(target)
 
     def boundingRect(self):
         """返回与共享测量一致的 32×32 点击区域，始终位于所属节点内部。"""
@@ -263,7 +268,7 @@ class PageControlItem(QGraphicsObject):
         item.visual.paint_page_control(painter, self.kind)
 
 
-# 保留旧模块中的控件名字；两种图标由同一个具体 Qt 图元绘制并处理命中。
+# 保留旧模块中的控件名字；三种入口由同一个 Qt 图元绘制并处理命中。
 SubmapControlItem = PageControlItem
 
 
@@ -278,6 +283,8 @@ class NodeItem(StaticNodeItem):
         self.fold_control = FoldControlItem(self) if owner is not None else None
         self.detail_page_control = PageControlItem(self, kind="detail") if owner is not None else None
         self.submap_control = SubmapControlItem(self) if owner is not None else None
+        self.reference_control = None
+        self._sync_reference_control()
 
     def boundingRect(self):
         """返回交互图元的重绘边界，纯图片额外覆盖画布投影。
@@ -348,6 +355,14 @@ class NodeItem(StaticNodeItem):
             self.submap_control.sync()
         if self.detail_page_control is not None:
             self.detail_page_control.sync()
+        self._sync_reference_control()
+
+    def _sync_reference_control(self):
+        """只为有过引用的图元创建按钮；隐藏后复用，避免大图普通节点增加 Qt 对象。"""
+        if self.reference_control is not None:
+            self.reference_control.sync()
+        elif self.owner is not None and "reference" in self.visual.page_kinds:
+            self.reference_control = PageControlItem(self, kind="reference")
 
     def itemChange(self, change, value):
         result = super().itemChange(change, value)

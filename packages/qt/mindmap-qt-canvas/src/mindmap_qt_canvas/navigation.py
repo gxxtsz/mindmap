@@ -12,6 +12,7 @@ from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QToolButton, QWidget
 
 from .interactions import document_interaction
+from .page_references import choose_reference_root
 from .view import MIN_ZOOM
 
 
@@ -78,24 +79,24 @@ class PathNavigation(QWidget):
         return " › ".join(entry.text for entry in self.entries)
 
     def set_path(self, entries, *, page_id=None, selection_count=0,
-                 page_kinds: Mapping[str | None, str] | None = None):
+                 page_kinds: Mapping[str | None, str] | None = None, reference_return=False):
         """同步页面根路径、类型图标和选择数量，不修改引擎路径对象。
 
         page_kinds 将页面 ID 映射到 main、submap、detail、inspiration，由导航层从文档查询。
         省略时兼容旧调用：None 使用主导图图标，其余使用子导图图标。映射仅
         用于显示，不参与路径文字、复制内容或跳转依据；类型变化同样触发重建。
-        page_id 为 None 时禁用返回按钮，其他页面允许按归属返回；宿主同步目标
-        对应的悬停与无障碍说明。仅在 GUI 线程调用，不提交内容或改变撤销历史。
+        主导图通常不能返回；reference_return 为真时仍可回到发起引用的节点。
+        宿主同步返回按钮的说明。仅在 GUI 线程调用，不提交内容或改变撤销历史。
         """
         entries = list(entries)
         kinds = {entry.page_id: (page_kinds or {}).get(
             entry.page_id, "main" if entry.page_id is None else "submap") for entry in entries}
-        signature = (tuple(entries), tuple(kinds.items()), page_id, selection_count)
+        signature = (tuple(entries), tuple(kinds.items()), page_id, selection_count, reference_return)
         if signature == self._signature:
             return
         self._signature = signature
         self.entries, self.selection_count, self.page_kinds = entries, selection_count, kinds
-        self.back_button.setEnabled(page_id is not None)
+        self.back_button.setEnabled(page_id is not None or reference_return)
         self.setToolTip(self.full_path)
         self.setAccessibleDescription(self.full_path)
         self._rebuild()
@@ -260,12 +261,22 @@ class PageViewState:
     focus_id: str | None
 
 
+@dataclass(frozen=True)
+class _ReferenceOrigin:
+    """一次引用跳转的来源，只属于当前画布，不随文件或会话保存。"""
+
+    page_id: str | None
+    node_id: str
+    inspiration_root_id: str | None
+
+
 class PageNavigationMixin:
     """画布内部页面协调器；文件引擎始终保持同一个实例和统一历史。"""
 
     def _init_page_navigation(self, layout):
         self._current_page_id = None
         self._detail_origin = None
+        self._reference_origin = None
         self._page_states = {}
         self._inspiration_root_id = None
         self._last_inspiration_root = None
@@ -456,8 +467,9 @@ class PageNavigationMixin:
 
     def _switch_page(
         self, page_id, *, notify=True, cache=True, inspiration_root_id=None, detail_origin=None,
+        reference_origin=None,
     ):
-        """切换页内读模型及视图；detail_origin 临时记录打开详情的页面和想法根。
+        """切换页内读模型及视图；可记录详情入口或引用来源作为临时返回位置。
 
         来源仅属于当前画布，不进入文件或会话快照；其他导航清除旧来源，避免
         再次从不同入口进入同一详情时返回错误页面。撤销删除仍由调用方选择有效祖先。
@@ -481,6 +493,7 @@ class PageNavigationMixin:
         self._virtualized = False
         self._current_page_id = page_id
         self._detail_origin = detail_origin if self.current_page_kind == "detail" else None
+        self._reference_origin = reference_origin
         if page_id == self.engine.inspiration_id:
             self._inspiration_root_id = self._choose_inspiration_root(
                 inspiration_root_id or self._inspiration_root_id)
@@ -562,6 +575,99 @@ class PageNavigationMixin:
         self._prepare_page_navigation()
         self.select_nodes([key])
         self._switch_page(node.submap_id)
+
+    def _reference_selection(self):
+        """返回唯一可设引用的选中节点；根和纯图片仍可使用其他原有操作。"""
+        selected = self.selected_node_ids()
+        if len(selected) != 1 or selected[0] in self._document.root_ids:
+            return None
+        node = self._document.nodes.get(selected[0])
+        return node if node is not None and not node.is_image_node else None
+
+    def _page_reference_choices(self):
+        """按当前文件枚举实际的单根页面，路径用于搜索，根 ID 用于确认。"""
+        book = self._book_document
+        choices = []
+        for page_id, root_id, label in (
+            (None, book.root_id, "主导图"),
+            *((page.id, page.root_id, "子导图") for page in book.submaps.values()),
+            *((page.id, page.root_id, "详情页") for page in book.detail_pages.values()),
+        ):
+            if page_id != self.current_page_id:
+                path = " › ".join(" ".join(entry.text.split()) or "（空主题）"
+                                  for entry in self.engine.node_path(root_id))
+                choices.append((root_id, label, path))
+        return choices
+
+    @document_interaction
+    def choose_page_reference(self) -> None:
+        """为单选普通节点设置或更换引用；取消时不产生引用变更或历史记录。
+
+        沿用切页的草稿和输入法检查。对话框开启期间允许自动保存或无关编辑；关闭
+        后若文档、页面、选中节点或引用本身改变，要求重新选择，避免覆盖其他视图的编辑。
+        """
+        self._ensure_editable()
+        node = self._reference_selection()
+        if node is None:
+            raise MindMapError("请选择一个普通文字节点来引用页面")
+        key = node.id
+        view_key, generation = self._view_key(), self.engine.document_generation
+        self._prepare_page_navigation()
+        node = self._reference_selection()
+        if (self._disposed or node is None or node.id != key or view_key != self._view_key()
+                or generation != self.engine.document_generation):
+            raise MindMapError("导图或所选节点已变化，请重新设置引用")
+        previous = node.page_reference_root_id
+        root_id = choose_reference_root(self, self._page_reference_choices(), current_root_id=previous,
+                                        colors=self._ui_colors)
+        if root_id is None:
+            return
+        self._ensure_editable()
+        node = self._reference_selection()
+        if (self._disposed or node is None or node.id != key or node.page_reference_root_id != previous
+                or view_key != self._view_key() or generation != self.engine.document_generation):
+            raise MindMapError("导图或所选节点已变化，请重新设置引用")
+        self.engine.set_page_reference(key, root_id)
+
+    @document_interaction
+    def clear_page_reference(self) -> None:
+        """解除单选节点的引用，保留原文；只读、输入法候选或选择失效时不修改。"""
+        self._ensure_editable()
+        node = self._reference_selection()
+        if node is None or node.page_reference_root_id is None:
+            raise MindMapError("请选择一个引用了页面的节点")
+        view_key, generation = self._view_key(), self.engine.document_generation
+        self._prepare_page_navigation()
+        self._ensure_editable()
+        current = self._reference_selection()
+        if (self._disposed or current is None or current.id != node.id
+                or current.page_reference_root_id != node.page_reference_root_id
+                or view_key != self._view_key() or generation != self.engine.document_generation):
+            raise MindMapError("导图或所选节点已变化，请重新解除引用")
+        self.engine.set_page_reference(node.id, None)
+
+    def open_page_reference(self, node_id: str | None = None) -> None:
+        """在当前标签定位引用目标页的根；只读也可用，来源现场只在本画布缓存。
+
+        node_id 省略时使用当前节点，明确传入时必须属于当前视图。输入法、目标失效
+        或提交侧栏草稿后入口发生变化时抛出 MindMapError，不执行跳转。
+        """
+        key = self.current_node_id() if node_id is None else node_id
+        if key not in self._document.nodes:
+            raise MindMapError("引用节点不在当前页面")
+        target = self.engine.resolve_page_reference(key)
+        if target is None:
+            raise MindMapError("此节点没有页面引用")
+        view_key, generation = self._view_key(), self.engine.document_generation
+        self._prepare_page_navigation()
+        if (self._disposed or view_key != self._view_key() or generation != self.engine.document_generation
+                or key not in self._document.nodes
+                or self._document.nodes[key].page_reference_root_id != target.node_id):
+            raise MindMapError("页面引用已变化，请重新跳转")
+        origin = _ReferenceOrigin(self.current_page_id, key, self.current_inspiration_root_id)
+        self.select_nodes([key])
+        self._switch_page(target.page_id, reference_origin=origin)
+        self._locate_page_node(target.node_id)
 
     @document_interaction
     def create_submap(self):
@@ -714,7 +820,16 @@ class PageNavigationMixin:
         self.engine.remove_detail_page(key)
 
     def return_to_parent_page(self):
-        """详情优先返回有效发起页并恢复视图，其余情况按实际所有权返回一层。"""
+        """优先返回有效引用来源，其次返回详情来源或实际所属页面。"""
+        reference = self._reference_return_origin()
+        if reference is not None:
+            self._prepare_page_navigation()
+            if self._reference_return_origin() != reference:
+                raise MindMapError("引用来源已变化，请重新导航")
+            self._switch_page(reference.page_id, inspiration_root_id=reference.inspiration_root_id)
+            if reference.node_id not in self.selected_node_ids():
+                self._locate_page_node(reference.node_id)
+            return
         if self._current_page_id is None:
             return
         origin = self._detail_return_origin()
@@ -782,8 +897,24 @@ class PageNavigationMixin:
             return None
         return origin
 
-    def _back_button_text(self):
+    def _reference_return_origin(self):
+        """确认来源仍在原页并指向当前根；删除、迁移或换绑后丢弃过期返回点。"""
+        origin = self._reference_origin
+        if origin is None:
+            return None
+        node = self._book_document.nodes.get(origin.node_id)
+        if (node is None or node.page_reference_root_id != self._document.root_id
+                or not self._book_document.has_page(origin.page_id)
+                or self.engine.node_page_id(origin.node_id) != origin.page_id
+                or origin.inspiration_root_id is not None
+                and self._inspiration_root_for(origin.node_id) != origin.inspiration_root_id):
+            self._reference_origin = None
+        return self._reference_origin
+
+    def _back_button_text(self, *, reference_return=False):
         """按实际返回目标生成提示，区分主导图、所属想法及不同层级的附属页面。"""
+        if reference_return:
+            return "返回引用节点"
         if self.current_page_id is None:
             return "已在主导图"
         if self.current_page_kind == "inspiration":
@@ -812,13 +943,15 @@ class PageNavigationMixin:
         # 之后删除本页时继续返回已经失效的祖先页面。灵感区空态也保留有效回退点。
         self._page_chain = ([self.current_page_id] if self.current_page_kind == "inspiration"
                             else [entry.page_id for entry in pages])
-        back_text = self._back_button_text()
+        reference_return = self._reference_return_origin() is not None
+        back_text = self._back_button_text(reference_return=reference_return)
         self.path_navigation.back_button.setToolTip(back_text)
         self.path_navigation.back_button.setAccessibleName(back_text)
         self.path_navigation.set_path(pages, page_id=self._current_page_id,
                                       selection_count=len(self.selected_node_ids()),
                                       page_kinds={entry.page_id: self._book_document.page_kind(entry.page_id)
-                                                  for entry in pages})
+                                                  for entry in pages},
+                                      reference_return=reference_return)
         self.path_navigation.set_ui_colors(ui_colors(self._ui_colors_override or self._document.theme))
         self.path_navigation.set_favorite_state(
             visible=self.current_page_kind == "submap",

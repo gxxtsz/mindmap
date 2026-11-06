@@ -413,8 +413,8 @@ class MindMapView(QGraphicsView):
             if item.can_activate():
                 # 切页会释放当前图元，回调只捕获节点 ID，不能在被销毁的按钮实例上继续执行。
                 key = item.node_item.node.id
-                enter = (self.owner.enter_detail_page if item.field_name == "detail_page_id"
-                         else self.owner.enter_submap)
+                enter = {"detail": self.owner.enter_detail_page, "submap": self.owner.enter_submap,
+                         "reference": self.owner.open_page_reference}[item.kind]
                 self.owner.call(lambda: enter(key))
             self._fold_pressed = True
             event.accept()

@@ -10,6 +10,9 @@ from .errors import MindMapError
 from .inspiration import InspirationEditorMixin
 from .models import Asset, MindMapDocument, MindMapPage, Node, _resolve_detail_page, new_id
 from .transactions import DocumentState
+from .validation import validate_page_reference
+
+_CLIPBOARD_REFERENCES = "clipboard_page_references"
 
 
 class DocumentEditor(InspirationEditorMixin):
@@ -144,11 +147,15 @@ class DocumentEditor(InspirationEditorMixin):
         apply_branch_style(self.document, node_ids, kind, scope=scope)
 
     def update_node(self, node_id: str, **patch) -> None:
-        """修改节点内容或样式；标识、普通子列表及两类页面引用只能由结构操作维护。"""
+        """修改节点内容或样式；标识、普通子列表及页面关系只能由专用操作维护。"""
 
-        allowed = {item.name for item in fields(Node)} - {"id", "children", "submap_id", "detail_page_id"}
+        allowed = {item.name for item in fields(Node)} - {
+            "id", "children", "submap_id", "detail_page_id", "page_reference_root_id",
+        }
         if patch.keys() - allowed:
             raise MindMapError("包含不可直接修改的节点字段")
+        if (patch.keys() & {"text", "text_format"}) and self.node(node_id).page_reference_root_id:
+            raise MindMapError("请到引用页面编辑正文，或先解除页面引用")
         node = self.edit(node_id)
         for key, value in patch.items():
             setattr(node, key, deepcopy(value))
@@ -170,6 +177,40 @@ class DocumentEditor(InspirationEditorMixin):
                         seen.add(key)
                         self.edit(key).text = patch["text"]
                         pending.append(key)
+
+    def set_page_reference(self, node_id, target_root_id):
+        """验证并登记独立的导航引用，保留原文和两类附属页的所有权。"""
+        node = self.node(node_id)
+        if target_root_id is not None:
+            if node.is_image_node:
+                raise MindMapError("纯图片节点不能引用页面")
+            validate_page_reference(node_id, target_root_id, self._state.page_id(node_id),
+                                    self._state.root_pages, self.document.inspiration.id)
+        if node.page_reference_root_id != target_root_id:
+            self.edit(node_id).page_reference_root_id = target_root_id
+
+    def prune_page_references(self, journal):
+        """在正式提交前解除因页面边界改变而失效的引用，随结构一起撤销。
+
+        按删掉的页面根、跨页移动的目的根反查已提交来源，并补上本事务新设的
+        引用。脱离为游离根的节点直接查变化父边。只看最终归属，嵌套事务中
+        暂时移走再移回不丢引用；普通编辑不遍历整张图或所有引用。
+        """
+        affected = journal.reference_targets_to_check
+        roots = self._state.root_pages
+        candidates = {key for key in journal.parents if key in roots}
+        if affected:
+            for target in affected:
+                candidates.update(self._state.reference_sources.get(target, ()))
+            candidates.update(key for key in journal.nodes if key in self.document.nodes
+                              and self.document.nodes[key].page_reference_root_id in affected)
+        for key in candidates:
+            node = self.document.nodes.get(key)
+            target = node.page_reference_root_id if node is not None else None
+            if target is not None and (key in roots or target not in roots
+                    or roots[target] == self.document.inspiration.id
+                    or roots[target] == self._state.page_id(key)):
+                self.edit(key).page_reference_root_id = None
 
     @staticmethod
     def require_plain_parent(node):
@@ -235,6 +276,9 @@ class DocumentEditor(InspirationEditorMixin):
         owner = self.node(node_id)
         if not owner.submap_id:
             raise MindMapError("此节点没有子导图")
+        destination = self._state.page_id(node_id)
+        if destination != self.document.inspiration.id:
+            self._state.journal.reference_targets_to_check.add(self.document.page_record(destination).root_id)
         page_id = owner.submap_id
         root = self.node(self.document.submaps[page_id].root_id)
         keep_root = self._submap_root_has_independent_content(root, owner)
@@ -463,6 +507,19 @@ class DocumentEditor(InspirationEditorMixin):
         fragment.detail_pages = {page.id: deepcopy(page) for key in selected
                                  if (page_id := self.node(key).detail_page_id)
                                  for page in [self.document.detail_pages[page_id]]}
+        # 片段仍是一份能独立校验的文档，不能带指向片段外的活动引用。把外部
+        # 目标记在剪贴板元数据中，仅同一打开实例可以恢复；原正文始终留在节点上。
+        page_roots = {page.root_id for page in fragment.iter_pages()}
+        external_references = {}
+        for node in fragment.nodes.values():
+            target = node.page_reference_root_id
+            if target is not None and target not in page_roots:
+                external_references[node.id] = target
+                node.page_reference_root_id = None
+        if external_references:
+            fragment.metadata[_CLIPBOARD_REFERENCES] = {
+                "source": self._state.clipboard_token, "targets": external_references,
+            }
         fragment.assets = {
             node.image_id: self.document.assets[node.image_id]
             for node in fragment.nodes.values()
@@ -478,6 +535,7 @@ class DocumentEditor(InspirationEditorMixin):
 
         默认无损携带两类页面，向详情页粘贴附属页面时必须由宿主显式选择省略。
         先校验原片段，避免通过丢弃页面掩盖损坏输入，再在独立副本上裁剪资源。
+        片段内引用随目标页重映射；片段外引用仅在同一打开实例中且仍有效时恢复。
         """
         if not isinstance(include_pages, bool):
             raise MindMapError("是否包含附属页面必须为布尔值")
@@ -489,6 +547,7 @@ class DocumentEditor(InspirationEditorMixin):
             fragment.nodes = {key: fragment.nodes[key] for key in selected}
             for node in fragment.nodes.values():
                 node.submap_id = node.detail_page_id = None
+                node.page_reference_root_id = None
             fragment.submaps.clear()
             fragment.detail_pages.clear()
             images = {node.image_id for node in fragment.nodes.values() if node.image_id}
@@ -500,11 +559,13 @@ class DocumentEditor(InspirationEditorMixin):
             self.require_plain_parent(parent)
         mapping = {node_id: new_id() for node_id in fragment.nodes if node_id != fragment.root_id}
         page_mapping = {page.id: new_id() for page in fragment.iter_pages()}
+        root_mapping = {page.root_id: mapping[page.root_id] for page in fragment.iter_pages()}
         for node_id, new in mapping.items():
             node = deepcopy(fragment.nodes[node_id])
             node.id, node.children = new, [mapping[x] for x in node.children]
             node.submap_id = page_mapping.get(node.submap_id)
             node.detail_page_id = page_mapping.get(node.detail_page_id)
+            node.page_reference_root_id = root_mapping.get(node.page_reference_root_id)
             self._state.put_node(node)
         for page in fragment.iter_pages():
             key = page_mapping[page.id]
@@ -516,9 +577,28 @@ class DocumentEditor(InspirationEditorMixin):
         parent.expanded = True
         for key in roots:
             self._state.set_parent(key, parent_id)
+        # 页根和父边都就绪后再判断粘贴位置，避免把跨页引用变成指向本页的引用。
+        # 元数据可来自外部剪贴板，形状不匹配时忽略它；绝不把它带进正式文档。
+        references = fragment.metadata.get(_CLIPBOARD_REFERENCES)
+        if isinstance(references, dict) and references.get("source") == self._state.clipboard_token:
+            targets = references.get("targets")
+            if isinstance(targets, dict):
+                self._restore_clipboard_references(targets, mapping)
         for key, asset in fragment.assets.items():
             self._state.set_asset(key, asset)
         return roots
+
+    def _restore_clipboard_references(self, targets, mapping):
+        """恢复本实例剪贴板中仍有效的外部引用；其余节点保留原文。"""
+        pages = self._state.root_pages
+        for old_id, target in targets.items():
+            key = mapping.get(old_id)
+            if (key is None or key in pages or not isinstance(target, str) or target not in pages
+                    or pages[target] in (self.document.inspiration.id, self._state.page_id(key))):
+                continue
+            node = self.node(key)
+            if not node.is_image_node and node.page_reference_root_id is None:
+                self.edit(key).page_reference_root_id = target
 
     def prune_unused_assets(self) -> None:
         """提交事务前清理无节点引用的图片；资源差异与节点差异一起进入撤销历史。"""

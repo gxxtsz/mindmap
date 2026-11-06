@@ -108,6 +108,8 @@ class InspirationEditorMixin:
         parent.expanded = True
         for key in roots:
             self._state.set_parent(key, parent_id)
+        # 迁入的后代也可能引用目的页，虽然它们的节点字段没有直接发生变化。
+        self._state.journal.reference_targets_to_check.add(self.document.page_record(target).root_id)
 
     def group_inspirations(self, node_ids, text="新主题", *, position):
         """创建共同游离父主题并组合选中分支，整个过程由一次事务回滚或提交。"""

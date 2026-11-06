@@ -1,4 +1,4 @@
-"""原生文档结构映射；写入版本 5，兼容版本 2、3、4 文档。"""
+"""原生文档结构映射；含页面引用写入版本 6，其余继续写入版本 5。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,8 @@ from mindmap_core import (
     ValidatedDocument,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+_BASE_SCHEMA_VERSION = 5
 
 
 def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
@@ -29,6 +30,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
+    仅存在活动引用时使用版本 6；旧版本不能识别此字段，因此无引用节点不写空字段。
     """
     if isinstance(document, MindMapPageView):
         raise MindMapError("单页读模型不能保存为完整文件，请使用引擎的完整文档快照")
@@ -41,11 +43,20 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
         else:
             record["path"] = f"assets/{asset.id}"
         assets.append(record)
+    nodes = []
+    version = _BASE_SCHEMA_VERSION
+    for node in document.nodes.values():
+        record = asdict(node)
+        if node.page_reference_root_id is None:
+            record.pop("page_reference_root_id")
+        else:
+            version = SCHEMA_VERSION
+        nodes.append(record)
     return {
         "format": "mindmap",
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": version,
         "root_id": document.root_id,
-        "nodes": [asdict(node) for node in document.nodes.values()],
+        "nodes": nodes,
         "assets": assets,
         "layout": asdict(document.layout),
         "theme": asdict(document.theme),
@@ -57,7 +68,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
 
 def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindMapDocument:
-    """读取当前多页格式或版本 2 单页格式，校验全部引用后返回独立文档。"""
+    """读取版本 2 至 6，校验全部页面关系及资源后返回独立文档。"""
     return _from_dict(data, resources=resources, copy_input=True)
 
 
@@ -75,15 +86,16 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
             raise MindMapError("不是本项目的思维导图文档")
         if copy_input:
             data = deepcopy(data)
-        if type(data.get("schema_version")) is not int or data["schema_version"] not in (2, 3, 4, SCHEMA_VERSION):
+        version = data.get("schema_version")
+        if type(version) is not int or not 2 <= version <= SCHEMA_VERSION:
             raise MindMapError("不支持的文档格式版本")
 
         allowed = {"format", "schema_version", "root_id", "nodes", "assets", "layout", "theme", "metadata"}
-        if data["schema_version"] >= 3:
+        if version >= 3:
             allowed.add("submaps")
-        if data["schema_version"] >= 4:
+        if version >= 4:
             allowed.add("detail_pages")
-        if data["schema_version"] >= 5:
+        if version >= 5:
             allowed.add("inspiration")
         if data.keys() - allowed:
             raise MindMapError("文档包含未知字段，请使用当前文件格式")
@@ -100,6 +112,8 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
             for record in records:
                 if not isinstance(record, dict) or "id" not in record:
                     raise MindMapError(f"{name} 中缺少显式 ID")
+                if version < 6 and name == "nodes" and "page_reference_root_id" in record:
+                    raise MindMapError("页面引用需要版本 6 文档格式")
                 entity = factory(**record)
                 if entity.id in result:
                     raise MindMapError(f"重复标识：{entity.id}")
