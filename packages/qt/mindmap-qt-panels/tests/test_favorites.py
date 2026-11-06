@@ -3,7 +3,7 @@
 import pytest
 from mindmap_core import MindMapEngine, Theme
 from mindmap_qt_panels import SubmapFavoritesPanel
-from mindmap_qt_ui.ui_style import ui_colors
+from mindmap_qt_ui.ui_style import outline_colors, ui_colors
 from PySide6.QtCore import QModelIndex, QPersistentModelIndex, QPoint, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
@@ -250,18 +250,36 @@ def test_nested_context_menu_uses_hit_page_and_rejects_stale_target(favorite_pan
     assert removed == [second] and not navigated
 
 
+@pytest.mark.parametrize("rtl", [False, True])
 @pytest.mark.parametrize("theme", [Theme(), Theme.dark()])
-def test_tree_keeps_single_line_geometry_and_selection_out_of_branch_area(favorite_panel, theme):
-    """检查真实绘制结果，防止 Qt 将选中底色另画成缩进区的一块直角色块。"""
+def test_tree_shares_outline_geometry_and_highlights_the_current_page(favorite_panel, qtbot, theme, rtl):
+    """用窄栏的实际像素检查分支和高亮，键盘移动后仍以当前打开页为准。"""
     engine, panel, owner, first, second = favorite_panel
-    for page in (first, second):
-        engine.set_submap_favorite(page, True)
-    colors = ui_colors(theme)
+    title = "窄侧栏中显示的长标题" * 8
+    with engine.transaction("准备收藏树的分支和同级项"):
+        leaf = engine.create_submap(engine.add_child(engine.page_document(second).root_id, title))
+        sibling = engine.create_submap(engine.add_child(engine.root_id, "顶层同级收藏"))
+        for page in (first, second, leaf, sibling):
+            engine.set_submap_favorite(page, True)
+    colors = outline_colors(theme)
     panel.set_ui_colors(colors)
-    panel.set_current_page_id(second)
-    QApplication.processEvents()
+    panel.resize(142, 180)
     tree = panel.tree_view
-    rect = tree.visualRect(panel.model.index_for(second))
+    tree.setLayoutDirection(Qt.LayoutDirection.RightToLeft if rtl else Qt.LayoutDirection.LeftToRight)
+    panel.set_current_page_id(leaf)
+    tree.setFocus()
+    QApplication.processEvents()
+
+    requested = []
+    panel.navigate_requested.connect(requested.append)
+    qtbot.keyClick(tree, Qt.Key.Key_Up)
+    focused = panel.model.index_for(second)
+    assert tree.currentIndex() == focused and tree.selectionModel().isSelected(focused)
+    assert not requested
+    QApplication.processEvents()
+
+    index = panel.model.index_for(leaf)
+    rect = tree.visualRect(index)
     image = tree.viewport().grab().toImage()
     ratio = image.devicePixelRatio()
 
@@ -269,14 +287,30 @@ def test_tree_keeps_single_line_geometry_and_selection_out_of_branch_area(favori
         """把 Qt 逻辑坐标转换成实际设备像素，兼容系统高 DPI 缩放。"""
         return image.pixelColor(round(x * ratio), round(y * ratio))
 
-    assert rect.height() == 32 and tree.indentation() == 16
-    assert color_at(rect.left() - 8, rect.top() + 4) == QColor(colors.surface)
-    assert color_at(rect.left() + 50, rect.top() + 4) == QColor(colors.selected)
+    def marker_x(row):
+        """由 Qt 给出的条目矩形反推标记中心，适配左右布局。"""
+        offset = tree.indentation() // 2
+        return row.right() + 1 + offset if rtl else row.left() - offset
+
+    assert rect.height() == 28 and tree.indentation() == 16 and tree.font().pixelSize() == 12
+    assert tree.horizontalScrollBar().maximum() == 0
+    assert index.data(Qt.ItemDataRole.ToolTipRole).splitlines()[0] == title
+    assert index.data(Qt.ItemDataRole.AccessibleDescriptionRole) == index.data(Qt.ItemDataRole.ToolTipRole)
+    assert color_at(rect.center().x(), rect.top() + 4) == QColor(colors.selected)
+    focus_rect = tree.visualRect(focused)
+    assert color_at(focus_rect.center().x(), focus_rect.top() + 4) != QColor(colors.selected)
+    assert color_at(marker_x(focus_rect), focus_rect.top() + 4) == QColor(colors.surface)
+    assert color_at(marker_x(rect), rect.top() + 4) == QColor(colors.surface)
+    assert color_at(marker_x(rect), rect.top() + rect.height() // 2) == QColor(colors.muted)
+
+    # 末级收藏的两列祖先导线贯穿整行；顶层同级项从自己的标记重新开始。
     root_rect = tree.visualRect(panel.model.index_for(first))
-    marker_x = root_rect.left() - tree.indentation() // 2
-    marker_y = root_rect.top() + root_rect.height() // 2
-    assert any(color_at(marker_x + dx, marker_y + dy) != QColor(colors.surface)
-               for dx in range(-3, 4) for dy in range(-3, 4))
+    guide = QColor("#45474b" if theme == Theme.dark() else "#dfe2e8")
+    for x in (marker_x(root_rect), marker_x(focus_rect)):
+        assert color_at(x, rect.top() + 1) == guide
+        assert color_at(x, rect.bottom() - 1) == guide
+    sibling_rect = tree.visualRect(panel.model.index_for(sibling))
+    assert color_at(marker_x(sibling_rect), sibling_rect.top() + 1) == QColor(colors.surface)
 
 
 def test_readonly_and_dispose_reject_stale_menu_callbacks(favorite_panel):

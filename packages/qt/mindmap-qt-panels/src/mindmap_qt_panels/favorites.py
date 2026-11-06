@@ -4,18 +4,9 @@ from __future__ import annotations
 
 from mindmap_core import MindMapEngine, Theme
 from mindmap_qt_ui.icons import toolbar_icon
-from mindmap_qt_ui.ui_style import UiColors, apply_ui_palette, menu_styles, scrollbar_styles, ui_colors
-from PySide6.QtCore import (
-    QAbstractItemModel,
-    QItemSelectionModel,
-    QModelIndex,
-    QPointF,
-    QRect,
-    QSize,
-    Qt,
-    Signal,
-)
-from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen, QPolygonF
+from mindmap_qt_ui.ui_style import UiColors, apply_ui_palette, menu_styles, outline_colors
+from PySide6.QtCore import QAbstractItemModel, QItemSelectionModel, QModelIndex, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QLabel,
@@ -23,10 +14,12 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyledItemDelegate,
-    QTreeView,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
+
+from ._sidebar_tree import ITEM_RIGHT_MARGIN, SidebarTreeView
 
 _PAGE_ROLE = Qt.ItemDataRole.UserRole + 1
 _PATH_ROLE = Qt.ItemDataRole.UserRole + 2
@@ -152,83 +145,51 @@ class _FavoritesModel(QAbstractItemModel):
         return structural
 
 
-class _FavoritesTreeView(QTreeView):
-    """仅接管分支标记的绘制，展开命中、选择及键盘处理仍全部交由原生树。
-
-    分支区保持面板底色，选中底色只由条目委托绘制；直接给 ::branch 设置背景
-    会使 Qt 样式表接管原生标记并隐藏默认三角，因此在这里明确绘制同色三角。
-    """
-
-    def __init__(self, colors: UiColors, parent: QWidget):
-        """保存宿主色板；加入堆叠布局后 Qt 会更换父控件，绘制不依赖父链。"""
-        super().__init__(parent)
-        self.colors = colors
-
-    def drawBranches(self, painter, rect, index):
-        """用逻辑像素绘制最后一级分支标记，兼容缩进、左右布局及高 DPI。"""
-        if not index.isValid() or rect.isEmpty():
-            return
-        colors = self.colors
-        painter.save()
-        try:
-            painter.fillRect(rect, QColor(colors.surface))
-            if not self.model().hasChildren(index):
-                return
-            rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
-            x = rect.left() + self.indentation() / 2 if rtl else rect.right() + 1 - self.indentation() / 2
-            y = rect.top() + rect.height() / 2
-            direction = -1 if rtl else 1
-            points = ((-3, -1.5), (3, -1.5), (0, 2)) if self.isExpanded(index) else (
-                (-1.5 * direction, -3), (-1.5 * direction, 3), (2 * direction, 0))
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(colors.muted))
-            painter.drawPolygon(QPolygonF([QPointF(x + dx, y + dy) for dx, dy in points]))
-        finally:
-            painter.restore()
-
-
 class _FavoriteDelegate(QStyledItemDelegate):
-    """以紧凑单行绘制收藏标题，完整路径交给模型的悬停提示及无障碍描述。
+    """在共用行样式上补充子导图图标、当前页状态和键盘焦点。"""
 
-    所有尺寸使用 Qt 逻辑像素，由 Qt 适配高 DPI；图标、文字和展开三角共用
-    行中心，标题长度与路径层数均不增加行高，窄侧栏中的标题在末尾省略。
-    """
+    def initStyleOption(self, option, index):
+        """把宿主确认的当前页映射为 Qt 的选中样式，保留原生排版与省略处理。
 
-    def sizeHint(self, option, index):
-        """返回统一的 32 逻辑像素行高，路径数据不参与可见行的尺寸计算。"""
-        return QSize(180, 32)
+        方向键可把 Qt 选择移到另一行浏览，只有宿主切页后才更新当前页角色。
+        因此在绘制选项中单独设置高亮和加粗，同时保留 Qt 提供的焦点、悬停状态。
+        """
+        super().initStyleOption(option, index)
+        colors = self.parent()._colors
+        current = bool(index.data(_CURRENT_ROLE))
+        selected = QStyle.StateFlag.State_Selected
+        if current:
+            option.state |= selected
+        else:
+            option.state &= ~selected
+
+        option.features |= QStyleOptionViewItem.ViewItemFeature.HasDecoration
+        option.decorationSize = QSize(16, 16)
+        # Qt 给已展开的条目使用图标开启状态。普通和开启状态使用同色，让强调色
+        # 始终表达宿主确认的当前页，展开状态则由树形三角表达。
+        icon_color = colors.accent if current else colors.muted
+        option.icon = toolbar_icon("submap", icon_color, colors.muted, icon_color)
+        # 同步字体与度量，让当前页加粗后的宽度参与 Qt 的末尾省略计算。
+        font = QFont(option.font)
+        font.setBold(current)
+        option.font = font
+        option.fontMetrics = QFontMetrics(font)
 
     def paint(self, painter, option, index):
-        """依次绘制状态底色、居中图标、单行标题和焦点轮廓，保持原有状态语义。"""
-        colors = self.parent()._colors
+        """先按共用样式绘制条目，再用虚线标出 Enter 将操作的键盘焦点行。"""
+        super().paint(painter, option, index)
+        if not option.state & QStyle.StateFlag.State_HasFocus:
+            return
+        rect = option.rect.adjusted(1, 1, -ITEM_RIGHT_MARGIN - 1, -1)
+        if rect.isEmpty():
+            return
         painter.save()
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setClipRect(option.rect)
-            rect = option.rect.adjusted(3, 2, -3, -2)
-            current = bool(index.data(_CURRENT_ROLE))
-            if current or option.state & QStyle.StateFlag.State_MouseOver:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(colors.selected if current else colors.hover))
-                painter.drawRoundedRect(rect, 5, 5)
-            icon = toolbar_icon("submap", colors.accent if current else colors.muted,
-                                colors.muted, colors.accent)
-            # 用实际行高计算图标位置，文字则在同一高度内垂直居中；不再预留
-            # 路径副标题的空间。复制字体，避免将当前页的加粗状态传给其他行。
-            icon.paint(painter, QRect(rect.left() + 8, rect.top() + (rect.height() - 16) // 2, 16, 16))
-            text_rect = rect.adjusted(32, 0, -8, 0)
-            font = QFont(option.font)
-            font.setBold(current)
-            painter.setFont(font)
-            painter.setPen(QColor(colors.text))
-            title = painter.fontMetrics().elidedText(index.data(), Qt.TextElideMode.ElideRight,
-                                                     max(0, text_rect.width()))
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, title)
-            if option.state & QStyle.StateFlag.State_HasFocus:
-                painter.setPen(QPen(QColor(colors.accent), 1, Qt.PenStyle.DotLine))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 4, 4)
+            painter.setClipRect(option.rect, Qt.ClipOperation.IntersectClip)
+            painter.setPen(QPen(QColor(self.parent()._colors.accent), 1, Qt.PenStyle.DotLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect, 4, 4)
         finally:
             painter.restore()
 
@@ -257,32 +218,28 @@ class SubmapFavoritesPanel(QWidget):
         self._disposed = False
         self._editable = True
         self._current_page_id = None
-        self._colors = ui_colors(Theme())
         self.setObjectName("mindmap_submap_favorites")
         self.setAccessibleName("子导图收藏")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        # 树自身带有与大纲一致的内边距，空态提示单独保留原来的留白。
+        layout.setContentsMargins(0, 0, 0, 0)
         self._stack = QStackedWidget(self)
         layout.addWidget(self._stack)
         self.empty_label = QLabel("暂无收藏\n\n在子导图路径栏点击星标，\n或右键入口节点收藏子导图。", self)
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setWordWrap(True)
-        self.empty_label.setMargin(12)
+        self.empty_label.setMargin(18)
         self._stack.addWidget(self.empty_label)
-        self.tree_view = _FavoritesTreeView(self._colors, self)
+        self.tree_view = SidebarTreeView(self)
         # 保留旧宿主使用的控件引用；两者始终指向同一棵树，不维护另一份列表。
         self.list_view = self.tree_view
         self.tree_view.setAccessibleName("已收藏的子导图树")
-        self.tree_view.setHeaderHidden(True)
-        self.tree_view.setIndentation(16)
-        self.tree_view.setUniformRowHeights(True)
         self.tree_view.setExpandsOnDoubleClick(False)
         self.tree_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree_view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree_view.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
-        self.tree_view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.tree_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.tree_view.setMouseTracking(True)
+        self.tree_view.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.tree_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.model = _FavoritesModel(self)
         self.tree_view.setModel(self.model)
@@ -336,7 +293,7 @@ class SubmapFavoritesPanel(QWidget):
         self.remove_action.setEnabled(self._editable)
 
     def set_ui_colors(self, colors: UiColors | None) -> None:
-        """应用宿主界面色板，None 使用默认浅色，返回 None，不修改导图主题。
+        """应用宿主界面色板，None 使用与大纲一致的默认浅色，不修改导图主题。
 
         非 UiColors、None 的参数抛出 TypeError；已释放面板忽略有效调用。色板同时
         覆盖树形视图、空态、滚动条和右键菜单，不依赖 QApplication 的全局样式。
@@ -345,19 +302,18 @@ class SubmapFavoritesPanel(QWidget):
             raise TypeError("界面色板必须为 UiColors 或 None")
         if self._disposed:
             return
-        self._colors = colors or ui_colors(Theme())
-        colors = self._colors
-        self.tree_view.colors = colors
+        colors = outline_colors(colors or Theme())
+        self._colors = colors
         apply_ui_palette(self, colors)
-        apply_ui_palette(self.tree_view, colors)
         self.setStyleSheet(
             f"QWidget#mindmap_submap_favorites {{background:{colors.surface};}}"
-            f"QStackedWidget, QTreeView {{background:{colors.surface}; border:0; outline:0;}}"
-            f"QLabel {{background:transparent; color:{colors.muted};}}" + scrollbar_styles(colors))
+            f"QStackedWidget {{background:{colors.surface}; border:0;}}"
+            f"QLabel {{background:transparent; color:{colors.muted};}}"
+        )
+        self.tree_view.set_tree_colors(colors)
         self._menu.setStyleSheet(menu_styles(colors))
         apply_ui_palette(self._menu, colors)
         self.remove_action.setIcon(toolbar_icon("favorite", colors.muted, colors.border, colors.accent))
-        self.tree_view.viewport().update()
 
     def close_popups(self) -> None:
         """关闭本面板菜单并清除待操作目标，返回 None，可重复调用。

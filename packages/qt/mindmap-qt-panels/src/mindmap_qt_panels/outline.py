@@ -3,31 +3,15 @@
 from __future__ import annotations
 
 from copy import copy
-from math import ceil, floor
 
 from mindmap_qt_ui.icons import toolbar_icon
-from mindmap_qt_ui.ui_style import UiColors, apply_ui_palette, menu_styles, outline_colors, scrollbar_styles
-from PySide6.QtCore import (
-    QAbstractItemModel,
-    QEvent,
-    QItemSelectionModel,
-    QModelIndex,
-    QPointF,
-    QRect,
-    Qt,
-    Signal,
-)
-from PySide6.QtGui import QAction, QActionGroup, QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QAbstractItemView, QMenu, QTreeView
+from mindmap_qt_ui.ui_style import UiColors, apply_ui_palette, menu_styles, outline_colors
+from PySide6.QtCore import QAbstractItemModel, QItemSelectionModel, QModelIndex, Qt, Signal
+from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtWidgets import QAbstractItemView, QMenu
 
+from ._sidebar_tree import SidebarTreeView
 from .contracts import PanelHost
-
-# 所有几何尺寸均使用 Qt 逻辑像素。原生 setIndentation 和树项 sizeHint 分别
-# 使用 16 与 28；正文 drawRow 使用 12 像素字号。150% 下对应 24 像素缩进、
-# 42 像素行距，不能把截图物理像素直接写进界面或再次手动乘系统缩放。
-_INDENTATION = 16
-_ROW_HEIGHT = 28
-_FONT_SIZE = 12
 
 
 class OutlineModel(QAbstractItemModel):
@@ -176,7 +160,7 @@ class OutlineModel(QAbstractItemModel):
         return None
 
 
-class OutlinePanel(QTreeView):
+class OutlinePanel(SidebarTreeView):
     """完整树的独立视图；展开按钮只影响本面板，不写入文档折叠状态。"""
 
     nodes_selected = Signal(list)
@@ -189,9 +173,7 @@ class OutlinePanel(QTreeView):
         super().__init__(parent)
         self.canvas = canvas
         self._syncing = False
-        self._theme_signature = None
         self._ui_colors_override = ui_colors
-        self._branch_hover_position = None
         self._display_depth = 2
         # 菜单和标题栏共用动作；动作由面板持有，宿主只创建按钮，不接管生命周期。
         self.depth_menu = QMenu(self)
@@ -213,20 +195,11 @@ class OutlinePanel(QTreeView):
         self._expanded_ids = set()
         self.expanded.connect(lambda index: self._expanded_ids.add(self.tree_model.node_id(index)))
         self.collapsed.connect(lambda index: self._expanded_ids.discard(self.tree_model.node_id(index)))
-        self.setHeaderHidden(True)
-        self.setUniformRowHeights(True)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.setAccessibleName("导图大纲")
         self.setMinimumWidth(180)
-        self.setIndentation(_INDENTATION)
-        font = self.font()
-        font.setPixelSize(_FONT_SIZE)
-        self.setFont(font)
-        self.setRootIsDecorated(True)
-        self.setMouseTracking(True)
-        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.selectionModel().selectionChanged.connect(self._selected)
         canvas.selection_changed.connect(self.sync_selection)
@@ -305,6 +278,9 @@ class OutlinePanel(QTreeView):
         即使同步逻辑不显式调用 scrollTo，currentChanged 或延迟布局仍可能调用
         此虚函数；在统一入口拦截，确保画布选择和模型刷新都不能冲破层级预设。
         """
+        # 共用视图初始化滚动模式时，Qt 可能在模型安装前传入无效索引。
+        if not index.isValid():
+            return
         key = self.tree_model.node_id(index)
         if key is not None and self._is_visible(key):
             super().scrollTo(index, hint)
@@ -415,110 +391,11 @@ class OutlinePanel(QTreeView):
         标题、视口和底部圆角留白使用同一底色；文字和柔和蓝灰选中态跟随
         工作区主题，三角及叶节点使用次要文字色，保留原有层级几何和交互。
         """
-        theme = self._ui_colors_override or theme
-        colors = outline_colors(theme)
-        if self._theme_signature == colors:
+        colors = outline_colors(self._ui_colors_override or theme)
+        if not self.set_tree_colors(colors):
             return
-        self._theme_signature = colors
-        dark = QColor(colors.surface).lightnessF() < 0.5
-        self._outline_colors = colors
-        self._guide_color = QColor("#45474b" if dark else "#dfe2e8")
-        self._branch_color = QColor(colors.muted)
-        self._leaf_color = QColor(colors.muted)
-        self.setStyleSheet(
-            f"QTreeView {{ background: {colors.surface}; color: {colors.text}; border: none; "
-            "padding: 5px 7px; outline: none; }"
-            f"QTreeView::item {{ height: {_ROW_HEIGHT}px; border: none; border-radius: 4px; "
-            "padding: 0 3px; margin-right: 8px; }"
-            f"QTreeView::item:hover {{ background: {colors.hover}; }}"
-            f"QTreeView::item:selected {{ background: {colors.selected}; color: {colors.text}; }}"
-            + scrollbar_styles(colors)
-        )
-        apply_ui_palette(self, colors)
         # 标题入口只呈现低对比度线条图标，当前层级由悬停提示和菜单勾选表达。
         # 图标随界面色板刷新，不读取导图主题之外的全局样式，明暗宿主保持一致。
         self.depth_action.setIcon(toolbar_icon("outline_depth", colors.muted, colors.muted, colors.text))
         self.depth_menu.setStyleSheet(menu_styles(colors))
         apply_ui_palette(self.depth_menu, colors)
-        self.viewport().update()
-
-    def drawBranches(self, painter, rect, index):
-        """绘制祖先竖线与本行标记，保留 QTreeView 原生的展开命中和键盘操作。
-
-        Qt 传入的 rect 已包含当前行所有层级的分支区域，并随横向滚动移动。
-        只给祖先列画贯穿整行的实线，不画横线；当前列有子节点时画三角，否则
-        画灰色圆点。这样末尾子树的竖线也会延续到最后一行的下边缘，与参考一致。
-        """
-        indentation = self.indentation()
-        if not index.isValid() or indentation <= 0 or rect.isEmpty():
-            return
-        painter.save()
-        try:
-            painter.fillRect(rect, QColor(self._outline_colors.surface))
-            rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
-            marker_x = rect.left() + indentation / 2 if rtl else rect.right() + 1 - indentation / 2
-            marker_y = rect.top() + rect.height() / 2
-            ancestors = max(0, rect.width() // indentation - 1)
-            first_x = marker_x + indentation if rtl else rect.left() + indentation / 2
-
-            # 深层大纲的分支矩形可能远宽于视口。按可见范围裁剪列号，不逐个遍历
-            # 离屏祖先，也不递归访问模型；开销只与当前能看到的导线数量有关。
-            visible = rect.intersected(self.viewport().rect())
-            first = max(0, ceil((visible.left() - first_x) / indentation))
-            stop = min(ancestors, floor((visible.right() - first_x) / indentation) + 1)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            # 先把细线宽度取整到设备像素再换回逻辑尺寸，防止 150% 时的 1.5
-            # 设备像素被光栅器截成单像素，造成导线比参考图明显偏细。
-            ratio = painter.device().devicePixelRatioF()
-            guide_width = max(1, floor(ratio + 0.5)) / ratio
-            painter.setPen(QPen(self._guide_color, guide_width))
-            for column in range(first, stop):
-                x = first_x + column * indentation
-                painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom() + 1))
-
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setPen(Qt.PenStyle.NoPen)
-            if self.model().hasChildren(index):
-                painter.setBrush(self._branch_color)
-                hover = self._branch_hover_position
-                hovered = (
-                    hover is not None
-                    and rect.contains(hover)
-                    and abs(hover.x() - marker_x) < indentation / 2
-                )
-                if self.isExpanded(index):
-                    points = ((-3.5, -2.5), (3.5, -2.5), (0, 3)) if hovered else (
-                        (-2.5, -1.5), (2.5, -1.5), (0, 2)
-                    )
-                else:
-                    direction = -1 if rtl else 1
-                    points = (
-                        ((-2.5 * direction, -3.5), (-2.5 * direction, 3.5), (3 * direction, 0))
-                        if hovered else
-                        ((-1.5 * direction, -2.5), (-1.5 * direction, 2.5), (2 * direction, 0))
-                    )
-                painter.drawPolygon(QPolygonF([QPointF(marker_x + x, marker_y + y) for x, y in points]))
-            else:
-                painter.setBrush(self._leaf_color)
-                painter.drawEllipse(QPointF(marker_x, marker_y), 2, 2)
-        finally:
-            painter.restore()
-
-    def viewportEvent(self, event):
-        """记录分支悬停位置，只重画涉及的行，事件仍由 Qt 处理选择和展开。
-
-        使用视口坐标而不是保存 QModelIndex：树结构变化、滚动或重排之后，
-        鼠标仍指向屏幕上的同一个位置，不会把旧节点的悬停状态带到其他行。
-        """
-        if event.type() in (QEvent.Type.MouseMove, QEvent.Type.Leave):
-            previous = self._branch_hover_position
-            self._branch_hover_position = (
-                event.position().toPoint() if event.type() == QEvent.Type.MouseMove else None
-            )
-            if previous != self._branch_hover_position:
-                for position in (previous, self._branch_hover_position):
-                    if position is not None:
-                        rect = self.visualRect(self.indexAt(position))
-                        if rect.isValid():
-                            self.viewport().update(QRect(0, rect.top(), self.viewport().width(), rect.height()))
-        return super().viewportEvent(event)

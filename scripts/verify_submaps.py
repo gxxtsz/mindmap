@@ -227,8 +227,8 @@ def child(scale, platform):
                     checks["收藏侧栏属于当前会话"] = (
                         favorites.isVisible() and window._favorites_stack.currentWidget() is favorites)
                     checks["收藏完整页面路径"] = nested_index.data(Qt.ItemDataRole.ToolTipRole).endswith("\n" + expected)
-                    checks["收藏统一32像素单行展示"] = all(
-                        favorites.tree_view.visualRect(index).height() == 32 for index in (parent_index, nested_index))
+                    checks["收藏统一28逻辑像素行高"] = all(
+                        favorites.tree_view.visualRect(index).height() == 28 for index in (parent_index, nested_index))
                     checks["收藏无障碍保留完整路径"] = nested_index.data(
                         Qt.ItemDataRole.AccessibleDescriptionRole) == nested_index.data(Qt.ItemDataRole.ToolTipRole)
                     assert window.grab().save(str(output / (label + "-favorites.png")))
