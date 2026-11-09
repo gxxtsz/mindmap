@@ -19,6 +19,7 @@ from .items import (
     NodeItem,
     PageControlItem,
 )
+from .selection_decoration import paint_node_selection, selection_bounds
 
 # 交互缩放与“适应窗口”共用 10% 下限，避免自动适配绕过交互入口的倍率限制。
 MIN_ZOOM = 0.1
@@ -56,6 +57,10 @@ class MindMapView(QGraphicsView):
         self.drag_origin = QPointF()
         self.node_drag = NodeDragController(self)
         self.image_resize = ImageResizeController(self)
+        self._selection_bounds = QRect()
+        # 外框不属于节点边界；场景内容、草稿尺寸或动画位置变化后，额外清除
+        # 前后两次的外框范围。只更新选中区域，避免为大图改用整视口持续重绘。
+        scene.changed.connect(self._update_selection_decoration)
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing
             | QPainter.RenderHint.TextAntialiasing
@@ -622,12 +627,30 @@ class MindMapView(QGraphicsView):
         else:
             super().keyPressEvent(event)
 
+    def _update_selection_decoration(self, *_args):
+        """使新旧外框范围失效，覆盖文字伸缩、节点移动和移除，不触碰场景几何。
+
+        由 Qt 的场景变化信号在 GUI 线程调用，参数中的脏场景矩形不需保留；释放
+        后忽略迟到通知。viewport.update 只请求重绘，不再次触发场景变化信号。
+        """
+        if self.owner._disposed:
+            return
+        current = selection_bounds(self)
+        dirty = self._selection_bounds.united(current)
+        self._selection_bounds = current
+        if not dirty.isEmpty():
+            self.viewport().update(dirty)
+
     def drawForeground(self, painter, rect):
-        """在 GUI 视图前景绘制固定屏幕尺寸的图片手柄，不参与场景导出。
+        """在 GUI 视图前景绘制间隔选中外框及图片手柄，不参与场景导出。
 
         painter、rect 为 Qt 本次绘制借用对象，不缓存、不修改文档或资源；仅由
         Qt GUI 线程在存活视图上调用，无额外所有权或正常业务异常。
         """
         super().drawForeground(painter, rect)
         self._draw_inspiration_empty(painter)
+        paint_node_selection(self, painter)
+        # 缩放及滚动可能只重绘视图而不发出 scene.changed；记住实际显示的位置，
+        # 使随后的局部移动仍能完整擦除旧外框，而非使用缩放前的视口坐标。
+        self._selection_bounds = selection_bounds(self)
         self.image_resize.paint(painter)

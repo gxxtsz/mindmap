@@ -520,6 +520,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             ("copy", "复制", "Ctrl+C", lambda w: w.copy(), False),
             ("cut", "剪切", "Ctrl+X", lambda w: w.cut(), True),
             ("paste", "粘贴", "Ctrl+V", lambda w: w.paste(), True),
+            ("select_all", "全选", "Ctrl+A", lambda w: w.select_all_nodes(), False),
             ("undo", "撤销", "Ctrl+Z", lambda w: w.engine.undo(), True),
             ("redo", "重做", ["Ctrl+Y", "Ctrl+Shift+Z"], lambda w: w.engine.redo(), True),
             ("move_up", "上移", "Ctrl+Up", lambda w: w.engine.move_up(w.current_node_id()), True),
@@ -643,6 +644,9 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             )
         self._actions["undo"].setEnabled(self.editable and not editing and self.engine.can_undo)
         self._actions["redo"].setEnabled(self.editable and not editing and self.engine.can_redo)
+        # 全选只改变当前页的节点选择，只读画布仍可用；编辑期间交回正文控件的
+        # 原生 Ctrl+A，空页面则没有可选择的节点。
+        self._actions["select_all"].setEnabled(not editing and bool(self._document.nodes))
         if self._properties_handler is not None:
             self._actions["properties"].setEnabled(True)
         self._actions["branch_style"].setEnabled(
@@ -780,6 +784,19 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._selection_changed()
         if self._virtualized:
             self._sync_viewport(force=True)
+
+    def select_all_nodes(self) -> None:
+        """选中当前页当前布局中的全部节点，并统一刷新外框及选择通知，返回 None。
+
+        包含已展开但位于视口外的主题，不跨页、不自动展开折叠后代；临时分支视图
+        只处理其布局中的节点。复用 select_nodes 的批量通知和按需图元创建，避免
+        逐个节点触发属性面板、路径栏及选中外框的更新。只读模式允许全选，文档、
+        撤销历史、节点布局和视口位置均不改变。仅在 GUI 线程调用，不保留参数；
+        画布已释放或正在编辑正文时直接返回，Ctrl+A 由文本控件处理其文字选择。
+        """
+        if self._disposed or self.editor is not None:
+            return
+        self.select_nodes(self.layout_result.nodes)
 
     def _selection_changed(self):
         self.view.image_resize.cancel()

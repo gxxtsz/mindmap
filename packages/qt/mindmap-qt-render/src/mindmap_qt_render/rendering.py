@@ -225,7 +225,7 @@ class NodeVisual:
 
     def paint(
         self, painter: QPainter, node: Node, *, selected=False, editing=False, controls=True,
-        page_controls=True, accent="#3478d5"
+        page_controls=True, accent="#3478d5", text_highlight=True
     ):
         """绘制节点正文、内嵌页面图标及可选的外侧折叠标记，不修改文档。
 
@@ -233,6 +233,9 @@ class NodeVisual:
         拖动影像一样传入 False。直接绘制时默认在右侧显示标记，调用方须将外侧
         标记计入自己的绘图范围。page_controls 独立控制内嵌页面图标，默认
         开启以供静态导出与拖动影像复用；画布通过独立子图元绘制时传入 False。
+        text_highlight 控制文本节点内置的选中及编辑描边，默认保留独立绘制接口的
+        既有行为。交互画布传入 False，由视图绘制固定屏幕尺寸的间隔外框；该开关
+        不影响 editing 对正文的隐藏，也不影响纯图片的选中轮廓及尺寸手柄。
         正文、标签和备注均显式开启文字抗锯齿，不依赖调用方的视图配置。
         绘制结束、纯图片提前返回或绘制异常时均恢复 painter 的全部绘图状态。
         """
@@ -249,9 +252,9 @@ class NodeVisual:
                 if node.children and controls:
                     self.paint_fold_control(painter, node)
                 return
-            # 文本控件借用焦点或鼠标选区时，节点选择标记可能暂时变化；整个编辑
-            # 会话仍保留同一条圆角高亮边框，不再依赖额外的文本焦点虚线表达状态。
-            highlighted = selected or editing
+            # 独立调用仍可请求原有描边；画布把交互高亮交给前景层，正式边框不随
+            # 选中或文字焦点变化，避免把根节点同色的加粗描边和新外框重复绘制。
+            highlighted = text_highlight and (selected or editing)
             painter.setPen(
                 QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
             )

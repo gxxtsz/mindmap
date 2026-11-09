@@ -8,16 +8,19 @@ from PySide6.QtWidgets import QGraphicsItem, QGraphicsObject
 class NodeItem(QGraphicsObject):
     """显示静态节点；折叠标记和页面图标分别控制，不注册编辑或文档修改行为。"""
 
-    def __init__(self, node, visual, theme, *, controls=False, page_controls=True):
+    def __init__(self, node, visual, theme, *, controls=False, page_controls=True, text_highlight=True):
         """借用节点及只读视觉；page_controls 默认绘制已计入尺寸的页面图标。
 
         controls 沿用既有的外侧折叠标记开关；交互画布另有页面按钮子图元，
-        因而将 page_controls 关闭以免重复绘制。两个开关都不改变节点测量。
+        因而将 page_controls 关闭以免重复绘制。text_highlight 控制文本内置的选中
+        与编辑描边，交互画布关闭后由视图承担间隔外框。所有开关均只影响绘制，
+        不改变测量、命中及纯图片选中轮廓；默认值保持独立宿主的既有行为。
         """
         super().__init__()
         self.node, self.visual, self.theme = node, visual, theme
         self.controls = bool(controls)
         self.page_controls = bool(page_controls)
+        self.text_highlight = bool(text_highlight)
         self.editing = False
         self.setZValue(5)
         self.setFlags(
@@ -66,6 +69,7 @@ class NodeItem(QGraphicsObject):
         return path
 
     def paint(self, painter, option, widget=None):
+        """借用当前画笔绘制只读视觉，按宿主开关决定是否显示文本内置高亮。"""
         self.visual.paint(
             painter,
             self.node,
@@ -74,4 +78,5 @@ class NodeItem(QGraphicsObject):
             controls=self.controls,
             page_controls=self.page_controls,
             accent=self.theme.accent,
+            text_highlight=self.text_highlight,
         )

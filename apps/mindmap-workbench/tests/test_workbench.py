@@ -1315,6 +1315,28 @@ def test_panel_modes_keep_instances_and_closed_session_is_disposed(window, mode,
     assert not panel.timer.isActive() and not current._downloads
 
 
+def test_canvas_select_all_shortcut_and_edit_menu_share_the_same_action(window, qtbot):
+    """真实工作台的 Ctrl+A 与编辑菜单共同全选活动画布，侧栏同步不吞掉快捷键。"""
+    canvas = window.canvas
+    root = window.engine.root_id
+    child = window.engine.add_child(root, "需要高亮的子节点")
+    canvas.select_nodes([root])
+    window.activateWindow()
+    canvas.view.setFocus()
+    QApplication.processEvents()
+    before, revision = window.engine.document, window.engine.revision
+    qtbot.keyClick(canvas.view.viewport(), Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    assert canvas.selected_node_ids() == [root, child]
+    menu = window.main_menu()
+    edit = next(action.menu() for action in menu.actions() if action.text() == "编辑")
+    select_all = next(action for action in edit.actions() if action.text() == "全选")
+    assert select_all is canvas.action("select_all")
+    canvas.select_nodes([root])
+    select_all.trigger()
+    assert canvas.selected_node_ids() == [root, child]
+    assert window.engine.document == before and window.engine.revision == revision
+
+
 def test_preferences_restore_and_local_input_shortcuts(window, qtbot):
     window.canvas.set_wheel_mode("zoom")
     window.manager.move("outline", DockTarget(DockPosition.BOTTOM_LEFT))

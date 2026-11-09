@@ -40,6 +40,8 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 - `NodeItem` 是静态图元，不持有编辑宿主；交互节点和文本编辑器属于画布包。
 
+- `NodeVisual.paint(..., text_highlight=True)` 与 `NodeItem(..., text_highlight=True)` 默认保留独立宿主的文本选中及编辑描边。交互画布传入 False，将文本选中外框交给视图前景绘制；该开关不改变编辑正文隐藏、纯图片轮廓、测量和命中，未选中时的正式导出外观保持原样。
+
 - 上述默认树布局示例需另行安装 `mindmap-layouts`；自定义宿主也可只实现核心 `LayoutAlgorithm` 并注册到 `LayoutRegistry` 后传入导出器。
 
 - 独立安装验收使用自定义布局验证三种图形输出。

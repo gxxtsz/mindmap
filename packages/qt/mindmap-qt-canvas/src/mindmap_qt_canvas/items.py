@@ -276,7 +276,8 @@ class NodeItem(StaticNodeItem):
     """交互节点转发编辑并绘制图片辅助效果，导出继续使用独立的静态图元。"""
 
     def __init__(self, node, visual, theme, owner=None):
-        super().__init__(node, visual, theme, controls=False, page_controls=owner is None)
+        super().__init__(node, visual, theme, controls=False, page_controls=owner is None,
+                         text_highlight=owner is None)
         self.owner = owner
         self.hovered = False
         self._fold_hide_pending = False
@@ -313,7 +314,8 @@ class NodeItem(StaticNodeItem):
 
         painter、option、widget 为 Qt 当前 GUI 绘制过程借用，不缓存或转移所有权。
         纯图片的投影避开图片内部，选中时沿用蓝色轮廓及视图的缩放手柄；无宿主
-        及普通图文节点复用静态绘制。宿主释放后不绘制辅助效果，不写文档或资源，
+        时复用静态绘制；有宿主的文本节点由视图前景绘制间隔外框，正式边框保持
+        原样。宿主释放后不绘制辅助效果，不写文档或资源，
         不改变导出视觉，无正常业务异常。
         """
         decorated = self.owner is not None and not self.owner._disposed and self.node.is_image_node
@@ -427,7 +429,8 @@ class NodeEditor(QGraphicsTextItem):
         """仅移除 Qt 默认的虚线焦点框，保留真实焦点、光标及文字选择绘制。
 
         拷贝样式参数再清除绘制标记，避免影响其他图元；键盘和输入法仍由原生
-        文本控件处理。编辑状态统一由节点现有的蓝色圆角选中边框表达。
+        文本控件处理。编辑状态统一由视图中的间隔外框表达，即使正文获得焦点或
+        选择暂时变化也保持高亮，外框跟随草稿尺寸更新。
         painter 为当前活动绘图器，option 和 widget 沿用 Qt 图元接口；独立绘制
         时也显式启用文字抗锯齿，正常完成或异常时均恢复调用方的绘图状态。
         """
