@@ -78,6 +78,33 @@ def test_new_file_session_and_editable_framework(window):
                for button in bar.findChildren(QToolButton))
 
 
+def test_large_selection_applies_properties_to_offscreen_nodes(window):
+    """工作台的全选快照同时驱动大纲及属性栏，屏外节点参与批量修改和撤销。"""
+    from mindmap_core import Node
+
+    document = window.engine.document
+    for index in range(1100):
+        node = Node(f"批量主题 {index}")
+        document.nodes[node.id] = node
+        document.root.children.append(node.id)
+    window.engine.replace_document(document)
+    window.manager.activate("outline", focus=False)
+    window.manager.activate("properties", focus=False)
+    canvas, panels = window.canvas, window.panels
+    canvas.select_all_nodes()
+    assert canvas.selection_count == 1101 and len(canvas.node_items) < 100
+    assert len(panels.properties._ids) == 1101
+    far = document.root.children[-1]
+    assert panels.outline.selectionModel().isSelected(panels.outline.tree_model.index_for(far))
+    panels.properties.fields["style.font_size"].setValue(22)
+    panels.properties.flush()
+    assert all(node.style["font_size"] == 22 for node in canvas.document_view.nodes.values())
+    assert canvas.selection_count == 1101 and len(canvas.node_items) < 100
+    assert window.engine.undo()
+    assert "font_size" not in window.engine.get_node(far).style
+    assert canvas.selection_count == 1101
+
+
 @pytest.mark.parametrize("entry", ["button", "shortcut"])
 @pytest.mark.parametrize("restore_layout", [False, True])
 def test_properties_toggle_closes_visible_panel_without_focus(window, qtbot, entry, restore_layout):

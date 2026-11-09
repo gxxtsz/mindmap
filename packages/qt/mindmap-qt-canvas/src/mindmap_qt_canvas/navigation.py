@@ -419,7 +419,7 @@ class PageNavigationMixin:
             self._page_states.pop(key, None)
         self._switch_page(page_id, cache=False, inspiration_root_id=root)
         if valid_view:
-            if ids and not self.selected_node_ids():
+            if ids and not self.selection_count:
                 # 文件可能被外部重新折叠；不强行展开或留下不可见的非空选择。
                 self.focus_id = None
                 self.refresh()
@@ -505,7 +505,7 @@ class PageNavigationMixin:
                             [entry.page_id for entry in self.engine.node_path(self._document.root_id)
                              if entry.page_root])
         self._node_parents = self._document.parents()
-        self._node_order = None
+        self._invalidate_selection_order()
         self._incremental_layout = None
         self._visual_document = None
         self._measure_dirty = None
@@ -695,7 +695,7 @@ class PageNavigationMixin:
         必须在 GUI 线程及画布存活期间调用，页面及节点仍由文档持有。
         """
         self._ensure_editable()
-        if len(self.selected_node_ids()) != 1:
+        if self.selection_count != 1:
             raise MindMapError("请选择一个有普通后代的节点")
         key = self.current_node_id()
         node = self.engine.get_node(key)
@@ -718,7 +718,7 @@ class PageNavigationMixin:
         只属于当前画布，不强制其他共享视图跟随导航。仅在 GUI 线程调用。
         """
         self._ensure_editable()
-        if len(self.selected_node_ids()) != 1:
+        if self.selection_count != 1:
             raise MindMapError("请选择一个拥有子导图的入口节点")
         key = self.current_node_id()
         if not self.engine.get_node(key).submap_id:
@@ -827,7 +827,7 @@ class PageNavigationMixin:
             if self._reference_return_origin() != reference:
                 raise MindMapError("引用来源已变化，请重新导航")
             self._switch_page(reference.page_id, inspiration_root_id=reference.inspiration_root_id)
-            if reference.node_id not in self.selected_node_ids():
+            if not self.is_node_selected(reference.node_id):
                 self._locate_page_node(reference.node_id)
             return
         if self._current_page_id is None:
@@ -948,7 +948,7 @@ class PageNavigationMixin:
         self.path_navigation.back_button.setToolTip(back_text)
         self.path_navigation.back_button.setAccessibleName(back_text)
         self.path_navigation.set_path(pages, page_id=self._current_page_id,
-                                      selection_count=len(self.selected_node_ids()),
+                                      selection_count=self.selection_count,
                                       page_kinds={entry.page_id: self._book_document.page_kind(entry.page_id)
                                                   for entry in pages},
                                       reference_return=reference_return)

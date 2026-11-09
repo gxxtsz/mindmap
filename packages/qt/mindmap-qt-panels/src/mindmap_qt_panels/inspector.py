@@ -24,6 +24,7 @@ class NodePropertiesPanel(NodePropertiesForm):
         super().__init__(parent, ui_colors=ui_colors)
         self.canvas = canvas
         self._ids = []
+        self._id_set = set()
         self._generation = canvas.engine.document_generation
         self._pending = {}
         self._applying = False
@@ -83,7 +84,23 @@ class NodePropertiesPanel(NodePropertiesForm):
         if self._pending and getattr(self.canvas, "is_external_event", lambda _: False)(event):
             return
         if not self._applying and event.kind != "saved":
-            self.sync()
+            changes = event.changes
+            if changes is not None and not changes.settings and not changes.collections.get("assets"):
+                delta = changes.collections.get("nodes", {})
+                relevant = bool(self._id_set.intersection(delta))
+                if not relevant and self.canvas.branch_scope == "subtree":
+                    # 分支汇总包含选中节点的后代；只沿本次变化的祖先链检查依赖。
+                    parents = self.canvas.parent_index
+                    for key in delta:
+                        parent = parents.get(key)
+                        while parent is not None and parent not in self._id_set:
+                            parent = parents.get(parent)
+                        if parent is not None:
+                            relevant = True
+                            break
+                if not relevant and self._generation == self.canvas.engine.document_generation:
+                    return
+            self.sync(self._ids)
 
     def _selection_changed(self, ids):
         if self._applying or self._selecting or self._disposed:
@@ -94,12 +111,16 @@ class NodePropertiesPanel(NodePropertiesForm):
         try:
             # 此时画布可能已经选中新节点；flush 只使用缓存的原标识，不读取新选择。
             self.flush()
-            self.sync()
+            self.sync(ids)
         finally:
             self._selecting = False
 
-    def sync(self):
-        """从正式文档读取；自身提交期间不重建输入控件，保留光标、焦点和滚动位置。"""
+    def sync(self, ids=None):
+        """从正式文档读取属性；可借用本次选择通知的快照，省略时查询宿主选择。
+
+        输入不会被修改或长期持有；自身提交期间不重建输入控件，保留光标、焦点
+        和滚动位置。选择通知及相关内容变化之外不重新汇总整批选中节点。
+        """
         if self._disposed:
             return
         # 只读同步复用画布在提交后取得的快照；flush 的候选编辑仍使用独立副本。
@@ -107,7 +128,9 @@ class NodePropertiesPanel(NodePropertiesForm):
         self._generation = self.canvas.engine.document_generation
         # 外部删除正在原地编辑的节点时，结束编辑通知可能早于画布选择重建。
         # 只读取新快照中仍存在的标识，随后正式选择通知会再次同步最终选择。
-        self._ids = [key for key in self.canvas.selected_node_ids() if key in document.nodes]
+        self._ids = [key for key in (self.canvas.selected_node_ids() if ids is None else ids)
+                     if key in document.nodes]
+        self._id_set = set(self._ids)
         self.set_theme(document.theme)
         self.load_nodes(
             [document.nodes[key] for key in self._ids],

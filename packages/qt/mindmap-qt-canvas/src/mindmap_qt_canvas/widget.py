@@ -76,6 +76,7 @@ from .inspiration import InspirationCanvasMixin
 from .interactions import document_interaction
 from .items import NodeEditor, NodeItem
 from .navigation import PageNavigationMixin
+from .selection import NodeSelectionMixin
 from .view import MIN_ZOOM, MindMapView
 from .view_controls import _ViewControls
 
@@ -84,7 +85,7 @@ VIRTUALIZATION_NODE_LIMIT = 1000
 _ENGINE_DOCUMENT = MindMapEngine.document
 
 
-class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
+class MindMapWidget(NodeSelectionMixin, InspirationCanvasMixin, PageNavigationMixin, QWidget):
     """原生画布组件。
 
     宿主先创建 QApplication，再将本组件加入任意布局。engine 可省略，此时创建
@@ -161,6 +162,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         )
         self._disposed = False
         self._applying_engine_event = False
+        self._init_selection()
         self._branch_drag_token = uuid4().hex
         # 宿主在同一文档绑定多个标签时启用；独立画布维持原有事件定位规则。
         self.shared_views = False
@@ -247,6 +249,8 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._view_reset_pending = False
         self._view_restore_center = None
         self._view_reset_timer.stop()
+        self.view._selection_update_timer.stop()
+        self.view._selection_decoration.invalidate()
         self._unsubscribe()
         for reply in tuple(self._downloads):
             reply.abort()
@@ -361,9 +365,11 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             self.refresh()
         self.select_nodes(ids)
         if ids:
-            bounds = self.node_items[ids[0]].sceneBoundingRect()
-            for key in ids[1:]:
-                bounds = bounds.united(self.node_items[key].sceneBoundingRect())
+            bounds = QRectF()
+            for key in ids:
+                rect = self.layout_result.nodes.get(key)
+                if rect is not None:
+                    bounds = bounds.united(QRectF(rect.x, rect.y, rect.width, rect.height))
             self.view.ensureVisible(bounds, 35, 35)
 
     @property
@@ -662,11 +668,11 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._actions["remove_image"].setVisible(not image_only)
         for name in ("image", "image_url"):
             self._actions[name].setEnabled(bool(self.editable and not editing and node and not node.submap_id))
-        single = len(self.selected_node_ids()) <= 1
+        single = self.selection_count <= 1
         in_detail = self.current_page_kind == "detail"
         in_inspiration = self.current_page_kind == "inspiration"
-        selected = self.selected_node_ids()
-        eligible = bool(len(selected) == 1 and node and not image_only and node.id not in self._document.root_ids)
+        selected = self.selection_count
+        eligible = bool(selected == 1 and node and not image_only and node.id not in self._document.root_ids)
         reference = self._actions["set_page_reference"]
         reference.setText("更换引用页面…" if referenced else "引用页面…")
         reference.setVisible(eligible)
@@ -682,7 +688,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._actions["move_to_inspiration"].setVisible(not in_detail)
         self._actions["move_to_inspiration"].setEnabled(bool(
             self.editable and not editing and selected and not in_detail
-            and (in_inspiration or self._document.root_id not in selected)))
+            and (in_inspiration or not self.is_node_selected(self._document.root_id))))
         if not node:
             for name in ("add_child", "add_sibling", "insert_parent", "edit", "delete", "copy", "cut",
                          "fold", "expand_all", "collapse_all", "move_up", "move_down", "hyperlink"):
@@ -693,12 +699,12 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self._actions["create_submap"].setToolTip("仅没有普通子节点和子导图的叶子节点可创建")
         converting = self._actions["convert_descendants_to_submap"]
         converting.setVisible(not in_detail and not image_only)
-        converting.setEnabled(bool(self.editable and not editing and len(selected) == 1 and node
+        converting.setEnabled(bool(self.editable and not editing and selected == 1 and node
                                    and node.children and not node.submap_id and not in_detail and not image_only))
         converting.setToolTip("保留当前节点，将全部普通后代迁入同名子导图并进入")
         restoring = self._actions["convert_submap_to_descendants"]
         restoring.setVisible(not in_detail and not image_only)
-        restoring.setEnabled(bool(self.editable and not editing and len(selected) == 1 and node
+        restoring.setEnabled(bool(self.editable and not editing and selected == 1 and node
                                   and node.submap_id and not in_detail and not image_only))
         restoring.setToolTip("仅转换当前一层；根有独立内容时保留为普通子节点")
         self._actions["enter_submap"].setEnabled(bool(not editing and single and node and node.submap_id))
@@ -747,66 +753,6 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
     def _ensure_editable(self):
         if not self.editable:
             raise MindMapError("当前画布为只读模式")
-
-    def selected_node_ids(self) -> list[str]:
-        """按树的先序顺序返回选择，移动后仍与文档层级一致。"""
-        selected = {item.node.id for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
-        if len(selected) < 2:
-            return list(selected)
-        if self._incremental_layout is not None:
-            return sorted(selected, key=self._incremental_layout.geometry.order)
-        if self._node_order is None:
-            self._node_order = {
-                key: index for index, key in enumerate(self._document.ordered_nodes())
-            }
-        return sorted(selected, key=self._node_order.__getitem__)
-
-    def current_node_id(self) -> str:
-        """取得首个选中节点；无选择时使用导航临时显示的节点，再回退到当前页根节点。
-
-        仅查询界面状态，不强制展开节点、不改变选择，也不创建历史记录。
-        """
-        ids = self.selected_node_ids()
-        return ids[0] if ids else self.focus_id or self._document.root_id
-
-    def select_nodes(self, node_ids) -> None:
-        """替换节点选择；折叠或聚焦之外的节点不会强制展开。"""
-        self.view.cancel_interaction()
-        self.scene.blockSignals(True)
-        try:
-            self.scene.clearSelection()
-            for key in node_ids:
-                self._ensure_node_item(key)
-                if key in self.node_items:
-                    self.node_items[key].setSelected(True)
-        finally:
-            self.scene.blockSignals(False)
-        self._selection_changed()
-        if self._virtualized:
-            self._sync_viewport(force=True)
-
-    def select_all_nodes(self) -> None:
-        """选中当前页当前布局中的全部节点，并统一刷新外框及选择通知，返回 None。
-
-        包含已展开但位于视口外的主题，不跨页、不自动展开折叠后代；临时分支视图
-        只处理其布局中的节点。复用 select_nodes 的批量通知和按需图元创建，避免
-        逐个节点触发属性面板、路径栏及选中外框的更新。只读模式允许全选，文档、
-        撤销历史、节点布局和视口位置均不改变。仅在 GUI 线程调用，不保留参数；
-        画布已释放或正在编辑正文时直接返回，Ctrl+A 由文本控件处理其文字选择。
-        """
-        if self._disposed or self.editor is not None:
-            return
-        self.select_nodes(self.layout_result.nodes)
-
-    def _selection_changed(self):
-        self.view.image_resize.cancel()
-        self.view.viewport().update()
-        if self._refreshing or self._disposed:
-            return
-        self._cancel_branch_menu()
-        self._update_actions()
-        self.view.update_cursor()
-        self.selection_changed.emit(self.selected_node_ids())
 
     def _engine_changed(self, event):
         """引擎已提交而读模型尚未同步时，暂停路径查询，避免访问刚删除的旧选择。"""
@@ -1011,7 +957,11 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 new_ids = []
                 self._measure_dirty = None
                 self._incremental_layout = None
-            self._node_order = None
+            if local_changes is None or any(
+                old is None or new is None or old.children != new.children
+                for old, new in local_changes.collections.get("nodes", {}).values()
+            ) or any(key in local_changes.settings for key in ("root_id", "inspiration")):
+                self._invalidate_selection_order()
             after = [key for key in before if key in self._document.nodes]
             parents = self._node_parents
             if new_ids and not external:
@@ -1129,7 +1079,9 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             else {}
         )
         result = self.layout_result
-        self._virtualized = self._incremental_layout is not None and len(result.nodes) > VIRTUALIZATION_NODE_LIMIT
+        self._layout_selection_ids = None
+        self._store_selection(self._filter_selection(self._selected_ids))
+        self._virtualized = self._incremental_layout is not None and len(result.nodes) >= VIRTUALIZATION_NODE_LIMIT
         self._viewport_signature = None
         self._refreshing = True
         self.scene.blockSignals(True)
@@ -1185,26 +1137,37 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         self.scene.addItem(item)
         self.node_items[key] = item
         item.setPos(rect.x, rect.y)
+        blocked = self.scene.blockSignals(True)
+        try:
+            item.setSelected(self.is_node_selected(key))
+            if item.isSelected():
+                self._projected_selection.add(key)
+        finally:
+            self.scene.blockSignals(blocked)
 
     def _viewport_changed(self):
         """视图平移、缩放或尺寸变化后同步屏内对象；构造及批量刷新期间由 refresh 统一调用。"""
-        if getattr(self, "_virtualized", False) and not self._refreshing and not self._disposed:
+        if (getattr(self, "_virtualized", False) and not self._refreshing and not self._disposed
+                and not self.view._viewport_sync_depth):
             self._sync_viewport()
 
     def _sync_viewport(self, *, force=False):
-        """保留选择、编辑和鼠标捕获对象，其余图元仅维护视口及预取边距。
+        """保留首个操作节点、编辑和鼠标捕获对象，其余图元仅维护视口及预取边距。
 
         连接线采用父级局部路径和世界原点。子树平移时只移动现有图元，保持 Qt
         路径和画笔不变；视口外实体仍存在于独立读模型和按需布局映射中。
         """
-        selected = {item.node.id for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
+        selected = {self.current_node_id()} if self.selection_count else set()
         if self.editor is not None:
             selected.add(self.editor.node_id)
         grabbed = self.scene.mouseGrabberItem()
         if isinstance(grabbed, NodeItem):
             selected.add(grabbed.node.id)
+        if self.view.press_node is not None:
+            selected.add(self.view.press_node)
         box = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
-        signature = (id(self.layout_result), box.x(), box.y(), box.width(), box.height(), frozenset(selected))
+        signature = (id(self.layout_result), box.x(), box.y(), box.width(), box.height(),
+                     frozenset(selected), self._selection_revision)
         if not force and signature == self._viewport_signature:
             return
         self._viewport_signature = signature
@@ -1251,6 +1214,9 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             visual = (self.editor.preview_visual
                       if self.editor is not None and key == self.editor.node_id else visuals[key])
             item = self.node_items.get(key)
+            controls_changed = (item is None or item.visual is not visual
+                                or item.node is not document.nodes[key] or item.theme is not document.theme
+                                or getattr(item, "_controls_layout", None) is not self.layout_result)
             if item is None:
                 item = NodeItem(document.nodes[key], visual, document.theme, self)
                 self.scene.addItem(item)
@@ -1266,8 +1232,15 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
             else:
                 # 视觉未变也同步实体引用，正文导航等读取当前快照，但不使 Qt 几何失效。
                 item.node, item.theme = document.nodes[key], document.theme
-            item.sync_fold_control()
+            item.setSelected(self.is_node_selected(key))
+            # 平移和缩放不改变按钮的场景几何；只在实体、尺寸、主题或布局变化时
+            # 重建控件路径。选中、悬停产生的可见性变化仍由各自事件即时同步。
+            if controls_changed:
+                item.sync_fold_control()
+                item._controls_layout = self.layout_result
             item.setPos(rect.x, rect.y)
+        self._projected_selection = self._selected_ids.intersection(self.node_items)
+        self.view._update_selection_decoration()
 
     def set_ui_colors(self, colors: UiColors | None) -> None:
         """覆盖本组件的界面色板，不修改导图主题、场景内容、选择和撤销历史。
@@ -1532,6 +1505,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                 or self._document.nodes[node_id].page_reference_root_id is not None):
             return
         self.finish_edit(commit=True)
+        self._cancel_branch_menu()
         self.select_nodes([node_id])
         item = self.node_items[node_id]
         item.editing = True
@@ -1728,7 +1702,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         剪贴板编码失败时不会执行删除；正式删除使用引擎的历史与资源清理规则。
         """
         self._ensure_editable()
-        if self.current_page_kind != "inspiration" and self._document.root_id in self.selected_node_ids():
+        if self.current_page_kind != "inspiration" and self.is_node_selected(self._document.root_id):
             raise MindMapError("不能剪切根节点")
         self.copy()
         self.engine.remove_nodes(self.selected_node_ids())
@@ -1765,7 +1739,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         elif mime.hasFormat(EDRAW_CLIPBOARD_MIME):
             # 先读完并验证结构，再询问放置方式；亿图解析失败时不能降级为纯文本。
             fragment = read_edraw_clipboard(bytes(mime.data(EDRAW_CLIPBOARD_MIME)))
-            if self.current_page_kind != "inspiration" or self.selected_node_ids():
+            if self.current_page_kind != "inspiration" or self.selection_count:
                 return self._paste_edraw(fragment)
         elif has_clipboard_image(mime):
             return self._paste_image(mime)
@@ -1814,12 +1788,12 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
                     or self.current_page_kind != "detail" or self.current_node_id() != target_id):
                 raise MindMapError("粘贴期间导图或目标已发生变化，请重新粘贴")
             include_pages = False
-        if outline_title is not None and (self.current_page_kind != "inspiration" or self.selected_node_ids()):
+        if outline_title is not None and (self.current_page_kind != "inspiration" or self.selection_count):
             return self._paste_outline(
                 fragment, title=outline_title, include_pages=include_pages, show_options=show_outline_options,
             )
         revision = self.engine.revision
-        if self.current_page_kind == "inspiration" and not self.selected_node_ids():
+        if self.current_page_kind == "inspiration" and not self.selection_count:
             with self.engine.transaction("粘贴游离分支"):
                 container = self.engine.add_inspiration("剪贴板临时容器", position=(0, 0))
                 ids = self.engine.paste_fragment(container, fragment, include_pages=include_pages)
@@ -1855,7 +1829,7 @@ class MindMapWidget(InspirationCanvasMixin, PageNavigationMixin, QWidget):
         历史，随后图片子节点独立提交；资源生命周期由引擎负责。调用不保留 MIME 引用。
         """
         self._ensure_editable()
-        if self.current_page_kind == "inspiration" and not self.selected_node_ids() and self.editor is None:
+        if self.current_page_kind == "inspiration" and not self.selection_count and self.editor is None:
             raise MindMapError("请先选择父主题，再粘贴图片")
         target_id = self.editor.node_id if self.editor is not None else self.current_node_id()
         page_id, generation = self.current_page_id, self.engine.document_generation

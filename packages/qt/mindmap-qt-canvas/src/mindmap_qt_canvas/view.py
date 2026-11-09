@@ -1,5 +1,6 @@
 """画布事件路由：平移、缩放、节点拖拽和键盘空间导航。"""
 
+from contextlib import contextmanager
 from math import ceil
 from time import monotonic
 from weakref import ref
@@ -19,7 +20,7 @@ from .items import (
     NodeItem,
     PageControlItem,
 )
-from .selection_decoration import paint_node_selection, selection_bounds
+from .selection_decoration import SelectionDecoration, paint_node_selection, selection_bounds
 
 # 交互缩放与“适应窗口”共用 10% 下限，避免自动适配绕过交互入口的倍率限制。
 MIN_ZOOM = 0.1
@@ -40,6 +41,7 @@ class MindMapView(QGraphicsView):
     def __init__(self, owner, scene):
         super().__init__(scene, owner)
         self.owner = owner
+        self._viewport_sync_depth = 0
         self.panning = False
         self._pan_button = Qt.MouseButton.NoButton
         self._pan_origin = None
@@ -54,10 +56,16 @@ class MindMapView(QGraphicsView):
         self._wheel_scroll_remainder = 0.0
         self._hidden_center = None
         self.press_node = None
+        self._selection_click = None
         self.drag_origin = QPointF()
         self.node_drag = NodeDragController(self)
         self.image_resize = ImageResizeController(self)
         self._selection_bounds = QRect()
+        self._pending_selection_bounds = QRect()
+        self._selection_decoration = SelectionDecoration(self)
+        self._selection_update_timer = QTimer(self)
+        self._selection_update_timer.setSingleShot(True)
+        self._selection_update_timer.timeout.connect(self._flush_selection_decoration)
         # 外框不属于节点边界；场景内容、草稿尺寸或动画位置变化后，额外清除
         # 前后两次的外框范围。只更新选中区域，避免为大图改用整视口持续重绘。
         scene.changed.connect(self._update_selection_decoration)
@@ -164,6 +172,10 @@ class MindMapView(QGraphicsView):
         内容加一屏余量的范围时，由 Qt 将视口限制到最近边界，不额外扩展空白区域。
         """
         self.image_resize.cancel()
+        # 切页的初始定位可能还在零间隔队列中。先完成可见页的待处理定位，再接受
+        # 用户缩放，避免后续编辑缓存页面状态时把刚设置的倍率恢复成 100%。
+        if self.owner._view_reset_pending and self.isVisible():
+            self.owner._apply_view_reset()
         current = self.transform().m11()
         target = min(4.0, max(MIN_ZOOM, current * factor))
         anchor = self.viewport().rect().center() if anchor is None else anchor
@@ -171,17 +183,29 @@ class MindMapView(QGraphicsView):
         previous_anchor = self.transformationAnchor()
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
         try:
-            self.scale(target / current, target / current)
-            # 先按缩放后的坐标映射反推目标中心，再一次性更新范围和中心。用滚动
-            # 位置补偿锚点，而非把位移累加到变换矩阵，保证边界始终约束实际视口。
-            visible = self.mapToScene(self.viewport().rect()).boundingRect()
-            center = visible.center() + before - self.mapToScene(anchor)
-            self.update_navigation_rect(center=center)
+            with self._batch_viewport_changes():
+                self.scale(target / current, target / current)
+                # 先按缩放后的坐标映射反推目标中心，再一次性更新范围和中心。用滚动
+                # 位置补偿锚点，而非把位移累加到变换矩阵，保证边界始终约束实际视口。
+                visible = self.mapToScene(self.viewport().rect()).boundingRect()
+                center = visible.center() + before - self.mapToScene(anchor)
+                self.update_navigation_rect(center=center)
         finally:
             self.setTransformationAnchor(previous_anchor)
         self.update_cursor()
         if self.node_drag.active:
             self.node_drag.update(self.node_drag._pointer)
+
+    @contextmanager
+    def _batch_viewport_changes(self):
+        """Qt 分别滚动横纵轴时只同步最终视口，避免中间位置反复创建、回收图元。"""
+        self._viewport_sync_depth += 1
+        try:
+            yield
+        finally:
+            self._viewport_sync_depth -= 1
+            if not self._viewport_sync_depth:
+                self.owner._viewport_changed()
 
     def update_navigation_rect(self, *, center: QPointF | None = None) -> None:
         """按当前可见内容重算导航范围，四周各留一屏可平移余量。
@@ -196,9 +220,9 @@ class MindMapView(QGraphicsView):
         visible = self.mapToScene(self.viewport().rect()).boundingRect()
         width, height = visible.width(), visible.height()
         center = visible.center() if center is None else center
-        self.setSceneRect(self.scene().sceneRect().adjusted(-width, -height, width, height))
-        self.centerOn(center)
-        self.owner._viewport_changed()
+        with self._batch_viewport_changes():
+            self.setSceneRect(self.scene().sceneRect().adjusted(-width, -height, width, height))
+            self.centerOn(center)
 
     def scrollContentsBy(self, dx, dy):
         """原生滚动完成后按新逻辑视口同步图元，边缘自动滚动也复用此入口。"""
@@ -362,6 +386,7 @@ class MindMapView(QGraphicsView):
         self._pan_origin = None
         self.press_node = None
         self._fold_pressed = False
+        self._selection_click = None
         self._set_hovered_node(None, immediate=True)
         self._expire_fold_hovers(clear=True)
         self.node_drag.cancel()
@@ -396,6 +421,7 @@ class MindMapView(QGraphicsView):
         # 新操作先完成上次放下后的展示动画，随后按最终几何命中，避免拖到中间帧。
         self.node_drag._settle_reflow()
         self.press_node = None
+        self._selection_click = None
         if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton) or (
             event.button() == Qt.MouseButton.LeftButton
             and event.modifiers() & Qt.KeyboardModifier.AltModifier
@@ -436,10 +462,14 @@ class MindMapView(QGraphicsView):
             return
         if isinstance(item, NodeItem) and event.button() == Qt.MouseButton.LeftButton:
             # 多选节点中的一个被拖动时保持整组选择，普通点击仍采用 Qt 的选择规则。
-            if item.isSelected() and len(self.owner.selected_node_ids()) > 1 and not event.modifiers():
+            if item.isSelected() and self.owner.selection_count > 1 and not event.modifiers():
+                self._selection_click = item.node.id
                 event.accept()
             else:
-                super().mousePressEvent(event)
+                with self.owner._scene_selection_event(
+                    replace=not bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                ):
+                    super().mousePressEvent(event)
             if (
                 self.owner.editable
                 and self.owner.editor is None
@@ -451,7 +481,11 @@ class MindMapView(QGraphicsView):
                 self.drag_origin = self.mapToScene(self.press_position)
             self.update_cursor(event.position().toPoint())
             return
-        super().mousePressEvent(event)
+        with self.owner._scene_selection_event(
+            replace=not isinstance(item, NodeEditor)
+            and not bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        ):
+            super().mousePressEvent(event)
         self.update_cursor(event.position().toPoint())
 
     def mouseMoveEvent(self, event):
@@ -483,8 +517,9 @@ class MindMapView(QGraphicsView):
                 # 右键先等待系统拖动距离；越过阈值后从按下位置开始累计完整位移。
                 self.panning = True
             delta = position - self.last_pan
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            with self._batch_viewport_changes():
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             self.last_pan = position
             self.update_cursor(position)
             event.accept()
@@ -495,6 +530,7 @@ class MindMapView(QGraphicsView):
                 and (event.position().toPoint() - self.press_position).manhattanLength()
                 >= QApplication.startDragDistance()
             ):
+                self._selection_click = None
                 if not self.node_drag.begin(self.drag_origin):
                     self.press_node = None
                     event.accept()
@@ -512,7 +548,8 @@ class MindMapView(QGraphicsView):
         elif self.press_node:
             # 捕获丢失后仍可能收到没有左键状态的移动，不能留下悬挂预览和计时器。
             self.cancel_interaction()
-        super().mouseMoveEvent(event)
+        with self.owner._scene_selection_event():
+            super().mouseMoveEvent(event)
         self.update_cursor(event.position().toPoint())
 
     def mouseReleaseEvent(self, event):
@@ -542,18 +579,24 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         if self.drag_ghost is not None:
+            self._selection_click = None
             drop = self.node_drag.finish(event.position().toPoint())
             self.press_node = None
             # 节点预览由视图自己处理，但按下事件曾交给场景选择。必须让场景收到
             # 配对的释放事件，解除图元捕获，随后光标才能按释放位置重新命中。
-            super().mouseReleaseEvent(event)
+            with self.owner._scene_selection_event():
+                super().mouseReleaseEvent(event)
             if drop is not None:
                 self.owner.call(lambda: self.node_drag.commit(drop))
             self.update_cursor(event.position().toPoint())
             event.accept()
             return
         self.press_node = None
-        super().mouseReleaseEvent(event)
+        with self.owner._scene_selection_event():
+            super().mouseReleaseEvent(event)
+        if self._selection_click is not None:
+            key, self._selection_click = self._selection_click, None
+            self.owner.select_nodes([key])
         self.update_cursor(event.position().toPoint())
 
     def mouseDoubleClickEvent(self, event):
@@ -601,12 +644,13 @@ class MindMapView(QGraphicsView):
             Qt.Key.Key_Down: (0, 1),
         }
         if self.owner.editor is None and event.key() in directions and not event.modifiers():
-            ids = self.owner.selected_node_ids()
-            if ids:
-                current = self.owner.node_items[ids[0]].sceneBoundingRect().center()
+            if self.owner.selection_count:
+                key = self.owner.current_node_id()
+                self.owner._ensure_node_item(key)
+                current = self.owner.node_items[key].sceneBoundingRect().center()
                 dx, dy = directions[event.key()]
                 if self.owner._virtualized:
-                    target = self.owner.layout_result.geometry.nearest(ids[0], dx, dy)
+                    target = self.owner.layout_result.geometry.nearest(key, dx, dy)
                     if target is not None:
                         self.owner.select_nodes([target])
                         self.ensureVisible(self.owner.node_items[target], 50, 50)
@@ -635,8 +679,18 @@ class MindMapView(QGraphicsView):
         """
         if self.owner._disposed:
             return
+        self._pending_selection_bounds = self._pending_selection_bounds.united(self._selection_bounds)
+        self._selection_decoration.invalidate()
+        if not self._selection_update_timer.isActive():
+            self._selection_update_timer.start(0)
+
+    def _flush_selection_decoration(self):
+        """同一事件循环只计算一次新旧外框范围，供随后前景绘制复用。"""
+        if self.owner._disposed:
+            return
         current = selection_bounds(self)
-        dirty = self._selection_bounds.united(current)
+        dirty = self._pending_selection_bounds.united(self._selection_bounds).united(current)
+        self._pending_selection_bounds = QRect()
         self._selection_bounds = current
         if not dirty.isEmpty():
             self.viewport().update(dirty)
@@ -652,5 +706,5 @@ class MindMapView(QGraphicsView):
         paint_node_selection(self, painter)
         # 缩放及滚动可能只重绘视图而不发出 scene.changed；记住实际显示的位置，
         # 使随后的局部移动仍能完整擦除旧外框，而非使用缩放前的视口坐标。
-        self._selection_bounds = selection_bounds(self)
+        self._selection_bounds = QRect(self._selection_decoration.bounds)
         self.image_resize.paint(painter)

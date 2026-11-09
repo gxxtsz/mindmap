@@ -1,109 +1,141 @@
-"""文本节点的视口选中装饰；不进入场景图元、正式测量、命中及图形导出。"""
+"""文本节点的视口选中装饰；仅缓存屏内外框，不进入场景、命中或图形导出。"""
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from functools import lru_cache
 
-from .items import NodeItem
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QTransform
 
-# 单位为视口逻辑像素，设备像素比由 Qt 处理；缩放导图不会缩小留白或加粗外框。
+# 单位为视口逻辑像素，设备像素比由 Qt 处理；缩放导图不会改变留白及外框线宽。
 SELECTION_GAP = 3.0
 SELECTION_WIDTH = 2.0
 _REPAINT_PADDING = SELECTION_GAP + SELECTION_WIDTH + 1.0
 
 
-def _selected_nodes(view):
-    """只枚举已选节点及当前编辑节点，不扫描整图，也不强制创建屏外图元。"""
-    owner = view.owner
-    if owner._disposed:
-        return
-    items = [item for item in view.scene().selectedItems() if isinstance(item, NodeItem)]
-    editor = getattr(owner, "editor", None)
-    if editor is not None:
-        editing = owner.node_items.get(editor.node_id)
-        if editing is not None and editing not in items:
-            items.append(editing)
-    for item in items:
-        if item.isVisible() and item.effectiveOpacity() > 0 and not item.node.is_image_node:
-            yield item
-
-
-def _body_outline(item, transform, pixel_ratio):
-    """取得正文连同正式描边的视口外缘，防止宽边框被留白遮盖或随缩放拉大间隔。"""
-    visual = item.visual
-    mapping = item.deviceTransform(transform)
-    rect = mapping.mapRect(QRectF(1, 1, visual.width - 2, visual.height - 2))
-    # NodeVisual 在内缩 1 像素的路径上居中描边；宽度为零时 Qt 使用设备像素细线。
-    half_border = (visual.border_width * mapping.m11() / 2 if visual.border_width > 0
-                   else 0.5 / pixel_ratio)
-    radius = min(7 * mapping.m11(), rect.width() / 2, rect.height() / 2) + half_border
-    return rect.adjusted(-half_border, -half_border, half_border, half_border), radius
-
-
-def selection_bounds(view):
-    """返回当前文本选中外框在视口内的联合重绘范围，空选择返回空 QRect。
-
-    view 为存活的交互视图，仅在 GUI 线程借用；返回值包含一个逻辑像素的抗锯齿
-    余量，并裁到实际视口。调用方同时重绘上次范围即可清除移动、缩短及取消选择
-    后的旧外框，不必扩大节点 boundingRect 或影响滚动范围，不修改文档及选择。
-    """
-    bounds = QRectF()
-    transform = view.viewportTransform()
-    viewport = QRectF(view.viewport().rect())
-    pixel_ratio = view.viewport().devicePixelRatioF()
-    for item in _selected_nodes(view):
-        rect, _ = _body_outline(item, transform, pixel_ratio)
-        rect = rect.adjusted(-_REPAINT_PADDING, -_REPAINT_PADDING,
-                             _REPAINT_PADDING, _REPAINT_PADDING).intersected(viewport)
-        bounds = bounds.united(rect)
-    return bounds.toAlignedRect()
-
-
 def _rounded_rect(rect, radius):
-    """构造独立圆角路径，半径包含外扩距离，使外框与节点保持均匀间隔。"""
     path = QPainterPath()
     path.addRoundedRect(rect, radius, radius)
     return path
 
 
-def paint_node_selection(view, painter: QPainter) -> None:
-    """按实际画布底色绘制 3 像素间隔及 2 像素外框，返回 None。
+@lru_cache(maxsize=512)
+def _outline_paths(width, height, border, matrix, pixel_ratio, button):
+    """按局部几何缓存路径；平移不进入键，尺寸、缩放、DPI 和折叠按钮参与键。
 
-    view、painter 仅供本次 GUI 绘制借用；先映射到视口再绘制，因此 10%～400%
-    缩放与高 DPI 均保持相同的逻辑线宽。根节点、普通节点、多选及编辑草稿复用
-    同一规则；编辑器借用焦点时仍显示其所属节点。图片继续使用原有轮廓和手柄。
-    间隔只覆盖正文外部，并避让可见折叠按钮；透明度跟随拖动中的源节点。
-    不持有输入对象、不创建场景图元、不修改文档或缓存；结束或异常时恢复画笔。
+    所有输入均为不可变数值，不持有节点或视图；返回路径只读借用，调用方不能
+    原地平移或修改。缓存有容量上限，避免滚动浏览整图后积累全部节点的路径。
     """
-    transform = view.viewportTransform()
-    viewport = QRectF(view.viewport().rect())
+    mapping = QTransform(*matrix, 0, 0)
+    rect = mapping.mapRect(QRectF(1, 1, width - 2, height - 2))
+    half_border = border * mapping.m11() / 2 if border > 0 else 0.5 / pixel_ratio
+    radius = min(7 * mapping.m11(), rect.width() / 2, rect.height() / 2) + half_border
+    rect.adjust(-half_border, -half_border, half_border, half_border)
+    body = _rounded_rect(rect, radius)
+    gap = _rounded_rect(rect.adjusted(-SELECTION_GAP, -SELECTION_GAP, SELECTION_GAP, SELECTION_GAP),
+                        radius + SELECTION_GAP)
+    outer = _rounded_rect(rect.adjusted(-SELECTION_GAP - SELECTION_WIDTH, -SELECTION_GAP - SELECTION_WIDTH,
+                                       SELECTION_GAP + SELECTION_WIDTH, SELECTION_GAP + SELECTION_WIDTH),
+                          radius + SELECTION_GAP + SELECTION_WIDTH)
+    ring = outer.subtracted(gap)
+    gap = gap.subtracted(body)
+    if button is not None:
+        # 按真实按钮圆角及描边避让，不能用含透明悬停通道的 boundingRect 裁剪。
+        x, y, w, h, *transform = button
+        clip = QTransform(*transform).map(_rounded_rect(QRectF(x, y, w, h), 10.5))
+        gap = gap.subtracted(clip)
+        ring = ring.subtracted(clip)
+    bounds = rect.adjusted(-_REPAINT_PADDING, -_REPAINT_PADDING, _REPAINT_PADDING, _REPAINT_PADDING)
+    return gap, ring, bounds
+
+
+class SelectionDecoration:
+    """合并一帧的屏内节点、路径及重绘范围；只由所属视图在 GUI 线程调用。"""
+
+    def __init__(self, view):
+        self.view = view
+        self._signature = None
+        self._frame = []
+        self.bounds = QRect()
+
+    def invalidate(self):
+        """使屏内快照失效，保留局部路径缓存；不立即扫描或发起递归重绘。"""
+        self._signature = None
+        self._frame = []
+
+    def frame(self, pixel_ratio):
+        """返回本帧外框及联合范围；绘制与脏区计算复用一次屏内节点查询。
+
+        只枚举当前实例化节点，不读取完整逻辑选择或创建屏外图元。返回项借用
+        Qt 图元，生命周期限于同一 GUI 帧；场景、选择及视图变换后重新计算。
+        """
+        view, owner = self.view, self.view.owner
+        if owner._disposed:
+            self.bounds = QRect()
+            return ()
+        transform = view.viewportTransform()
+        matrix = (transform.m11(), transform.m12(), transform.m21(), transform.m22())
+        viewport = QRectF(view.viewport().rect())
+        editor_id = owner.editor.node_id if owner.editor is not None else None
+        signature = (matrix, transform.dx(), transform.dy(), viewport.width(), viewport.height(),
+                     pixel_ratio, owner._selection_revision, editor_id)
+        if signature == self._signature:
+            return self._frame
+        frame, bounds = [], QRectF()
+        for key, item in owner.node_items.items():
+            if (not owner.is_node_selected(key) and key != editor_id or item.node.is_image_node
+                    or not item.isVisible() or item.effectiveOpacity() <= 0):
+                continue
+            mapping = item.deviceTransform(transform)
+            visual = item.visual
+            # 先作廉价相交判断，预取区域和固定操作节点位于屏外时不构造外框路径。
+            margin = _REPAINT_PADDING + max(visual.border_width * mapping.m11() / 2, 0.5 / pixel_ratio)
+            rect = mapping.mapRect(QRectF(0, 0, visual.width, visual.height))
+            if not viewport.intersects(rect.adjusted(-margin, -margin, margin, margin)):
+                continue
+            origin = QPointF(mapping.dx(), mapping.dy())
+            button = None
+            control = item.fold_control
+            if control is not None and control.isVisible():
+                box = control.button_rect().adjusted(-0.5, -0.5, 0.5, 0.5)
+                cm = control.deviceTransform(transform)
+                button = (box.x(), box.y(), box.width(), box.height(), cm.m11(), cm.m12(), cm.m21(), cm.m22(),
+                          cm.dx() - origin.x(), cm.dy() - origin.y())
+            local = (mapping.m11(), mapping.m12(), mapping.m21(), mapping.m22())
+            gap, ring, dirty = _outline_paths(visual.width, visual.height, visual.border_width,
+                                              local, pixel_ratio, button)
+            bounds = bounds.united(dirty.translated(origin).intersected(viewport))
+            frame.append((item, origin, gap, ring))
+        self._signature, self._frame = signature, frame
+        self.bounds = bounds.toAlignedRect()
+        return frame
+
+
+def selection_bounds(view):
+    """返回含抗锯齿余量且裁到视口的外框联合范围；与本帧绘制复用可见节点快照。
+
+    空选择返回空 QRect；只读借用存活视图，仅在 GUI 线程调用，不修改文档或图元。
+    调用方需同时重绘上次范围，清理移动、缩短和取消选择后遗留的外框。
+    """
+    view._selection_decoration.frame(view.viewport().devicePixelRatioF())
+    return QRect(view._selection_decoration.bounds)
+
+
+def paint_node_selection(view, painter: QPainter) -> None:
+    """绘制 3 像素间隔及 2 像素外框，保持主题、编辑高亮及拖动透明度，返回 None。
+
+    view、painter 仅在本次 GUI 绘制借用；外框在视口坐标绘制，10%～400% 缩放及
+    高 DPI 均保持逻辑线宽。图片继续使用原有轮廓和手柄；结束或异常时恢复画笔。
+    本接口不参与导出、不改变图元边界，只读借用缓存路径，平移时仅平移画笔。
+    """
+    frame = view._selection_decoration.frame(painter.device().devicePixelRatioF())
     background = view.scene().backgroundBrush()
-    pixel_ratio = painter.device().devicePixelRatioF()
     painter.save()
     try:
         painter.resetTransform()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         opacity = painter.opacity()
-        for item in _selected_nodes(view):
-            rect, radius = _body_outline(item, transform, pixel_ratio)
-            outer_rect = rect.adjusted(-SELECTION_GAP - SELECTION_WIDTH, -SELECTION_GAP - SELECTION_WIDTH,
-                                       SELECTION_GAP + SELECTION_WIDTH, SELECTION_GAP + SELECTION_WIDTH)
-            if not viewport.intersects(outer_rect):
-                continue
-            body = _rounded_rect(rect, radius)
-            gap = _rounded_rect(rect.adjusted(-SELECTION_GAP, -SELECTION_GAP,
-                                              SELECTION_GAP, SELECTION_GAP), radius + SELECTION_GAP)
-            outer = _rounded_rect(outer_rect, radius + SELECTION_GAP + SELECTION_WIDTH)
-            ring = outer.subtracted(gap)
-            gap = gap.subtracted(body)
-            control = item.fold_control
-            if control is not None and control.isVisible():
-                # 折叠按钮与正文只相隔 4 个场景像素，低倍率时更靠近正文。按真实
-                # 圆角形状及描边避让，不能用包含透明悬停通道的 boundingRect 裁剪。
-                button = _rounded_rect(control.button_rect().adjusted(-0.5, -0.5, 0.5, 0.5), 10.5)
-                button = control.deviceTransform(transform).map(button)
-                gap = gap.subtracted(button)
-                ring = ring.subtracted(button)
+        for item, origin, gap, ring in frame:
+            painter.setWorldTransform(QTransform.fromTranslate(origin.x(), origin.y()))
             painter.setOpacity(opacity * item.effectiveOpacity())
             painter.fillPath(gap, background)
             painter.fillPath(ring, QColor(item.theme.accent))

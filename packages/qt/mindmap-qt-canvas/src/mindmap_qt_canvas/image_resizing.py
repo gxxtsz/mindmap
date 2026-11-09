@@ -12,7 +12,6 @@ from PySide6.QtGui import QColor, QPen
 from shiboken6 import isValid
 
 from .image_decoration import paint_image_shadow
-from .items import NodeItem
 
 # 顺时针排列八个边缘手柄，零分量表示以对应边的中点为锚点。
 HANDLES = ((-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0))
@@ -50,10 +49,11 @@ class ImageResizeController:
             return None
         # 文档/页面替换时，场景可能暂时还保留旧选择。这里仅判断单选，不借用
         # 新文档的树顺序索引排序旧 ID，也不在鼠标移动时重建完整节点顺序。
-        selected = [item for item in owner.scene.selectedItems() if isinstance(item, NodeItem)]
-        if len(selected) != 1:
+        if owner.selection_count != 1:
             return None
-        item = selected[0]
+        item = owner.node_items.get(owner.current_node_id())
+        if item is None:
+            return None
         node = owner._document.nodes.get(item.node.id)
         return item if node is not None and node.is_image_node else None
 

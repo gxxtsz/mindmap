@@ -6,7 +6,7 @@ from copy import copy
 
 from mindmap_qt_ui.icons import toolbar_icon
 from mindmap_qt_ui.ui_style import UiColors, apply_ui_palette, menu_styles, outline_colors
-from PySide6.QtCore import QAbstractItemModel, QItemSelectionModel, QModelIndex, Qt, Signal
+from PySide6.QtCore import QAbstractItemModel, QItemSelection, QItemSelectionModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QAbstractItemView, QMenu
 
@@ -173,6 +173,9 @@ class OutlinePanel(SidebarTreeView):
         super().__init__(parent)
         self.canvas = canvas
         self._syncing = False
+        self._selected_ids = set()
+        self._selection_snapshot = None
+        self._selection_order = None
         self._ui_colors_override = ui_colors
         self._display_depth = 2
         # 菜单和标题栏共用动作；动作由面板持有，宿主只创建按钮，不接管生命周期。
@@ -288,29 +291,57 @@ class OutlinePanel(SidebarTreeView):
     def _selected(self, selected, deselected):
         if self._syncing:
             return
-        selected_ids = {self.tree_model.node_id(index) for index in self.selectionModel().selectedRows()}
-        self.nodes_selected.emit(
-            [
-                key
-                for key in self.tree_model.document.ordered_nodes()
-                if key in selected_ids
-            ]
-        )
+        # selectedRows 会展开所有既有范围并在深树上反复查询 parent；只消费 Qt
+        # 给出的增减范围，即使此前全选万节点，Ctrl 点击也只处理实际变化的行。
+        model = self.tree_model
+        for ranges, adding in ((deselected, False), (selected, True)):
+            for part in ranges:
+                parent = model.node_id(part.parent())
+                children = model.document.nodes[parent].children if parent else model.document.root_ids
+                ids = children[part.top():part.bottom() + 1]
+                if adding:
+                    self._selected_ids.update(ids)
+                else:
+                    self._selected_ids.difference_update(ids)
+        if self._selection_order is None:
+            self._selection_order = {key: rank for rank, key in enumerate(model.document.ordered_nodes())}
+        snapshot = tuple(sorted(self._selected_ids, key=self._selection_order.__getitem__))
+        if snapshot != self._selection_snapshot:
+            self._selection_snapshot = snapshot
+            self.nodes_selected.emit(list(snapshot))
 
     def sync_selection(self, ids):
-        """同步包括隐藏节点在内的选择，严格保留当前展开状态，避免选择信号循环。"""
+        """一次提交包括隐藏节点在内的选择，保留当前项、展开状态并避免信号循环。
+
+        ids 为树序标识快照，只在调用期间借用。按同父连续行合并 QItemSelection，
+        单列模型不使用 Rows 标志，避免 Qt 重复展开范围。重复快照无需再次同步。
+        """
         if self._syncing:
+            return
+        model = self.tree_model
+        ids = tuple(key for key in ids if key in model.document.nodes)
+        if ids == self._selection_snapshot:
             return
         self._syncing = True
         try:
-            self.selectionModel().clearSelection()
+            groups = {}
             for key in ids:
-                if key not in self.tree_model.document.nodes:
-                    continue
-                index = self.tree_model.index_for(key)
-                self.selectionModel().select(
-                    index, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
-                )
+                groups.setdefault(model.parents.get(key), []).append(model.rows[key])
+            selection = QItemSelection()
+            for parent, rows in groups.items():
+                children = model.document.nodes[parent].children if parent else model.document.root_ids
+                rows.sort()
+                first = last = rows[0]
+                for row in rows[1:]:
+                    if row == last + 1:
+                        last = row
+                    else:
+                        selection.select(model.index_for(children[first]), model.index_for(children[last]))
+                        first = last = row
+                selection.select(model.index_for(children[first]), model.index_for(children[last]))
+            self.selectionModel().select(selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            self._selected_ids = set(ids)
+            self._selection_snapshot = ids
             if ids and ids[0] in self.tree_model.document.nodes:
                 index = self.tree_model.index_for(ids[0])
                 self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
@@ -368,6 +399,9 @@ class OutlinePanel(SidebarTreeView):
                 self.verticalScrollBar().setValue(scroll)
         finally:
             self._syncing = False
+        if changed:
+            self._selection_snapshot = None
+            self._selection_order = None
         self.set_theme(self.canvas.document_view.theme)
         self.sync_selection(self.canvas.selected_node_ids())
 

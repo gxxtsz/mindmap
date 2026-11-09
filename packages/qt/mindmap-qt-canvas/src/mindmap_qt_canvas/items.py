@@ -101,9 +101,13 @@ class FoldControlItem(QGraphicsObject):
         item = self.node_item
         if item is None:
             return
-        self.setVisible(bool(item.owner is not None and not item.owner._disposed and item.node.children and (
+        visible = bool(item.owner is not None and not item.owner._disposed and item.node.children and (
             not item.node.expanded or item.hovered or item.isSelected() or item._fold_hide_pending
-        )))
+        ))
+        if visible != self.isVisible():
+            self.setVisible(visible)
+            if item.owner is not None:
+                item.owner.view._update_selection_decoration()
 
     def hover_distance(self, scene_position, scale: float) -> float | None:
         """返回指针到按钮或出线短段的屏幕距离，不依赖按钮是否显示。
@@ -279,6 +283,7 @@ class NodeItem(StaticNodeItem):
         super().__init__(node, visual, theme, controls=False, page_controls=owner is None,
                          text_highlight=owner is None)
         self.owner = owner
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, owner is not None)
         self.hovered = False
         self._fold_hide_pending = False
         self.fold_control = FoldControlItem(self) if owner is not None else None
@@ -308,6 +313,8 @@ class NodeItem(StaticNodeItem):
         if self.node.is_image_node != node.is_image_node:
             self.prepareGeometryChange()
         super().update_content(node, visual, theme)
+        if self.owner is not None:
+            self.owner.view._update_selection_decoration()
 
     def paint(self, painter, option, widget=None):
         """绘制正式内容及画布专用的图片投影、悬停轮廓，返回 None。
@@ -368,6 +375,15 @@ class NodeItem(StaticNodeItem):
 
     def itemChange(self, change, value):
         result = super().itemChange(change, value)
+        if getattr(self, "owner", None) is not None and change in (
+            QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemTransformHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemScaleHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemRotationHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemVisibleHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemOpacityHasChanged,
+        ):
+            self.owner.view._update_selection_decoration()
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             control = getattr(self, "fold_control", None)
             if control is not None:
