@@ -143,7 +143,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     qtbot.mouseClick(window.title_bar.menu, Qt.MouseButton.LeftButton)
     assert popped == [expected]
     assert set(window.manager.specs) == {
-        "outline", "favorites", "inspiration", "properties", "map_settings", "operation_log",
+        "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "operation_log",
     }
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
@@ -160,8 +160,8 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
     assert [action for action in view.actions() if not action.isSeparator()] == [window.canvas.action(key) for key in (
         "zoom_in", "zoom_out", "expand_all", "collapse_all",
-    )] + [window.read_only_action, window.log_action]
-    assert view.actions()[-2].isSeparator()
+    )] + [window.read_only_action, window.recent_pages_action, window.log_action]
+    assert view.actions()[-3].isSeparator()
     assert not hasattr(window, "show_document")
     assert window.manager.states["properties"].visible
     main.deleteLater()

@@ -1,15 +1,26 @@
-"""工作台的最近文件与退出会话记录；文件内容、停靠布局分别由原组件持有。"""
+"""工作台的最近文件、页面访问及退出会话记录；文件内容、布局由原组件持有。"""
 
 from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 
 from mindmap_docking import JsonLayoutStore
 
 RECENT_FILE_LIMIT = 20
+RECENT_PAGE_LIMIT = 50
+PageKey = tuple[str | None, str | None]
+
+
+def _page_key(page_id: object, root_id: object) -> PageKey:
+    """校验本机记录中的标识类型；页面是否仍存在由加载后的实际引擎判断。"""
+    if any(value is not None and (not isinstance(value, str) or not value or "\0" in value)
+           for value in (page_id, root_id)) or page_id is None and root_id is not None:
+        raise ValueError("页面记录必须使用有效的页面和想法根标识")
+    return page_id, root_id
 
 
 def path_key(path: str | Path) -> str:
@@ -28,10 +39,12 @@ def _document_path(value: object) -> str:
 
 
 class DocumentState:
-    """原子保存最近文件和最近一次正常退出的文件集合。
+    """原子保存最近文件、按文件隔离的页面历史和最近一次正常退出的文件集合。
 
     最近文件每次更新立即落盘，但始终携带上一次成功提交的退出快照，不能把
     启动恢复期间的半成品写成新会话。新退出快照由窗口通过关闭检查后显式提交。
+    页面历史先更新内存，由宿主防抖调用 flush_recent_pages；其他成功写入也会
+    携带当前页面记录并清除其脏标记，避免另存为或退出时遗漏刚发生的访问。
     I/O 或格式错误交给窗口显示中文提示，文件加载不依赖此记录成功保存。
     """
 
@@ -40,6 +53,8 @@ class DocumentState:
         self.recent_files: list[str] = []
         self.open_documents: list[dict[str, object]] = []
         self.active_id = ""
+        self.recent_pages: dict[str, tuple[PageKey, ...]] = {}
+        self.recent_pages_dirty = False
 
     def load(self) -> None:
         """读取版本 1 本机记录，返回 None；路径和标识完整校验后才替换内存状态。
@@ -48,6 +63,7 @@ class DocumentState:
         无效视图不使整份退出集合失效。旧记录缺少此字段仍可加载。不存在配置
         表示首次使用；I/O 或基本结构错误抛出 OSError/ValueError。由 GUI 线程
         的窗口初始化调用，读取结果独立持有，不借用导图或 Qt 控件的生命周期。
+        可选 recent_pages 独立逐项校验，旧配置缺省为空，损坏条目不影响退出集合。
         """
         payload = self.store.load()
         if payload is None:
@@ -84,6 +100,32 @@ class DocumentState:
         self.recent_files = normalized_recent[:RECENT_FILE_LIMIT]
         self.open_documents = normalized_documents
         self.active_id = active if active in identifiers else ""
+        # 新字段独立降级；坏路径、坏条目不影响最近文件和退出会话的有效记录。
+        # 缺少 page_id 不能误认为主导图，只有显式 JSON null 才表示主导图。
+        pages = payload.get("recent_pages", {})
+        normalized_pages = {}
+        for path, records in pages.items() if isinstance(pages, dict) else ():
+            try:
+                key = path_key(_document_path(path))
+            except (OSError, ValueError, TypeError):
+                continue
+            if not isinstance(records, list):
+                continue
+            entries = list(normalized_pages.get(key, ()))
+            for record in records:
+                if not isinstance(record, dict) or "page_id" not in record:
+                    continue
+                try:
+                    entry = _page_key(record["page_id"], record.get("inspiration_root_id"))
+                except ValueError:
+                    continue
+                if entry not in entries:
+                    entries.append(entry)
+                if len(entries) >= RECENT_PAGE_LIMIT:
+                    break
+            normalized_pages[key] = tuple(entries[:RECENT_PAGE_LIMIT])
+        self.recent_pages = normalized_pages
+        self.recent_pages_dirty = False
 
     def _save(self) -> None:
         """复用现有 JSON 存储的同目录临时文件与原子替换，写入失败保留旧文件。"""
@@ -92,7 +134,35 @@ class DocumentState:
             "recent_files": self.recent_files,
             "open_documents": self.open_documents,
             "active_id": self.active_id,
+            "recent_pages": {
+                path: [{"page_id": page, "inspiration_root_id": root} for page, root in entries]
+                for path, entries in self.recent_pages.items()
+            },
         })
+        self.recent_pages_dirty = False
+
+    def pages_for(self, path: str | Path) -> tuple[PageKey, ...]:
+        """读取该文件最近页面的不可变序列，不访问文件内容，也不改访问顺序。"""
+        return self.recent_pages.get(path_key(path), ())
+
+    def set_recent_pages(self, path: str | Path, pages: Sequence[PageKey]) -> bool:
+        """替换一份导图的页面记录，返回是否变化；只更新内存，由宿主防抖落盘。
+
+        path 使用与文件会话一致的规范化键；条目按调用顺序去重并保留最近 50 项。
+        不持有传入容器，不修改退出快照。写入失败时仍保留这些内存记录供下次重试。
+        """
+        key = path_key(_document_path(str(Path(path).resolve())))
+        entries = tuple(dict.fromkeys(_page_key(*item) for item in pages))[:RECENT_PAGE_LIMIT]
+        if entries == self.recent_pages.get(key, ()):
+            return False
+        self.recent_pages[key] = entries
+        self.recent_pages_dirty = True
+        return True
+
+    def flush_recent_pages(self) -> None:
+        """原子写入尚未保存的页面记录；失败抛出 OSError，保留脏标记及原磁盘文件。"""
+        if self.recent_pages_dirty:
+            self._save()
 
     def remember(self, path: str | Path) -> None:
         """成功新建、打开或另存为后置顶；普通激活、自动保存及恢复不调用此接口。"""

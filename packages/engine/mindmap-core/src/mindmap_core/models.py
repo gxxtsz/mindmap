@@ -205,6 +205,27 @@ class PathEntry:
     page_root: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class PageSummary:
+    """独立于文档实体的只读页面摘要，供最近访问等导航列表长期持有。
+
+    主导图的 page_id 为 None；独立想法由灵感区 page_id 和根标识共同定位。
+    path 保存不可变路径项，标题及路径随下一次查询更新，不作为页面身份依据。
+    本类型不保存视口、访问时间或文档内容，也不承担任何导航及持久化行为。
+    """
+
+    page_id: str | None
+    inspiration_root_id: str | None
+    kind: str
+    title: str
+    path: tuple[PathEntry, ...]
+
+    @property
+    def key(self) -> tuple[str | None, str | None]:
+        """返回页面身份；同名页面及不同独立想法拥有不同的键。"""
+        return self.page_id, self.inspiration_root_id
+
+
 @dataclass
 class InspirationArea:
     """文档内无入口节点的独立灵感区，坐标均为导图逻辑像素。

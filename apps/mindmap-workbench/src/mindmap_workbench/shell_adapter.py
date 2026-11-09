@@ -53,15 +53,15 @@ def ui_colors_from_shell(theme) -> UiColors:
     )
 
 
-class _OperationLogLayoutStore:
+class _WorkbenchLayoutStore:
     """在既有布局存储边界补齐新面板，原始校验及原子写入仍交给停靠框架。"""
 
-    def __init__(self, store, default_tool):
+    def __init__(self, store, default_tools):
         self.store = store
-        self.default_tool = deepcopy(default_tool)
+        self.default_tools = deepcopy(default_tools)
 
     def load(self) -> dict | None:
-        """读取旧布局时添加缺失的日志面板；已有日志显隐及位置一律保留。
+        """读取旧布局时补齐日志和最近访问；已保存的新面板显隐及位置一律保留。
 
         只迁移结构可识别的版本 1 数据，损坏结构原样交回管理器统一校验；读取
         不写文件，下一次正常布局保存才落盘。复制数据，避免修改存储方缓存的快照。
@@ -71,19 +71,33 @@ class _OperationLogLayoutStore:
             return payload
         session = payload.get("session")
         tools = session.get("tools") if isinstance(session, dict) else None
-        if (isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools)
-                and not any(tool.get("id") == "operation_log" for tool in tools)):
-            payload = deepcopy(payload)
-            tool = deepcopy(self.default_tool)
-            # 旧版允许把其他侧栏移到底部，优先使用未占用的底部格。
-            occupied = {item.get("position") for item in tools if item.get("visible")}
-            if tool["position"] in occupied and DockPosition.BOTTOM_RIGHT not in occupied:
-                tool["position"] = tool["last_position"] = DockPosition.BOTTOM_RIGHT
-            payload["session"]["tools"].append(tool)
+        if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
+            return payload
+        payload = deepcopy(payload)
+        tools = payload["session"]["tools"]
+        for default in self.default_tools:
+            if any(tool.get("id") == default["id"] for tool in tools):
+                continue
+            tool = deepcopy(default)
+            if tool["id"] == "operation_log":
+                # 日志沿用原迁移规则，优先使用未占用的底部格。
+                occupied = {item.get("position") for item in tools if item.get("visible")}
+                if tool["position"] in occupied and DockPosition.BOTTOM_RIGHT not in occupied:
+                    tool["position"] = tool["last_position"] = DockPosition.BOTTOM_RIGHT
+            else:
+                # 最近访问仅在首次加入旧布局时展开；同一停靠格只显示一个面板。
+                # 保留被替换侧栏的位置等状态，之后仍可从原来的入口切回。
+                for item in tools:
+                    if (item.get("host_id") == tool["host_id"] and item.get("position") == tool["position"]
+                            and item.get("mode") in ("dock_pinned", "dock_unpinned")):
+                        item["visible"] = False
+                        if payload["session"].get("active") == item.get("id"):
+                            payload["session"]["active"] = tool["id"]
+            tools.append(tool)
         return payload
 
     def save(self, payload: dict) -> None:
-        """保存现有完整布局，不保存日志文本、不改变原存储格式和失败语义。"""
+        """保存完整布局，不保存日志文本或页面访问记录，沿用原存储格式和失败语义。"""
         self.store.save(payload)
 
 
@@ -127,6 +141,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         # 空白页不创建画布，也需要先补齐离屏平台字体；正常桌面字体不会被改写。
         ensure_fonts()
         self._disposed = False
+        self._restoring_recent_pages = True
         self._updating_preferences = False
         self._operation_error_token = object()
         self.layout_registry = layout_registry if layout_registry is not None else create_default_layout_registry()
@@ -144,6 +159,10 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.set_always_on_top(pinned is True or isinstance(pinned, str) and pinned == "true")
         self.always_on_top_changed.connect(self._save_always_on_top)
         self.document_state = DocumentState(manager.storage_dir / "documents-v1.json")
+        self._recent_pages_timer = QTimer(self)
+        self._recent_pages_timer.setSingleShot(True)
+        self._recent_pages_timer.setInterval(500)
+        self._recent_pages_timer.timeout.connect(self.flush_recent_pages)
         startup_messages = []
         try:
             self.document_state.load()
@@ -153,9 +172,10 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._outline_stack = QStackedWidget(manager.parking)
         self._favorites_stack = QStackedWidget(manager.parking)
         self._inspiration_stack = QStackedWidget(manager.parking)
+        self._recent_pages_stack = QStackedWidget(manager.parking)
         self._properties_stack = QStackedWidget(manager.parking)
         self._settings_stack = QStackedWidget(manager.parking)
-        for stack in (self._outline_stack, self._favorites_stack, self._inspiration_stack,
+        for stack in (self._outline_stack, self._favorites_stack, self._inspiration_stack, self._recent_pages_stack,
                       self._properties_stack, self._settings_stack):
             message = QLabel("没有打开的导图")
             message.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -178,6 +198,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             ("outline", "大纲", self._outline_stack, "outline", DockPosition.LEFT_TOP, "Alt+1"),
             ("favorites", "收藏", self._favorites_stack, "favorites", DockPosition.LEFT_TOP, "Alt+4"),
             ("inspiration", "灵感", self._inspiration_stack, "inspiration", DockPosition.LEFT_TOP, "Alt+6"),
+            ("recent_pages", "最近访问", self._recent_pages_stack, "recent-pages", DockPosition.LEFT_TOP, "Alt+7"),
             ("properties", "节点属性", self._properties_stack, "properties", DockPosition.RIGHT_TOP, "Alt+2"),
             ("map_settings", "导图设置", self._settings_stack, "settings", DockPosition.RIGHT_TOP, ""),
         ):
@@ -192,6 +213,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         ))
         self.log_action = manager.actions["tool:operation_log"]
         self.log_action.setCheckable(True)
+        self.recent_pages_action = manager.actions["tool:recent_pages"]
+        self.recent_pages_action.setCheckable(True)
         self.host.editor.set_empty_widget_factory(lambda: _WelcomePage(self))
         self._register_file_actions()
         self.settings_action = manager.register_action("app.settings", "导图设置", self.show_settings_panel,
@@ -200,6 +223,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self.read_only_action.toggled.connect(self._set_read_only)
         self.recent_files_button = RecentFilesButton(self)
         self.set_title_bar_navigation(self.recent_files_button)
+        manager.activate("recent_pages", focus=False)
+        self.recent_pages_action.setChecked(True)
         manager.activate("properties", focus=False)
         manager.activate("operation_log", focus=False)
         self.log_action.setChecked(True)
@@ -208,8 +233,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             sizes.update(left=260, right=360, bottom=260)
         manager.restore_layout(layout)
         manager.set_default_layout()
-        manager.layout_store = _OperationLogLayoutStore(
-            manager.layout_store, next(tool for tool in layout["tools"] if tool["id"] == "operation_log"),
+        manager.layout_store = _WorkbenchLayoutStore(
+            manager.layout_store, [next(tool for tool in layout["tools"] if tool["id"] == identifier)
+                                   for identifier in ("operation_log", "recent_pages")],
         )
         self._properties_visible = True
         self._settings_visible = False
@@ -231,6 +257,9 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                 startup_messages.append("部分导图未能恢复：" + "；".join(failures))
         self.refresh_theme()
         self._bind_session(self.active_session)
+        self._restoring_recent_pages = False
+        if self.active_session is not None:
+            self.active_session._record_page_visit()
         if startup_messages:
             self.show_status_message("；".join(startup_messages))
         self._opening_dropped_files = False
@@ -364,6 +393,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         panels.set_ui_colors(colors)
         session.favorites.set_ui_colors(colors)
         session.inspiration.set_ui_colors(colors)
+        session.recent_pages.set_ui_colors(colors)
 
     @property
     def ui_colors(self) -> UiColors:
@@ -451,6 +481,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._outline_stack.setCurrentWidget(session.panels.outline) if session else self._outline_stack.setCurrentIndex(0)
         self._favorites_stack.setCurrentWidget(session.favorites) if session else self._favorites_stack.setCurrentIndex(0)
         self._inspiration_stack.setCurrentWidget(session.inspiration) if session else self._inspiration_stack.setCurrentIndex(0)
+        self._recent_pages_stack.setCurrentWidget(session.recent_pages) if session else self._recent_pages_stack.setCurrentIndex(0)
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
         self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
         self._status_controls.bind_canvas(session.canvas if session else None)
@@ -459,7 +490,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
         # 关闭活动标签到下一标签的短暂空绑定不暂停，只有关闭全部导图才回欢迎页。
-        self.manager.set_tools_suspended(("outline", "favorites", "inspiration", "properties", "map_settings"),
+        self.manager.set_tools_suspended(("outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings"),
                                          not bool(len(self.sessions)))
 
     def _set_read_only(self, checked):
@@ -523,6 +554,25 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
         except OSError as error:
             self.show_status_message(f"最近文件未能保存：{error}")
             self.record_operation(f"最近文件未能保存：{error}", level="warning")
+
+    def schedule_recent_pages_save(self) -> None:
+        """合并连续切页引起的本机写入；不触发导图自动保存或改变退出快照。"""
+        if not self._disposed:
+            self._recent_pages_timer.start()
+
+    def flush_recent_pages(self) -> None:
+        """防抖到期、关闭标签或退出时保存访问记录；失败不阻止浏览和关闭。
+
+        状态层保留尚未保存的内存快照，下一次访问或显式收尾可再次尝试。
+        提示统一交给现有状态栏及操作日志，不弹出阻塞对话框。
+        """
+        self._recent_pages_timer.stop()
+        try:
+            self.document_state.flush_recent_pages()
+        except OSError as error:
+            message = f"最近访问记录未能保存：{error}"
+            self.show_status_message(message)
+            self.record_operation(message, level="warning")
 
     def clear_recent_files(self):
         """清空最近文件，退出快照及运行中的全部会话继续保留。"""
@@ -698,6 +748,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
             if title == "视图":
                 section.addAction(self.read_only_action)
                 section.addSeparator()
+                section.addAction(self.recent_pages_action)
                 section.addAction(self.log_action)
             menu.insertMenu(anchor, section)
         return menu
@@ -714,7 +765,8 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                 session.panels.set_ui_colors(colors)
                 session.favorites.set_ui_colors(colors)
                 session.inspiration.set_ui_colors(colors)
-            for stack in (self._outline_stack, self._favorites_stack, self._inspiration_stack,
+                session.recent_pages.set_ui_colors(colors)
+            for stack in (self._outline_stack, self._favorites_stack, self._inspiration_stack, self._recent_pages_stack,
                           self._properties_stack, self._settings_stack):
                 palette = stack.palette()
                 palette.setColor(QPalette.ColorRole.Window, self.manager.theme.color("tool-window-bg"))
@@ -732,11 +784,14 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
                                              compact=self.manager.theme.compact)
         if hasattr(self, "log_action"):
             self.log_action.setIcon(self.manager.theme.icon("log"))
+        if hasattr(self, "recent_pages_action"):
+            self.recent_pages_action.setIcon(self.manager.theme.icon("recent-pages"))
 
     def _layout_changed(self):
         if self._disposed:
             return
         self.log_action.setChecked(self.manager.states["operation_log"].visible)
+        self.recent_pages_action.setChecked(self.manager.states["recent_pages"].visible)
         visible = self.manager.states["properties"].visible
         if getattr(self, "_properties_visible", visible) and not visible and self.panels:
             self.panels.flush_pending_edits()
@@ -752,6 +807,7 @@ class MindMapWorkbenchWindow(WorkbenchWindow):
     def dispose(self):
         """主窗口通过全部保存检查后停止所有会话；重复调用安全。"""
         if not self._disposed:
+            self.flush_recent_pages()
             self._disposed = True
             QApplication.instance().removeEventFilter(self)
             self.setAcceptDrops(False)

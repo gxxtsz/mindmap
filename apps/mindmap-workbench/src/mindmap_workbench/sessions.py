@@ -13,13 +13,14 @@ from mindmap_core import MindMapEngine, MindMapError
 from mindmap_docking import DocumentSpec
 from mindmap_formats import can_process_snapshot, save_document, supports_process_save
 from mindmap_qt_canvas import MindMapFileController, MindMapFileState, MindMapWidget
-from mindmap_qt_panels import InspirationPanel, MindMapPanels, SubmapFavoritesPanel
+from mindmap_qt_panels import InspirationPanel, MindMapPanels, RecentPagesPanel, SubmapFavoritesPanel
 from PySide6.QtCore import QObject, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from .background_save import save_snapshot
 from .document_state import path_key
 from .operation_log import describe_change
+from .recent_pages import RecentPageHistory
 
 # 延迟启动一个独立进程，避免编码、深拷贝及垃圾回收持有 GUI 的解释器锁。
 _SAVE_POOL = None
@@ -62,6 +63,7 @@ class MindMapDocumentSession(QObject):
         self.engine = MindMapEngine()
         self.file_state = MindMapFileState()
         self.views = []
+        self.recent_pages = RecentPageHistory(self)
         self.last_error = ""
         self._file_size_bytes = None
         self.disposed = False
@@ -162,6 +164,7 @@ class MindMapDocumentSession(QObject):
         """幂等释放文件级计时器和订阅；调用时最后一个视图的控制器仍须存活。"""
         if self.disposed:
             return
+        self.owner.window.flush_recent_pages()
         self.timer.stop()
         self._finish_background_save(wait=True)
         self.disposed = True
@@ -184,6 +187,8 @@ class MindMapDocumentSession(QObject):
             self.timer.start()
             if self.owner.get(self.representative.id) is self.representative:
                 self.owner.window.record_operation(describe_change(event), session=self.representative)
+        if not self.disposed and event.kind != "saved":
+            self.recent_pages.refresh()
         self.sync_views()
 
     def _refresh_file_size(self) -> None:
@@ -313,6 +318,8 @@ class MindMapSession(QObject):
         self.document = document if document is not None else MindMapDocumentSession(owner)
         self.engine = self.document.engine
         self.disposed = False
+        self._navigating_recent_page = False
+        self._last_recent_page_key = None
         colors = owner.window.ui_colors
         # 历史动作由标签栏承载，视图操作由主窗口状态栏承载，画布不再创建浮条。
         self.canvas = MindMapWidget(self.engine, toolbar=False, view_controls=False, embedded=True,
@@ -355,6 +362,11 @@ class MindMapSession(QObject):
         self.canvas.inspirations_detached.connect(self.inspiration.flash_roots)
         self.canvas.inspiration_sidebar_requested.connect(self._show_inspiration)
         self._sync_inspiration()
+        self.recent_pages = RecentPagesPanel(self.canvas)
+        self.recent_pages.hide()
+        self.recent_pages.navigate_requested.connect(self._navigate_recent_page)
+        self.canvas.page_changed.connect(self._sync_recent_page)
+        self.canvas.document_changed.connect(self._sync_recent_page)
         self.files = MindMapFileController(self.canvas, self.panels, owner.window,
                                            writer=self.document._write, state=self.document.file_state,
                                            background_open=True)
@@ -463,6 +475,54 @@ class MindMapSession(QObject):
         self.favorites.set_current_page_id(self.canvas.current_page_id)
         self.favorites.set_editable(self.canvas.editable and not self.canvas.is_editing)
 
+    def _record_page_visit(self) -> None:
+        """仅记录已安装的活动标签；后台画布同步和启动恢复的中间页面均不计入。"""
+        if (self.disposed or self.owner.active is not self or self.owner.get(self.id) is not self
+                or self.owner.window._restoring_recent_pages):
+            return
+        key = self.canvas.current_page_id, self.canvas.current_inspiration_root_id
+        self._last_recent_page_key = key
+        self.document.recent_pages.visit(*key)
+
+    def _sync_recent_page(self, *_):
+        """用完整页面键检测实际切换；文字编辑和自动保存的通知不改变访问顺序。"""
+        if self.disposed:
+            return
+        key = self.canvas.current_page_id, self.canvas.current_inspiration_root_id
+        changed = key != self._last_recent_page_key
+        self._last_recent_page_key = key
+        self.recent_pages.set_current_page(*key)
+        if changed:
+            self._record_page_visit()
+
+    def _navigate_recent_page(self, page_id, root_id):
+        """在所属活动标签安全跳转；失败恢复高亮，成功才置顶并保留最近访问侧栏。
+
+        同步信号期间临时抑制灵感侧栏自动展开，避免成功进入想法后替换本列表。
+        输入法、待提交属性和视口缓存均交给现有画布接口；不会创建新标签。
+        """
+        if self.disposed or self.owner.active is not self:
+            return
+
+        def navigate():
+            if self.engine.page_summary(page_id, root_id) is None:
+                self.document.recent_pages.refresh()
+                raise MindMapError("该页面已不存在，已从最近访问中移除")
+            if root_id is not None:
+                self.canvas.show_inspiration(root_id)
+            else:
+                self.canvas.navigate_to(page_id)
+            return True
+
+        self._navigating_recent_page = True
+        try:
+            if self.canvas.call(navigate):
+                self._record_page_visit()
+        finally:
+            self._navigating_recent_page = False
+            self.recent_pages.set_current_page(self.canvas.current_page_id,
+                                               self.canvas.current_inspiration_root_id, reset_selection=True)
+
     def _navigate_favorite(self, page_id):
         """复用画布输入检查与页面现场恢复；失败后还原收藏树高亮，不伪装已经切页。"""
         self.canvas.call(lambda: self.canvas.navigate_to(page_id))
@@ -509,7 +569,7 @@ class MindMapSession(QObject):
 
     def _show_inspiration(self):
         """导航成功后打开共享左侧灵感工具；后台恢复候选不抢占其他文件焦点。"""
-        if self.owner.get(self.id) is self and self.owner.active is self:
+        if not self._navigating_recent_page and self.owner.get(self.id) is self and self.owner.active is self:
             self.owner.window.manager.activate("inspiration", focus=False)
 
     def dispose(self):
@@ -528,9 +588,11 @@ class MindMapSession(QObject):
         self.panels.dispose()
         self.favorites.dispose()
         self.inspiration.dispose()
+        self.recent_pages.dispose()
         for stack, page in ((self.owner.window._outline_stack, self.panels.outline),
                             (self.owner.window._favorites_stack, self.favorites),
                             (self.owner.window._inspiration_stack, self.inspiration),
+                            (self.owner.window._recent_pages_stack, self.recent_pages),
                             (self.owner.window._properties_stack, self.panels.properties),
                             (self.owner.window._settings_stack, self.panels.settings)):
             # 未安装的候选会话独立持有面板，后台读取结束时主窗口的停靠栈可能已释放。
@@ -582,13 +644,15 @@ class MindMapSessionManager(QObject):
         return next((item for item in self.ordered() if item.files.path is not None
                      and path_key(item.files.path) == key), None)
 
-    def _install(self, session, *, remember=True, after=None):
+    def _install(self, session, *, remember=True, after=None, reset_recent_pages=False):
         """初次加载或保存完整成功后才注册界面，避免出现空路径和半初始化的标签。"""
         self._sessions[session.id] = session
         self._known_paths[session.id] = session.files.path
+        session.document.recent_pages.bind(session.files.path, reset=reset_recent_pages)
         self.window._outline_stack.addWidget(session.panels.outline)
         self.window._favorites_stack.addWidget(session.favorites)
         self.window._inspiration_stack.addWidget(session.inspiration)
+        self.window._recent_pages_stack.addWidget(session.recent_pages)
         self.window._properties_stack.addWidget(session.panels.properties)
         self.window._settings_stack.addWidget(session.panels.settings)
         # 标签只显示不含末尾扩展名的文件名，完整路径仍由文件控制器保留。
@@ -659,7 +723,7 @@ class MindMapSessionManager(QObject):
                 candidate.dispose()
                 candidate.canvas.deleteLater()
                 return False
-            self._install(candidate)
+            self._install(candidate, reset_recent_pages=True)
             self.window.record_operation(f"新建导图：{candidate.files.path}", session=candidate)
             return True
         except Exception as error:
@@ -762,6 +826,8 @@ class MindMapSessionManager(QObject):
                 # 标签及分屏切换时重新读取，允许外部文件变化在下次激活时更新。
                 self.active._refresh_file_size()
             self.window._bind_session(self.active)
+            if self.active is not None:
+                self.active._record_page_visit()
             if focus is not None and focus.isVisible() and QApplication.focusWidget() is not focus:
                 focus.setFocus(Qt.FocusReason.OtherFocusReason)
         finally:
@@ -808,6 +874,7 @@ class MindMapSessionManager(QObject):
         if session.id not in self._sessions or session.disposed:
             return
         if self._known_paths.get(session.id) != session.files.path:
+            session.document.recent_pages.bind(session.files.path)
             for view in session.document.views:
                 if self.get(view.id) is view:
                     self._known_paths[view.id] = session.files.path
@@ -831,6 +898,7 @@ class MindMapSessionManager(QObject):
         self.window._sync_document()
 
     def _closed(self, session):
+        self.window.flush_recent_pages()
         self.window.record_operation("关闭标签" if len(session.document.views) > 1 else "关闭导图", session=session)
         self._sessions.pop(session.id, None)
         self._known_paths.pop(session.id, None)

@@ -13,6 +13,7 @@
 - [导图设置](#导图设置)
 - [独立灵感面板](#独立灵感面板)
 - [独立收藏面板](#独立收藏面板)
+- [最近访问面板](#最近访问面板)
 
 ## 安装与构建
 
@@ -160,6 +161,14 @@ wheel_menu = panels.settings.create_menu(canvas)
 - `flash_roots(node_ids)` 仅提示成功新增的数量，1.6 秒后隐藏，不改变画布或搜索；新的拖放交互会取消旧成功提示的倒计时，避免当前反馈被提前关闭。
 
 - 所有方法在 GUI 线程调用；引擎在面板存活期间必须有效，永久释放前先 `dispose()`。
+
+## 最近访问面板
+
+- `RecentPagesPanel(parent=None)` 提供双行的只读页面列表，不依赖引擎实例、画布或停靠框架，也不增加 `PanelHost` 的必需成员。
+- `set_entries(Sequence[PageSummary])` 接收宿主按最近访问顺序提供的不可变页面摘要；条目显示标题、类型和路径，长文字省略，完整内容保留在悬停提示和无障碍描述中。
+- `set_current_page(page_id, inspiration_root_id=None, *, reset_selection=False)` 同步实际当前页；活动页高亮与方向键浏览的焦点项分别展示，跳转失败可传 `reset_selection=True` 还原选择。
+- 单击或 Enter 发出 `navigate_requested(page_id, inspiration_root_id)`，方向键只浏览。宿主负责再次验证目标、处理输入法及草稿、执行导航和保存访问记录。
+- 重排按稳定键保留键盘目标和滚动位置，改名不重置模型；`set_ui_colors(UiColors | None)` 同步明暗主题，None 使用默认浅色。所有图形调用发生在 GUI 线程，永久释放前调用幂等 `dispose()` 停止更新和导航请求。
 
 ## 独立收藏面板
 

@@ -155,6 +155,10 @@ engine.undo()
 
 - `engine.page_document(page_id)` 返回隔离的单页布局读模型，`node_page_id(node_id)` 返回页内归属，`node_path(node_id)` 返回包含页面和节点 ID 的完整可点击路径。
 
+- `engine.page_summary(page_id, inspiration_root_id=None) -> PageSummary | None` 只读查询页面类型、当前标题和完整路径；主导图传 None，独立想法须同时指定灵感区 ID 和游离根 ID。目标删除、根已归并或参数不匹配时返回 None，灵感空态不生成摘要。
+
+- `PageSummary` 为不可变类型，包含 `page_id`、`inspiration_root_id`、`kind`、`title` 和不可变路径项元组 `path`，`key` 返回稳定的二元页面身份。查询仅访问页面索引与祖先链，不复制整份文档、不遍历普通后代、不改变事件或历史；旧摘要不会随后续编辑改变，展示更新时应重新查询。
+
 - `set_layout` 与 `set_theme` 接受可选关键字参数 `page_id`，省略时仍修改主导图。
 
 - `engine.document` 和保存快照始终包含全部页面，历史变化集的 `page_id` 表示操作所属页。

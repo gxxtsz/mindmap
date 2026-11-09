@@ -6,7 +6,8 @@ from .inspector import NodePropertiesPanel
 from .inspiration import InspirationPanel
 from .outline import OutlineModel, OutlinePanel
 from .panels import MindMapPanels
+from .recent_pages import RecentPagesPanel
 from .settings import GlobalSettingsPanel
 
 __all__ = ["PanelHost", "NodePropertiesPanel", "OutlineModel", "OutlinePanel", "MindMapPanels",
-           "GlobalSettingsPanel", "SubmapFavoritesPanel", "InspirationPanel"]
+           "GlobalSettingsPanel", "SubmapFavoritesPanel", "InspirationPanel", "RecentPagesPanel"]

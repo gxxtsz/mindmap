@@ -14,7 +14,7 @@ from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent, EventDispatcher
 from .history import HistoryManager
 from .loading import ValidatedDocument
-from .models import MindMapDocument, Node, PathEntry, Theme
+from .models import MindMapDocument, Node, PageSummary, PathEntry, Theme
 from .operations import DocumentEditor
 from .transactions import DocumentState, TransactionManager
 
@@ -132,6 +132,34 @@ class MindMapEngine:
             return deepcopy(self._state.document.page_view(page_id, inspiration_root_id=inspiration_root_id))
         except KeyError as exc:
             raise MindMapError("导图页面不存在") from exc
+
+    def page_summary(self, page_id: str | None, inspiration_root_id: str | None = None) -> PageSummary | None:
+        """按稳定标识查询页面类型、当前标题和完整路径，失效目标返回 None。
+
+        主导图使用 (None, None)，子导图及详情页只提供 page_id，独立想法必须
+        同时指定灵感区标识及仍然独立的根节点。空灵感区、已删除页面、已归并的
+        想法及不匹配的根参数均返回 None，不自动回退到其他页面。
+
+        查询仅访问页面索引及目标的祖先链，不建立整图快照或遍历普通后代。
+        返回摘要和路径项均不可变，不借用可写实体；在引擎所属线程同步调用，
+        不修改文档、修订号、撤销历史或保存状态。
+        """
+        document = self._state.document
+        if page_id is not None and not isinstance(page_id, str):
+            return None
+        if not document.has_page(page_id):
+            return None
+        kind = document.page_kind(page_id)
+        if kind == "inspiration":
+            if not isinstance(inspiration_root_id, str) or inspiration_root_id not in document.inspiration.root_ids:
+                return None
+            root = inspiration_root_id
+        else:
+            if inspiration_root_id is not None:
+                return None
+            root = document.page_record(page_id).root_id
+        return PageSummary(page_id, inspiration_root_id, kind, document.display_node(root).text,
+                           tuple(self.node_path(root)))
 
     def node_path(self, node_id: str) -> list[PathEntry]:
         """迭代构造全局祖先路径，入口与子图根合并，保留每一级页面根的跳转项。

@@ -87,6 +87,10 @@
       "sha256": "d7f340b04af7e057bc6c8e801ede3621313df1f0598b35663b871aea015e19c7"
     },
     {
+      "path": "icons/recent-pages.svg",
+      "sha256": "8ffee3639a1cbb17190e66572b9b9cc7643e055f898aa590177e9e1d656d0147"
+    },
+    {
       "path": "icons/restore.svg",
       "sha256": "eb28474a33929c2d08da7ba651a1f723738401b18c83549b842b3d8240edbd05"
     },

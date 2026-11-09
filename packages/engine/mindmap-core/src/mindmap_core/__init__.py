@@ -26,6 +26,7 @@ from .models import (
     MindMapPage,
     MindMapPageView,
     Node,
+    PageSummary,
     PathEntry,
     Theme,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "NodeMove",
     "NodePlacement",
     "OperationRejected",
+    "PageSummary",
     "PathCommand",
     "PathEntry",
     "Point",
