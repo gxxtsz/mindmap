@@ -8,6 +8,7 @@
 ## 目录
 
 - [快速接入](#快速接入)
+- [文档读写](#文档读写)
 - [事务与事件](#事务与事件)
 - [精确移动事件](#精确移动事件)
 - [共享文档的事件来源](#共享文档的事件来源)
@@ -43,6 +44,12 @@ engine.undo()
 - **节点计数：** 仅统计节点数时使用 `engine.node_count`，它包括折叠节点且不建立文档副本。
 
 - **父级查询：** 查询单个父级使用 `engine.parent_id(node_id)`，根返回 `None`，无效标识报错；无需重建整图父级表。
+
+## 文档读写
+
+从 `mindmap_core.formats` 导入 `load_document` 和 `save_document`。用 `load_document(path)` 读取原生文件，用 `save_document(engine.document, path)` 保存完整快照。默认注册表根据 `.mindmap` 扩展名选择原生格式。
+
+原生文件是 ZIP 容器，`document.json` 记录文档结构与版本，图片资源位于 `assets/` 下。内置编解码器可读取结构版本 2 至 6。保存时有有效页面引用的文档写为版本 6，其余写为版本 5。
 
 ## 事务与事件
 
@@ -172,7 +179,7 @@ engine.undo()
 - 新页复制来源页布局及主题，默认未收藏；只新增包装根和页面，后代标识、子序、折叠状态及附属内容保持不变。
 - `convert_submap_to_descendants(node_id) -> None` 把入口拥有的当前一层子导图接回普通后代并展开入口；更深层页面及其收藏保留，空子导图转为普通叶子。
 - 重复包装根会移除；根自身有子导图或详情页，或备注、链接、标签、图标、样式、元数据、文字格式、方向存在不同于入口的非默认值时，保留根为普通子节点。根引用的图片或实际图片尺寸不同时也保留；标识、同步标题、子列表和展开状态不参与判定。
-- 两个接口均在引擎所属线程同步调用，不导航、不复制整份文档；非法目标抛出中文 `MindMapError`，失败完整回滚，成功只生成一条历史。删除的当前页面收藏在同一事务清理，撤销恢复原顺序，文件版本仍为 5。
+- 两个接口均在引擎所属线程同步调用，不导航、不复制整份文档；非法目标抛出中文 `MindMapError`，失败完整回滚，成功只生成一条历史。删除的当前页面收藏在同一事务清理，撤销恢复原顺序。
 
 ## 子导图收藏接口
 
@@ -262,7 +269,7 @@ engine.undo()
 
 - `Node.detail_page_id` 与 `MindMapDocument.detail_pages` 独立于既有子导图字段，页面记录共用 `MindMapPage`。
 
-- `create_detail_page(node_id) -> str` 允许主导图、子导图中的任意节点创建唯一详情；`remove_detail_page(node_id)` 只删除详情内容，保留入口、普通分支与子导图。
+- `create_detail_page(node_id) -> str` 允许主导图、子导图和灵感区的非纯图片节点创建详情。`remove_detail_page(node_id)` 删除详情内容，保留入口、普通分支与子导图。
 
 - 两类页面名称都沿 ID 关联双向同步，布局和主题分别维护，禁止直接通过 `update_node` 改写页面引用。
 
@@ -284,7 +291,7 @@ engine.undo()
 
 ### 页面查询与约束
 
-- `page_record(page_id)` 借用页面记录，`page_kind(page_id)` 返回 `main`、`submap` 或 `detail`，`has_page(page_id)` 检查导航目标，`iter_pages()` 枚举两类附属页；借用记录禁止外部修改。
+- `page_record(page_id)` 借用页面记录，`page_kind(page_id)` 返回 `main`、`submap`、`detail` 或 `inspiration`，`has_page(page_id)` 检查导航目标，`iter_pages()` 枚举子导图和详情页。借用记录仅供读取。
 
 - `page_document`、`page_view`、布局与主题接口接受两类页面标识，详情单页读模型也保留类别。
 
@@ -292,7 +299,7 @@ engine.undo()
 
 ### 复制与历史
 
-- `paste_fragment(parent_id, fragment, include_pages=True)` 默认完整复制两类页面并重建标识。
+- `paste_fragment(parent_id, fragment, *, include_pages=True)` 默认完整复制两类页面并重建标识。
 
 - 向详情页粘贴带附页的片段默认拒绝；宿主确认省略后可显式传入 `include_pages=False`，仅复制普通分支及其属性、图片，并裁掉附属页面引用和无用资源。
 
@@ -302,7 +309,7 @@ engine.undo()
 
 ## 页面引用接口
 
-- `engine.set_page_reference(node_id, target_root_id)` 为普通文字节点设置引用，传入 `None` 解除。目标是本文件中另一张主导图、子导图或详情页的根节点 ID。根节点和纯图片节点不能设引用；无效参数抛出 `MindMapError`。
+- `engine.set_page_reference(node_id, target_root_id)` 为普通文字节点设置引用，传入 `None` 解除。目标是同一文件内其他页面的根节点 ID，可指向主导图、子导图或详情页。根节点和纯图片节点不能设引用，无效参数抛出 `MindMapError`。
 - `engine.resolve_page_reference(node_id)` 返回目标根的不可变 `PathEntry`，无引用返回 `None`。主导图的 `page_id` 为 `None`，仍能通过 `node_id` 定位根。`page_reference_sources(target_root_id)` 返回已提交的来源节点标识，供视图按差量更新。
 - `get_node()` 和完整文档保留来源原文。`page_document()` 以及文档的 `page_view()` 投影目标根的正文和格式；普通后代、图片及附属页面仍属于来源节点。引用节点的正文和格式不能通过 `update_node()` 直接修改。
 - 引用独立于页面所有权。删除目标页、迁移使引用指向当前页或来源变成独立想法的根时，在同一事务中清理引用，撤销时一起恢复。
@@ -319,7 +326,7 @@ engine.undo()
 
 ### 分支样式
 
-- `engine.set_branch_style(node_ids, kind, scope="subtree")` 支持 `BranchStyle` 的 11 种语义样式，`kind=None` 恢复原始曲线，`scope="level"` 仅修改选中节点。
+- `engine.set_branch_style(node_ids, kind, *, scope="subtree")` 支持 `BranchStyle` 的 11 种语义样式，`kind=None` 恢复原始曲线，`scope="level"` 仅修改选中节点。
 
 - 整次操作去重并只记录一次历史。
 
@@ -357,9 +364,7 @@ engine.undo()
 
 - 冻结的凭据不等于递归冻结文档，编码器不得修改 `snapshot.document`；需要可修改副本时使用 `engine.document`。
 
-- 后台只接收 document。
-
-- 实际写入成功后，在引擎线程调用 `mark_saved_snapshot(snapshot)`；返回 True 表示标记该历史版本，后续编辑仍保持未保存。
+- 后台编码使用 `snapshot.document`。实际写入成功后，在引擎线程将原始凭据传给 `mark_saved_snapshot(snapshot)`。返回 `True` 表示标记该历史版本，后续编辑仍保持未保存。
 
 - 其他引擎或替换文档前的凭据返回 False，不发送保存事件；错误类型抛出 TypeError。
 

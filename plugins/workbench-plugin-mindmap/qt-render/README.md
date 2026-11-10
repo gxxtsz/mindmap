@@ -2,7 +2,7 @@
 
 思维导图的 Qt 测量、静态绘制与图形导出。本包可以独立构建和安装，不依赖桌面外壳或停靠框架。
 
-- **运行环境：** 要求 Python 3.12+、PySide6 `>=6.9,<7`。宿主先创建 `QApplication`，所有图形接口在 GUI 线程调用。
+运行环境要求 Python 3.12 及以上、PySide6 `>=6.9,<7`。宿主先创建 `QApplication`，再在 GUI 线程调用图形接口。
 
 ## 目录
 
@@ -13,9 +13,7 @@
 
 ## 安装与依赖
 
-在仓库根目录执行 `uv build --package mindmap-qt-render` 构建本包；安装 wheel 时由元数据解析依赖。
-
-- 本包的运行依赖只有 `mindmap-core` 和 PySide6。导出由调用方提供布局注册表。
+在仓库根目录执行 `uv build --package mindmap-qt-render` 构建本包的源码发行包和 wheel。本包运行时依赖 `mindmap-core` 和 PySide6，从本地 wheel 安装时需让安装器能找到这些依赖。
 
 ## 独立导出
 
@@ -30,9 +28,9 @@ document = MindMapDocument.new("独立渲染")
 export_document(document, "导图.png", layout_registry=create_default_layout_registry())
 ```
 
-- 同一接口支持 `.png`、`.svg`、`.pdf`；`scale` 控制 PNG 分辨率，`expand_all` 控制是否展开全部节点。
+- 接口根据后缀选择 PNG、SVG 或 PDF。传入 `expand_all=True` 可导出折叠节点的后代。`scale` 控制 PNG 分辨率，PNG 输出上限为四千万像素。
 
-- 输出先在内存完成，再原子替换文件，失败不会截断旧目标。
+- 目标文件的父目录须已存在。输出先在内存完成，再原子替换文件，失败不会截断旧目标。
 
 - 离屏导出可在创建应用前设置 `QT_QPA_PLATFORM=offscreen`。
 
@@ -42,15 +40,13 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 - `NodeVisual.paint(..., text_highlight=True)` 与 `NodeItem(..., text_highlight=True)` 默认保留独立宿主的文本选中及编辑描边。交互画布传入 False，将文本选中外框交给视图前景绘制；该开关不改变编辑正文隐藏、纯图片轮廓、测量和命中，未选中时的正式导出外观保持原样。
 
-- 默认树布局由 `mindmap_core.layouts` 提供。自定义宿主也可实现核心 `LayoutAlgorithm` 并注册到 `LayoutRegistry` 后传入导出器。
-
-- 导出测试使用自定义布局验证三种图形输出。
+- 调用 `export_document()` 时须传入 `layout_registry`。可用 `mindmap_core.layouts.create_default_layout_registry()` 创建内置树布局注册表，也可注册自定义 `LayoutAlgorithm`。
 
 ## 字体渲染
 
 ### 字体策略
 
-- `VisualFactory` 保留节点选择的字族、字号、粗体、斜体及下划线，统一使用 `QFont.PreferAntialias` 和 `QFont.PreferNoHinting`，减轻非整数倍率下笔画过度贴合像素网格造成的生硬边缘。
+- `VisualFactory` 保留节点设置的字族、字号、粗体、斜体及下划线，统一使用 `QFont.StyleStrategy.PreferAntialias` 和 `QFont.HintingPreference.PreferNoHinting`，减轻非整数倍率下笔画过度贴合像素网格造成的生硬边缘。
 
 - 标签、折叠计数和原地编辑沿用同一字体策略，系统字体回退及ClearType 仍由 Qt 和操作系统处理，不修改宿主的全局字体或系统设置。
 
@@ -82,7 +78,7 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 - 节点内容区上下各保留 8 个逻辑像素，多行文字、图片、标签和备注按实际内容撑高；根节点、普通节点、原地编辑、拖动影像与图形导出共用相同的测量规则。
 
-- `NodeVisual.fold_rect(direction="right", child_count=0)` 返回独立的外侧按钮矩形，支持右、左、下三种方向；零表示展开减号，正数用于测量完整的直接子节点计数。
+- `NodeVisual.fold_rect(direction="right", *, child_count=0)` 返回独立的外侧按钮矩形，支持右、左、下三种方向。`child_count=0` 对应展开时的减号，正数用于测量直接子节点计数的宽度。
 
 - `paint_fold_control()` 与 `paint(..., controls=True)` 保留静态绘制入口，圆框、符号和数字跟随节点边框。
 

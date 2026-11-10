@@ -12,4 +12,6 @@
 
 ## 插件接入
 
-插件在 `pyproject.toml` 的 `personal_workbench.plugins` 入口点组中公开清单，入口名称须与 `PluginManifest.id` 一致。宿主调用清单的 `activate(context)`，插件通过上下文注册扩展，并返回实现 `dispose()` 的实例。参见[运行时的插件接入说明](../workbench-runtime/README.md#插件接入-api)。
+插件在 `pyproject.toml` 的 `personal_workbench.plugins` 入口点组中公开清单，入口名称须与 `PluginManifest.id` 一致。
+
+宿主发现插件时会导入清单所在的模块。将业务模块的导入和对象创建放在清单的 `activate(context)` 中，使宿主可以轻量发现插件。激活时通过上下文注册扩展，并返回实现 `dispose()` 的实例。参见[运行时的插件接入说明](../workbench-runtime/README.md#插件接入-api)。

@@ -5,26 +5,22 @@
 
 该包与核心、渲染、Qt 编辑器三个组件共同归属上级插件目录，各自独立构建和安装。
 所有成员向上发现仓库根工作区，共用 `.venv` 与 `uv.lock`。
-完整导图操作及组件接口索引见[思维导图插件说明](../README.md)，公开插件机制见[工作台运行时](../../../packages/workbench-runtime/README.md)。
+分发成员和组件导入路径见[思维导图插件说明](../README.md)。公开插件机制见[工作台运行时](../../../packages/workbench-runtime/README.md)。
 
-## 安装与启动
+## 启动与注册
 
-在仓库根目录执行：
+插件随工作台启动。同步环境和启动应用的命令见[应用启动说明](../../../apps/personal-workbench/README.md#启动)。
 
-```powershell
-uv sync --locked --all-packages --group dev
-uv run --locked --package personal-workbench personal-workbench
-```
-
-发行名保持 `workbench-plugin-mindmap`，Python 导入名保持 `workbench_plugin_mindmap`，
-入口为 `workbench_plugin_mindmap:manifest`。禁用插件时只读取轻量清单，不加载业务实现。
+发行名为 `workbench-plugin-mindmap`，Python 导入名为 `workbench_plugin_mindmap`。
+`personal_workbench.plugins` 入口点组以 `mindmap` 注册 `workbench_plugin_mindmap:manifest`。
+发现阶段读取轻量清单，启用后的激活阶段才导入导图业务实现。
 
 ## 目录与依赖
 
 - `src/workbench_plugin_mindmap/`：插件装配、文档与视图会话、业务日志及页面历史。
 - `tests/`：导图自动保存、共享视图、收藏、灵感及页面恢复等回归测试。
-- 核心、渲染和 Qt 编辑器通过分发包依赖安装，工作台接入通过 `workbench-api` 的公开协议完成。
-- 源码发行包和 wheel 收录本包内容，运行时依赖由分发元数据声明。
+- 运行时依赖 `mindmap-core`、`mindmap-qt-render`、`mindmap-qt-editor`、`workbench-api` 和 PySide6。工作台接入使用 `workbench-api` 的公开协议。
+- 源码发行包包含本包的源码、测试和构建元数据。wheel 包含本包的运行代码，由安装器按分发元数据解析依赖。
 
 ## 文档与视图生命周期
 

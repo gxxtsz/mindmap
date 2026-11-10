@@ -10,11 +10,11 @@
 
 ## 宿主入口
 
-通过 `WorkbenchConfig` 设置应用标识、标题和图标，通过 `WorkbenchRuntimeWindow` 创建窗口。`run_desktop()` 提供启动参数解析和 Qt 事件循环。参见[个人工作台的装配实现](../../apps/personal-workbench/src/personal_workbench/app.py)。
+从 `workbench_runtime` 导入 `WorkbenchConfig`、`WorkbenchRuntimeWindow` 和 `run_desktop`。配置对象设置应用标识、标题和图标，窗口类负责装配宿主。`run_desktop(builder, ...)` 解析启动参数，将参数交给窗口工厂 `builder`，并运行 Qt 事件循环。参见[个人工作台的装配实现](../../apps/personal-workbench/src/personal_workbench/app.py)。
 
-构造窗口时，可用 `storage_dir` 指定状态、布局和设置的存储目录，用 `restore=False` 跳过启动时的文档与布局恢复。
+构造窗口时，可用 `storage_dir` 指定状态、布局和设置的存储目录。传入 `restore=False` 时以默认布局启动，仍读取设置和最近文件。
 
-产品可传入 `profile_upgrade(state, settings)` 处理已加载的配置。回调在插件激活和会话恢复前修改状态及设置值字典，返回两份数据各自的变更标记。运行时将有变更且通过校验的现有配置原子写回，即使跳过会话恢复也会运行回调。
+产品可传入 `profile_upgrade(state, settings)` 处理已加载的配置。回调在插件激活和会话恢复前原地修改状态及设置值字典，并依次返回状态和设置的布尔变更标记。加载校验通过且已存在的文件在变更后立即原子写回。传入 `restore=False` 时也会执行回调。
 
 ## 插件接入 API
 

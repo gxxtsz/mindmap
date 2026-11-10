@@ -3,7 +3,7 @@
 安装 `mindmap-qt-editor` 可在任意 Qt 宿主中嵌入画布、文件控制器、侧栏面板和共享控件。
 画布、面板和控件分别从 `mindmap_qt_editor.canvas`、`mindmap_qt_editor.panels` 和 `mindmap_qt_editor.controls` 按需导入。
 
-- **运行环境：** 要求 Python 3.12+、PySide6 `>=6.9,<7`。宿主先创建 `QApplication`，所有图形接口在 GUI 线程调用。
+运行环境要求 Python 3.12 及以上、PySide6 `>=6.9,<7`。宿主先创建 `QApplication`，再在 GUI 线程调用图形接口。
 
 ## 目录
 
@@ -22,7 +22,7 @@
 
 ## 安装与构建
 
-在仓库根目录执行 `uv build --package mindmap-qt-editor` 构建本包，安装 wheel 时由元数据解析依赖。
+在仓库根目录执行 `uv build --package mindmap-qt-editor` 构建本包的源码发行包和 wheel。本包运行时依赖 `mindmap-core`、`mindmap-qt-render` 和 PySide6，从本地 wheel 安装时需让安装器能找到这些依赖。
 
 ## 嵌入画布
 
@@ -56,7 +56,7 @@ finally:
 
 ### 面板与候选校验
 
-- 面板可以通过 `document_view`、`parent_index`、`is_editing`、`branch_scope`、`branch_kinds()`、`reveal_nodes()` 等公开接口集成。
+- 从 `mindmap_qt_editor.panels` 导入 `MindMapPanels` 和 `PanelHost`。使用 `MindMapPanels(host)` 将大纲、属性和设置面板接入画布或实现相同协议的自定义宿主。宿主提供引擎、页面与选择查询、候选校验及变更信号。成员和生命周期约束见 [PanelHost 协议](src/mindmap_qt_editor/panels/contracts.py)。
 
 - `select_all_nodes()` 与 `action("select_all")` 全选当前页面布局中的节点，默认快捷键为 `Ctrl+A`。包含视口外的已展开主题，不跨页、不展开折叠后代、不改变文档和历史；通过一次批量选择通知同步选中外框及面板，只读模式同样可用。文字编辑时动作停用，快捷键交由 Qt 全选正文；空页面停用动作，组件释放后接口直接返回。
 
@@ -64,7 +64,7 @@ finally:
 
 ### 文件状态与共享视图
 
-- `MindMapFileController(canvas, panels, dialog_parent=None, *, writer=..., state=None)` 兼容原调用。
+- 从 `mindmap_qt_editor.canvas` 导入 `MindMapFileController` 和 `MindMapFileState`。构造签名为 `MindMapFileController(canvas, panels, dialog_parent=None, *, writer=save_document, state=None, background_open=False)`，默认写入器来自 `mindmap_core.formats`。
 
 - 第二参数仅要求提供 `flush_pending_edits()`，没有侧栏的宿主可以提供空实现。
 
@@ -86,7 +86,7 @@ finally:
 
 - 宿主在保存或关闭前查询，候选完成后再正常提交输入；无需访问内部编辑器对象。
 
-- 布局优化能力统一由布局包提供，覆写注册表布局入口时显示和导出均保留该入口。
+- 内置树布局的增量能力由 `mindmap_core.layouts` 提供。画布和图形导出都使用宿主传入的布局注册表。
 
 - `layout_result.nodes` 和 `layout_result.branches` 按只读映射消费，需要完整字典时显式调用 `dict(...)`，避免依赖增量映射没有提供的字典修改或复制方法。
 
@@ -130,7 +130,7 @@ finally:
 
 ### 跨控件拖放接口
 
-- 跨控件拖放使用 `create_branch_drag(node_ids=None, origin="canvas")` 生成本文件标识载荷，侧栏单根来源使用 `origin="sidebar"`；`can_detach_branch_drag()` 只读验收，`detach_branch_drag()` 在一次事务中拆出分支并留在原画布，成功发出 `inspirations_detached(list)`。
+- 跨控件拖放使用 `create_branch_drag(node_ids=None, *, origin="canvas")` 生成本文件标识载荷，侧栏单根来源使用 `origin="sidebar"`。`can_detach_branch_drag(mime)` 检查载荷能否拆出分支，`detach_branch_drag(mime)` 在一次事务中拆出分支并留在原画布，成功发出 `inspirations_detached(list)` 并返回 `True`。
 
 - `can_receive_branch_drag(mime, parent_id=None)` 检查当前目标资格，`receive_branch_drag(mime, parent_id, *, index=None, direction=None)` 独立试算后迁入目标父主题，`index` 是移除移动根后的子节点插入下标，省略时追加；`direction` 可指定双向根节点的左右分支。
 
@@ -228,13 +228,9 @@ finally:
 
 - 页面按钮的命中与导航属于交互层，图形及占用尺寸由渲染包统一提供。
 
-- 手动分支聚焦接口 `focus_node()` 及 `focus`、`unfocus` 动作已移除，右键菜单与宿主视图菜单不再提供对应入口。
-
 - `Ctrl+F` 没有默认画布绑定；`Escape` 只取消编辑、拖动或关闭菜单，空闲时不改变视图。
 
-- `navigate_to()` 定位折叠节点时仍可临时显示目标，返回页面时恢复该导航状态；此机制不改写折叠字段、不进入撤销历史，也不提供独立聚焦入口。
-
-- 引擎布局接口保持兼容。
+- `navigate_to()` 定位折叠节点时可临时显示目标，返回页面时恢复该导航状态。临时显示属于视图状态，文档折叠与撤销历史独立管理。
 
 ## 收藏与详情页
 
@@ -325,7 +321,7 @@ finally:
 
 - 标准引擎的初始化及文档替换通过 `capture_read_snapshot()` 捕获稳定读版本，避免逐节点深拷贝；画布只替换读模型中的实体，不修改借用实体。扩展引擎继续经过原有 `document` 入口，保留宿主的文档投影及统计。
 
-- 内置树布局以持久化摘要增量更新几何和连接线，超过 1000 个可见节点时仅维护视口及预取区图元。
+- 内置树布局以持久化摘要增量更新几何和连接线，布局结果达到 1000 个节点时启用视口虚拟化，按需维护视口及预取区图元。
 
 - 选择、编辑和鼠标捕获节点固定保留；屏外选择、滚动、键盘导航及完整图形导出保持可用。
 
@@ -341,7 +337,7 @@ finally:
 
 - `MindMapFileController(..., background_open=True)` 将大于 1 MiB 的标准原生文件交给工作线程解析、建模和校验，GUI 保持事件处理并提供“正在打开导图…”及取消按钮。桌面工作台默认启用；独立组件默认同步，小文件与扩展读取器保持同步。
 
-- `open_path()` 仍在打开完成后返回 True；取消返回 False，旧文档、路径和保存状态保持原值。工作线程不会访问画布或引擎，图片、布局、历史和通知全部留在 GUI 线程。取消后在途解析自行完成并丢弃结果；父窗口销毁会结束等待，不给后台任务保留 Qt 回调，同一控制器的重入打开直接返回 False。
+- `open_path()` 在打开完成后返回 `True`。取消后台解析时返回 `False`，旧文档、路径和保存状态保持原值。工作线程只负责解析和结构校验，图片解码、布局、历史和通知在 GUI 线程处理。取消或父窗口销毁时结束等待，在途解析完成后丢弃结果。同一控制器的重入打开直接返回 `False`。
 
 - 主导图预检使用正式画布的增量几何服务，避免为了预检生成全部连接线路径。内置读取结果仅在标准引擎及未覆写替换入口下转移所有权，其他实现保留隔离复制。
 
@@ -485,15 +481,13 @@ finally:
 
 - `widget.edraw_paste_options` 返回亿图、缩进文本及 Markdown 共用的 `(mode, keep_children, replace_root)`，初始为 `("append", True, True)`。
 
-- 使用 `set_edraw_paste_options(mode, keep_children, replace_root=True)` 恢复默认选择，两个开关必须为布尔值；旧二参数调用仍默认替换根节点。
+- 使用 `set_edraw_paste_options(mode, keep_children, replace_root=True)` 设置下一次弹窗的默认选项。`mode` 为 `append` 或 `replace`，两个开关均为布尔值。
 
-- 监听 `edraw_paste_options_changed(str, bool, bool)` 保存成功后的实际变化，信号依次携带粘贴方式、保留原后代和替换根节点；沿用亿图接口名保持兼容，三种来源的配置弹窗相互继承上次确认成功的单根选择，单行直贴不参与偏好读写。
+- 选项实际变化时发出 `edraw_paste_options_changed(str, bool, bool)`，包括调用设置方法和成功确认单根粘贴选项引起的变化。信号依次携带粘贴方式、保留原后代和替换根节点。
 
-- 桌面宿主继续通过既有 `clipboard/edraw_*` 配置项同步所有会话及恢复重启偏好，无需迁移；偏好不属于导图或历史。
+- 独立组件在内存中管理选项。个人工作台将三项偏好保存在 `workbench-settings-v1.json` 的 `mindmap` 命名空间，键为 `clipboard/edraw_mode`、`clipboard/edraw_keep_children` 和 `clipboard/edraw_replace_root`。工作台会同步各会话并在下次启动时读取，缺失或无效的值使用对应默认值。
 
-- 组件只在内存保存偏好，工作台通过其 `preferences.ini` 跨重启保存三项选择，其中新项为 `clipboard/edraw_replace_root`，旧配置缺项或无效时默认 `True`。
-
-- 取消、失败及多根来源强制追加不覆盖之前的单树偏好；每次仍显示弹窗。
+- 取消、失败、多根来源强制追加及单行直贴均保留上次确认的单根选项。
 
 ## 布局、样式与宿主外观
 
@@ -539,7 +533,7 @@ finally:
 
 - 侧栏点击后自动提交；弹窗按“确定”与外观一起提交一次历史，取消不修改文档；未改样式不覆盖后代。
 
-- `widget.set_branch_style("round", scope="subtree")` 使用当前选择，无选择时使用导航临时显示的中心主题或当前页根主题；`scope="level"` 仅改本级，`None` 恢复默认。
+- `widget.set_branch_style("round", scope="subtree")` 使用当前选择，无选择时使用导航临时显示的中心主题或当前页根主题。`scope="level"` 仅改本级，传入 `kind=None` 恢复未配置样式时的原始曲线。
 
 - 只读、文字编辑和不支持此能力的布局禁用入口。
 
@@ -629,23 +623,21 @@ finally:
 
 ### 控制器与原生文件
 
-- `MindMapFileController(canvas, panels, dialog_parent=None, *, writer=...)` 提供宿主无关的文件生命周期，不读写本机偏好，也不拥有画布。
-
-- `path` 表示当前保存位置，`is_dirty` 只反映引擎修改状态；有损文件导入及其待保存状态已删除。
+- `MindMapFileController` 提供独立于工作台的文件操作。`path` 表示当前保存位置，`is_dirty` 反映引擎修改状态。画布生命周期与偏好由宿主管理。
 
 - `new_document()`、`open_path()`、`save()` 返回是否完成操作，`confirm_replace()` 统一处理保存确认；主文档只使用 `.mindmap` 原生格式。
 
-- `open_path(path)` 仅接收 `.mindmap`，不再接受 `format_id` 参数；扩展名比较忽略大小写，始终使用原生容器解码。
+- `open_path(path)` 校验 `.mindmap` 扩展名并使用原生容器解码。扩展名比较忽略大小写。
 
 - `validate_open_path(path)` 在读取文件、分配会话和提交输入前校验扩展名；不匹配时抛出 `MindMapError`。
 
-- `open_dialog()` 只显示 `思维导图 (*.mindmap)`，取消或校验失败不改变当前文档；JSON、大纲及扩展格式不能用于文件打开。
+- `open_dialog()` 使用 `思维导图 (*.mindmap)` 筛选。取消文件选择时返回 `False`。读取和校验成功后，`confirm_replace()` 先提交有效输入，再按需询问是否保存当前文档。
 
 ### 保存与后台写入
 
 - 保存、导出和确认替换前，控制器会提交有效属性输入与原地文字。
 
-- `save(save_as=False)` 的保存对话框固定显示 `思维导图 (*.mindmap)`，写入器始终接收 `format_id="mindmap"`，不再解析对话框格式名称或记录其他路径格式。
+- `save(*, save_as=False)` 在尚无路径或显式另存时显示 `思维导图 (*.mindmap)` 筛选的保存对话框，写入器始终接收 `format_id="mindmap"`。
 
 - `validate_save_path(path)` 返回校验后的路径：没有扩展名时补齐 `.mindmap`，原生扩展名忽略大小写；其他后缀抛出 `MindMapError`，不静默改名或修改文件。
 
@@ -657,7 +649,7 @@ finally:
 
 - 保存事件只更新状态，不触发画布的文档替换通知，不取消菜单、连接线预览或输入法，也不清空撤销历史。
 
-- `wait_for_pending_write` 可设置宿主写入屏障，默认不设置；文件替换、路径变化及显式写入前调用。
+- `wait_for_pending_write` 是可选的无参回调，控制器在接管新建或已打开的文档以及写入快照前调用。
 
 - 桌面工作台以该屏障等待在途后台保存，避免旧任务覆盖新版本；后台保存策略由宿主管理。
 
@@ -675,11 +667,7 @@ finally:
 
 - `export_dialog("txt")` 从当前页的正式快照读取全部节点，灵感区只取当前想法。选定文件后使用内置文本格式原子写入，每个节点一行，每层缩进一个 Tab。空想法抛出 `MindMapError`。
 
-- `format_filters()` 仅接受 `open`、`save`，两者均固定返回 `思维导图 (*.mindmap)`；其他值抛出 `MindMapError`。
-
-- 动态保存格式列表和筛选解析已删除，额外格式注册不能扩大文件操作范围；底层通用文件与内存编解码接口、原子写入继续保留。
-
-- 原生保存目标为 `.mindmap`。剪贴板可使用 JSON、Markdown 和文本编解码器。
+- `format_filters(purpose)` 对 `open` 和 `save` 均返回 `思维导图 (*.mindmap)`，其他值抛出 `MindMapError`。剪贴板和通用编解码使用各自的格式入口。
 
 ### 错误与通知
 
