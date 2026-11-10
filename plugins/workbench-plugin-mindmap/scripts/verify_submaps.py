@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 def child(scale, platform):
     """每档缩放使用独立 QApplication，避免运行中改变 Qt 缩放基线。"""
     from mindmap_core import MindMapError
-    from mindmap_formats import load_document
+    from mindmap_core.formats import load_document
     from personal_workbench.app import build_window
     from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, Qt
     from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter

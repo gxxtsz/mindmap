@@ -5,7 +5,7 @@ from threading import Event
 
 import pytest
 from mindmap_core import MindMapError
-from mindmap_qt_canvas import loading
+from mindmap_qt_editor.canvas import loading
 from personal_workbench.app import build_window
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QPushButton

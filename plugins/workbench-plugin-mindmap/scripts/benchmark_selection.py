@@ -18,7 +18,7 @@ from time import perf_counter, time_ns
 import PySide6
 from benchmark import build_document
 from mindmap_core import MindMapEngine
-from mindmap_qt_canvas import MindMapWidget
+from mindmap_qt_editor.canvas import MindMapWidget
 from personal_workbench.app import build_window
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt
 from PySide6.QtGui import QMouseEvent

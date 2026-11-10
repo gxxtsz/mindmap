@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-CANVAS_TESTS = "plugins/workbench-plugin-mindmap/qt/mindmap-qt-canvas/tests"
+CANVAS_TESTS = "plugins/workbench-plugin-mindmap/qt-editor/tests/canvas"
 
 
 def run_offscreen(arguments):

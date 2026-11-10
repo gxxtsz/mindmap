@@ -17,8 +17,8 @@ from pathlib import Path
 from types import ModuleType
 
 from mindmap_core import MindMapDocument, MindMapEngine, Node, Theme
-from mindmap_layouts import create_default_layout_registry
-from mindmap_qt_canvas import MindMapWidget
+from mindmap_core.layouts import create_default_layout_registry
+from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_render import export_document, rendering
 from PySide6.QtCore import QPointF, Qt, qVersion
 from PySide6.QtGui import QColor, QFont, QFontInfo, QImage, QInputMethodEvent, QPainter

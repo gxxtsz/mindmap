@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from mindmap_core import MindMapDocument, MindMapError
-from mindmap_formats import load_document, save_document
+from mindmap_core.formats import load_document, save_document
 from personal_workbench.app import build_window
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog

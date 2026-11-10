@@ -1,14 +1,9 @@
-"""用正式布局、分支路由和 Qt 绘制入口验收 11 种连接线，不再维护实验公式。
+"""用正式布局、分支路由和 Qt 绘制入口验收 11 种连接线。
 
-运行示例：
+运行示例
     uv run --locked --all-packages python plugins/workbench-plugin-mindmap/scripts/branch_style_lab.py
     uv run --locked --all-packages python plugins/workbench-plugin-mindmap/scripts/branch_style_lab.py --direction both
     uv run --locked --all-packages python plugins/workbench-plugin-mindmap/scripts/branch_style_lab.py --style 10_arrow2 --show
-
-普通分支公式的 REA 来源为 calcLinePath（0x180218b50），证据标识：
-ev_154960d96c32553331bfb19d6c801745e2fb011bb1b9d9db4e1bc138d16fb966。
-恢复公式、主干位置等独立参数的说明见 mindmap_layouts.connectors 和中文逆向报告。
-本工具只绘制本项目节点，不包含原软件图片、特殊节点补偿、加厚或手绘效果。
 """
 
 from __future__ import annotations
@@ -21,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mindmap_core import BranchStyle, LayoutConfig, MindMapDocument, MindMapEngine, Rect, apply_branch_style
-from mindmap_layouts import TreeLayout, route_branches
+from mindmap_core.layouts import TreeLayout, route_branches
 from mindmap_qt_render.rendering import ensure_fonts, paint_branch
 from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPaintEvent, QPen
@@ -29,20 +24,20 @@ from PySide6.QtSvg import QSvgGenerator, QSvgRenderer
 from PySide6.QtWidgets import QApplication, QScrollArea, QWidget
 
 DIRECTION_LABELS = {"right": "向右", "left": "向左", "both": "双向", "down": "向下"}
-# 编号仅用于对应原资源名称和兼容旧命令行；正式文档始终保存语义标识。
+# 样式编号用于命令行选择、卡片标题和输出文件名。
 RESOURCE_IDS = {kind: f"{index}_{kind.value}" for index, kind in enumerate(BranchStyle, 1)}
 STYLE_DESCRIPTIONS = {
     BranchStyle.LINE: "父子锚点之间的直线",
-    BranchStyle.ARC: "恢复控制比例：0.4 / 0.6",
-    BranchStyle.CURVE: "恢复随坡度变化的控制系数",
+    BranchStyle.ARC: "起段沿父节点边缘，末段垂直接入子节点",
+    BranchStyle.CURVE: "按分支坡度调整曲线控制点",
     BranchStyle.ELBOW: "共享主干去重后统一描画",
-    BranchStyle.ROUND: "恢复半径上限 6 与控制比例 0.448",
-    BranchStyle.ARC2: "恢复控制比例：0.2 / 0.25",
+    BranchStyle.ROUND: "出口圆滑过渡，圆角半径上限为 6",
+    BranchStyle.ARC2: "控制点更靠近两端锚点的弧线",
     BranchStyle.ROUND2: "纯折线，普通尾段长度 11",
-    BranchStyle.CENTRE: "独立短主干 + 恢复曲线段",
+    BranchStyle.CENTRE: "短主干连接坡度自适应曲线",
     BranchStyle.ARROW: "正交路径，终点切向决定箭头",
     BranchStyle.ARROW2: "与凹弧同中心线；箭头独立构造",
-    BranchStyle.CURVE_CONVEX: "独立重建，尚无完整恢复公式",
+    BranchStyle.CURVE_CONVEX: "凸曲线，末段斜向接入子节点",
 }
 
 
@@ -114,7 +109,7 @@ class LabDrawing:
         self.size = QSize(900, 570) if self.single else QSize(1440, 1020)
 
     def paint(self, painter: QPainter) -> None:
-        """绘制实验说明与样式卡片；原软件图片不会进入此绘图流程。"""
+        """将布局说明和样式卡片绘制到调用方提供的画布。"""
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
         painter.fillRect(QRectF(0, 0, self.size.width(), self.size.height()), QColor("#f3f6fa"))
         painter.setPen(QColor("#24364d"))
@@ -152,16 +147,6 @@ class LabDrawing:
             painter.setPen(QColor("#65768a"))
             set_font(painter, 14 if self.single else 12)
             painter.drawText(card.adjusted(18, card.height() - 35, -12, -9), explanation)
-        painter.setPen(QColor("#697a8f"))
-        set_font(painter, 13)
-        footers = (
-            "普通分支采用已恢复公式；主干比例、短边保护与箭头尺寸为本项目独立参数。",
-            "11_curveconvex 为独立重建；不包含原生特殊节点补偿、加厚轮廓与手绘效果。",
-        )
-        for index, footer in enumerate(footers):
-            painter.drawText(
-                QRectF(36, self.size.height() - 65 + index * 24, self.size.width() - 72, 23), footer
-            )
 
 
 def export_drawing(drawing: LabDrawing, output: Path, stem: str) -> tuple[Path, Path]:
@@ -181,7 +166,7 @@ def export_drawing(drawing: LabDrawing, output: Path, stem: str) -> tuple[Path, 
     generator.setSize(drawing.size)
     generator.setViewBox(QRectF(0, 0, drawing.size.width(), drawing.size.height()))
     generator.setTitle("分支连接线正式路由验收")
-    generator.setDescription("节点矩形取自本项目 TreeLayout；普通分支采用恢复公式，11 与箭头尺寸独立重建。")
+    generator.setDescription("使用树布局生成的节点矩形绘制分支连接线。")
     painter = QPainter(generator)
     try:
         drawing.paint(painter)
@@ -210,7 +195,7 @@ class LabWidget(QWidget):
 
 
 def main() -> int:
-    """兼容原资源编号及正式语义名称，生成文件写入指定目录，默认不显示窗口。"""
+    """按样式名称或编号选择样例，导出到指定目录，默认离屏运行。"""
     parser = argparse.ArgumentParser(description="使用 TreeLayout 节点矩形运行 11 种分支正式路由验收")
     parser.add_argument("--output", type=Path, default=Path(".artifacts/branch-style-lab"), help="输出目录")
     parser.add_argument("--style", choices=[*BranchStyle, *RESOURCE_IDS.values()], help="仅导出某一种样式")

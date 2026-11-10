@@ -25,4 +25,4 @@ uv run --locked --no-sync python plugins/workbench-plugin-mindmap/scripts/benchm
 uv run --locked --no-sync python plugins/workbench-plugin-mindmap/scripts/verify_text_rendering.py --platform windows --baseline-ref HEAD
 ```
 
-完整命令和参数见[开发与验收](../../../docs/开发与验收.md)。脚本不是分发包运行接口，不放进适配包的 wheel。
+工作区构建与独立安装见[验收脚本说明](../../../scripts/README.md)。导图专项脚本随仓库提供。

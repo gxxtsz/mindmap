@@ -16,8 +16,8 @@ from unittest.mock import patch
 
 from benchmark import build_document
 from mindmap_core import Rect
-from mindmap_layouts.incremental import IncrementalTreeGeometry
-from mindmap_layouts.tree import TreeLayout
+from mindmap_core.layouts.incremental import IncrementalTreeGeometry
+from mindmap_core.layouts.tree import TreeLayout
 
 
 def milliseconds(action):
@@ -43,7 +43,7 @@ def benchmark(count, samples):
     full, local, queries, moved, updated, visited, counts = [], [], [], [], [], [], []
     layout = TreeLayout()
     # 只关闭参照算法的连接线路由，保留现有文档校验、树坐标和边界生成成本。
-    with patch("mindmap_layouts.tree.route_branches", return_value={}):
+    with patch("mindmap_core.layouts.tree.route_branches", return_value={}):
         for index in range(samples):
             expanded = index % 2 == 1
             elapsed, _ = milliseconds(lambda: geometry.set_expanded(branch, expanded))

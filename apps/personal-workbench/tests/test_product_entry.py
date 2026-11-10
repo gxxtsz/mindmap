@@ -1,10 +1,9 @@
 """产品工厂仅装配公开服务，插件配置不会重新变成窗口专属接口。"""
 
-from importlib.metadata import PackageNotFoundError, distribution, entry_points
+from importlib.metadata import distribution
 
-import pytest
-from mindmap_formats import create_default_format_registry
-from mindmap_layouts import create_default_layout_registry
+from mindmap_core.formats import create_default_format_registry
+from mindmap_core.layouts import create_default_layout_registry
 from personal_workbench.app import build_window
 from workbench_runtime import WorkbenchRuntimeWindow
 
@@ -23,8 +22,7 @@ def test_factory_passes_registries_through_plugin_options(qtbot, tmp_path):
     assert not hasattr(window, "canvas") and not hasattr(window, "sessions")
 
 
-def test_only_new_product_is_installed_and_exposes_a_command():
-    with pytest.raises(PackageNotFoundError):
-        distribution("mindmap-workbench")
-    commands = {item.name for item in entry_points(group="gui_scripts")}
-    assert "personal-workbench" in commands and "mindmap-workbench" not in commands
+def test_product_exposes_its_gui_command():
+    """验证产品发行包声明的命令及其调用目标。"""
+    commands = distribution("personal-workbench").entry_points.select(group="gui_scripts")
+    assert {item.name: item.value for item in commands} == {"personal-workbench": "personal_workbench:main"}

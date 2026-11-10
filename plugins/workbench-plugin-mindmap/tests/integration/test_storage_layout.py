@@ -1,8 +1,8 @@
 """文件往返、异常保护和布局几何测试。"""
 
 from mindmap_core import MindMapDocument, Node
-from mindmap_formats import dumps, loads
-from mindmap_layouts import create_default_layout_registry
+from mindmap_core.formats import dumps, loads
+from mindmap_core.layouts import create_default_layout_registry
 
 
 def test_large_depth_serialization_and_layout():

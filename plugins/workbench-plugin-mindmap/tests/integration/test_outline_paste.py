@@ -2,8 +2,8 @@
 
 import pytest
 from mindmap_core import MindMapEngine
-from mindmap_formats import encode_document
-from mindmap_qt_ui.dialogs import EdrawPasteOptions
+from mindmap_core.formats import encode_document
+from mindmap_qt_editor.controls.dialogs import EdrawPasteOptions
 from PySide6.QtCore import QMimeData
 from PySide6.QtWidgets import QApplication
 
@@ -49,7 +49,7 @@ def test_paste_and_history_follow_outline_depth(
 
     # 两种剪贴板都走正式 paste 入口；外部文本只替换选项弹窗的交互结果，
     # 项目原生片段仍由正式编解码器解析，避免直接调用引擎而漏掉画布通知转换。
-    monkeypatch.setattr("mindmap_qt_canvas.widget.edraw_paste_options",
+    monkeypatch.setattr("mindmap_qt_editor.canvas.clipboard_actions.edraw_paste_options",
                         lambda *args, **kwargs: EdrawPasteOptions("append", True, True))
     branch_texts = ["粘贴主题", "子主题", "孙主题"]
     if source == "text":

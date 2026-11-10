@@ -4,8 +4,8 @@
 
 
 from mindmap_core import MindMapDocument, MindMapEngine, Node
-from mindmap_qt_canvas import MindMapWidget
-from mindmap_qt_panels import MindMapPanels
+from mindmap_qt_editor.canvas import MindMapWidget
+from mindmap_qt_editor.panels import MindMapPanels
 
 
 def document_with_nodes(count):

@@ -27,8 +27,9 @@ disabled.mkdir()
 window = WorkbenchRuntimeWindow(storage_dir=disabled, restore=False)
 assert not window.providers and all(record.status == "已禁用" for record in window.plugins.records)
 assert "workbench_plugin_mindmap.controller" not in sys.modules
-assert 'mindmap_core' not in sys.modules
-assert 'mindmap_qt_canvas' not in sys.modules
+assert "mindmap_core" not in sys.modules
+assert "mindmap_qt_editor" not in sys.modules
+assert "mindmap_qt_render" not in sys.modules
 window.dispose()
 window = WorkbenchRuntimeWindow(storage_dir=sys.argv[1], manifests=[], restore=False)
 assert not window.providers

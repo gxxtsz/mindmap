@@ -41,23 +41,22 @@ packages/
   workbench-runtime/             插件宿主、文档与会话、桌面外壳与停靠
 plugins/
   workbench-plugin-mindmap/
-    adapter/                    导图插件接入层
-    engine/                     核心、布局、格式三个独立包
-    qt/                         渲染、控件、画布、面板四个独立包
+    core/                       模型、编辑引擎、内置布局、文档格式
+    qt-render/                  Qt 测量、静态绘制与图形导出
+    qt-editor/                  Qt 交互画布、业务面板与共享控件
+    workbench-adapter/          工作台插件入口、文档会话与自动保存
     tests/integration/          导图组件组合测试
     scripts/                    导图性能与桌面专项验收
-    docs/                       导图操作说明
 scripts/                        工作区发现、发行和桌面验收
 tests/integration/              跨包架构、桌面组合和进程生命周期验收
-docs/                           通用架构、开发与发行说明
 ```
 
-工作区包含 **11 个独立分发包**。通用能力使用 `workbench-*` 名称，产品入口使用 `personal-workbench`，导图专属组件使用 `mindmap-*`。
+工作区包含 **7 个独立分发包**。通用能力使用 `workbench-*` 名称，产品入口使用 `personal-workbench`，导图专属组件使用 `mindmap-*`。
 分发包使用 `src/` 布局，单包测试随源码放置，插件专属组件集中到插件分组目录。新增插件不需要修改主窗口。
 
 ## 配置兼容
 
-默认配置位置继续使用系统配置目录下的 `mindmap/mindmap-workbench`。产品入口注入历史应用标识及路径，通用运行时不解释历史产品名称。
+工作台默认将配置保存到系统配置目录下的 `mindmap/mindmap-workbench`。
 `.mindmap` 文件格式和布局标识保持稳定。历史格式的配置只读导入，现有工作台配置在启动时升级后恢复。
 
 ## 检查与构建
@@ -65,6 +64,7 @@ docs/                           通用架构、开发与发行说明
 ```powershell
 uv run --locked --no-sync pytest
 uv run --locked --no-sync ruff check .
+uv lock --check
 uv build --all-packages
 uv run --locked --no-sync python scripts/verify_wheels.py
 uv run --locked --no-sync python scripts/verify_plugins.py
@@ -75,6 +75,5 @@ uv run --locked --no-sync python scripts/verify_plugins.py
 ## 开发文档
 
 - 插件协议、生命周期、文档服务和数据兼容见[工作台运行时](packages/workbench-runtime/README.md)。
-- 窗口与布局能力见[桌面外壳](packages/workbench-runtime/docs/桌面外壳.md)和[停靠与分屏](packages/workbench-runtime/docs/停靠与分屏.md)。
-- [开发与验收](docs/开发与验收.md)：完整成员说明、构建、桌面和性能验证。
-- [资源与许可](docs/资源与许可.md)：字体、图标和其他资源来源。
+- 独立构建、安装和桌面验收见[工作区验收脚本](scripts/README.md)。
+- 导图组件的使用入口见[思维导图 Python 接口](plugins/workbench-plugin-mindmap/README.md#python-接口)。

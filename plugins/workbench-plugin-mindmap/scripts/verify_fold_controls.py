@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 from mindmap_core import LayoutConfig, MindMapEngine, Theme
-from mindmap_qt_canvas import MindMapWidget
+from mindmap_qt_editor.canvas import MindMapWidget
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter
 from PySide6.QtWidgets import QApplication

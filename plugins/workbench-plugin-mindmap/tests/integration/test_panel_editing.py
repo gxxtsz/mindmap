@@ -3,7 +3,7 @@
 
 import pytest
 from mindmap_core import BranchStyle, LayoutConfig, MindMapDocument, MindMapError
-from mindmap_formats import load_document, save_document
+from mindmap_core.formats import load_document, save_document
 from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
 from PySide6.QtGui import QColor, QInputMethodEvent
 from PySide6.QtWidgets import (
@@ -262,7 +262,7 @@ def test_readonly_outline_hidden_target_keeps_selection(workspace):
 
 def test_disabled_field_eligibility_and_unsupported_layout(workspace):
     from mindmap_core import LayoutInfo
-    from mindmap_layouts import TreeLayout
+    from mindmap_core.layouts import TreeLayout
 
     class Custom(TreeLayout):
         info = LayoutInfo("custom", "自定义", LayoutConfig(algorithm_id="custom"))

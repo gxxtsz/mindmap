@@ -1,35 +1,33 @@
-"""工作区成员、显式依赖、公开边界及删除入口的验收。"""
+"""核对工作区成员、显式依赖和公开接口边界。"""
 
 import ast
-import importlib.util
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
+from importlib.metadata import distributions
+from importlib.util import resolve_name
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED = {
-    "mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-qt-render",
-    "mindmap-qt-ui", "mindmap-qt-canvas", "mindmap-qt-panels",
-    "personal-workbench", "workbench-api", "workbench-runtime",
-    "workbench-plugin-mindmap",
+MINDMAP_DIRECTORIES = {
+    "mindmap-core": "core",
+    "mindmap-qt-render": "qt-render",
+    "mindmap-qt-editor": "qt-editor",
+    "workbench-plugin-mindmap": "workbench-adapter",
 }
-REMOVED = {"mindmap_engine", "mindmap_qt", "mindmap_qt_workspace", "mindmap_workbench",
-           "mindmap_docking", "mindmap_shell", "workbench_docking", "workbench_shell", "workbench_plugin_text"}
+EXPECTED = set(MINDMAP_DIRECTORIES) | {"personal-workbench", "workbench-api", "workbench-runtime"}
 DEPENDENCIES = {
-    "mindmap-core": set(), "mindmap-layouts": {"mindmap-core"}, "mindmap-formats": {"mindmap-core"},
-    "mindmap-qt-render": {"mindmap-core"},
-    "mindmap-qt-ui": {"mindmap-core", "mindmap-layouts", "mindmap-qt-render"},
-    "mindmap-qt-canvas": {"mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-qt-render", "mindmap-qt-ui"},
-    "mindmap-qt-panels": {"mindmap-core", "mindmap-layouts", "mindmap-qt-ui"},
-    "workbench-api": set(),
-    "workbench-runtime": {"workbench-api"},
-    "workbench-plugin-mindmap": {"workbench-api", "mindmap-core", "mindmap-layouts", "mindmap-formats",
-                               "mindmap-qt-canvas", "mindmap-qt-panels", "mindmap-qt-ui", "mindmap-qt-render"},
-    "personal-workbench": {"workbench-runtime", "workbench-plugin-mindmap"},
+    "mindmap-core": set(),
+    "mindmap-qt-render": {"mindmap-core", "pyside6"},
+    "mindmap-qt-editor": {"mindmap-core", "mindmap-qt-render", "pyside6"},
+    "workbench-api": {"pyside6"},
+    "workbench-runtime": {"workbench-api", "pyside6"},
+    "workbench-plugin-mindmap": {"workbench-api", "mindmap-core", "mindmap-qt-editor", "mindmap-qt-render", "pyside6"},
+    "personal-workbench": {"workbench-runtime", "workbench-plugin-mindmap", "pyside6"},
 }
 
 
@@ -57,36 +55,28 @@ def test_workspace_and_lock_only_reference_current_repository():
     assert set(installed) == EXPECTED
     for name, package in installed.items():
         assert (ROOT / package["source"]["editable"]).resolve() == packages[name][0].resolve()
-    for name in ("workbench-api", "workbench-runtime"):
-        assert packages[name][0] == ROOT / "packages" / name
-    for directory in ("desktop", "platform", "workbench-docking", "workbench-shell"):
-        assert not (ROOT / "packages" / directory).exists()
-    for module in REMOVED:
-        assert importlib.util.find_spec(module) is None
-    assert not (ROOT / "plugins/workbench-plugin-mindmap/workbench").exists()
+    infrastructure = {ROOT / "packages" / name for name in ("workbench-api", "workbench-runtime")}
+    assert {path.parent for path in (ROOT / "packages").rglob("pyproject.toml")} == infrastructure
+    for directory in infrastructure:
+        assert packages[directory.name][0] == directory
+    names = {item.metadata["Name"].lower().replace("_", "-") for item in distributions()}
+    assert {name for name in names if name.startswith(("mindmap-", "workbench-", "personal-workbench"))} == EXPECTED
 
 
 def test_mindmap_components_are_owned_by_plugin_directory():
-    """导图业务包与适配入口同目录归属，通用基础设施仍可独立于导图安装。
-
-    目录聚合不合并分发包：七个组件须保持各自元数据、源码和测试，
-    通用平台和产品入口各自保留独立目录，业务组件集中在导图插件下。
-    """
+    """四个导图成员按职责平铺，通用基础设施及产品入口独立归属。"""
     packages = members()
     plugin_root = ROOT / "plugins/workbench-plugin-mindmap"
-    assert packages["workbench-plugin-mindmap"][0].is_relative_to(plugin_root)
-    assert not (plugin_root / "pyproject.toml").exists()
-    domain = {"mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-qt-render",
-              "mindmap-qt-ui", "mindmap-qt-canvas", "mindmap-qt-panels"}
-    for name in domain:
+    assert {path.parent for path in plugin_root.rglob("pyproject.toml")} == {
+        plugin_root / relative_path for relative_path in MINDMAP_DIRECTORIES.values()
+    }
+    for name, relative_path in MINDMAP_DIRECTORIES.items():
         directory, _ = packages[name]
-        assert directory.is_relative_to(plugin_root), name
+        assert directory == plugin_root / relative_path, name
         assert (directory / "src" / name.replace("-", "_")).is_dir(), name
         assert (directory / "tests").is_dir(), name
-    for name in EXPECTED - domain - {"workbench-plugin-mindmap"}:
+    for name in EXPECTED - MINDMAP_DIRECTORIES.keys():
         assert not packages[name][0].is_relative_to(plugin_root), name
-    assert not (ROOT / "packages/engine").exists()
-    assert not (ROOT / "packages/qt").exists()
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))
@@ -122,7 +112,8 @@ def assert_source_boundary(file, name, declared):
         for module in imports:
             parts = module.split(".")
             top = parts[0]
-            assert top not in REMOVED, file
+            if name == "mindmap-core":
+                assert top == own_module or top in sys.stdlib_module_names, (file, module)
             if top == "PySide6":
                 assert "pyside6" in declared, file
             if top.startswith(("mindmap_", "workbench_", "personal_workbench")) and top != own_module:
@@ -143,10 +134,9 @@ def test_platform_and_plugins_obey_business_boundaries():
     """平台不能导入业务包；插件不能反向导入运行时或应用装配层。"""
     for name in ("workbench-api", "workbench-runtime", "workbench-plugin-mindmap"):
         path, _ = members()[name]
-        forbidden = ({"mindmap_core", "mindmap_layouts", "mindmap_formats", "mindmap_qt_canvas",
-                      "mindmap_qt_panels", "mindmap_qt_render", "mindmap_qt_ui",
-                      "workbench_plugin_mindmap"} if name in {"workbench-api", "workbench-runtime"} else
-                     {"workbench_runtime", "personal_workbench", "mindmap_workbench"})
+        forbidden = ({name.replace("-", "_") for name in MINDMAP_DIRECTORIES}
+                     if name in {"workbench-api", "workbench-runtime"} else
+                     {"workbench_runtime", "personal_workbench"})
         for file in runtime_sources(path / "src"):
             for node in ast.walk(ast.parse(file.read_text("utf-8"))):
                 imported = ([alias.name for alias in node.names] if isinstance(node, ast.Import) else
@@ -155,16 +145,19 @@ def test_platform_and_plugins_obey_business_boundaries():
 
 
 def test_runtime_dependencies_are_explicit_and_point_downward():
-    """真实导入必须声明直接依赖；下层不能借助聚合入口安装上层实现。"""
+    """每个成员使用单一导入命名空间，并为跨包导入声明直接依赖。"""
     for name, (path, metadata) in members().items():
         declared = {re.split(r"[<>=!~ ;\[]", item)[0].lower() for item in metadata["dependencies"]}
-        assert declared & EXPECTED == DEPENDENCIES[name]
-        for file in runtime_sources(path / "src" / name.replace("-", "_")):
+        assert declared == DEPENDENCIES[name]
+        source_root = path / "src"
+        files = list(runtime_sources(source_root))
+        assert {file.relative_to(source_root).parts[0] for file in files} == {name.replace("-", "_")}
+        for file in files:
             assert_source_boundary(file, name, declared)
 
 
 @pytest.mark.parametrize("source", [
-    "import mindmap_qt_canvas", "from mindmap_core._private import helper",
+    "import mindmap_qt_editor.canvas", "from mindmap_core._private import helper",
     "import mindmap_core._private", "from mindmap_core import _helper",
 ])
 def test_nested_module_cannot_hide_dependency_or_private_import(tmp_path, source):
@@ -175,20 +168,63 @@ def test_nested_module_cannot_hide_dependency_or_private_import(tmp_path, source
     file.write_text(source, "utf-8")
     assert list(runtime_sources(tmp_path)) == [file]
     with pytest.raises(AssertionError):
-        assert_source_boundary(file, "mindmap-layouts", {"mindmap-core"})
+        assert_source_boundary(file, "mindmap-qt-render", {"mindmap-core"})
 
 
 def test_own_private_module_is_allowed(tmp_path):
     """包内模块可以导入同一包的私有实现。"""
     own = tmp_path / "module.py"
-    own.write_text("from mindmap_layouts._internal import _helper", "utf-8")
-    assert_source_boundary(own, "mindmap-layouts", set())
+    own.write_text("from mindmap_core.layouts._internal import _helper", "utf-8")
+    assert_source_boundary(own, "mindmap-core", set())
+
+
+def assert_no_internal_imports(file, package, forbidden):
+    """将相对导入解析为绝对路径，同时识别从父包直接导入子包的写法。"""
+    for node in ast.walk(ast.parse(file.read_text("utf-8"))):
+        if isinstance(node, ast.Import):
+            imports = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = resolve_name("." * node.level + module, package)
+            imports = [f"{module}.{alias.name}" for alias in node.names]
+        else:
+            continue
+        for target in imports:
+            assert not any(target == prefix or target.startswith(prefix + ".") for prefix in forbidden), (file, target)
+
+
+def test_bundled_components_keep_internal_boundaries():
+    """同一分发包内仍保持单向依赖，面板与画布各自通过公开协议接入。"""
+    rules = {
+        "mindmap_core": {
+            "": ("mindmap_core.layouts", "mindmap_core.formats"),
+            "layouts": ("mindmap_core.formats",),
+            "formats": ("mindmap_core.layouts",),
+        },
+        "mindmap_qt_render": {"": ("mindmap_core.layouts", "mindmap_core.formats")},
+        "mindmap_qt_editor": {
+            "": ("mindmap_qt_editor.canvas", "mindmap_qt_editor.panels", "mindmap_qt_editor.controls"),
+            "panels": ("mindmap_qt_editor.canvas",),
+            "canvas": ("mindmap_qt_editor.panels",),
+            "controls": ("mindmap_qt_editor.canvas", "mindmap_qt_editor.panels"),
+        },
+    }
+    packages = members()
+    for module, restrictions in rules.items():
+        directory, _ = packages[module.replace("_", "-")]
+        root = directory / "src" / module
+        for file in runtime_sources(root):
+            parents = file.relative_to(root).parts[:-1]
+            scope = parents[0] if parents else ""
+            package = ".".join((module, *parents))
+            assert_no_internal_imports(file, package, restrictions.get(scope, ()))
 
 
 def test_canvas_does_not_use_layout_implementation_indexes():
     """画布只查询公开几何能力，不依赖布局服务内部的同级索引或坐标转换。"""
-    directory, _ = members()["mindmap-qt-canvas"]
-    source = (directory / "src/mindmap_qt_canvas/dragging.py").read_text("utf-8")
+    directory, _ = members()["mindmap-qt-editor"]
+    source = (directory / "src/mindmap_qt_editor/canvas/drop_targets.py").read_text("utf-8")
     assert "query_with_sibling_neighbors" in source
     for forbidden in ("geometry._transform", "geometry.groups", "geometry.locations", "geometry.visited_parent_rects"):
         assert forbidden not in source

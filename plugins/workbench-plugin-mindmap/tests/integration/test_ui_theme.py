@@ -1,8 +1,7 @@
 """宿主公开色板切换保持输入、文档主题及界面隔离。"""
 
 from mindmap_core import Theme
-from mindmap_qt_ui import UiColors
-from mindmap_qt_ui.ui_style import ui_colors
+from mindmap_qt_editor.theme import UiColors, ui_colors
 from PySide6.QtWidgets import QApplication, QWidget
 
 

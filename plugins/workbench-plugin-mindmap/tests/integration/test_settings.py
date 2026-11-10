@@ -5,10 +5,10 @@ from dataclasses import replace
 
 import pytest
 from mindmap_core import BranchStyle, LayoutConfig, LayoutInfo, MindMapDocument, MindMapError, Theme
-from mindmap_formats import load_document, save_document
-from mindmap_layouts import TreeLayout
-from mindmap_qt_canvas import MindMapWidget
-from mindmap_qt_ui.property_controls import MIXED
+from mindmap_core.formats import load_document, save_document
+from mindmap_core.layouts import TreeLayout
+from mindmap_qt_editor.canvas import MindMapWidget
+from mindmap_qt_editor.controls.property_controls import MIXED
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtTest import QTest

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def child(scale):
     """每档缩放启动独立 Qt 进程，截图和报告不修改用户导图。"""
-    from mindmap_formats import load_document
+    from mindmap_core.formats import load_document
     from personal_workbench.app import build_window
     from PySide6.QtCore import QPoint, QTimer
     from PySide6.QtGui import QContextMenuEvent, QPainter

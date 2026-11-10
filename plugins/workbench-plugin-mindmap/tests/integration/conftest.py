@@ -8,8 +8,8 @@ from PySide6.QtWidgets import QApplication
 def composition_factory(qtbot):
     """只组合正式画布和面板，不实现已删除工作区的停靠或浮动功能。"""
     from mindmap_core import MindMapDocument, MindMapEngine
-    from mindmap_qt_canvas import MindMapWidget
-    from mindmap_qt_panels import MindMapPanels
+    from mindmap_qt_editor.canvas import MindMapWidget
+    from mindmap_qt_editor.panels import MindMapPanels
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtWidgets import QHBoxLayout, QWidget
 
