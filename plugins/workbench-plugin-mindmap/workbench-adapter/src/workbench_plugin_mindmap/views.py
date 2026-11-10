@@ -82,12 +82,16 @@ class MindMapEditorView(QObject):
         self.canvas.document_changed.connect(self._sync_recent_page)
         self.files = MindMapFileController(self.canvas, self.panels, owner.window.context.ui.parent,
                                            writer=self.document._write, state=self.document.file_state,
-                                           background_open=True)
+                                           background_open=True, versioned_writer=True)
         self.canvas.error_occurred.connect(self._canvas_failed)
         self.files.message.connect(self._file_message)
         self.document.attach(self)
         self.canvas.selection_changed.connect(lambda *_: owner.window._sync_document())
         self.canvas.editable_changed.connect(lambda *_: owner.window._sync_document())
+        self.canvas.editing_changed.connect(owner.window._sync_document)
+        self.canvas.selection_changed.connect(self._view_state_changed)
+        self.canvas.page_changed.connect(self._view_state_changed)
+        self.canvas.viewport_changed.connect(self._view_state_changed)
         owner.window._configure_session(self)
 
     icon = "mindmap"
@@ -98,7 +102,10 @@ class MindMapEditorView(QObject):
 
     @property
     def title(self):
-        return (self.files.path.stem if self.files.path else "新建导图") + ("（保存失败）" if self.document.last_error else "")
+        title = self.files.path.stem if self.files.path else "新建导图"
+        if self.files.state.conflict:
+            return title + "（保存冲突）"
+        return title + ("（保存失败）" if self.document.last_error else "")
 
     @property
     def status_text(self):
@@ -110,9 +117,21 @@ class MindMapEditorView(QObject):
                 break
             value /= 1024
         display = "未知" if size is None else f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
-        status = "保存失败" if self.document.last_error else "待保存" if self.files.is_dirty else "已保存"
         return (f"{len(self.canvas.document_view.nodes)} 个节点 · {self.canvas.selection_count} 个选中 · "
-                f"{status} · 文件大小：{display}")
+                f"文件大小：{display}")
+
+    @property
+    def save_status(self) -> str:
+        """返回当前视图输入及共享文件写入状态，用于常驻状态栏展示。"""
+        if self.files.state.conflict:
+            return "保存冲突"
+        if self.document.last_error:
+            return "保存失败"
+        if self.canvas.is_editing or self.is_composing:
+            return "正在编辑 · 正在写入" if self.document.is_writing else "正在编辑"
+        if self.document.is_writing:
+            return "正在写入"
+        return "待保存" if self.files.is_dirty else "已保存"
 
     @property
     def edit_actions(self):
@@ -130,9 +149,14 @@ class MindMapEditorView(QObject):
         return True
 
     def capture_state(self):
-        # 退出快照提交前收束页面历史防抖，保证隐藏标签最后的导航也进入插件状态。
-        self.owner.window.flush_recent_pages()
         return {"version": 1, **self.canvas.capture_page_view_state()}
+
+    def _view_state_changed(self, *_):
+        if self.disposed:
+            return
+        notify = getattr(self.owner.window.context.documents, "view_state_changed", None)
+        if notify is not None:
+            notify(self.id)
 
     def restore_state(self, state):
         """插件负责自己的视图版本，旧记录没有版本字段时按第一版兼容读取。"""

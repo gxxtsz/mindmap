@@ -72,7 +72,10 @@ def previous_profile(window, tmp_path):
     assert window.close()
     directory = tmp_path / "配置"
     layout_path = directory / "workbench-layout-v1.json"
-    layout = json.loads(layout_path.read_text("utf-8"))
+    state_path = directory / "workbench-state-v1.json"
+    state = json.loads(state_path.read_text("utf-8"))
+    state.pop("session_checkpoint")
+    layout = state["layout"]
     host = layout["session"]["hosts"]["main"]
     editor = host["editor"]
     host["editor"] = {"kind": "split", "orientation": "vertical", "sizes": [500, 250], "children": [
@@ -83,8 +86,6 @@ def previous_profile(window, tmp_path):
     text, history, other = [tmp_path / name for name in ("旧正文.TXT", "仅在历史里的笔记.MD", "其他插件.md")]
     for path in (text, history, other):
         path.write_text(path.stem, "utf-8")
-    state_path = directory / "workbench-state-v1.json"
-    state = json.loads(state_path.read_text("utf-8"))
     state.pop("product_profile_revision")
     state["views"].extend([
         {"id": "text.saved", "plugin_id": "text", "editor_type": "text.editor", "path": str(text)},
@@ -127,7 +128,7 @@ def test_upgrade_removes_retired_views_settings_and_history(previous_profile, qt
     later = tmp_path / "升级后加入的历史.md"
     restored.remember_path(later)
     assert restored.close()
-    assert "text.saved" not in (directory / "workbench-layout-v1.json").read_text("utf-8")
+    assert "text.saved" not in state_path.read_text("utf-8")
     again = build_window(storage_dir=directory)
     qtbot.addWidget(again, before_close_func=lambda item: item.dispose())
     assert again.state.recent_files == [str(later), *state["recent_files"]]

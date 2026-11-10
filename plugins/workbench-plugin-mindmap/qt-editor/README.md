@@ -71,6 +71,7 @@ finally:
 - 多个同引擎控制器可传入同一个 `MindMapFileState` 共享路径；省略时仍各自独立。
 
 - `prepare_save` 可设置为无参布尔回调，显式保存前由宿主统一检查并提交关联视图输入；返回 False 取消，自动保存不调用。
+- `MindMapFileState` 还共享已打开或写入的磁盘版本与冲突标志。注入支持版本核验的写入器时使用 `versioned_writer=True`，写入器接收 `expected_version`，在替换前核验目标并返回本次写入的文件版本。普通自定义写入器沿用原签名。
 
 - 共享状态只管理路径，宿主负责合并保存调度和成功、失败通知；写入成功才更新共享路径。
 
@@ -189,6 +190,7 @@ finally:
 - `current_page_id` 返回当前页面标识，`None` 表示主导图；`create_submap()` 创建后直接进入，`enter_submap(node_id)` 进入已有子图，`navigate_to(page_id, node_id)` 按路径切页定位，`return_to_parent_page()` 恢复上一级视图。
 
 - `page_changed` 仅通知页面变化，不属于引擎修改事件，不触发自动保存。
+- `viewport_changed` 通知视口变化。宿主可读取 `zoom_factor` 更新倍率展示，或在防抖后用 `capture_page_view_state()` 取得可恢复快照。
 
 - `document_view` 始终只包含当前页，`engine.document` 始终包含完整文件；图形导出读取当前页的正式快照。
 

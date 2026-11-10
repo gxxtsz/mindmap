@@ -62,7 +62,7 @@ class RecentFilesButton(QToolButton):
         """活动标签、关闭及另存为后更新显示；历史重排只由成功的文件操作触发。"""
         session = self.window.documents.active
         path = session.document.path if session else None
-        text = path.stem if path else "最近文件"
+        text = self.window.documents.display_title(session, file_name=True) if path else "最近文件"
         tooltip = str(path) if path else "查看最近打开的文件"
         # 引擎修改和选区变化也会刷新窗口状态；路径没有变化时不反复触发布局计算。
         if self._full_text == text and self.toolTip() == tooltip:

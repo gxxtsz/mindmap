@@ -373,10 +373,12 @@ class SceneSyncMixin:
             self.scene.blockSignals(blocked)
 
     def _viewport_changed(self):
-        """视图平移、缩放或尺寸变化后同步屏内对象；构造及批量刷新期间由 refresh 统一调用。"""
-        if (getattr(self, "_virtualized", False) and not self._refreshing and not self._disposed
-                and not self.view._viewport_sync_depth):
+        """平移、缩放或尺寸变化后同步屏内对象，再通知宿主记录视图现场。"""
+        if (getattr(self, "_refreshing", True) or self._disposed or self.view._viewport_sync_depth):
+            return
+        if self._virtualized:
             self._sync_viewport()
+        self.viewport_changed.emit()
 
     def _sync_viewport(self, *, force=False):
         """保留首个操作节点、编辑和鼠标捕获对象，其余图元仅维护视口及预取边距。

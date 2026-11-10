@@ -739,7 +739,7 @@ class DockManager(QObject):
 
     def add_document(self, document_id, title, widget, host_id="main", icon="document", *,
                      can_close=None, on_closed=None, modified=False, dispose_on_close=False,
-                     on_duplicate=None, on_open_directory=None):
+                     on_duplicate=None, on_open_directory=None, group_id="", index=-1):
         """注册已有文档控件并显示；标识必须唯一，文档内容不进入布局配置。
 
         on_duplicate 可选，签名为无参回调并返回是否成功；提供后显示标签复制
@@ -747,6 +747,7 @@ class DockManager(QObject):
         释放规则沿用 can_close、on_closed、dispose_on_close，仅限 GUI 线程。
         on_open_directory 为可选的无参布尔回调，提供后显示打开目录入口；宿主在
         调用时解析自己的最新文件路径。回调不会触发标签激活，也不进入布局配置。
+        group_id 指定已有分屏，省略时沿用默认组。index 为组内插入位置，-1 表示追加。
         """
         if document_id in self.documents or not document_id or document_id.startswith("tool:"):
             raise ValueError(f"文档标识重复：{document_id}")
@@ -757,23 +758,28 @@ class DockManager(QObject):
         if on_open_directory is not None and not callable(on_open_directory):
             raise TypeError("打开所在文件夹回调必须可调用或为 None")
         self.documents[document_id] = {"title": title, "widget": widget, "icon": icon,
+                                       "tooltip": "",
                                        "can_close": can_close, "on_closed": on_closed,
                                        "on_duplicate": on_duplicate,
                                        "on_open_directory": on_open_directory,
                                        "dispose_on_close": bool(dispose_on_close),
                                        "modified": bool(modified), "closed": False, "host_id": host_id}
-        self.move_document(document_id, host_id)
+        self.move_document(document_id, host_id, group_id, index)
         self.set_document_modified(document_id, modified)
 
-    def register_document(self, spec: DocumentSpec, host_id="main"):
-        """通过声明式规格注入业务文档；工厂失败时不注册半成品。"""
+    def register_document(self, spec: DocumentSpec, host_id="main", *, group_id="", index=-1):
+        """在 GUI 线程按规格建立并登记控件，返回已交给工作台管理的 QWidget。
+
+        group_id 指定已存在的编辑组，省略时使用默认组。index 从零开始，-1 追加。
+        标识重复或窗口无效时先拒绝，工厂抛出异常时不产生文档登记。
+        """
         if spec.id in self.documents or host_id not in self.hosts:
             raise ValueError("文档重复或宿主不存在")
         widget = spec.factory()
         self.add_document(spec.id, spec.title, widget, host_id, spec.icon,
                           can_close=spec.can_close, on_closed=spec.on_closed, modified=spec.modified,
                           dispose_on_close=spec.dispose_on_close, on_duplicate=spec.on_duplicate,
-                          on_open_directory=spec.on_open_directory)
+                          on_open_directory=spec.on_open_directory, group_id=group_id, index=index)
         return widget
 
     def duplicate_document(self, document_id: str) -> bool:
@@ -818,8 +824,22 @@ class DockManager(QObject):
         if not isinstance(title, str) or not title.strip():
             raise ValueError("文档标题不能为空")
         doc = self.documents[document_id]
+        if doc["title"] == title:
+            return
         doc["title"] = title
         self.set_document_modified(document_id, doc["modified"])
+        location = self.hosts[doc["host_id"]].editor.find_token(document_id)
+        if location:
+            location[0].set_close_label(location[1], title)
+
+    def set_document_tooltip(self, document_id: str, text: str) -> None:
+        """为已登记文档保留完整提示，在移动和恢复分屏时随标签重新应用。"""
+        doc = self.documents[document_id]
+        if doc["tooltip"] != text:
+            doc["tooltip"] = text
+            location = self.hosts[doc["host_id"]].editor.find_token(document_id)
+            if location:
+                location[0].setTabToolTip(location[1], text)
 
     def set_document_actions(self, document_id: str, actions: Iterable[QAction]) -> None:
         """设置当前文档在标签栏右侧显示的图标动作，传入空序列可清除。
@@ -851,7 +871,10 @@ class DockManager(QObject):
         for host in self.hosts.values():
             location = host.editor.find_token(document_id)
             if location:
-                location[0].setTabText(location[1], doc["title"] + (" *" if modified else ""))
+                group, index = location
+                text = doc["title"] + (" *" if modified else "")
+                if group.tabText(index) != text:
+                    group.setTabText(index, text)
 
     def can_close_document(self, document_id):
         """业务关闭决策由回调负责；无决策的已修改文档默认拒绝关闭。"""
@@ -924,11 +947,15 @@ class DockManager(QObject):
             return
         if document_id and (document_id not in self.documents or self.documents[document_id]["closed"]):
             return
-        if self.active_document_id != document_id:
-            self.active_document_id = document_id
-            self.document_activated.emit(document_id)
         if document_id:
             self._last_editor["main"] = document_id
+        if self.active_document_id != document_id:
+            self.active_document_id = document_id
+            for host in self.hosts.values():
+                for group in host.editor.groups:
+                    group.tabBar().sync_group_activity()
+            self.document_activated.emit(document_id)
+            self.schedule_save()
 
     def _select_remaining_document(self):
         """关闭或恢复完成后保留有效活动页，否则按编辑组顺序选取一个可见文档。"""
@@ -1344,18 +1371,22 @@ class DockManager(QObject):
         if not self.closing and not self.refreshing and self._session_save_depth == 0:
             self._save_timer.start()
 
-    def save_session(self):
+    def save_session(self, *, raise_errors=False):
         """仅保存当前会话快照；默认 JSON 存储采用原子替换。
 
         保留版本 1 的会话外层及快照格式，不再写入命名布局集合或当前布局名称。
         读取旧配置后的下一次正常保存也会自然清除这些废弃字段。
+        定时保存遇到写入错误时通过 message 通知。显式退出可传 raise_errors=True，
+        由窗口捕获错误并保留所有控件，供用户重试。
         """
         if self.closing or self._session_save_depth or not self.hosts:
             return
         payload = {"schema_version": 1, "session": self.capture_layout()}
         try:
             self.layout_store.save(payload)
-        except OSError as error:
+        except (OSError, TypeError, ValueError) as error:
+            if raise_errors:
+                raise
             self.message.emit(f"布局未能保存：{error}")
 
     def load_session(self):

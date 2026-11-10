@@ -341,7 +341,7 @@ class PageNavigationMixin:
         return self._last_inspiration_root if self._last_inspiration_root in roots else next(iter(roots), None)
 
     def capture_page_view_state(self) -> dict[str, object]:
-        """返回当前页的独立 JSON 兼容快照，供宿主在正常退出时保存到本机配置。
+        """返回当前页的独立 JSON 兼容快照，供宿主保存工作现场。
 
         无参数；返回值包含 page_id（None 为主导图）、zoom、场景中心 center、
         按树顺序排列的 selection，以及导航临时显示范围 focus_id。嵌套列表均为

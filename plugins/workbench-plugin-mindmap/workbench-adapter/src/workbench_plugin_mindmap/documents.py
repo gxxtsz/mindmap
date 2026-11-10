@@ -11,11 +11,13 @@ from uuid import uuid4
 
 from mindmap_core import MindMapEngine, MindMapError
 from mindmap_core.formats import can_process_snapshot, save_document, supports_process_save
+from mindmap_core.formats.files import FileVersionConflict, file_version
 from mindmap_qt_editor.canvas import MindMapFileState
 from PySide6.QtCore import QObject, QTimer
+from PySide6.QtWidgets import QMessageBox
 from workbench_api import OperationResult, SavePolicy
 
-from .background_save import save_snapshot
+from .background_save import SavedSnapshot, save_snapshot
 from .operation_log import describe_change
 from .recent_pages import RecentPageHistory
 
@@ -88,6 +90,11 @@ class MindMapDocumentHandle(QObject):
         return self.engine.is_dirty
 
     @property
+    def is_writing(self) -> bool:
+        """后台写入尚未由 GUI 线程结算时返回 True。多个标签共享同一状态。"""
+        return self._background_save is not None
+
+    @property
     def resource_uri(self):
         return self.path.as_uri() if self.path else "untitled:" + self.id
 
@@ -98,6 +105,8 @@ class MindMapDocumentHandle(QObject):
         if result:
             if reason == "explicit":
                 self.owner.window.record_operation(f"{'另存为' if save_as else '保存导图'}：{self.path}", session=view)
+            elif reason == "close":
+                self.owner.window.flush_recent_pages()
             return OperationResult()
         return OperationResult.failed(self.last_error) if self.last_error else OperationResult.cancelled()
 
@@ -161,7 +170,7 @@ class MindMapDocumentHandle(QObject):
         views.extend(view for view in self.views if view not in views)
         for view in views:
             if view.is_composing:
-                self._failed("请先完成输入法候选，再保存或关闭导图")
+                self.owner.window.show_status_message("请先完成输入法候选，再保存或关闭导图")
                 if self.owner.get(view.id) is view:
                     self.owner.window.context.documents.activate_view(view.id)
                 return False
@@ -183,6 +192,23 @@ class MindMapDocumentHandle(QObject):
             self._saved()
         return saved
 
+    def reload_after_conflict(self) -> bool:
+        """用户确认后重载共享文件。取消或加载失败均保留内存中的导图与冲突标志。"""
+        if not self.file_state.conflict or not self.prepare_inputs():
+            return False
+        if self.engine.is_dirty and QMessageBox.question(
+            self.owner.window.context.ui.parent, "重新加载导图",
+            "要放弃这份导图在工作台中的修改，并读取磁盘上的版本吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return False
+        return self.files.reload()
+
+    def restore_missing(self) -> bool:
+        """显式恢复丢失文件，先提交关联视图输入，再由文件控制器保护目标路径。"""
+        return self.file_state.conflict and self.prepare_inputs() and self.files.restore_missing()
+
     def dispose(self):
         """幂等释放文件级计时器和订阅；调用时最后一个视图的控制器仍须存活。"""
         if self.disposed:
@@ -198,16 +224,19 @@ class MindMapDocumentHandle(QObject):
 
     def _write(self, document, path, **kwargs):
         """所有写入先检查其他会话的文件归属，再复用引擎原子写入，禁止跨标签覆盖。"""
-        self._finish_background_save(wait=True)
+        self._check_target_owner(path)
+        return save_document(document, path, **kwargs)
+
+    def _check_target_owner(self, path):
         other = self.owner.find_path(path)
         if other is not None and other.document is not self:
             raise MindMapError("该文件已在另一个标签打开，请选择其他保存位置")
-        save_document(document, path, **kwargs)
 
     def _changed(self, event):
         """保存事件不重新启动计时器；修改、撤销和重做合并为一次延迟写入。"""
         if not self.disposed and event.kind in {"change", "undo", "redo"}:
-            self.timer.start()
+            if not self.file_state.conflict:
+                self.timer.start()
             if self.owner.get(self.representative.id) is self.representative:
                 self.owner.window.record_operation(describe_change(event), session=self.representative)
         if not self.disposed and event.kind != "saved":
@@ -244,10 +273,11 @@ class MindMapDocumentHandle(QObject):
         if self.disposed:
             return
         self._refresh_file_size()
-        self.last_error = message
         self.timer.stop()
         name = self.files.path.name if self.files.path else "新建导图"
-        self.owner.window.show_status_message(f"{name}：{message}")
+        hint = "，请在「文件」菜单处理保存冲突" if self.file_state.conflict else ""
+        self.last_error = message + hint
+        self.owner.window.show_status_message(f"{name}：{self.last_error}")
         self.owner.window.record_operation(f"保存导图失败：{message}", session=self.representative, level="error")
         self.sync_views()
 
@@ -258,7 +288,7 @@ class MindMapDocumentHandle(QObject):
         直接调用默认同步，保留显式保存、测试及宿主调用的成功/失败返回语义。
         外部注入写入器或编码器继续同步，不能假定它们支持独立进程。
         """
-        if self.disposed:
+        if self.disposed or self.file_state.conflict:
             return False
         if (background and self.engine.node_count > BACKGROUND_SAVE_NODE_LIMIT
                 and self.engine.is_dirty and self.files.writer == self._write):
@@ -271,25 +301,25 @@ class MindMapDocumentHandle(QObject):
                     if self.files.path is None:
                         raise MindMapError("导图尚未选择保存位置")
                     target = self.files.validate_save_path(self.files.path)
-                    other = self.owner.find_path(target)
-                    if other is not None and other.document is not self:
-                        raise MindMapError("该文件已在另一个标签打开，请选择其他保存位置")
+                    self._check_target_owner(target)
+                    expected = self.files.expected_write_version(target)
                     snapshot = self.engine.capture_save_snapshot()
                     if not can_process_snapshot(snapshot.document):
                         return self.files.save_committed()
                     executor = _save_pool()
                     try:
-                        future = executor.submit(save_snapshot, snapshot.document, target)
+                        future = executor.submit(save_snapshot, snapshot.document, target,
+                                                 expected_version=expected)
                     except BrokenProcessPool:
                         _discard_save_pool(executor)
                         raise MindMapError("后台保存进程不可用，请重新保存") from None
                     self._background_save = future, snapshot, target, executor
                     self._save_poll.start()
+                    self.sync_views()
                     return True
             except (MindMapError, OSError) as exc:
-                self.files.report_error(str(exc))
+                self.files.report_error(exc)
                 return False
-        self._finish_background_save(wait=True)
         saved = self.files.save_committed()
         if saved and self.last_error:
             # 撤销回已保存快照时可以无需写盘，但旧错误也应清除，避免干净标签
@@ -312,17 +342,19 @@ class MindMapDocumentHandle(QObject):
         self._background_save = None
         self._save_poll.stop()
         try:
-            future.result()
+            result = future.result()
+            version = result.version if isinstance(result, SavedSnapshot) else file_version(target)
         except Exception as exc:
             if isinstance(exc, BrokenProcessPool):
                 _discard_save_pool(executor)
             if not self.disposed:
-                self.files.report_error(f"后台保存失败：{exc}")
+                error = exc if isinstance(exc, FileVersionConflict) else f"后台保存失败：{exc}"
+                self.files.report_error(error)
             return False
         if not self.disposed:
             self.engine.mark_saved_snapshot(snapshot)
             if self.files.path == target:
-                self.files.state_changed.emit()
+                self.files.accept_file_version(target, version)
         return True
 
 

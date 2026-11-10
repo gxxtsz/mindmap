@@ -4,12 +4,47 @@ import os
 import tempfile
 from io import BytesIO
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 from mindmap_core import FormatRegistry, MindMapDocument, MindMapError, ValidatedDocument
 
 from .limits import MAX_ARCHIVE_BYTES
 from .processing import supports_owned_load
 from .registry import create_default_format_registry
+
+
+class FileVersion(NamedTuple):
+    """本地文件的版本标记，供编辑会话及独立保存进程比较。
+
+    文件替换由设备及文件标识检测，原地修改由纳秒级修改时间及大小检测。
+    标记可跨进程传递，且读取标记无需解码文件内容。
+    """
+
+    device: int
+    inode: int
+    size: int
+    modified_ns: int
+
+
+class FileVersionConflict(MindMapError):
+    """文件已消失或版本不符，写入流程应保留当前磁盘内容。"""
+
+
+def file_version(path: str | Path) -> FileVersion | None:
+    """读取路径当前指向的文件版本。路径不存在返回 None，其他访问错误交给调用方。"""
+    try:
+        info = Path(path).stat()
+    except FileNotFoundError:
+        return None
+    return FileVersion(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def check_file_version(path: str | Path, expected: FileVersion | None) -> None:
+    """核验即将使用的文件版本，None 表示调用方要求目标仍不存在。"""
+    current = file_version(path)
+    if current != expected:
+        message = ("原文件已移走或删除" if current is None else "磁盘文件已被外部修改")
+        raise FileVersionConflict(message)
 
 
 def load_document(
@@ -62,11 +97,15 @@ def save_document(
     registry: FormatRegistry | None = None,
     format_id: str | None = None,
     options=None,
-) -> None:
+    expected_version: FileVersion | None | Literal[False] = False,
+) -> FileVersion | None:
     """先写目标同目录的临时文件，完整刷新后原子替换；任何格式均复用此流程。
 
     本函数也可导出有损格式；是否能作为主文档保存由宿主查询 can_save 决定。
     保存失败保持原文件不变，且无论成功失败都不修改引擎脏状态。
+    传入 expected_version 时，在编码完成及原子替换前再次核验目标版本。
+    None 要求目标仍不存在。成功返回本次写入文件的版本，供下一次保存比较。
+    省略该参数沿用普通写入行为，返回 None。
     """
     registry = registry if registry is not None else create_default_format_registry()
     document.validate()
@@ -79,7 +118,12 @@ def save_document(
             registry.write(document, stream, format_id=entry.info.id, options=options)
             stream.flush()
             os.fsync(stream.fileno())
+        written_version = None
+        if expected_version is not False:
+            written_version = file_version(temporary)
+            check_file_version(target, expected_version)
         os.replace(temporary, target)
+        return written_version
     except MindMapError:
         raise
     except OSError as exc:

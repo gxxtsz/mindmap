@@ -202,6 +202,11 @@ class ScopedDocuments:
     def sync(self, view):
         self.service.sync(view)
 
+    def view_state_changed(self, view_id: str) -> None:
+        """只调度本插件视图的现场保存，候选或已释放视图的通知可安全忽略。"""
+        if self.service.owners.get(view_id) == self.context.plugin_id:
+            self.service.view_state_changed(view_id)
+
     def remove_view(self, view_id):
         if self.service.owners.get(view_id) == self.context.plugin_id:
             self.service.remove_view(view_id)

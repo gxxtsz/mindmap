@@ -5,6 +5,7 @@ from uuid import uuid4
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QTabBar, QTabWidget, QToolBar, QWidget
+from shiboken6 import isValid
 
 from .controls import DockSplitter, IconButton, _CardCorners
 from .models import DockTarget
@@ -79,6 +80,7 @@ class EditorTabBar(QTabBar):
         self.setDrawBase(False)
         self.setElideMode(Qt.TextElideMode.ElideRight)
         self.setIconSize(QSize(14, 14))
+        self.setProperty("activeGroup", False)
         self.currentChanged.connect(lambda *_: self._update_close_buttons())
         self.tabMoved.connect(self._tabs_moved)
 
@@ -101,7 +103,9 @@ class EditorTabBar(QTabBar):
                 border-bottom:2px solid transparent; }}
             {selector}::tab:hover {{ background:{theme.css('toolbar-bg-hovered')}; }}
             {selector}::tab:selected {{ background:{theme.css('editor-bg')};
-                color:{theme.css('text-default')}; border-bottom-color:{theme.css('control-brand-border')}; }}
+                color:{theme.css('text-default')}; border-bottom-color:{theme.css('editor-border')}; }}
+            {selector}[activeGroup="true"]::tab:selected {{
+                border-bottom-color:{theme.css('control-brand-border')}; }}
         """
         # 普通工具切换也会刷新宿主，相同样式无需再次触发 Qt 样式重排。
         if self.styleSheet() != stylesheet:
@@ -114,6 +118,17 @@ class EditorTabBar(QTabBar):
         size = super().tabSizeHint(index)
         # 标签撑满整行；所有状态预留相同的两像素底线，切换和悬停时文字不会上下跳动。
         return QSize(size.width(), self.group.manager.theme.editor_header_height)
+
+    def sync_group_activity(self) -> None:
+        """仅高亮当前接收全局命令的分屏，同时保留各组自己的标签选择。"""
+        token = self.tabData(self.currentIndex()) if self.currentIndex() >= 0 else None
+        active = token == self.group.manager.active_document_id
+        if self.property("activeGroup") != active:
+            self.setProperty("activeGroup", active)
+            self.setAccessibleDescription("活动分屏" if active else "编辑器分屏")
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.update()
 
     def _update_close_buttons(self):
         """选中、鼠标悬停或键盘聚焦时绘制关闭图形；所有按钮始终保留固定占位。"""
@@ -145,6 +160,11 @@ class EditorTabBar(QTabBar):
         self.press = event.position().toPoint()
         self.pressed_index = self.tabAt(self.press)
         super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self.pressed_index >= 0:
+            token = self.tabData(self.pressed_index)
+            if token in self.group.manager.documents:
+                # 同组已选标签不会发出 currentChanged，显式激活命中的文档及其正文。
+                self.group.manager.activate_document(token)
 
     def mouseMoveEvent(self, event):
         point = event.position().toPoint()
@@ -160,7 +180,7 @@ class EditorTabBar(QTabBar):
 
     def contextMenuEvent(self, event):
         """按命中的稳定标签标识构建菜单，执行目录操作前不激活其他文档。"""
-        index = self.tabAt(event.pos())
+        index = self.currentIndex() if event.reason() == event.Reason.Keyboard else self.tabAt(event.pos())
         if index < 0:
             return
         token = self.tabData(index)
@@ -177,14 +197,22 @@ class EditorTabBar(QTabBar):
             if document.get("on_duplicate") is not None or document.get("on_open_directory") is not None:
                 menu.addSeparator()
         menu.addAction("关闭", lambda: self.group.close_token(token))
-        menu.addAction("关闭其他标签", lambda: self.group.close_others(token))
+        menu.addAction("关闭本组其他标签", lambda: self.group.close_others(token)).setEnabled(self.group.count() > 1)
         menu.addSeparator()
-        # 拆分会迁移当前标签，只有同组还存在其他页面时才有两个有效分屏。
-        menu.addAction("向右拆分", lambda: self.group.area.split_token(
-            token, Qt.Orientation.Horizontal)).setEnabled(self.group.count() > 1)
-        menu.addAction("向下拆分", lambda: self.group.area.split_token(
-            token, Qt.Orientation.Vertical)).setEnabled(self.group.count() > 1)
-        menu.exec(event.globalPos())
+        move = menu.addMenu("移到新分屏")
+        move.setEnabled(self.group.count() > 1)
+        for label, orientation in (("右侧", Qt.Orientation.Horizontal), ("下方", Qt.Orientation.Vertical)):
+            move.addAction(label, lambda checked=False, axis=orientation: self.group.area.split_token(token, axis))
+        if document is not None and document.get("on_duplicate") is not None:
+            duplicate = menu.addMenu("在新分屏打开同一文档")
+            for label, orientation in (("右侧", Qt.Orientation.Horizontal), ("下方", Qt.Orientation.Vertical)):
+                duplicate.addAction(label, lambda checked=False, axis=orientation:
+                                    self.group.area.split_copy(token, axis))
+        try:
+            menu.exec(event.globalPos())
+        finally:
+            if isValid(menu):
+                menu.deleteLater()
 
 
 class EditorGroup(QTabWidget):
@@ -254,6 +282,7 @@ class EditorGroup(QTabWidget):
     def _sync_document_actions(self):
         """复用当前文档的动作；切换到工具标签或空组时完整释放角部占位。"""
         token = self.tabBar().tabData(self.currentIndex()) if self.currentIndex() >= 0 else None
+        self.tabBar().sync_group_activity()
         document = self.manager.documents.get(token)
         actions = document.get("header_actions", ()) if document else ()
         if self._document_actions.actions() != list(actions):
@@ -293,6 +322,8 @@ class EditorGroup(QTabWidget):
         close = _EditorCloseButton(self.tabBar(), title)
         close.clicked.connect(lambda: self.close_token(token))
         self.tabBar().setTabButton(inserted, QTabBar.ButtonPosition.RightSide, close)
+        if token in self.manager.documents:
+            self.setTabToolTip(inserted, self.manager.documents[token]["tooltip"])
         self.setCurrentIndex(inserted)
         # insertTab 可能先发出 currentChanged，彼时稳定 token 尚未写入，需补同步。
         self._sync_document_actions()
@@ -301,6 +332,13 @@ class EditorGroup(QTabWidget):
         if token in self.manager.documents:
             self.manager._set_active_document(token)
         widget.show()
+
+    def set_close_label(self, index: int, title: str) -> None:
+        """标签改名后同步关闭按钮的提示和无障碍名称，不重新创建按钮。"""
+        button = self.tabBar().tabButton(index, QTabBar.ButtonPosition.RightSide)
+        if button is not None:
+            button.setToolTip(f"关闭 {title}")
+            button.setAccessibleName(button.toolTip())
 
     def close_token(self, token):
         if token.startswith("tool:"):
@@ -396,6 +434,7 @@ class EditorGroup(QTabWidget):
             self.manager.move(data["id"], target)
         else:
             self.manager.move_document(data["id"], self.area.host.host_id, self.group_id, index)
+            self.manager.activate_document(data["id"])
         self.area.host.preview.hide()
         event.acceptProposedAction()
 
@@ -411,7 +450,7 @@ class EditorArea(QWidget):
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
-        self.root = DockSplitter(Qt.Orientation.Horizontal, self.manager)
+        self.root = self._new_splitter(Qt.Orientation.Horizontal)
         self._layout.addWidget(self.root)
         self.groups = []
         self._new_group(parent=self.root)
@@ -424,6 +463,11 @@ class EditorArea(QWidget):
         if parent:
             parent.addWidget(group)
         return group
+
+    def _new_splitter(self, orientation):
+        splitter = DockSplitter(orientation, self.manager)
+        splitter.splitterMoved.connect(self.manager.schedule_save)
+        return splitter
 
     def set_empty_widget_factory(self, factory):
         """为空分组提供独立占位页；操作结束后仅在整个编辑区为空时保留一组。"""
@@ -521,7 +565,7 @@ class EditorArea(QWidget):
         while not isinstance(parent, DockSplitter):
             parent = parent.parentWidget()
         position = parent.indexOf(original)
-        branch = DockSplitter(orientation, self.manager)
+        branch = self._new_splitter(orientation)
         original.setParent(None)
         parent.insertWidget(position, branch)
         branch.addWidget(original)
@@ -530,8 +574,20 @@ class EditorArea(QWidget):
             self.manager.move(token[5:], DockTarget("editor", self.host.host_id, -1, group.group_id))
         else:
             self.manager.move_document(token, self.host.host_id, group.group_id)
+            self.manager.activate_document(token)
         branch.setSizes([500, 500])
         self.manager.schedule_save()
+
+    def split_copy(self, token: str, orientation: Qt.Orientation) -> None:
+        """让编辑器复制命中文档的视图，再将新视图移入分屏。
+
+        原标签及其位置由宿主保留。取消或未登记新的活动视图时不创建空分屏。
+        """
+        existing = set(self.manager.documents)
+        if self.manager.duplicate_document(token):
+            copy = self.manager.active_document_id
+            if copy not in existing:
+                self.split_token(copy, orientation)
 
     def snapshot(self):
         def walk(widget):
@@ -572,7 +628,8 @@ class EditorArea(QWidget):
                 current = group._restore_current
                 group._desired_selection = tokens[current] if 0 <= current < len(tokens) else ""
                 return group
-            split = DockSplitter(Qt.Orientation.Vertical if node.get("orientation") == "vertical" else Qt.Orientation.Horizontal, self.manager)
+            orientation = Qt.Orientation.Vertical if node.get("orientation") == "vertical" else Qt.Orientation.Horizontal
+            split = self._new_splitter(orientation)
             for child in node.get("children", [])[:16]:
                 split.addWidget(build(child))
             if node.get("sizes"):
@@ -580,7 +637,7 @@ class EditorArea(QWidget):
             return split
         restored = build(data)
         if isinstance(restored, EditorGroup):
-            self.root = DockSplitter(Qt.Orientation.Horizontal, self.manager)
+            self.root = self._new_splitter(Qt.Orientation.Horizontal)
             self.root.addWidget(restored)
         else:
             self.root = restored

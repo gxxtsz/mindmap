@@ -6,6 +6,7 @@ import zipfile
 import pytest
 from mindmap_core import BranchStyle, LayoutConfig, MindMapDocument, MindMapEngine, MindMapError
 from mindmap_core.formats import (
+    create_default_format_registry,
     dumps,
     encode_document,
     export_outline,
@@ -17,6 +18,7 @@ from mindmap_core.formats import (
     save_document,
     to_dict,
 )
+from mindmap_core.formats.files import FileVersionConflict, file_version
 
 
 def example():
@@ -107,6 +109,27 @@ def test_atomic_save_failure_preserves_old_file(tmp_path, monkeypatch):
     with pytest.raises(MindMapError):
         save_document(example(), target)
     assert target.read_bytes() == "原有文件".encode()
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.parametrize("originally_exists", [False, True])
+def test_versioned_save_checks_target_after_encoding(tmp_path, monkeypatch, originally_exists):
+    """编码期间外部创建或修改目标时，原子保存保留外部版本并清理临时文件。"""
+    target = tmp_path / "目标.mindmap"
+    if originally_exists:
+        target.write_bytes(b"original")
+    expected = file_version(target)
+    registry = create_default_format_registry()
+    write = registry.write
+
+    def concurrent_write(*args, **kwargs):
+        write(*args, **kwargs)
+        target.write_bytes(b"external update")
+
+    monkeypatch.setattr(registry, "write", concurrent_write)
+    with pytest.raises(FileVersionConflict, match="外部修改"):
+        save_document(example(), target, registry=registry, expected_version=expected)
+    assert target.read_bytes() == b"external update"
     assert list(tmp_path.iterdir()) == [target]
 
 

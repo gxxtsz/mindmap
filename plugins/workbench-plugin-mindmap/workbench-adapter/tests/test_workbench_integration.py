@@ -887,11 +887,11 @@ def test_status_reset_zoom_preserves_view_and_document(window, qtbot, scale):
     """真实点击恢复原始尺寸并保留查看位置，重复操作不修改文档、选择和历史。"""
     canvas, view = window.plugins.instance("mindmap").canvas, window.plugins.instance("mindmap").canvas.view
     button = window.plugins.instance("mindmap")._status_controls.buttons["reset_zoom"]
-    assert button.toolTip() == "恢复默认尺寸（100%）"
     assert button.accessibleName() == "恢复默认尺寸"
     assert not canvas.action("reset_zoom").shortcuts()
     canvas.select_nodes([canvas.engine.root_id])
     view.zoom(scale / view.transform().m11())
+    assert button.text() == f"{scale:.0%}" and button.text() in button.toolTip()
     root = QPointF(*canvas.layout_result.nodes[canvas.engine.root_id].center)
     view.update_navigation_rect(center=root + QPointF(100, -80))
     center = view.mapToScene(view.viewport().rect()).boundingRect().center()
@@ -902,6 +902,7 @@ def test_status_reset_zoom_preserves_view_and_document(window, qtbot, scale):
         qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
         QApplication.processEvents()
         assert view.transform().m11() == pytest.approx(1.0)
+        assert button.text() == "100%"
         actual = view.mapToScene(view.viewport().rect()).boundingRect().center()
         assert (actual - center).manhattanLength() < 2
         assert (actual - root).manhattanLength() > 100

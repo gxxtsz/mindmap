@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
 )
+from shiboken6 import isValid
 
 from mindmap_qt_editor.controls.base import CardFrame
 from mindmap_qt_editor.controls.branch_styles import BranchStyleMenu, branch_style_icon
@@ -104,6 +105,8 @@ class MindMapWidget(
     edits_flush_requested = Signal()
     branch_scope_changed = Signal(str)
     page_changed = Signal(object)
+    # 平移、缩放及视口尺寸变化后的 GUI 通知，宿主可合并后读取当前视图快照。
+    viewport_changed = Signal()
     # 请求宿主展示所属文档的灵感侧栏；只改变停靠界面，不提交内容或切换文件。
     inspiration_sidebar_requested = Signal()
     # 拆出成功后仅提示侧栏，不切换画布；列表顺序由引擎根顺序决定。
@@ -941,6 +944,11 @@ class MindMapWidget(
         self.view.update_navigation_rect(center=center)
         self.view.update_cursor()
 
+    @property
+    def zoom_factor(self) -> float:
+        """读取当前视图实际倍率，1.0 表示 100%。在 GUI 线程配合 viewport_changed 使用。"""
+        return self.view.transform().m11()
+
     def reset_zoom(self) -> None:
         """立即恢复到 100% 原始尺寸，围绕当前视口中心缩放，不主动居中根节点。
 
@@ -1305,31 +1313,55 @@ class MindMapWidget(
             else:
                 self.layout_registry.layout(page, sizes)
 
-    def context_menu(self, global_position):
-        """在指定全局位置显示复用内置及扩展 QAction 的右键菜单。
+    def context_menu(self, global_position, *, on_canvas: bool = False):
+        """在屏幕全局位置显示菜单。鼠标命中背景时传 on_canvas=True，仅显示页面级动作。
 
-        动作状态及快捷键归画布统一管理；查看菜单本身不提交文档修改，关闭后释放菜单。
+        默认按当前选择区分单节点及多选，键盘可直接调用。复用原动作及权限。关闭后
+        释放临时菜单和子菜单，动作仍由画布持有。调用需在存活画布的 GUI 线程执行。
         """
         menu = QMenu(self)
-        groups = [
-            ("add_inspiration", "move_to_inspiration", "attach_inspirations", "group_inspirations"),
-            ("add_child", "add_sibling", "insert_parent", "edit", "properties", "delete"),
-            ("create_submap", "convert_descendants_to_submap", "enter_submap", "convert_submap_to_descendants",
-             "favorite_submap", "delete_submap"),
-            ("create_detail_page", "enter_detail_page", "delete_detail_page"),
-            ("set_page_reference", "open_page_reference", "clear_page_reference"),
-            ("copy", "cut", "paste", "undo", "redo"),
-            ("move_up", "move_down", "fold", "expand_all", "collapse_all"),
-            ("image", "image_url", "remove_image", "hyperlink"),
-            ("fit", "center"),
+        try:
+            for title, keys in self._context_menu_groups(on_canvas or not self.selection_count):
+                actions = [self._actions[key] for key in keys if self._actions[key].isVisible()]
+                if not actions:
+                    continue
+                if title:
+                    menu.addMenu(title).addActions(actions)
+                else:
+                    if menu.actions():
+                        menu.addSeparator()
+                    menu.addActions(actions)
+            menu.exec(global_position)
+        finally:
+            if isValid(menu):
+                menu.deleteLater()
+
+    def _context_menu_groups(self, on_canvas):
+        if on_canvas:
+            groups = [
+                ("", ("fit", "center", "reset_zoom", "zoom_in", "zoom_out")),
+                ("", ("expand_all", "collapse_all")),
+            ]
+            if self.current_page_kind == "inspiration":
+                groups.insert(0, ("", ("add_inspiration",)))
+            return groups
+        if self.selection_count > 1:
+            return [
+                ("", ("cut", "copy", "delete")),
+                ("灵感", ("move_to_inspiration", "attach_inspirations", "group_inspirations")),
+                ("", ("undo", "redo")),
+                ("", self._custom_actions),
+            ]
+        return [
+            ("", ("add_child", "add_sibling", "edit", "properties")),
+            ("", ("cut", "copy", "paste", "delete")),
+            ("节点结构", ("insert_parent", "move_up", "move_down", "fold")),
+            ("页面", ("create_submap", "convert_descendants_to_submap", "enter_submap",
+                      "convert_submap_to_descendants", "favorite_submap", "delete_submap",
+                      "create_detail_page", "enter_detail_page", "delete_detail_page",
+                      "set_page_reference", "open_page_reference", "clear_page_reference")),
+            ("灵感", ("add_inspiration", "move_to_inspiration", "attach_inspirations", "group_inspirations")),
+            ("图片和链接", ("image", "image_url", "remove_image", "hyperlink")),
+            ("", ("undo", "redo")),
+            ("", self._custom_actions),
         ]
-        for group in groups:
-            if menu.actions():
-                menu.addSeparator()
-            for key in group:
-                menu.addAction(self._actions[key])
-        if self._custom_actions:
-            menu.addSeparator()
-            for key in self._custom_actions:
-                menu.addAction(self._actions[key])
-        menu.exec(global_position)

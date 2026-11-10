@@ -81,6 +81,7 @@ class MindMapController(QObject):
         context.ui.subscribe_theme(self.refresh_theme)
         context.ui.subscribe_layout(self._layout_changed)
         context.ui.subscribe_active(self._finish_restoring)
+        context.ui.contribute_menu(MenuContribution(MenuLocation.FILE, self.populate_conflict_menu))
         context.ui.contribute_menu(MenuContribution(MenuLocation.FILE_EXPORT, self.populate_export_menu))
         context.ui.contribute_menu(MenuContribution(MenuLocation.EDIT, self.populate_edit_menu))
         context.ui.contribute_menu(MenuContribution(MenuLocation.VIEW, self.populate_view_menu))
@@ -126,6 +127,10 @@ class MindMapController(QObject):
         self.read_only_action.setEnabled(session is not None)
         with QSignalBlocker(self.read_only_action):
             self.read_only_action.setChecked(session is not None and not session.canvas.editable)
+        if session is None:
+            self._status_controls.set_save_status("")
+        else:
+            self._status_controls.set_save_status(session.save_status, session.document.last_error)
         self.context.ui.refresh()
 
     def new_operation(self, path=None):
@@ -141,6 +146,20 @@ class MindMapController(QObject):
             return OperationResult(view_id=self.sessions.active_id) if opened else OperationResult.cancelled()
         except Exception as error:
             return OperationResult.failed(error, reported=view_id is None)
+
+    def populate_conflict_menu(self, menu: QMenu) -> None:
+        """当前导图发生保存冲突时，提供保留内存内容或重新读取磁盘版本的入口。"""
+        session = self.active_session
+        if session is None or not session.document.file_state.conflict:
+            return
+        document = session.document
+        path = document.path
+        actions = menu.addMenu("处理保存冲突")
+        if path is not None and path.is_file():
+            actions.addAction("重新加载磁盘版本…", lambda: self.call(document.reload_after_conflict))
+        elif path is not None and not path.exists():
+            actions.addAction("恢复原文件", lambda: self.call(document.restore_missing))
+        actions.addAction(self.context.ui.action("app.save_as"))
 
     def populate_export_menu(self, menu: QMenu) -> None:
         """在宿主的导出分区列出当前页支持的格式。空白页期间省略整组动作。"""

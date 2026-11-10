@@ -50,10 +50,10 @@ class Settings:
 
 
 class StateStore:
-    """最近资源立即落盘，退出视图仅在关闭检查全部通过后提交。
+    """工作台的本机状态。标签、活动文档与分屏布局作为同一份会话快照提交。
 
-    布局另外保存一份独立记录，启动恢复期间由宿主设置 restoring 屏障。
-    配置不包含文档正文；保存失败时旧磁盘文件及已提交退出记录均保持有效。
+    最近资源立即落盘，启动恢复期间由宿主设置 restoring 屏障。
+    配置只存工作现场及插件元数据。写入失败时旧磁盘快照仍完整可读。
     """
 
     def __init__(self, directory, initial=None):
@@ -69,7 +69,7 @@ class StateStore:
                 self._validate(payload)
         except (OSError, ValueError, TypeError) as error:
             self.error = f"工作台状态无效，已保留原记录：{error}"
-            # 已损坏的新配置先保留字节副本，再允许下一次正常退出写入新会话。
+            # 已损坏的新配置先保留字节副本，再允许写入新会话。
             # 备份失败时保持只读，避免用空会话覆盖用户尚可修复的数据。
             try:
                 backup = self.store.path.with_name(f"workbench-state-invalid-{uuid4().hex}.json")
@@ -144,14 +144,20 @@ class StateStore:
         self.save()
 
     def save_session(self, views, active_id, layout=None):
-        previous = deepcopy(self.data)
+        """原子提交一轮工作现场。写入失败时恢复内存中的上一轮记录。
+
+        layout 提供时同时标记新快照为权威版本，使启动时跳过遗留的单独布局文件。
+        调用方可继续省略 layout 以保留已有布局。传入的嵌套记录由状态层独立持有。
+        """
+        previous = self.data.copy()
         self.data["views"] = deepcopy(views)
         self.data["active_id"] = active_id
         if layout is not None:
             self.data["layout"] = deepcopy(layout)
+            self.data["session_checkpoint"] = True
         try:
             self.save()
-        except OSError:
+        except (OSError, TypeError, ValueError):
             self.data = previous
             raise
 
@@ -176,16 +182,20 @@ class PluginState:
 
 
 class WorkspaceLayoutStore:
-    """将停靠框架的布局保存请求转为工作台状态更新，不触碰旧布局文件。"""
+    """停靠框架与工作台会话快照之间的适配层，旧布局文件仅用于首次读取。"""
 
-    def __init__(self, state):
+    def __init__(self, state, capture_documents):
         self.state = state
-        self.path = state.store.path.with_name("workbench-layout-v1.json")
-        self.store = JsonLayoutStore(self.path)
+        self.capture_documents = capture_documents
+        self.path = state.store.path
+        self.legacy_layout = JsonLayoutStore(self.path.with_name("workbench-layout-v1.json"))
         self.default_tools = []
 
     def load(self):
-        payload = self.store.load() if self.path.exists() else deepcopy(self.state.data.get("layout"))
+        if self.state.data.get("session_checkpoint") is not True and self.legacy_layout.path.exists():
+            payload = self.legacy_layout.load()
+        else:
+            payload = deepcopy(self.state.data.get("layout"))
         if not isinstance(payload, dict) or not isinstance(payload.get("session"), dict):
             return payload
         tools = payload["session"].get("tools")
@@ -204,7 +214,7 @@ class WorkspaceLayoutStore:
         return payload
 
     def save(self, payload):
+        """在 GUI 线程读取关联文档及活动标识，与本次布局一并原子提交。"""
         if not self.state.restoring:
-            self.store.save(payload)
-            self.state.data["layout"] = deepcopy(payload)
-            self.state.save()
+            views, active_id = self.capture_documents()
+            self.state.save_session(views, active_id, payload)

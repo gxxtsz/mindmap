@@ -84,7 +84,8 @@ def test_nested_snapshot_is_owned_and_failed_commit_rolls_back(tmp_path, monkeyp
     state = writable_state(tmp_path)
     view = {**record(tmp_path), "view_state": {"version": 1, "center": [10, 20], "selection": ["节点"]}}
     expected = deepcopy(view)
-    state.save_session([view], view["id"])
+    layout = {"schema_version": 1, "session": {"active": view["id"]}}
+    state.save_session([view], view["id"], layout)
     saved = state.store.path.read_bytes()
     view["view_state"]["center"].clear()
     view["view_state"]["selection"].append("之后的修改")
@@ -95,6 +96,7 @@ def test_nested_snapshot_is_owned_and_failed_commit_rolls_back(tmp_path, monkeyp
 
     monkeypatch.setattr(state.store, "save", fail)
     with pytest.raises(OSError, match="配置写入失败"):
-        state.save_session([], "")
+        state.save_session([], "", {"schema_version": 1, "session": {}})
     assert state.open_documents == [expected] and state.active_id == expected["id"]
+    assert state.data["layout"] == layout and state.data["session_checkpoint"]
     assert state.store.path.read_bytes() == saved

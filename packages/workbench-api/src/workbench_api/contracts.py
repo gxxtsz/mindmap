@@ -114,7 +114,13 @@ class EditorView(Protocol):
         """提交完整输入；输入法候选仍在进行时返回 False，不强制结束组合。"""
         ...
 
-    def capture_state(self) -> dict: ...
+    def capture_state(self) -> dict:
+        """在 GUI 线程取得可序列化的视图快照，供运行期间和退出时保存。
+
+        返回页面、光标或视口等可重建的视图状态。调用方也可读取隐藏标签的快照，
+        读取期间保留未提交的编辑和视图所属文档。
+        """
+        ...
 
     def restore_state(self, state: dict) -> None:
         """恢复支持的视图版本；未知版本回退默认值，不改变共享文档内容。"""
@@ -183,9 +189,22 @@ class DocumentService(Protocol):
         ...
 
     def register_view(self, provider_id: str, view: EditorView, *, after: str | None = None,
-                      remember: bool = True) -> Disposable: ...
+                      remember: bool = True) -> Disposable:
+        """成功后把视图放入活动分屏。after 指向已有标签时，插在该标签之后。
+
+        remember 控制是否加入最近文件。返回注销句柄，用于插件卸载或创建失败时清理。
+        """
+        ...
 
     def sync(self, view: EditorView) -> None: ...
+
+    def view_state_changed(self, view_id: str) -> None:
+        """通知宿主视图的可恢复状态发生变化，例如切页、平移或缩放。
+
+        仅对本插件已登记的视图生效，启动恢复期间延后处理。连续通知由宿主合并，
+        到期时读取最新 capture_state，与标签和分屏布局一并保存。
+        """
+        ...
 
     def remove_view(self, view_id: str) -> None: ...
 

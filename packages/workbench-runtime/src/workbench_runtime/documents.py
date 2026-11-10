@@ -1,5 +1,6 @@
 """统一管理共享文档和标签；业务模型及文件编码始终归编辑器插件。"""
 
+from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
 
@@ -22,6 +23,7 @@ class DocumentService(QObject):
         self.views = {}
         self.providers = {}
         self.owners = {}
+        self._file_qualifiers = {}
         self.active_id = ""
         self._prepared = False
         self._switching = False
@@ -66,6 +68,9 @@ class DocumentService(QObject):
         if any(item.document.id == view.document.id and item.document is not view.document for item in self.views.values()):
             raise ValueError("不同文档不能复用同一文档标识")
         owner, _provider = self.window.providers[provider_id]
+        area = self.window.host.editor
+        anchor = area.find_token(after) if after else None
+        target = anchor or area.find_token(self.active_id)
         self.views[view.id], self.providers[view.id], self.owners[view.id] = view, provider_id, owner
         try:
             self.window.manager.register_document(DocumentSpec(
@@ -73,12 +78,7 @@ class DocumentService(QObject):
                 can_close=lambda: self.prepare_close([view.id]), on_closed=lambda: self._closed(view.id),
                 dispose_on_close=True, on_duplicate=lambda: bool(view.duplicate()),
                 on_open_directory=lambda: self.window.open_file_directory(view.id),
-            ))
-            if after:
-                location = self.window.host.editor.find_token(after)
-                if location:
-                    group, index = location
-                    self.window.manager.move_document(view.id, "main", group.group_id, index + 1)
+            ), group_id=target[0].group_id if target else "", index=anchor[1] + 1 if anchor else -1)
             self.window.manager.set_document_actions(view.id, getattr(view, "toolbar_actions", ()))
             for action in getattr(view, "edit_actions", {}).values():
                 action.changed.connect(self.window.edit_commands.refresh)
@@ -112,6 +112,7 @@ class DocumentService(QObject):
         self.owners.pop(view_id, None)
         if view is not None:
             view.dispose()
+        self._update_file_qualifiers()
         if self.active_id == view_id:
             self.active_id = ""
             self.active_changed.emit(None)
@@ -133,13 +134,62 @@ class DocumentService(QObject):
     def sync(self, view):
         if view.id not in self.views:
             return
-        self.window.manager.set_document_title(view.id, view.title)
-        self.window.manager.set_document_modified(view.id, view.document.is_dirty)
-        location = self.window.host.editor.find_token(view.id)
-        if location:
-            location[0].setTabToolTip(location[1], str(view.document.path or "未保存的文档") +
-                                    ("\n保存失败：" + view.document.last_error if getattr(view.document, "last_error", "") else ""))
+        if not self._update_file_qualifiers():
+            self._sync_tab(view)
+        self.window.manager.schedule_save()
         self.changed.emit()
+
+    def display_title(self, view, *, file_name=False) -> str:
+        """为同名文件附加最短可区分的目录。标题栏可只借用文件名和区分信息。
+
+        同一文件的多个视图共用一个名称。同目录的同名异格式文件使用扩展名区分。
+        """
+        path = view.document.path
+        title = path.stem if file_name and path is not None else view.title
+        qualifier = self._file_qualifiers.get(path, "")
+        return f"{title} · {qualifier}" if qualifier else title
+
+    def _update_file_qualifiers(self) -> bool:
+        paths = {view.document.path for view in self.views.values() if view.document.path is not None}
+        if paths == self._file_qualifiers.keys():
+            return False
+        self._file_qualifiers = dict.fromkeys(paths, "")
+        by_name = defaultdict(list)
+        for path in paths:
+            by_name[path.stem.casefold()].append(path)
+        for same_name in by_name.values():
+            if len(same_name) < 2:
+                continue
+            for path in same_name:
+                parents = {other.parent for other in same_name if other.parent != path.parent}
+                parts = path.parent.parts
+                directory = ""
+                if parents:
+                    for length in range(1, len(parts) + 1):
+                        suffix = Path(*parts[-length:])
+                        if all(suffix != Path(*parent.parts[-length:]) for parent in parents):
+                            directory = str(suffix)
+                            break
+                    directory = directory or str(path.parent)
+                extension = path.suffix if any(other != path and other.parent == path.parent
+                                               for other in same_name) else ""
+                self._file_qualifiers[path] = " · ".join(value for value in (directory, extension) if value)
+        for view in self.views.values():
+            self._sync_tab(view)
+        return True
+
+    def _sync_tab(self, view):
+        manager = self.window.manager
+        manager.set_document_title(view.id, self.display_title(view))
+        manager.set_document_modified(view.id, view.document.is_dirty)
+        message = getattr(view.document, "last_error", "")
+        tooltip = str(view.document.path or "未保存的文档")
+        manager.set_document_tooltip(view.id, tooltip + (f"\n保存失败：{message}" if message else ""))
+
+    def view_state_changed(self, view_id: str) -> None:
+        """合并已登记视图的现场更新，防抖到期后随标签和布局保存。"""
+        if view_id in self.views:
+            self.window.manager.schedule_save()
 
     def save(self, view=None, *, save_as=False, reason="explicit"):
         view = view or self.active
@@ -241,6 +291,7 @@ class DocumentService(QObject):
                     view.id, view.title, lambda item=view: item.widget, dispose_on_close=True,
                     on_closed=lambda key=view.id: self._closed(key), can_close=lambda: True,
                 ))
+                self.sync(view)
         selected = self.views.get(active_id)
         if selected is None or isinstance(selected, MissingView):
             selected = next((view for view in self.views.values() if not isinstance(view, MissingView)), selected)

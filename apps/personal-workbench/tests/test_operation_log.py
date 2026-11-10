@@ -60,7 +60,7 @@ def test_log_layout_and_theme_restore_without_log_history(log_window, tmp_path, 
         window.manager.hide("operation_log")
     directory = window.manager.storage_dir
     assert window.close()
-    assert "上一进程的独有记录" not in (directory / "workbench-layout-v1.json").read_text("utf-8")
+    assert "上一进程的独有记录" not in (directory / "workbench-state-v1.json").read_text("utf-8")
     restored = build_window(storage_dir=directory)
     qtbot.addWidget(restored)
     restored.show()
@@ -88,6 +88,10 @@ def test_old_layout_adds_visible_log_without_replacing_other_preferences(log_win
     snapshot["theme"] = "dark"
     snapshot["hosts"]["main"]["region_sizes"]["dock"]["right"] = 411
     assert window.close()
+    state_path = directory / "workbench-state-v1.json"
+    state = json.loads(state_path.read_bytes())
+    state.pop("session_checkpoint")
+    state_path.write_text(json.dumps(state), "utf-8")
     (directory / "workbench-layout-v1.json").write_text(
         json.dumps({"schema_version": 1, "session": snapshot}), encoding="utf-8",
     )

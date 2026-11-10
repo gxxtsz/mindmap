@@ -620,16 +620,19 @@ class MindMapView(QGraphicsView):
         """
         event.accept()
         if event.reason() != event.Reason.Mouse:
-            self._show_context_menu(event.pos(), event.globalPos())
+            self.owner.context_menu(event.globalPos())
 
     def _show_context_menu(self, position, global_position):
         """仅在确定为点击后选择菜单目标，右键拖动始终保留原有选择。"""
         item = self.itemAt(position)
         if isinstance(item, (FoldControlItem, PageControlItem)):
             item = item.node_item
-        if item is not None and isinstance(item, NodeItem) and not item.isSelected():
-            self.owner.select_nodes([item.node.id])
-        self.owner.context_menu(global_position)
+        if isinstance(item, NodeItem):
+            if not item.isSelected():
+                self.owner.select_nodes([item.node.id])
+            self.owner.context_menu(global_position)
+        else:
+            self.owner.context_menu(global_position, on_canvas=True)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and (

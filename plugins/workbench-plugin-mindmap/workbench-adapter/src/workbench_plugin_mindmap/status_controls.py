@@ -5,7 +5,7 @@ from mindmap_qt_editor.icons import toolbar_icon
 from mindmap_qt_editor.theme import UiColors
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QKeySequence
-from PySide6.QtWidgets import QHBoxLayout, QToolButton, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
 
 
 class _StatusViewControls(QWidget):
@@ -29,6 +29,11 @@ class _StatusViewControls(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 0, 2, 0)
         layout.setSpacing(2)
+        self.save_label = QLabel(self)
+        self.save_label.setObjectName("mindmap_save_status")
+        self.save_label.setAccessibleName("导图保存状态")
+        layout.addWidget(self.save_label)
+        layout.addSpacing(6)
         for key in self._labels:
             button = QToolButton(self)
             button.setObjectName("status_" + key)
@@ -39,6 +44,7 @@ class _StatusViewControls(QWidget):
             button.setIconSize(QSize(16, 16))
             layout.addWidget(button)
             self.buttons[key] = button
+        self.buttons["reset_zoom"].setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.buttons["wheel_mode"].clicked.connect(self._toggle_wheel_mode)
         self._sync_actions()
 
@@ -51,6 +57,8 @@ class _StatusViewControls(QWidget):
         """
         if canvas is self._canvas:
             return
+        if self._canvas is not None:
+            self._canvas.viewport_changed.disconnect(self._sync_zoom)
         for action in self._bound_actions:
             action.changed.disconnect(self._sync_actions)
         self._bound_actions.clear()
@@ -62,6 +70,7 @@ class _StatusViewControls(QWidget):
                 button.removeAction(previous)
         self._canvas = canvas
         if canvas is not None:
+            canvas.viewport_changed.connect(self._sync_zoom)
             for key, button in self.buttons.items():
                 action = canvas.action(key)
                 if key != "wheel_mode":
@@ -71,6 +80,12 @@ class _StatusViewControls(QWidget):
                 action.changed.connect(self._sync_actions)
                 self._bound_actions.append(action)
         self._sync_actions()
+
+    def set_save_status(self, text: str, detail: str = "") -> None:
+        """显示当前导图的保存状态。常驻标签与窗口的临时提示独立，悬停可查看失败原因。"""
+        self.save_label.setText(text)
+        self.save_label.setToolTip(detail or text)
+        self.save_label.setAccessibleDescription(detail or text)
 
     def _sync_actions(self):
         """只刷新展示状态，不反向触发动作；没有导图时保持按钮位置及无障碍名称。"""
@@ -96,6 +111,16 @@ class _StatusViewControls(QWidget):
             button.setToolTip(description)
             button.setAccessibleName(label)
             button.setAccessibleDescription(description)
+        self._sync_zoom()
+
+    def _sync_zoom(self):
+        button = self.buttons["reset_zoom"]
+        text = f"{self._canvas.zoom_factor:.0%}" if self._canvas is not None else "—"
+        button.setText(text)
+        if self._canvas is not None:
+            description = f"当前缩放 {text}，点击恢复默认尺寸（100%）"
+            button.setToolTip(description)
+            button.setAccessibleDescription(description)
 
     def _toggle_wheel_mode(self):
         """每次点击只在两种模式间切换；持久化和跨标签同步交给宿主现有信号链。"""
@@ -111,6 +136,7 @@ class _StatusViewControls(QWidget):
         self._colors = colors
         self.setStyleSheet(
             "QWidget#mindmap_status_controls { background:transparent; }"
+            f"QLabel#mindmap_save_status {{ color:{colors.muted}; padding:0; }}"
             "QWidget#mindmap_status_controls QToolButton { background:transparent; padding:0; "
             "border:1px solid transparent; border-radius:4px; }"
             f"QWidget#mindmap_status_controls QToolButton:hover {{ background:{colors.hover}; }}"
@@ -118,7 +144,9 @@ class _StatusViewControls(QWidget):
             f"QWidget#mindmap_status_controls QToolButton:focus {{ border-color:{colors.accent}; }}"
         )
         for key, button in self.buttons.items():
-            button.setFixedSize(22 if compact else 24, 18 if compact else 20)
+            width = button.fontMetrics().horizontalAdvance("400%") + 10 if key == "reset_zoom" else (
+                22 if compact else 24)
+            button.setFixedSize(width, 18 if compact else 20)
             if self._canvas is None:
                 name = "wheel_scroll" if key == "wheel_mode" else key
                 button.setIcon(toolbar_icon(name, colors.text, colors.muted, colors.accent))

@@ -103,7 +103,7 @@ def test_tab_menu_opens_hit_directory_without_activation(directory_window, tmp_p
     window.operation_log.clear()
 
     def choose_directory():
-        menu = bar.findChildren(QMenu)[-1]
+        menu = bar.findChildren(QMenu, options=Qt.FindChildOption.FindDirectChildrenOnly)[-1]
         try:
             assert window.plugins.instance("mindmap").active_session is other
             assert [action.text() for action in menu.actions()[:2]] == ["复制标签", "打开所在文件夹"]

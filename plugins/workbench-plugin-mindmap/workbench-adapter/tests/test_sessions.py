@@ -16,7 +16,7 @@ from mindmap_qt_editor.canvas import loading as background_loading
 from personal_workbench.app import build_window
 from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QImage, QInputMethodEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton, QToolButton, QWidget
 from shiboken6 import isValid
 
 
@@ -101,7 +101,7 @@ def test_real_background_process_saves_without_running_in_gui_process(
         assert session.document.autosave(background=True)
         future = session.document._background_save[0]
         qtbot.waitUntil(lambda: session.document._background_save is None, timeout=15000)
-        assert future.result() != os.getpid()
+        assert future.result().pid != os.getpid()
         assert not session.document.last_error and not session.engine.is_dirty
         assert load_document(session.files.path) == session.engine.document
     finally:
@@ -194,6 +194,87 @@ def test_background_failure_keeps_old_file_and_explicit_retry_succeeds(
     monkeypatch.setattr("workbench_plugin_mindmap.documents.save_snapshot", save_document)
     assert session.document.save() and not session.engine.is_dirty
     assert load_document(session.files.path).root.text == "必须保留的修改"
+
+
+@pytest.mark.parametrize("resolution", ["reload", "save_as", "restore"])
+def test_disk_conflict_pauses_autosave_and_can_be_resolved(empty_window, tmp_path, qtbot, monkeypatch, resolution):
+    """保存保护外部替换与删除，从文件菜单解决冲突后恢复正常写入。"""
+    window = empty_window
+    path = tmp_path / "共享.mindmap"
+    session = create(window, path)
+    if resolution == "restore":
+        path.unlink()
+        assert not window.save() and not path.exists() and not session.engine.is_dirty
+    else:
+        save_document(MindMapDocument.new("磁盘版本"), path)
+        session.engine.update_node(session.engine.root_id, text="工作台修改")
+        qtbot.waitUntil(lambda: session.files.state.conflict)
+        assert load_document(path).root.text == "磁盘版本" and session.engine.is_dirty
+        session.engine.update_node(session.engine.root_id, text="冲突后的修改")
+        assert not session.document.timer.isActive()
+        assert not window.save()
+
+    status = window.plugins.instance("mindmap")._status_controls.save_label
+    assert status.text() == "保存冲突" and status.isVisible()
+    menu = window.main_menu()
+    file_menu = next(action.menu() for action in menu.actions() if action.text() == "文件")
+    resolve = next(action.menu() for action in file_menu.actions() if action.text() == "处理保存冲突")
+    if resolution == "reload":
+        answer = QMessageBox.StandardButton.Cancel
+        monkeypatch.setattr(QMessageBox, "question", lambda *args: answer)
+        resolve.actions()[0].trigger()
+        assert session.engine.document.root.text == "冲突后的修改" and session.files.state.conflict
+        answer = QMessageBox.StandardButton.Yes
+        resolve.actions()[0].trigger()
+        assert session.engine.document.root.text == "磁盘版本"
+    elif resolution == "save_as":
+        target = tmp_path / "保留本地修改.mindmap"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+        resolve.actions()[-1].trigger()
+        assert session.files.path == target and load_document(target).root.text == "冲突后的修改"
+        assert load_document(path).root.text == "磁盘版本"
+    else:
+        resolve.actions()[0].trigger()
+        assert load_document(path).root.text == session.engine.document.root.text
+    menu.deleteLater()
+    assert not session.files.state.conflict and not session.document.last_error and not session.engine.is_dirty
+    assert status.text() == "已保存"
+
+
+def test_background_commit_detects_external_change_after_dispatch(
+    empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor,
+):
+    """工作进程已捕获旧版本时，外部写入仍会在原子替换边界阻止过期保存。"""
+    from workbench_plugin_mindmap.background_save import save_snapshot
+
+    session = create_large_session(empty_window, tmp_path / "后台冲突.mindmap")
+    started, release = Event(), Event()
+
+    def held_writer(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return save_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr("workbench_plugin_mindmap.documents.save_snapshot", held_writer)
+    try:
+        session.engine.update_node(session.engine.root_id, text="待写入的版本")
+        session.document.timer.stop()
+        status = empty_window.plugins.instance("mindmap")._status_controls.save_label
+        assert status.text() == "待保存"
+        assert session.document.autosave(background=True)
+        qtbot.waitUntil(started.is_set)
+        assert status.text() == "正在写入"
+        save_document(MindMapDocument.new("后来写入的磁盘版本"), session.files.path)
+        release.set()
+        qtbot.waitUntil(lambda: session.document._background_save is None)
+        assert session.files.state.conflict and session.engine.is_dirty
+        assert load_document(session.files.path).root.text == "后来写入的磁盘版本"
+        target = tmp_path / "后台冲突另存.mindmap"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+        assert empty_window.save(save_as=True)
+    finally:
+        release.set()
+        session.document._finish_background_save(wait=True)
 
 
 def test_explicit_save_waits_for_old_background_write_before_writing_new_version(
@@ -1030,6 +1111,9 @@ def test_autosave_keeps_inline_ime_and_property_draft(empty_window, tmp_path):
     session.canvas.begin_edit(session.engine.root_id)
     editor = session.canvas.editor
     editor.setPlainText("尚未提交的正文")
+    status = empty_window.plugins.instance("mindmap")._status_controls.save_label
+    empty_window.show_status_message("临时提示")
+    assert status.isVisible() and status.text() == "正在编辑"
     event = QInputMethodEvent("输入法候选", [])
     editor.inputMethodEvent(event)
     assert session.document.autosave()
@@ -1168,7 +1252,8 @@ def test_layout_restore_preserves_live_documents_and_restart_reopens_files(empty
     assert window.plugins.instance("mindmap").active_session is first
     assert all(window.host.editor.find_token(session.id) for session in (first, second))
     window.manager.save_session()
-    text = window.manager.storage_file.read_text("utf-8")
+    payload = json.loads(window.manager.storage_file.read_bytes())
+    text = json.dumps(payload["layout"], ensure_ascii=False)
     assert str(first.files.path) not in text and "甲.mindmap" not in text
     assert set(json.loads(text)) == {"schema_version", "session"}
     storage = window.manager.storage_dir

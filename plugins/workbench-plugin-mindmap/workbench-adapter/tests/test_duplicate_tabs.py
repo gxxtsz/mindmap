@@ -7,9 +7,10 @@ from types import SimpleNamespace
 import pytest
 from mindmap_core.formats import load_document, save_document
 from personal_workbench.app import build_window
-from PySide6.QtCore import QBuffer, QIODevice, QPointF, Qt, QTimer
+from PySide6.QtCore import QBuffer, QCoreApplication, QEvent, QIODevice, QPointF, Qt, QTimer
 from PySide6.QtGui import QContextMenuEvent, QImage, QInputMethodEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu
+from shiboken6 import isValid
 
 
 @pytest.fixture
@@ -107,7 +108,7 @@ def test_tab_context_menu_copies_hit_tab_without_activating_it_first(windows, tm
     bar = group.tabBar()
 
     def choose():
-        menu = bar.findChildren(QMenu)[-1]
+        menu = bar.findChildren(QMenu, options=Qt.FindChildOption.FindDirectChildrenOnly)[-1]
         try:
             assert window.plugins.instance("mindmap").active_session is second
             action = next(action for action in menu.actions() if action.text() == "复制标签")
@@ -120,6 +121,34 @@ def test_tab_context_menu_copies_hit_tab_without_activating_it_first(windows, tm
     bar.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, bar.mapToGlobal(point)))
     assert window.plugins.instance("mindmap").active_session.document is first.document
     assert window.plugins.instance("mindmap").active_session is not first
+
+
+def test_tab_menu_opens_a_single_document_in_a_new_split_and_releases_menu(windows, tmp_path):
+    window = windows()
+    source = new(window, tmp_path / "同一份导图.mindmap")
+    group, index = window.host.editor.find_token(source.id)
+    bar = group.tabBar()
+    opened = []
+
+    def choose():
+        menu = bar.findChildren(QMenu, options=Qt.FindChildOption.FindDirectChildrenOnly)[-1]
+        try:
+            opened.append(menu)
+            assert not next(action for action in menu.actions() if action.text() == "移到新分屏").isEnabled()
+            split = next(action.menu() for action in menu.actions() if action.text() == "在新分屏打开同一文档")
+            split.actions()[0].trigger()
+        finally:
+            menu.close()
+
+    QTimer.singleShot(0, choose)
+    point = bar.tabRect(index).center()
+    bar.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, bar.mapToGlobal(point)))
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    copied = window.documents.active
+    assert copied is not source and copied.document is source.document
+    assert window.host.editor.find_token(source.id)[0] is group
+    assert window.host.editor.find_token(copied.id)[0] is not group and len(window.host.editor.groups) == 2
+    assert opened and not isValid(opened[0])
 
 
 def test_failed_copy_rolls_back_registered_view_without_releasing_document(windows, tmp_path, monkeypatch):
@@ -340,7 +369,7 @@ def test_background_save_is_shared_and_newer_changes_remain_dirty(windows, tmp_p
     second = duplicate(window, first)
     submitted, future = [], Future()
 
-    def submit(function, document, path):
+    def submit(function, document, path, **kwargs):
         submitted.append((document, path))
         return future
 

@@ -335,6 +335,10 @@ def test_old_layout_adds_recent_panel_once_and_preserves_other_settings(windows,
     snapshot["theme"] = "dark"
     snapshot["hosts"]["main"]["region_sizes"]["dock"]["left"] = 319
     assert window.close()
+    state_file = window.state.store.path
+    state = json.loads(state_file.read_bytes())
+    state.pop("session_checkpoint")
+    state_file.write_text(json.dumps(state), encoding="utf-8")
     layout_file = tmp_path / "配置" / "workbench-layout-v1.json"
     layout_file.write_text(json.dumps({"schema_version": 1, "session": snapshot}), encoding="utf-8")
     restored = windows(restore=True)

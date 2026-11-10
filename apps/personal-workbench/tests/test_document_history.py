@@ -137,7 +137,7 @@ def test_restart_restores_tab_order_split_positions_and_active_document(history_
     payload = state_payload(window)
     assert [item["id"] for item in payload["views"]] == ordered
     assert payload["active_id"] == first.id
-    assert "甲.mindmap" not in window.manager.storage_file.read_text("utf-8")
+    assert "甲.mindmap" not in json.dumps(payload["layout"], ensure_ascii=False)
     saved_bytes = (tmp_path / "甲.mindmap").read_bytes()
     restored = build_window(storage_dir=storage)
     qtbot.addWidget(restored)
@@ -234,8 +234,15 @@ def test_document_records_and_layout_recover_independently(history_window, tmp_p
     window.manager.set_theme("dark")
     storage = window.manager.storage_dir
     assert window.close()
-    invalid = window.state.store.path if corrupt == "documents" else window.manager.storage_file
-    invalid.write_text("损坏的 JSON", "utf-8")
+    path = window.state.store.path
+    payload = json.loads(path.read_bytes())
+    if corrupt == "documents":
+        # 损坏主文件时，遗留的单独布局仍能用于降级启动。
+        path.with_name("workbench-layout-v1.json").write_text(json.dumps(payload["layout"]), "utf-8")
+        path.write_text("损坏的 JSON", "utf-8")
+    else:
+        payload["layout"] = {"schema_version": 0, "session": {}}
+        path.write_text(json.dumps(payload), "utf-8")
     restored = build_window(storage_dir=storage)
     qtbot.addWidget(restored)
     if corrupt == "documents":

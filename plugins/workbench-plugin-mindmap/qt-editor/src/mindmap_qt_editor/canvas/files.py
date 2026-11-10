@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from mindmap_core import FormatRegistration, MindMapDocument, MindMapEngine, MindMapError
 from mindmap_core.formats import load_document, load_validated_document, save_document, supports_owned_load
+from mindmap_core.formats.files import FileVersion, FileVersionConflict, check_file_version, file_version
 from mindmap_core.layouts import supports_incremental_layout
 from mindmap_qt_render.rendering import VisualFactory
 from PySide6.QtCore import QObject, Signal
@@ -21,6 +22,7 @@ _ADOPT_DOCUMENT = MindMapEngine.adopt_document
 _VALIDATE_DOCUMENT = MindMapWidget.validate_document
 _MEASURE_DOCUMENT = VisualFactory.measure
 _LOAD_DOCUMENT = load_document
+_SAVE_DOCUMENT = save_document
 
 
 class PendingEdits(Protocol):
@@ -37,14 +39,17 @@ class PendingEdits(Protocol):
 
 @dataclass
 class MindMapFileState:
-    """多个文件控制器共同持有的保存位置，不拥有画布、引擎或 Qt 对象。
+    """多个文件控制器共用的保存位置、磁盘版本及冲突标志。
 
     同一文档的视图传入同一实例；控制器仅在实际写入成功后更新 path，其他视图
     立即读取新路径。宿主负责统一保存调度和状态通知，不能把不同引擎绑定到同一
     实例。未显式传入时，每个控制器创建独立状态，保持原有单画布用法。
+    version 由已打开或实际写入的文件建立，冲突持续到重新加载或成功写入为止。
     """
 
     path: Path | None = None
+    version: FileVersion | None = field(default=None, init=False)
+    conflict: bool = field(default=False, init=False)
 
 
 class MindMapFileController(QObject):
@@ -63,7 +68,8 @@ class MindMapFileController(QObject):
     OPEN_FILTER = "思维导图 (*.mindmap)"
 
     def __init__(self, canvas, panels: PendingEdits, dialog_parent=None, *, writer=save_document,
-                 state: MindMapFileState | None = None, background_open: bool = False):
+                 state: MindMapFileState | None = None, background_open: bool = False,
+                 versioned_writer: bool = False):
         """绑定视图与写入器，可通过 state 共享路径；状态实例由调用方和控制器共同持有。
 
         省略 state 时行为与原接口一致；共享状态不自动共享引擎或提交其他视图输入，
@@ -72,11 +78,15 @@ class MindMapFileController(QObject):
         background_open=True 时大于 1 MiB 的标准原生文件在工作线程解析及校验，等待
         期间 GUI 继续处理事件并提供取消；返回值仍表示本次打开已完成。普通文件和
         扩展读取器保持同步，后台线程不访问画布、面板或引擎，取消不提交候选。
+        versioned_writer=True 表示初始注入的写入器支持与 save_document 相同的
+        expected_version 参数及返回值，负责在实际替换文件前再次核验版本。
+        其他自定义写入器沿用原签名，由控制器在调用前检查已绑定文件。
         """
         super().__init__(dialog_parent)
         self.canvas, self.engine, self.panels = canvas, canvas.engine, panels
         self.dialog_parent = dialog_parent
         self.writer = writer
+        self._versioned_writer = writer if versioned_writer else _SAVE_DOCUMENT
         self.state = state if state is not None else MindMapFileState()
         self._background_open = background_open
         self._opening = False
@@ -93,16 +103,21 @@ class MindMapFileController(QObject):
     @path.setter
     def path(self, value: Path | None) -> None:
         """设置所属文档的共享路径；宿主初始化可赋值，保存流程仅在写入成功后赋值。"""
-        self.state.path = value
+        if self.state.path != value:
+            self.state.path = value
+            self.state.version = None
+            self.state.conflict = False
 
     @property
     def is_dirty(self) -> bool:
         """只读返回引擎修改状态；原生导图打开不再产生待另存的导入状态。"""
         return self.engine.is_dirty
 
-    def report_error(self, message):
-        """把失败交给宿主的状态栏或日志，不自行显示阻塞错误对话框。"""
-        self.error_occurred.emit(message)
+    def report_error(self, error: str | Exception):
+        """通知宿主写入失败。磁盘冲突保留在共享文件状态中，信号继续传递中文文本。"""
+        if isinstance(error, FileVersionConflict):
+            self.state.conflict = True
+        self.error_occurred.emit(str(error))
 
     def format_filters(self, purpose: str) -> str:
         """打开与保存均返回唯一的原生格式筛选，其他用途抛出 MindMapError。
@@ -187,26 +202,35 @@ class MindMapFileController(QObject):
         不再接受导入格式选择；将 JSON 或文本改名为 .mindmap 也必须通过原生
         容器验证，不能通过扩展名绕过内容校验。失败不修改当前文档或保存标记。
         """
-        source = self.validate_open_path(path)
+        return self._open(self.validate_open_path(path))
+
+    def reload(self) -> bool:
+        """用磁盘最新内容替换当前文件。调用方须先检查关联视图并确认放弃本地修改。
+
+        沿用原生加载、后台取消及完整画布预检。任何失败都保留旧文档与磁盘版本。
+        """
+        return self.path is not None and self._open(self.validate_open_path(self.path), replacing=True)
+
+    def _open(self, source, *, replacing=False):
         if self._opening:
             return False
         self._opening = True
         try:
-            return self._open_path(source)
+            return self._open_path(source, replacing=replacing)
         finally:
             self._opening = False
 
-    def _open_path(self, source):
+    def _open_path(self, source, *, replacing):
         """在禁止同一控制器重入的边界内准备候选，全部预检成功后才提交。"""
         registry = self.canvas.format_registry
         # 宿主替换通用加载入口时继续调用它，避免原生优化绕过注入的读取调度。
         owned = load_document is _LOAD_DOCUMENT and supports_owned_load(registry)
-        background = False
-        if owned and self._background_open:
-            try:
-                background = source.stat().st_size > loading.BACKGROUND_OPEN_BYTES
-            except OSError as exc:
-                raise MindMapError(f"读取文档失败：{exc}") from exc
+        try:
+            version = file_version(source)
+        except OSError as exc:
+            raise MindMapError(f"读取文档失败：{exc}") from exc
+        background = (owned and self._background_open and version is not None
+                      and version.size > loading.BACKGROUND_OPEN_BYTES)
         if background:
             validation = loading.load_native_in_background(source, self.dialog_parent)
             if validation is None:
@@ -228,10 +252,14 @@ class MindMapFileController(QObject):
         else:
             validation = None
             self.canvas.validate_document(document, defer_inactive_pages=True)
-        if not self.confirm_replace():
+        if not replacing and not self.confirm_replace():
             return False
         if self.wait_for_pending_write is not None:
             self.wait_for_pending_write()
+        try:
+            check_file_version(source, version)
+        except (FileVersionConflict, OSError) as exc:
+            raise MindMapError(f"读取文档失败：{exc}，请重试") from exc
         if (owned and type(self.engine) is MindMapEngine
                 and getattr(self.engine.replace_document, "__func__", None) is _REPLACE_DOCUMENT):
             # 内置解码结果尚未发布，校验只读使用后直接交给引擎；扩展读取或引擎
@@ -243,8 +271,7 @@ class MindMapFileController(QObject):
                 self.engine.adopt_document(document)
         else:
             self.engine.replace_document(document)
-        self.path = source
-        self.state_changed.emit()
+        self.accept_file_version(source, version)
         # 初始视图使用正常倍率；由画布等待实际显示后居中，避免大型导图被整图
         # 适应压缩到无法阅读，也避免在会话安装前使用隐藏视口的占位尺寸。
         self.canvas.reset_view()
@@ -296,15 +323,37 @@ class MindMapFileController(QObject):
         """只保存已提交快照，不弹出选择框、不结束原地编辑或提交侧栏草稿。
 
         自动保存调用此边界；保存通知仅更新历史的保存位置，不产生新的编辑记录。
-        无绑定路径时报告错误并返回 False。即使当前快照没有修改，也先校验路径
-        和原生编解码器，避免错误绑定路径在保存全部或关闭时被当作保存成功。
+        无绑定路径时报告错误并返回 False。即使快照没有修改，也检查路径、原生
+        编解码器和磁盘版本，避免文件丢失或发生外部修改时被当作保存成功。
         """
         if self.path is None:
             self.report_error("导图尚未选择保存位置")
             return False
         return self._write_snapshot(self.path, only_if_dirty=True)
 
-    def _write_snapshot(self, target, *, only_if_dirty=False):
+    def restore_missing(self) -> bool:
+        """将已提交内容恢复到原路径。写入前再次要求该路径为空，防止覆盖重现的文件。"""
+        return self.path is not None and self._write_snapshot(self.path, restore_missing=True)
+
+    def expected_write_version(self, target: Path) -> FileVersion | None:
+        """返回写入目标的预期版本。原路径须匹配上次打开或保存，另存目标取当前版本。"""
+        if self.state.version is not None and self._is_bound_target(target):
+            check_file_version(target, self.state.version)
+            return self.state.version
+        return file_version(target)
+
+    def _is_bound_target(self, target: Path) -> bool:
+        return self.path is not None and (target == self.path or target.resolve() == self.path.resolve())
+
+    def accept_file_version(self, target: Path, version: FileVersion | None) -> None:
+        """记录已打开或写入的版本，解除共享文件的冲突并发出状态变更通知。
+
+        后台写入返回实际提交的版本，由宿主先更新引擎的保存快照再调用此方法。
+        """
+        self.state.path, self.state.version, self.state.conflict = target, version, False
+        self.state_changed.emit()
+
+    def _write_snapshot(self, target, *, only_if_dirty=False, restore_missing=False):
         """手动、自动及首次保存共用原生路径检查和原子写入，失败不更新绑定路径。
 
         自动保存的干净快照可跳过写盘，但不能跳过路径与格式检查。写入器始终接收
@@ -315,17 +364,30 @@ class MindMapFileController(QObject):
             self.require_native_save_format()
             if self.wait_for_pending_write is not None:
                 self.wait_for_pending_write()
+            if restore_missing:
+                check_file_version(target, None)
+                expected = None
+            else:
+                expected = self.expected_write_version(target)
             if only_if_dirty and not self.is_dirty:
+                self.state.conflict = False
                 return True
-            self.writer(
-                self.engine.document, target, registry=self.canvas.format_registry, format_id="mindmap"
-            )
-        except (MindMapError, OSError) as exc:
-            self.report_error(str(exc))
+            options = {"registry": self.canvas.format_registry, "format_id": "mindmap"}
+            if self.writer == self._versioned_writer:
+                options["expected_version"] = expected
+            version = self.writer(self.engine.document, target, **options)
+            if not isinstance(version, FileVersion):
+                version = file_version(target)
+        except FileVersionConflict as exc:
+            # 另存目标被修改时保留原绑定文件的冲突状态，允许稍后继续保存原文件。
+            self.report_error(exc if self._is_bound_target(target) else str(exc))
             return False
-        self.path = target
+        except (MindMapError, OSError) as exc:
+            self.report_error(exc)
+            return False
+        self.state.path = target
         self.engine.mark_saved()
-        self.state_changed.emit()
+        self.accept_file_version(target, version)
         return True
 
     def export_dialog(self, format_id: str = "svg"):

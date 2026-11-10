@@ -265,7 +265,8 @@ def test_context_menu_exposes_both_conversion_actions(workspace, monkeypatch):
         """保留真实 Qt 菜单构建，只跳过阻塞事件循环。"""
 
         def exec(self, position):
-            captured.extend(self.actions())
+            pages = next(action.menu() for action in self.actions() if action.text() == "页面")
+            captured.extend(pages.actions())
 
     monkeypatch.setattr("mindmap_qt_editor.canvas.widget.QMenu", InspectedMenu)
     canvas.context_menu(canvas.mapToGlobal(canvas.rect().center()))

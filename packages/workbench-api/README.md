@@ -16,6 +16,10 @@
 
 宿主发现插件时会导入清单所在的模块。将业务模块的导入和对象创建放在清单的 `activate(context)` 中，使宿主可以轻量发现插件。激活时通过上下文注册扩展，并返回实现 `dispose()` 的实例。参见[运行时的插件接入说明](../workbench-runtime/README.md#插件接入-api)。
 
+### 视图状态
+
+新视图默认进入活动分屏。登记时可传入 `after`，让复制视图直接插在源标签之后。编辑器在切页、平移或缩放后调用 `context.documents.view_state_changed(view.id)`，工作台合并连续通知并读取 `EditorView.capture_state()`，与标签和布局一起保存。视图快照返回可序列化数据，读取时保留输入状态和共享文档内容。
+
 ### 主菜单扩展
 
 使用 `workbench_api.qt.MenuLocation` 指定位置。工作台决定分区标题和顺序，插件提供该分区的动作及可用状态。

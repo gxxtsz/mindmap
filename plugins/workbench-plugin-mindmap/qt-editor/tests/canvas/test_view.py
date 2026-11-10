@@ -3,9 +3,10 @@
 import pytest
 from mindmap_core import LayoutConfig, MindMapEngine, MindMapError, Theme
 from mindmap_qt_editor.canvas import MindMapWidget
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QContextMenuEvent, QFocusEvent, QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
+from shiboken6 import isValid
 
 
 @pytest.fixture
@@ -131,6 +132,40 @@ def test_right_click_with_jitter_opens_one_menu_and_selects_target(canvas, monke
     context(view, end)
     assert len(menus) == 1 and widget.selected_node_ids() == [b]
     assert view.mapToScene(start) == old_position
+
+
+def test_right_click_menu_routes_canvas_single_and_multiple_selection_and_releases_menu(canvas, qtbot):
+    widget, first, second = canvas
+    view = widget.view
+    blank = QPoint(8, 8)
+    assert view.itemAt(blank) is None
+    widget.select_nodes([first, second])
+
+    def open_at(point):
+        opened, actions = [], []
+
+        def inspect():
+            menu = widget.findChildren(QMenu, options=Qt.FindChildOption.FindDirectChildrenOnly)[-1]
+            opened.append(menu)
+            actions.extend(menu.actions())
+            menu.close()
+
+        QTimer.singleShot(0, inspect)
+        qtbot.mouseClick(view.viewport(), Qt.MouseButton.RightButton, pos=point)
+        actions = {action.text() for action in actions if not action.isSeparator()}
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert opened and not isValid(opened[0])
+        return actions
+
+    assert open_at(blank) >= {"适应窗口", "回到中心"}
+    assert widget.selected_node_ids() == [first, second]
+    assert "删除" not in open_at(blank)
+    point = view.mapFromScene(widget.node_items[second].sceneBoundingRect().center())
+    multi = open_at(point)
+    assert multi >= {"删除", "复制"} and "页面" not in multi
+    assert widget.selected_node_ids() == [first, second]
+    widget.select_nodes([second])
+    assert open_at(point) >= {"删除", "页面", "图片和链接"}
 
 
 @pytest.mark.parametrize(

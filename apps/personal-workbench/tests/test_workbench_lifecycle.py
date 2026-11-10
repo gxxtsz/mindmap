@@ -1,6 +1,7 @@
 """导图分屏、局部输入、插件开关和历史会话恢复验收。"""
 
 import json
+from pathlib import Path
 
 import pytest
 from mindmap_core import MindMapError
@@ -30,8 +31,15 @@ def test_split_routes_commands_and_preserves_local_text_input(workspace, tmp_pat
     QApplication.processEvents()
     assert {view.id for view in window.documents.ordered()} == {mindmap.id, other.id}
     assert len(window.host.editor.groups) == 2
-    other.canvas.view.setFocus()
-    qtbot.keyClick(other.canvas.view, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    window.manager.activate_document(mindmap.id)
+    group, index = window.host.editor.find_token(other.id)
+    bar = group.tabBar()
+    # 右组的标签本来就已选中，点击时仍须将活动文档及焦点切换到右侧。
+    qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.tabRect(index).center())
+    assert window.documents.active is other
+    assert bar.property("activeGroup")
+    assert not window.host.editor.find_token(mindmap.id)[0].tabBar().property("activeGroup")
+    qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
     assert other.engine.document.root.text == "中心主题"
     assert mindmap.engine.document.root.text == "导图修改"
     window.manager.activate_document(mindmap.id)
@@ -49,6 +57,34 @@ def test_split_routes_commands_and_preserves_local_text_input(workspace, tmp_pat
     window.action("app.copy").trigger()
     assert QApplication.clipboard().text() == "局部输入"
     assert mindmap.engine.document.root.text == "中心主题"
+    window.manager.activate_document(other.id)
+    assert window.new_document(tmp_path / "在活动组新建.mindmap")
+    assert window.host.editor.find_token(window.documents.active.id)[0] is group
+
+
+def test_same_name_titles_and_full_paths_survive_split_and_restore(workspace, tmp_path, qtbot):
+    window = workspace
+    views = []
+    for folder in ("甲", "乙"):
+        path = tmp_path / folder / "项目" / "同名.mindmap"
+        path.parent.mkdir(parents=True)
+        assert window.new_document(path)
+        views.append(window.documents.active)
+    window.host.editor.split_token(views[1].id, Qt.Orientation.Horizontal)
+    for restore in (False, True):
+        if restore:
+            window.manager.restore_layout(window.manager.capture_layout())
+        for view, folder in zip(views, ("甲", "乙"), strict=True):
+            window.manager.activate_document(view.id)
+            group, index = window.host.editor.find_token(view.id)
+            suffix = str(Path(folder) / "项目")
+            assert group.tabText(index) == f"同名 · {suffix}"
+            assert group.tabToolTip(index) == str(view.document.path)
+            qtbot.waitUntil(lambda: suffix in window.recent_files_button.text())
+            assert window.recent_files_button.toolTip() == str(view.document.path)
+    assert window.manager.close_document(views[0].id)
+    group, index = window.host.editor.find_token(views[1].id)
+    assert group.tabText(index) == "同名"
 
 
 def test_disabled_plugin_restart_preserves_document_and_panel_layout(workspace, qtbot, tmp_path):

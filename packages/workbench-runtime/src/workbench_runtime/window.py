@@ -98,7 +98,8 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         manager = DockManager(application_id=self.config.application_id, storage_dir=directory,
                               theme=Theme(theme or "light"), preserve_open_documents=True,
                               shortcut_context=Qt.ShortcutContext.WindowShortcut,
-                              layout_store=WorkspaceLayoutStore(self.state))
+                              layout_store=WorkspaceLayoutStore(
+                                  self.state, lambda: (self.documents.snapshot(), self.documents.active_id)))
         manager.storage_file = manager.layout_store.path
         super().__init__(AppSpec(self.config.application_id, self.config.title, icon=self.config.icon,
                                  storage_dir=directory, theme=manager.theme), manager=manager)
@@ -450,7 +451,9 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         self.action("app.new").setEnabled(bool(self.providers))
         self.action("app.open").setEnabled(bool(self.providers))
         title = self.config.title
-        self.setWindowTitle(f"{'* ' if view.document.is_dirty else ''}{view.title} — {title}" if view else title)
+        if view:
+            title = f"{'* ' if view.document.is_dirty else ''}{self.documents.display_title(view)} — {title}"
+        self.setWindowTitle(title)
         self.status_label.setText("  " + (getattr(view, "status_text", "就绪") if view else "新建或打开文件以开始"))
         for identifier, spec in self.command_specs.items():
             self.action(identifier).setEnabled(spec.enabled())
@@ -478,6 +481,10 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
                                     QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
 
     def eventFilter(self, watched, event):
+        if self._ready and not self._disposed and watched is self and event.type() in (
+            QEvent.Type.Move, QEvent.Type.Resize,
+        ):
+            self.manager.schedule_save()
         if (not self._ready or self._disposed or self._opening_dropped_files or
                 event.type() not in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop) or
                 not isinstance(watched, QWidget) or (watched is not self and not self.isAncestorOf(watched))):
@@ -516,10 +523,9 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
             return
         # 先捕获仍然存活的视图与分屏，再提交退出快照；释放过程不能反写空会话。
         try:
-            self.manager.save_session()
-            self.state.save_session(self.documents.snapshot(), self.documents.active_id)
+            self.manager.save_session(raise_errors=True)
             self.settings.sync()
-        except OSError as error:
+        except (OSError, ValueError, TypeError) as error:
             self.show_status_message(f"退出会话未能保存：{error}")
             event.ignore()
             return
@@ -532,7 +538,7 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         self._disposed = True
         QApplication.instance().removeEventFilter(self)
         self.edit_commands.dispose()
-        self.manager.shutdown()
         self.state.restoring = True
+        self.manager.shutdown()
         self.documents.dispose()
         self.plugins.dispose()

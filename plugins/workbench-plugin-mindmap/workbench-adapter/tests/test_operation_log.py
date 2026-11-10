@@ -660,7 +660,7 @@ def test_background_document_save_logs_only_failure_with_own_source(
     if background:
         future = Future()
         monkeypatch.setattr(sessions_module, "BACKGROUND_SAVE_NODE_LIMIT", 0)
-        monkeypatch.setattr(sessions_module, "_save_pool", lambda: SimpleNamespace(submit=lambda *args: future))
+        monkeypatch.setattr(sessions_module, "_save_pool", lambda: SimpleNamespace(submit=lambda *args, **kw: future))
         assert first.document.autosave(background=True)
         assert entries(window) == []
         if failed:
