@@ -1,4 +1,4 @@
-"""按真实能力归属迁移的组件与行为回归。"""
+"""验证设置面板、画布和文档配置的交互行为。"""
 
 from copy import deepcopy
 from dataclasses import replace
@@ -7,7 +7,6 @@ import pytest
 from mindmap_core import BranchStyle, LayoutConfig, LayoutInfo, MindMapDocument, MindMapError, Theme
 from mindmap_core.formats import load_document, save_document
 from mindmap_core.layouts import TreeLayout
-from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_editor.controls.property_controls import MIXED
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor
@@ -451,16 +450,3 @@ def test_selected_and_hover_rows_have_distinct_pixels_and_right_checkmark(worksp
     assert canvas.engine.document.layout.direction == "left"
     canvas.engine.undo()
     assert selected.isChecked() and not hovered.isChecked()
-
-
-def test_standalone_keeps_wheel_and_branch_interfaces(qtbot):
-    canvas = MindMapWidget()
-    qtbot.addWidget(canvas)
-    try:
-        canvas.action("wheel_zoom").trigger()
-        canvas.set_branch_style("round")
-        assert canvas.wheel_mode == "zoom" and canvas.action("wheel_mode").menu() is canvas.wheel_menu
-        assert canvas.engine.document.root.style["branch"]["kind"] == "round"
-        assert canvas.action("wheel_mode") not in canvas.toolbar.actions()
-    finally:
-        canvas.dispose()

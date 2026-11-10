@@ -43,10 +43,8 @@ plugins/
   workbench-plugin-mindmap/
     core/                       模型、编辑引擎、内置布局、文档格式
     qt-render/                  Qt 测量、静态绘制与图形导出
-    qt-editor/                  Qt 交互画布、业务面板与共享控件
+    qt-editor/                  Qt 交互画布、业务面板、共享控件及组合测试
     workbench-adapter/          工作台插件入口、文档会话与自动保存
-    tests/integration/          导图组件组合测试
-    scripts/                    导图性能与桌面专项验收
 ```
 
 工作区包含 **7 个独立分发包**。通用能力使用 `workbench-*` 名称，产品入口使用 `personal-workbench`，导图专属组件使用 `mindmap-*`。
@@ -65,8 +63,6 @@ uv run --locked --no-sync ruff check .
 uv lock --check
 uv build --all-packages
 ```
-
-性能与导图专项命令见[导图验收脚本](plugins/workbench-plugin-mindmap/scripts/README.md)。
 
 ## 开发文档
 

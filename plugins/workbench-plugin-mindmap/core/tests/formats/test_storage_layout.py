@@ -1,4 +1,4 @@
-"""文件往返、异常保护和布局几何测试。"""
+"""验证深层导图经过 JSON 往返后仍可完成布局。"""
 
 from mindmap_core import MindMapDocument, Node
 from mindmap_core.formats import dumps, loads

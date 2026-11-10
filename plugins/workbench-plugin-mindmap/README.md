@@ -1,7 +1,7 @@
 # 思维导图插件
 
 通过公开工作台 API 提供 `.mindmap` 编辑器、业务面板、页面历史、共享视图和自动保存。
-导图专属源码、组件测试、组合测试和验收脚本集中在本目录。
+导图专属源码、组件测试和组合测试集中在本目录。
 
 ## 目录与分发边界
 
@@ -11,8 +11,7 @@
 | [qt-render](qt-render/README.md) | `mindmap-qt-render` 提供 Qt 测量、静态绘制与图形导出 |
 | [qt-editor](qt-editor/README.md) | `mindmap-qt-editor` 提供画布、业务面板、共享控件与文件控制器 |
 | [workbench-adapter](workbench-adapter/README.md) | `workbench-plugin-mindmap` 负责插件注册、文档与视图会话、面板装配和自动保存 |
-| `tests/integration/` | 引擎、格式、画布与面板的业务组合验收 |
-| [scripts](scripts/README.md) | 导图性能基准、绘制和桌面专项验收 |
+| `qt-editor/tests/integration/` | 画布、面板与引擎的组合回归 |
 
 四个分发包直接注册到仓库根 uv 工作区，各自管理 `src/`、`tests/`、许可证和构建元数据。
 从任意成员目录均可使用根锁文件及环境。
@@ -39,7 +38,6 @@ uv run --locked --package personal-workbench personal-workbench
 | 共享控件、色板与图标 | `mindmap_qt_editor.controls`、`mindmap_qt_editor.theme`、`mindmap_qt_editor.icons` |
 | 工作台插件清单 | `workbench_plugin_mindmap:manifest` |
 
-## 开发与验收
+## 工作台接入
 
 - 公开协议、注册、生命周期及兼容策略见[工作台运行时](../../packages/workbench-runtime/README.md)。
-- 导图性能与桌面专项验收见[导图专项脚本](scripts/README.md)。

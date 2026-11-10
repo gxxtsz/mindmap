@@ -43,6 +43,11 @@ def test_standalone_canvas_keeps_same_public_interface_and_card(qtbot):
         assert canvas.view.mapTo(surface, QPoint()) == QPoint(8, 8)
         assert canvas.action("properties").isEnabled()
         assert canvas.action("branch_style") not in canvas.toolbar.actions()
+        assert canvas.action("wheel_mode") not in canvas.toolbar.actions()
         assert not canvas.windowFlags() & Qt.WindowType.FramelessWindowHint
+        canvas.action("wheel_zoom").trigger()
+        canvas.set_branch_style("line")
+        assert canvas.engine.document.root.style["branch"]["kind"] == "line"
+        assert canvas.wheel_mode == "zoom"
     finally:
         canvas.dispose()

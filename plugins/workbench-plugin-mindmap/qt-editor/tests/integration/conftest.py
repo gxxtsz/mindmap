@@ -1,4 +1,4 @@
-"""导图画布与面板的真实组合夹具；仅由导图集成用例共享。"""
+"""画布、侧栏和设置菜单的组合测试夹具。"""
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication
 
 @pytest.fixture
 def composition_factory(qtbot):
-    """只组合正式画布和面板，不实现已删除工作区的停靠或浮动功能。"""
+    """组装正式画布和面板，并在测试结束后释放控件及文档订阅。"""
     from mindmap_core import MindMapDocument, MindMapEngine
     from mindmap_qt_editor.canvas import MindMapWidget
     from mindmap_qt_editor.panels import MindMapPanels
@@ -78,7 +78,7 @@ def composition_factory(qtbot):
 
 @pytest.fixture
 def workspace(composition_factory):
-    """三节点测试数据；名称沿用测试历史，不对应任何发行组件。"""
+    """提供包含两个一级分支和一个叶节点的画布与面板组合。"""
     from mindmap_core import MindMapDocument, MindMapEngine
 
     engine = MindMapEngine(MindMapDocument.new("根主题"))

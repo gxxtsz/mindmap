@@ -1,7 +1,4 @@
-"""按真实能力归属迁移的组件与行为回归。"""
-
-
-
+"""验证画布和面板处理文档事件时复用快照及图元。"""
 
 from mindmap_core import MindMapDocument, MindMapEngine, Node
 from mindmap_qt_editor.canvas import MindMapWidget

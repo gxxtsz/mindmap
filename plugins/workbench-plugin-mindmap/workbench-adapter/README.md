@@ -24,7 +24,7 @@ uv run --locked --package personal-workbench personal-workbench
 - `src/workbench_plugin_mindmap/`：插件装配、文档与视图会话、业务日志及页面历史。
 - `tests/`：导图自动保存、共享视图、收藏、灵感及页面恢复等回归测试。
 - 核心、渲染和 Qt 编辑器通过分发包依赖安装，工作台接入通过 `workbench-api` 的公开协议完成。
-- 源码发行包和 wheel 只包含本包内容，构建验收逐个验证所有成员的依赖及资源。
+- 源码发行包和 wheel 收录本包内容，运行时依赖由分发元数据声明。
 
 ## 文档与视图生命周期
 
@@ -33,4 +33,4 @@ uv run --locked --package personal-workbench personal-workbench
 - `editor_provider.py` 的 `MindMapEditorProvider` 创建、打开和复制视图，并通过公开文档服务登记。平台负责通用标签和批量关闭，提供者只协调导图专属装配。
 - `controller.py` 注册轻量清单激活后的菜单、面板、状态栏和偏好，不承担文档存储。
 
-跨导图组件的组合测试位于上级 `tests/integration/`；性能与桌面专项脚本位于上级 `scripts/`。
+画布与面板的组合用例见 [Qt 编辑器集成测试](../qt-editor/tests/integration/)。

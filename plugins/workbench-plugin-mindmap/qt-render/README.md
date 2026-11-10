@@ -8,7 +8,7 @@
 
 - [安装与依赖](#安装与依赖)
 - [独立导出](#独立导出)
-- [字体渲染与多倍率验收](#字体渲染与多倍率验收)
+- [字体渲染](#字体渲染)
 - [节点与附页标记](#节点与附页标记)
 
 ## 安装与依赖
@@ -44,9 +44,9 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 - 默认树布局由 `mindmap_core.layouts` 提供。自定义宿主也可实现核心 `LayoutAlgorithm` 并注册到 `LayoutRegistry` 后传入导出器。
 
-- 独立安装验收使用自定义布局验证三种图形输出。
+- 导出测试使用自定义布局验证三种图形输出。
 
-## 字体渲染与多倍率验收
+## 字体渲染
 
 ### 字体策略
 
@@ -65,24 +65,6 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 ### 绘图状态
 
 - 正文、标签、备注和折叠计数的独立绘制均显式开启文字抗锯齿；节点、文本及编辑器绘制在正常完成、提前返回或异常时恢复调用方的绘图状态，避免影响相邻图元。
-
-### 视觉验收
-
-- 在仓库根目录运行下面的视觉验收命令。
-
-- `--baseline-ref` 指向修改前的本地提交，省略该参数时只生成当前版本的样例；输出写入 `.artifacts/text-rendering`，不读取用户导图或本机偏好。
-
-```powershell
-uv run --locked --all-packages python plugins/workbench-plugin-mindmap/scripts/verify_text_rendering.py --platform windows --baseline-ref <修改前的提交哈希>
-```
-
-- 验收覆盖明暗主题，中文、英文、混排、数字标点、粗斜体、下划线、字体回退和 Markdown，画布倍率为 10%、50%、75%、100%、115%、125%、150%、200%、400%，设备像素比为1、1.25、1.5、2。
-
-- 每张对照图的样例以原始物理像素并排排列，不再缩放；同时生成四种分辨率的 PNG 及保留矢量文字的 SVG、PDF，并记录布局及缓存检查结果。
-
-- 隐藏画布还会在全部九个倍率下验证原地编辑几何、输入法候选隔离、确认、取消和撤销。
-
-- Windows 视觉验收使用原生 `windows` 平台；`offscreen` 可用于功能回归，字体渲染效果可能因离屏字体库及后端不同而与桌面环境有差异。
 
 ## 节点与附页标记
 
