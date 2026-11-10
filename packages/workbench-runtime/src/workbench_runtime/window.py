@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 from workbench_api import OperationStatus, PluginContext
+from workbench_api.qt import MenuLocation
 
 from .commands import EditCommandRouter
 from .config import WorkbenchConfig
@@ -24,7 +26,7 @@ from .operation_log import OperationLogPanel
 from .palette import colors_from_theme
 from .plugins import PluginManager
 from .recent_files import RecentFilesButton
-from .services import CommandRegistry, EditorRegistry, ScopedDocuments, UiService
+from .services import CommandRegistry, EditorRegistry, ScopedDocuments, UiService, menu_location
 from .state import Settings, StateStore, WorkspaceLayoutStore
 from .storage import JsonLayoutStore
 from .ui.docking import DockManager, DockPosition, Theme, ToolWindowSpec
@@ -106,9 +108,6 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
             "operation_log", "操作日志", lambda: self.operation_log, "log", DockPosition.BOTTOM_LEFT, "Alt+5",
             header_actions=(self.operation_log.copy_all_action, self.operation_log.clear_action),
         ))
-        self.log_action = manager.actions["tool:operation_log"]
-        self.log_action.setCheckable(True)
-        manager.layout_changed.connect(self._sync_log_action)
         manager.activate("operation_log", focus=False)
         self._register_actions()
         self.edit_commands = EditCommandRouter(self)
@@ -318,46 +317,125 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
     def show_plugin_manager(self):
         self.plugins.show_dialog(self)
 
-    def main_menu(self):
+    def main_menu(self) -> QMenu:
+        """按宿主分区装配临时主菜单，标准编辑动作始终由工作台摆放。"""
         self.edit_commands.refresh()
-        menu = super().main_menu()
-        sections = {item.text(): item.menu() for item in menu.actions() if item.menu()}
-        anchor = next((item for item in menu.actions() if item.text() == "设置"), None)
-        for title in ("编辑", "视图"):
-            section = QMenu(title, menu)
-            sections[title] = section
-            menu.insertMenu(anchor, section)
-        view = self.documents.active
-        if view:
-            for title, actions in getattr(view, "menu_actions", {}).items():
-                for action in actions:
-                    standard = next((key for key, value in getattr(view, "edit_actions", {}).items()
-                                     if value is action), None)
-                    sections[title].addAction(self.edit_commands.actions[standard] if standard else action)
-        if not view or isinstance(view, MissingView):
-            sections["编辑"].addActions(list(self.edit_commands.actions.values()))
-        for identifier, (_owner, provider) in self.providers.items():
-            sections["文件"].insertAction(self.action("app.open"), self._new_action(sections["文件"], identifier, provider))
-        for contribution in self.menu_contributions:
-            if contribution.menu in sections:
-                contribution.populate(sections[contribution.menu])
-        for identifier, spec in self.command_specs.items():
-            if spec.menu in sections:
-                sections[spec.menu].addAction(self.action(identifier))
-        sections["视图"].addAction(self.log_action)
+        menu, groups, settings = self._build_main_menu()
+        files = groups["文件"]
+        sections = {MenuLocation.FILE: files, MenuLocation.SETTINGS: settings}
+        for location, title in ((MenuLocation.EDIT, "编辑"), (MenuLocation.VIEW, "视图")):
+            section = groups.get(title)
+            if section is None:
+                section = QMenu(title, menu)
+                menu.insertMenu(settings.menuAction(), section)
+            sections[location] = section
+
+        self._populate_new_menu(files)
+        edit = sections[MenuLocation.EDIT]
+        first = next(iter(edit.actions()), None)
+        edit.insertActions(first, list(self.edit_commands.actions.values()))
+        edit.insertSeparator(self.edit_commands.actions["cut"])
+        if first is not None:
+            edit.insertSeparator(first)
+
+        exports = QMenu("导出当前页", files)
+        sections[MenuLocation.FILE_EXPORT] = exports
+        self._append_plugin_menu_items(sections)
+        export_actions = [action for action in exports.actions() if not action.isSeparator()]
+        if export_actions:
+            exports.setIcon(self.manager.theme.icon("export-image"))
+            exports.menuAction().setProperty("workbench_icon", "export-image")
+            exports.setEnabled(any(action.isEnabled() for action in export_actions))
+            files.insertMenu(self.action("app.quit"), exports)
+        self._append_panels_menu(sections[MenuLocation.VIEW])
         return menu
 
-    def _sync_log_action(self):
-        """日志属于平台，在没有任何编辑器插件时也要同步面板勾选状态。"""
-        self.log_action.setChecked(self.manager.states["operation_log"].visible)
-
-    def _new_action(self, menu, identifier, provider):
-        action = menu.addAction("新建" + provider.title)
-        action.setIcon(self.manager.theme.icon(provider.icon))
-        action.setProperty("workbench_icon", provider.icon)
-        action.triggered.connect(lambda: self.new_document(provider_id=identifier))
+    def _populate_new_menu(self, menu):
+        """单编辑器复用新建动作，多编辑器从子菜单选择，窗口快捷键始终可路由。"""
+        action = self.action("app.new")
+        if len(self.providers) == 1:
+            _owner, provider = next(iter(self.providers.values()))
+            action.setText("新建" + provider.title)
+            return
+        action.setText("新建")
+        if not self.providers:
+            return
+        choices = QMenu("新建", menu)
+        choices.setIcon(action.icon())
+        choices.menuAction().setProperty("workbench_icon", action.property("workbench_icon"))
+        for identifier, (_owner, provider) in self.providers.items():
+            choice = choices.addAction(self.manager.theme.icon(provider.icon), provider.title)
+            choice.triggered.connect(lambda checked=False, key=identifier:
+                                     self.call(lambda: self.new_document(provider_id=key)))
+        menu.insertMenu(action, choices)
+        # 仅从弹出菜单移除，新建命令仍挂在工作台窗口上并保留 Ctrl+N。
         menu.removeAction(action)
-        return action
+
+    def _append_plugin_menu_items(self, sections):
+        """先装配单个贡献，再合入宿主分区。失败的贡献不会留下半组动作。"""
+        items = {location: [] for location in sections}
+        self._collect_legacy_view_menu_items(items)
+        for plugin_id, contribution in tuple(self.menu_contributions):
+            section = sections[contribution.menu]
+            staging = QMenu(section.title(), section)
+            try:
+                contribution.populate(staging)
+                items[contribution.menu].extend(staging.actions())
+            except Exception as error:
+                staging.deleteLater()
+                self.record_operation(f"插件 {plugin_id} 的菜单填充失败：{error}", level="error")
+        for identifier, spec in self.command_specs.items():
+            if spec.menu:
+                items[spec.menu].append(self.action(identifier))
+
+        view_actions = getattr(self.documents.active, "edit_actions", {})
+        for location, actions in items.items():
+            menu = sections[location]
+            excluded = set(menu.actions())
+            if location == MenuLocation.EDIT:
+                excluded.update(view_actions[key] for key in self.edit_commands.actions if key in view_actions)
+            additions = [action for action in dict.fromkeys(actions) if action not in excluded]
+            if not additions:
+                continue
+            if location == MenuLocation.EDIT:
+                menu.addSeparator()
+            anchor = self.action("app.quit") if location == MenuLocation.FILE else None
+            menu.insertActions(anchor, additions)
+
+    def _collect_legacy_view_menu_items(self, items):
+        """兼容旧视图的 menu_actions 扩展，校验整组后再合入菜单。"""
+        view = self.documents.active
+        try:
+            groups = [(menu_location(name), list(actions))
+                      for name, actions in getattr(view, "menu_actions", {}).items()]
+            if any(not isinstance(action, QAction) or not isValid(action)
+                   for _, actions in groups for action in actions):
+                raise TypeError("编辑器菜单动作必须为有效的 QAction")
+        except Exception as error:
+            plugin_id = self.documents.owners.get(view.id, "未知")
+            self.record_operation(f"插件 {plugin_id} 的编辑器菜单填充失败：{error}", level="error")
+            return
+        for location, actions in groups:
+            items[location].extend(actions)
+
+    def _append_panels_menu(self, menu):
+        """按当前可用的工具生成显隐开关，停靠状态和切换行为仍由管理器维护。"""
+        if menu.actions():
+            menu.addSeparator()
+        panels = menu.addMenu("面板")
+        for identifier, spec in self.manager.specs.items():
+            if not self.manager.is_tool_available(identifier):
+                continue
+            action = panels.addAction(self.manager.theme.icon(spec.icon), spec.title)
+            action.setCheckable(True)
+            action.setChecked(self.manager.states[identifier].visible)
+            if spec.shortcut:
+                # 菜单内显示快捷键，常驻的窗口快捷键仍由停靠管理器负责。
+                action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+                action.setShortcut(spec.shortcut)
+            action.triggered.connect(lambda checked=False, key=identifier:
+                                     self.call(lambda: self.manager.toggle(key)))
+        panels.setEnabled(bool(panels.actions()))
 
     def refresh_document(self, *_):
         if not self._ready or self._disposed:
@@ -385,7 +463,6 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         if not self._ready:
             return
         self.operation_log.set_ui_colors(colors_from_theme(self.manager.theme), compact=self.manager.theme.compact)
-        self.log_action.setIcon(self.manager.theme.icon("log"))
         self.recent_files_button.refresh_theme()
         for group in self.host.editor.groups:
             if group.empty_widget:

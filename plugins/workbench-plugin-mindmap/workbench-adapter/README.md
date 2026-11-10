@@ -15,6 +15,8 @@
 `personal_workbench.plugins` 入口点组以 `mindmap` 注册 `workbench_plugin_mindmap:manifest`。
 发现阶段读取轻量清单，启用后的激活阶段才导入导图业务实现。
 
+打开导图后，「文件 → 导出当前页」提供 PNG、SVG、PDF 和 TXT 四种格式。「编辑」保留常用的添加节点、编辑文字和节点属性入口，其余动作按节点结构、页面、灵感和图片归组。导图设置及其他可用侧栏统一列在「视图 → 面板」。
+
 ## 目录与依赖
 
 - `src/workbench_plugin_mindmap/`：插件装配、文档与视图会话、业务日志及页面历史。

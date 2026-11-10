@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from PySide6.QtGui import QAction, QColor, QIcon
@@ -10,16 +11,33 @@ from PySide6.QtWidgets import QMenu, QWidget
 from .contracts import Disposable
 
 
+class MenuLocation(StrEnum):
+    """主菜单贡献位置。标识与显示文字无关，分区标题和顺序由宿主决定。
+
+    FILE_EXPORT 对应「文件」下的「导出当前页」子菜单。其他位置接收所属菜单的扩展动作，
+    例如 EDIT 的扩展动作排在宿主的标准编辑命令之后。
+    """
+
+    FILE = "file"
+    FILE_EXPORT = "file.export"
+    EDIT = "edit"
+    VIEW = "view"
+    SETTINGS = "settings"
+
+
 @dataclass(frozen=True)
 class CommandSpec:
-    """命令可加入菜单或快捷键；enabled 每次活动上下文变化时重新求值。"""
+    """声明可复用的命令。menu 使用 MenuLocation，空字符串表示无需菜单入口。
+
+    enabled 在活动上下文变化时重新求值，工作台将结果同步到菜单和快捷键共用的动作。
+    """
 
     id: str
     title: str
     callback: Callable
     shortcut: str = ""
     icon: str = ""
-    menu: str = ""
+    menu: MenuLocation | str = ""
     enabled: Callable[[], bool] = lambda: True
 
 
@@ -39,9 +57,13 @@ class PanelSpec:
 
 @dataclass(frozen=True)
 class MenuContribution:
-    """菜单打开时填充，按当前文档提供动作；构造时不保留其他视图的绑定。"""
+    """菜单打开时按当前文档填充。menu 使用 MenuLocation 指定宿主分区。
 
-    menu: str
+    populate 仅收到本次贡献的临时菜单，成功后宿主才合入其中的动作。临时子菜单使用
+    menu.addMenu(标题) 创建，随主菜单释放。复用的文档动作仍由所属视图管理。
+    """
+
+    menu: MenuLocation | str
     populate: Callable[[QMenu], None]
 
 
@@ -108,7 +130,9 @@ class UiService(Protocol):
 
     def register_status(self, spec: StatusItemSpec) -> Disposable: ...
 
-    def contribute_menu(self, contribution: MenuContribution) -> Disposable: ...
+    def contribute_menu(self, contribution: MenuContribution) -> Disposable:
+        """登记动态菜单贡献并返回注销句柄。未知位置在注册时抛出 ValueError。"""
+        ...
 
     def subscribe_active(self, callback: Callable) -> Disposable: ...
 

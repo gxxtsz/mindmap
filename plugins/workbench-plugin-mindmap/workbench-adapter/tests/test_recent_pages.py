@@ -303,7 +303,13 @@ def test_sidebar_shortcut_theme_layout_and_restart(windows, tmp_path, qtbot, vis
     QApplication.processEvents()
     qtbot.keyClick(window, Qt.Key.Key_7, Qt.KeyboardModifier.AltModifier)
     assert not window.manager.states["recent_pages"].visible
-    window.plugins.instance("mindmap").recent_pages_action.trigger()
+    menu = window.main_menu()
+    view = next(action.menu() for action in menu.actions() if action.text() == "视图")
+    panels = next(action.menu() for action in view.actions() if action.text() == "面板")
+    recent_pages = next(action for action in panels.actions() if action.text() == "最近访问")
+    assert not recent_pages.isChecked()
+    recent_pages.trigger()
+    menu.deleteLater()
     assert window.manager.states["recent_pages"].visible
     window.manager.move("recent_pages", DockTarget(DockPosition.LEFT_BOTTOM))
     window.manager.set_theme("dark")

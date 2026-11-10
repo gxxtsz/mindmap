@@ -122,15 +122,6 @@ class MindMapEditorView(QObject):
     def toolbar_actions(self):
         return [self.canvas.action("undo"), self.canvas.action("redo")]
 
-    @property
-    def menu_actions(self):
-        groups = {"编辑": ("undo", "redo", "add_inspiration", "move_to_inspiration", "attach_inspirations",
-                "group_inspirations", "add_child", "add_sibling", "insert_parent", "edit", "properties",
-                "delete", "convert_descendants_to_submap", "convert_submap_to_descendants", "set_page_reference",
-                "open_page_reference", "clear_page_reference", "copy", "cut", "paste", "select_all", "image", "image_url"),
-                "视图": ("zoom_in", "zoom_out", "expand_all", "collapse_all")}
-        return {title: [self.canvas.action(key) for key in keys] for title, keys in groups.items()}
-
     def prepare_input(self):
         if self.is_composing:
             self.owner.window.show_status_message("请先完成输入法候选，再保存或关闭导图")

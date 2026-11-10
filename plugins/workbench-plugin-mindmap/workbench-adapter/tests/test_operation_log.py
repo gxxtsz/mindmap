@@ -710,11 +710,8 @@ def test_export_success_and_failure_are_logged_once(log_window, tmp_path, monkey
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
     menu = window.main_menu()
     files = next(action.menu() for action in menu.actions() if action.text() == "文件")
-    if format_id == "txt":
-        action = next(action for action in files.actions() if action.text() == "导出当前页为 TXT…")
-    else:
-        exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
-        action = next(action for action in exports.actions() if action.data() == format_id)
+    exports = next(action.menu() for action in files.actions() if action.text() == "导出当前页")
+    action = next(action for action in exports.actions() if action.data() == format_id)
     action.trigger()
     assert target.is_file() and len(entries(window)) == 1
     assert "[信息] [导出源.mindmap] 已导出：" in entries(window)[0]

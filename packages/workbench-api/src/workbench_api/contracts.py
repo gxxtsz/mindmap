@@ -96,7 +96,11 @@ class DocumentHandle(Protocol):
 
 
 class EditorView(Protocol):
-    """独立标签协议；widget 的实际 QWidget 类型在 Qt 注册边界校验。"""
+    """独立标签协议，widget 的实际 QWidget 类型在 Qt 注册边界校验。
+
+    edit_actions 提供视图支持的标准编辑动作，以 undo、redo、cut、copy、paste、
+    select_all 为键。宿主负责菜单摆放和快捷键路由，插件可按视图能力省略相应的键。
+    """
 
     id: str
     document: DocumentHandle

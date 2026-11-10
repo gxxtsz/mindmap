@@ -367,11 +367,11 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     menu = window.main_menu()
     files = menu.actions()[0].menu()
     assert [action.text() for action in files.actions()] == [
-        "新建", "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "退出",
+        "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "退出",
     ]
-    for title in ("导出图形", "导出当前页为 TXT…"):
-        assert all(action.text() != title for action in files.actions())
     assert not menu.actions()[1].menu().actions()[0].isEnabled()
+    panels = menu.actions()[2].menu().actions()[0].menu()
+    assert [action.text() for action in panels.actions()] == ["操作日志"]
     menu.deleteLater()
     session = create(window, tmp_path / "第一份.mindmap")
     assert not group.empty_widget.isVisible() and group.count() == 1

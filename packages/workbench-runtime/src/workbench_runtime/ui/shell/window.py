@@ -280,7 +280,12 @@ class _TitleBar(QWidget):
             button.refresh_theme()
 
     def show_menu(self):
-        self.window.main_menu().exec(self.menu.mapToGlobal(QPoint(0, self.menu.height())))
+        """弹出本次装配的主菜单，关闭后释放临时菜单及其子菜单。"""
+        menu = self.window.main_menu()
+        try:
+            menu.exec(self.menu.mapToGlobal(QPoint(0, self.menu.height())))
+        finally:
+            menu.deleteLater()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.window.windowHandle():
@@ -554,16 +559,23 @@ class WorkbenchWindow(QMainWindow):
         with _preserve_windows_placement(int(handle.winId())):
             handle.setFlag(flag, enabled)
 
-    def main_menu(self):
-        """根据动作声明动态构建菜单，业务菜单与内建工作区菜单共用动作实例。"""
+    def main_menu(self) -> QMenu:
+        """构建供本次弹出使用的主菜单，调用方在使用完毕后负责释放。"""
+        return self._build_main_menu()[0]
+
+    def _build_main_menu(self):
+        """返回临时根菜单及已装配的分区，供运行时复用共享动作和外观菜单。"""
         menu = QMenu(self)
         groups = {}
         for spec in self._action_specs:
             if spec.menu not in groups:
                 groups[spec.menu] = menu.addMenu(spec.menu)
             groups[spec.menu].addAction(self.manager.actions[spec.id])
-        menu.addMenu(self.appearance_menu())
-        return menu
+        settings = self.appearance_menu()
+        # addMenu 接收现有 QMenu 时保留其所有者，显式挂到本次弹出的根菜单下。
+        settings.setParent(menu, settings.windowFlags())
+        menu.addMenu(settings)
+        return menu, groups, settings
 
     def appearance_menu(self):
         """构建平铺设置菜单；外观、界面显示、布局三组仅用分隔线区分。

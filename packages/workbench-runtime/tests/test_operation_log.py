@@ -34,7 +34,6 @@ def test_log_is_available_without_document_and_toggle_reuses_panel(log_window, q
     assert window.host.region_sizes["dock"]["bottom"] == 260
     assert window.manager.is_tool_available("operation_log")
     assert window.manager.specs["operation_log"].shortcut == "Alt+5"
-    assert not window.log_action.icon().isNull()
 
     def toggle():
         if entry == "shortcut":
@@ -43,8 +42,11 @@ def test_log_is_available_without_document_and_toggle_reuses_panel(log_window, q
         elif entry == "menu":
             menu = window.main_menu()
             view = next(action.menu() for action in menu.actions() if action.text() == "视图")
-            assert window.log_action in view.actions() and window.log_action.isEnabled()
-            window.log_action.trigger()
+            panels = next(action.menu() for action in view.actions() if action.text() == "面板")
+            action = next(action for action in panels.actions() if action.text() == "操作日志")
+            assert action.isEnabled() and not action.icon().isNull()
+            assert action.isChecked() == window.manager.states["operation_log"].visible
+            action.trigger()
             menu.deleteLater()
         else:
             button = next(button for rail in (window.host.left_rail, window.host.right_rail)
@@ -54,11 +56,11 @@ def test_log_is_available_without_document_and_toggle_reuses_panel(log_window, q
 
     original = window.operation_log
     toggle()
-    assert not original.isVisible() and not window.log_action.isChecked()
+    assert not original.isVisible() and not window.manager.states["operation_log"].visible
     window.record_operation("隐藏期间仍记录")
     assert len(entries(window)) == 1 and not original.isVisible()
     toggle()
-    assert window.operation_log is original and original.isVisible() and window.log_action.isChecked()
+    assert window.operation_log is original and original.isVisible() and window.manager.states["operation_log"].visible
     assert window.manager.documents == {}
 
 

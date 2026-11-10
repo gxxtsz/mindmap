@@ -1,11 +1,27 @@
 """按插件隔离的注册服务及 Qt 桥，资源清理由 PluginContext 统一拥有。"""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 from PySide6.QtGui import QAction, QColor, QIcon
-from workbench_api.qt import PanelSpec
+from workbench_api.qt import CommandSpec, MenuContribution, MenuLocation, PanelSpec
 
 from .ui.docking import ToolWindowSpec
+
+_LEGACY_MENU_LOCATIONS = {
+    "文件": MenuLocation.FILE,
+    "编辑": MenuLocation.EDIT,
+    "视图": MenuLocation.VIEW,
+    "设置": MenuLocation.SETTINGS,
+}
+
+
+def menu_location(value: MenuLocation | str) -> MenuLocation:
+    """将稳定标识和已有的中文菜单别名统一为宿主使用的位置，拒绝未知位置。"""
+    try:
+        return MenuLocation(_LEGACY_MENU_LOCATIONS.get(value, value))
+    except ValueError as error:
+        raise ValueError(f"未知的主菜单位置：{value}") from error
 
 
 class EditorRegistry:
@@ -27,7 +43,10 @@ class CommandRegistry:
     def __init__(self, window, context):
         self.window, self.context = window, context
 
-    def register(self, spec):
+    def register(self, spec: CommandSpec) -> QAction:
+        """先校验菜单位置，再创建动作，避免无效声明占用命令标识或快捷键。"""
+        if spec.menu:
+            spec = replace(spec, menu=menu_location(spec.menu))
         action = self.window.manager.register_action(
             spec.id, spec.title, lambda: self.window.call(spec.callback), shortcut=spec.shortcut, icon=spec.icon)
         self.window.command_specs[spec.id] = spec
@@ -114,9 +133,11 @@ class UiService:
 
         return self.context.own(remove)
 
-    def contribute_menu(self, contribution):
-        self._window.menu_contributions.append(contribution)
-        return self.context.own(lambda: self._window.menu_contributions.remove(contribution))
+    def contribute_menu(self, contribution: MenuContribution):
+        """验证位置并记录所属插件，供弹出菜单时隔离填充错误和释放注册。"""
+        record = (self.context.plugin_id, replace(contribution, menu=menu_location(contribution.menu)))
+        self._window.menu_contributions.append(record)
+        return self.context.own(lambda: self._window.menu_contributions.remove(record))
 
     def subscribe_active(self, callback):
         self._window.documents.active_changed.connect(callback)

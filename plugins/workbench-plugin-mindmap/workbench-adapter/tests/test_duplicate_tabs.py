@@ -404,8 +404,9 @@ def test_page_reference_edit_menu_shared_tab_and_autosave(windows, tmp_path, mon
     first.canvas.select_nodes([source])
     menu = window.main_menu()
     edit_menu = next(action.menu() for action in menu.actions() if action.text() == "编辑")
+    page_menu = next(action.menu() for action in edit_menu.actions() if action.text() == "页面")
     action = first.canvas.action("set_page_reference")
-    assert action in edit_menu.actions() and action.isEnabled()
+    assert action in page_menu.actions() and action.isEnabled()
     monkeypatch.setattr("mindmap_qt_editor.canvas.navigation.choose_reference_root", lambda *a, **k: root)
     action.trigger()
     assert first.canvas.document_view.nodes[source].text == "章节"

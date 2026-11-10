@@ -178,17 +178,34 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "设置"]
     files = next(action.menu() for action in main.actions() if action.text() == "文件")
     assert [action.text() for action in files.actions()] == [
-        "新建", "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "导出当前页为 TXT…", "退出",
+        "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出当前页", "退出",
     ]
-    assert next(action for action in files.actions() if action.text() == "导出当前页为 TXT…").isEnabled()
-    exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
-    assert [action.text() for action in exports.actions()] == ["PNG 图片…", "SVG 矢量图…", "PDF 文档…"]
+    assert files.actions()[0] is window.action("app.new")
+    assert files.actions()[0].shortcut().toString() == "Ctrl+N"
+    exports = next(action.menu() for action in files.actions() if action.text() == "导出当前页")
+    assert [action.text() for action in exports.actions()] == ["PNG 图片…", "SVG 矢量图…", "PDF 文档…", "TXT 文本…"]
     assert all(action.isEnabled() for action in exports.actions())
+
+    edit = next(action.menu() for action in main.actions() if action.text() == "编辑")
+    edit_actions = [action for action in edit.actions() if not action.isSeparator()]
+    assert edit_actions[:6] == [window.action("app." + key)
+                               for key in ("undo", "redo", "cut", "copy", "paste", "select_all")]
+    assert [action.text() for action in edit_actions[6:]] == [
+        "添加子节点", "添加同级节点", "编辑文字", "节点属性", "节点结构", "页面", "灵感", "图片",
+    ]
+
     view = next(action.menu() for action in main.actions() if action.text() == "视图")
-    assert [action for action in view.actions() if not action.isSeparator()] == [window.plugins.instance("mindmap").canvas.action(key) for key in (
-        "zoom_in", "zoom_out", "expand_all", "collapse_all",
-    )] + [window.plugins.instance("mindmap").read_only_action, window.plugins.instance("mindmap").recent_pages_action, window.log_action]
-    assert view.actions()[-3].isSeparator()
+    plugin = window.plugins.instance("mindmap")
+    assert view.actions()[:-2] == [
+        plugin.canvas.action(key) for key in ("zoom_in", "zoom_out", "expand_all", "collapse_all")
+    ] + [plugin.read_only_action]
+    assert view.actions()[-2].isSeparator()
+    panels = view.actions()[-1].menu()
+    assert panels.title() == "面板"
+    assert {action.text(): action.isChecked() for action in panels.actions()} == {
+        "操作日志": True, "大纲": False, "收藏": False, "灵感": False,
+        "最近访问": True, "节点属性": True, "导图设置": False,
+    }
     assert not hasattr(window, "show_document")
     assert window.manager.states["properties"].visible
     main.deleteLater()
@@ -977,7 +994,7 @@ def test_graphic_export_menu_selects_format_and_keeps_fold_state(window, tmp_pat
     monkeypatch.setattr(canvas, "export", capture_range)
     menu = window.main_menu()
     files = next(action.menu() for action in menu.actions() if action.text() == "文件")
-    exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")
+    exports = next(action.menu() for action in files.actions() if action.text() == "导出当前页")
     next(action for action in exports.actions() if action.data() == format_id).trigger()
     assert dialogs == [(window, "导出 " + label, f"思维导图.{format_id}", f"{label} (*.{format_id})")]
     assert ranges == [expanded]
@@ -1033,7 +1050,9 @@ def test_txt_export_menu_uses_active_page_and_keeps_document_state(window, tmp_p
     assert session.files.is_dirty
 
     menu = window.main_menu()
-    action = next(action for action in menu.actions()[0].menu().actions() if action.text() == "导出当前页为 TXT…")
+    files = menu.actions()[0].menu()
+    exports = next(action.menu() for action in files.actions() if action.text() == "导出当前页")
+    action = next(action for action in exports.actions() if action.data() == "txt")
     assert action.isEnabled()
     monkeypatch.setattr(QMessageBox, "question", lambda *args: pytest.fail("TXT 不应询问折叠范围"))
 
@@ -1076,8 +1095,9 @@ def test_txt_export_is_disabled_in_empty_inspiration(window, monkeypatch):
     """有活动文档但当前想法为空时，菜单及文件控制器均禁止导出。"""
     window.plugins.instance("mindmap").canvas.show_inspiration()
     menu = window.main_menu()
-    action = next(action for action in menu.actions()[0].menu().actions() if action.text() == "导出当前页为 TXT…")
-    assert not action.isEnabled()
+    files = menu.actions()[0].menu()
+    exports = next(action.menu() for action in files.actions() if action.text() == "导出当前页")
+    assert not exports.isEnabled() and not any(action.isEnabled() for action in exports.actions())
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: pytest.fail("空想法不应打开文件选择框"))
     with pytest.raises(MindMapError, match="暂无可导出的想法内容"):
         window.plugins.instance("mindmap").files.export_dialog("txt")
@@ -1464,9 +1484,10 @@ def test_submap_conversion_edit_menu_status_log_and_autosave(window):
     canvas.select_nodes([owner])
     menu = window.main_menu()
     edit_menu = next(action.menu() for action in menu.actions() if action.text() == "编辑")
+    page_menu = next(action.menu() for action in edit_menu.actions() if action.text() == "页面")
     extract = canvas.action("convert_descendants_to_submap")
     restore = canvas.action("convert_submap_to_descendants")
-    assert extract in edit_menu.actions() and restore in edit_menu.actions()
+    assert extract in page_menu.actions() and restore in page_menu.actions()
     assert extract.isEnabled() and not restore.isEnabled()
     extract.trigger()
     page = engine.get_node(owner).submap_id

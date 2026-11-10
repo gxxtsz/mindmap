@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QSignalBlocker, QTimer
 from PySide6.QtGui import QAction, QIcon, QPalette
 from PySide6.QtWidgets import QLabel, QMenu, QStackedWidget, QWidget
 from workbench_api import EditorProvider, OperationResult
-from workbench_api.qt import CommandSpec, MenuContribution, PanelSpec, StatusItemSpec
+from workbench_api.qt import CommandSpec, MenuContribution, MenuLocation, PanelSpec, StatusItemSpec
 
 from .editor_provider import MindMapEditorProvider
 from .operation_log import describe_display
@@ -68,13 +68,9 @@ class MindMapController(QObject):
             ("properties", "节点属性", self._properties_stack, "properties", "right_top", "Alt+2"),
             ("map_settings", "导图设置", self._settings_stack, "settings", "right_top", ""),
         ):
-            action = context.ui.register_panel(PanelSpec(identifier, title, lambda content=stack: content,
-                                                        icon, position, shortcut, headers.get(identifier, ()),
-                                                        identifier in ("recent_pages", "properties")))
-            if identifier == "recent_pages":
-                assert action is not None
-                self.recent_pages_action = action
-                action.setCheckable(True)
+            context.ui.register_panel(PanelSpec(identifier, title, lambda content=stack: content,
+                                                icon, position, shortcut, headers.get(identifier, ()),
+                                                identifier in ("recent_pages", "properties")))
         self.settings_action = context.commands.register(CommandSpec(
             "mindmap.settings", "导图设置", self.show_settings_panel, "Alt+3", "settings",
             enabled=lambda: self.active_session is not None))
@@ -85,15 +81,13 @@ class MindMapController(QObject):
         context.ui.subscribe_theme(self.refresh_theme)
         context.ui.subscribe_layout(self._layout_changed)
         context.ui.subscribe_active(self._finish_restoring)
-        context.ui.contribute_menu(MenuContribution("文件", self.populate_file_menu))
-        context.ui.contribute_menu(MenuContribution("视图", self.populate_view_menu))
+        context.ui.contribute_menu(MenuContribution(MenuLocation.FILE_EXPORT, self.populate_export_menu))
+        context.ui.contribute_menu(MenuContribution(MenuLocation.EDIT, self.populate_edit_menu))
+        context.ui.contribute_menu(MenuContribution(MenuLocation.VIEW, self.populate_view_menu))
         self._properties_visible = True
         self._settings_visible = False
         self.refresh_theme()
         self._bind_session(None)
-
-    def action(self, identifier):
-        return self.context.ui.action(identifier)
 
     def show_status_message(self, message):
         self.context.ui.show_message(message)
@@ -148,30 +142,52 @@ class MindMapController(QObject):
         except Exception as error:
             return OperationResult.failed(error, reported=view_id is None)
 
-    def populate_file_menu(self, menu):
-        if self.active_session is None:
+    def populate_export_menu(self, menu: QMenu) -> None:
+        """在宿主的导出分区列出当前页支持的格式。空白页期间省略整组动作。"""
+        canvas = self.canvas
+        if canvas is None:
             return
-        exports = QMenu("导出图形", menu)
-        exports.setIcon(self.context.ui.theme_icon("export-image"))
-        exports.menuAction().setProperty("workbench_icon", "export-image")
-        exports.setEnabled(bool(self.canvas.document_view.nodes))
-        for format_id, title in (("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档")):
-            action = exports.addAction(title + "…")
+        has_nodes = bool(canvas.document_view.nodes)
+        for format_id, title in (
+            ("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档"), ("txt", "TXT 文本"),
+        ):
+            action = menu.addAction(title + "…")
             action.setData(format_id)
-            action.triggered.connect(lambda checked=False, selected=format_id: self.call(lambda: self.files.export_dialog(selected)))
-        menu.insertMenu(self.action("app.quit"), exports)
-        action = QAction("导出当前页为 TXT…", menu)
-        action.setIcon(self.context.ui.theme_icon("export-text"))
-        action.setProperty("workbench_icon", "export-text")
-        action.setEnabled(bool(self.canvas.document_view.nodes))
-        action.triggered.connect(lambda: self.call(lambda: self.files.export_dialog("txt")))
-        menu.insertAction(self.action("app.quit"), action)
+            action.setEnabled(has_nodes)
+            if format_id == "txt":
+                action.setIcon(self.context.ui.theme_icon("export-text"))
+            action.triggered.connect(lambda checked=False, selected=format_id: self._export_current_page(selected))
 
-    def populate_view_menu(self, menu):
-        if self.active_session is not None:
-            menu.addAction(self.read_only_action)
-            menu.addSeparator()
-            menu.addAction(self.recent_pages_action)
+    def _export_current_page(self, format_id: str) -> None:
+        """触发时读取活动文件控制器，使菜单打开后切换标签仍导出正确的页面。"""
+        files = self.files
+        if files is not None:
+            self.call(lambda: files.export_dialog(format_id))
+
+    def populate_edit_menu(self, menu: QMenu) -> None:
+        """高频节点动作直接可见，结构、页面、灵感和图片动作分别归组。"""
+        canvas = self.canvas
+        if canvas is None:
+            return
+        menu.addActions([canvas.action(key) for key in ("add_child", "add_sibling", "edit", "properties")])
+        menu.addSeparator()
+        for title, keys in (
+            ("节点结构", ("insert_parent", "delete")),
+            ("页面", ("convert_descendants_to_submap", "convert_submap_to_descendants",
+                     "set_page_reference", "open_page_reference", "clear_page_reference")),
+            ("灵感", ("add_inspiration", "move_to_inspiration", "attach_inspirations", "group_inspirations")),
+            ("图片", ("image", "image_url")),
+        ):
+            submenu = menu.addMenu(title)
+            submenu.addActions([canvas.action(key) for key in keys])
+
+    def populate_view_menu(self, menu: QMenu) -> None:
+        """贡献活动导图的视图动作，面板入口由宿主根据停靠注册表生成。"""
+        canvas = self.canvas
+        if canvas is None:
+            return
+        menu.addActions([canvas.action(key) for key in ("zoom_in", "zoom_out", "expand_all", "collapse_all")])
+        menu.addAction(self.read_only_action)
 
     def refresh_theme(self, *_):
         colors = self.ui_colors
@@ -441,7 +457,6 @@ class MindMapController(QObject):
     def _layout_changed(self):
         if self._disposed:
             return
-        self.recent_pages_action.setChecked(self.context.ui.panel_visible("recent_pages"))
         visible = self.context.ui.panel_visible("properties")
         if getattr(self, "_properties_visible", visible) and not visible and self.panels:
             self.panels.flush_pending_edits()
