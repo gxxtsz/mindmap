@@ -123,6 +123,10 @@
       "sha256": "c4d5e39eb21377d196045203a88c02faf8183cf7e71c9c77e92e007ef9c39a62"
     },
     {
+      "path": "icons/workbench.svg",
+      "sha256": "1740dde42ec6f2d29242e1776f5bdedd45043afe4a0a70e73ef421664b17275a"
+    },
+    {
       "path": "light.json",
       "sha256": "44e1ac2dadba6a45bac517d0d2b44eac77362183038ea028c9e7136c5f94b370"
     }

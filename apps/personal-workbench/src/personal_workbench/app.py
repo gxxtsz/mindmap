@@ -9,7 +9,7 @@ from workbench_runtime import WorkbenchConfig, WorkbenchRuntimeWindow, run_deskt
 from .migration import migrate_legacy, upgrade_profile
 
 # 产品的历史应用标识和目录必须保持稳定；代码包改名不能导致已有会话失联。
-PRODUCT_CONFIG = WorkbenchConfig(application_id="mindmap-workbench", title="个人工作台", icon="mindmap")
+PRODUCT_CONFIG = WorkbenchConfig(application_id="mindmap-workbench", title="个人工作台", icon="workbench")
 
 
 def default_storage_dir() -> Path:
