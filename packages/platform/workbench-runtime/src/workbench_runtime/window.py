@@ -1,0 +1,432 @@
+"""通用个人工作台宿主；所有编辑器行为均从已注册的插件能力取得。"""
+
+from pathlib import Path
+
+from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+from workbench_api import OperationStatus, PluginContext
+from workbench_docking import DockManager, DockPosition, JsonLayoutStore, Theme, ToolWindowSpec
+from workbench_shell import ActionSpec, AppSpec, WorkbenchWindow
+
+from .commands import EditCommandRouter
+from .config import WorkbenchConfig
+from .documents import DocumentService, MissingView
+from .operation_log import OperationLogPanel
+from .palette import colors_from_theme
+from .plugins import PluginManager
+from .recent_files import RecentFilesButton
+from .services import CommandRegistry, EditorRegistry, ScopedDocuments, UiService
+from .state import Settings, StateStore, WorkspaceLayoutStore
+
+
+class WelcomePage(QWidget):
+    """按已启用编辑器生成新建入口；空平台仍提供插件管理入口。"""
+
+    def __init__(self, window):
+        super().__init__()
+        self.window = window
+        layout = QVBoxLayout(self)
+        layout.addStretch()
+        title = QLabel(window.config.title, self)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size:24px;font-weight:600;")
+        layout.addWidget(title)
+        for identifier, (_owner, provider) in window.providers.items():
+            button = QPushButton("新建" + provider.title, self)
+            button.setFixedWidth(180)
+            button.clicked.connect(lambda checked=False, key=identifier: window.new_document(provider_id=key))
+            layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        for title, callback in (("打开文件", window.open_dialog), ("插件管理", window.show_plugin_manager)):
+            button = QPushButton(title, self)
+            button.setFixedWidth(180)
+            button.clicked.connect(lambda checked=False, action=callback: window.call(action))
+            layout.addWidget(button, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch()
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        theme = self.window.manager.theme
+        self.setStyleSheet(f"background:{theme.css('editor-bg')};color:{theme.css('text-default')};")
+
+
+class WorkbenchRuntimeWindow(WorkbenchWindow):
+    """统一的窗口装配器，不导入编辑器业务模块，也不判断具体插件标识。"""
+
+    def __init__(self, *, config: WorkbenchConfig | None = None, storage_dir=None, theme=None,
+                 restore=True, manifests=None, migration=None, plugin_options=None):
+        """装配插件宿主；产品配置和历史转换由应用注入，空清单可启动空工作台。
+
+        storage_dir 显式提供时优先使用该位置，保证测试隔离及历史目录连续性。
+        config 只影响产品标识与显示信息，不改变文档资源、插件 ID 或布局格式。
+        """
+        self.config = config or WorkbenchConfig()
+        self._disposed = False
+        self._ready = False
+        self._opening_dropped_files = False
+        self.providers = {}
+        self.command_specs = {}
+        self.menu_contributions = []
+        self.status_items = {}
+        self.default_panel_ids = {"operation_log"}
+        self._plugin_options = plugin_options or {}
+        self._contexts = {}
+        directory = Path(storage_dir) if storage_dir is not None else self.config.default_storage_dir()
+        initial_state, initial_settings = migration(directory) if migration else (None, {})
+        self.state = StateStore(directory, initial_state)
+        settings_store = JsonLayoutStore(directory / "workbench-settings-v1.json")
+        self.settings, settings_error = Settings.load(settings_store, initial_settings)
+        manager = DockManager(application_id=self.config.application_id, storage_dir=directory,
+                              theme=Theme(theme or "light"), preserve_open_documents=True,
+                              shortcut_context=Qt.ShortcutContext.WindowShortcut,
+                              layout_store=WorkspaceLayoutStore(self.state))
+        manager.storage_file = manager.layout_store.path
+        super().__init__(AppSpec(self.config.application_id, self.config.title, icon=self.config.icon,
+                                 storage_dir=directory, theme=manager.theme), manager=manager)
+        self.documents = DocumentService(self)
+        self.operation_log = OperationLogPanel(manager.parking)
+        manager.register_tool_window(ToolWindowSpec(
+            "operation_log", "操作日志", lambda: self.operation_log, "log", DockPosition.BOTTOM_LEFT, "Alt+5",
+            header_actions=(self.operation_log.copy_all_action, self.operation_log.clear_action),
+        ))
+        self.log_action = manager.actions["tool:operation_log"]
+        self.log_action.setCheckable(True)
+        manager.layout_changed.connect(self._sync_log_action)
+        manager.activate("operation_log", focus=False)
+        self._register_actions()
+        self.edit_commands = EditCommandRouter(self)
+        self.recent_files_button = RecentFilesButton(self)
+        self.set_title_bar_navigation(self.recent_files_button)
+        self.documents.changed.connect(self.refresh_document)
+        self.plugins = PluginManager(self._make_context, self.settings.scoped("plugins"), manifests)
+        self.plugins.activate()
+        self.host.editor.set_empty_widget_factory(lambda: WelcomePage(self))
+        layout = manager.capture_layout()
+        for sizes in layout["hosts"]["main"]["region_sizes"].values():
+            sizes.update(left=260, right=360, bottom=260)
+        manager.restore_layout(layout)
+        manager.set_default_layout()
+        manager.layout_store.default_tools = [item for item in layout["tools"]
+                                               if item["id"] in self.default_panel_ids]
+        pinned = self.settings.value("window/always_on_top", False)
+        self.set_always_on_top(pinned is True or isinstance(pinned, str) and pinned == "true")
+        self.always_on_top_changed.connect(self._save_pin)
+        failures = []
+        # 文件加载可能处理 Qt 事件，因此恢复屏障必须跨越全部文件及布局恢复。
+        if restore:
+            with manager.defer_session_saving():
+                failures = self.documents.restore(self.state.open_documents, self.state.active_id)
+                selected = self.documents.active_id
+                manager.load_session()
+                if selected in self.documents.views:
+                    manager.activate_document(selected)
+        if theme is not None:
+            manager.set_theme(theme)
+        self.state.restoring = False
+        self._ready = True
+        self.refresh_theme()
+        self.documents.active_changed.emit(self.documents.active)
+        self.refresh_document()
+        for record in self.plugins.records:
+            if record.error:
+                self.record_operation(f"插件 {record.name} 加载失败：{record.error}", level="error")
+        if failures:
+            self.show_status_message("部分文件暂不可用：" + "；".join(failures))
+        elif self.state.error:
+            self.show_status_message(self.state.error)
+        elif settings_error:
+            self.show_status_message(settings_error)
+        self.setAcceptDrops(True)
+        QApplication.instance().installEventFilter(self)
+
+    def _make_context(self, plugin_id):
+        context = PluginContext(plugin_id, None, None, None, None, self.settings.scoped(plugin_id),
+                                self.state.plugin_state(plugin_id), self.record_operation,
+                                self._plugin_options.get(plugin_id, {}))
+        context.editors = EditorRegistry(self, context)
+        context.commands = CommandRegistry(self, context)
+        context.ui = UiService(self, context)
+        context.documents = ScopedDocuments(self.documents, context)
+        self._contexts[plugin_id] = context
+        return context
+
+    def _register_actions(self):
+        for identifier, title, callback, shortcut, icon in (
+            ("new", "新建", self.new_document, "Ctrl+N", "new-document"),
+            ("open", "打开…", self.open_dialog, "Ctrl+O", "folder"),
+            ("open_directory", "打开所在文件夹", self.open_file_directory, "", "open-directory"),
+            ("save", "保存", self.save, "Ctrl+S", "save"),
+            ("save_all", "保存全部", self.save_all, "Ctrl+Alt+S", "save-all"),
+            ("save_as", "另存为…", lambda: self.save(save_as=True), "Ctrl+Shift+S", "save-as"),
+            ("quit", "退出", self.close, "Ctrl+Q", "exit"),
+        ):
+            self.add_action(ActionSpec("app." + identifier, title, lambda action=callback: self.call(action),
+                                       icon, shortcut, "文件"))
+
+    def call(self, callback):
+        try:
+            return callback()
+        except Exception as error:
+            if not getattr(error, "_workbench_reported", False):
+                self.record_operation(f"操作失败：{error}", level="error")
+            error._workbench_reported = False
+            self.show_status_message(str(error))
+            return None
+
+    def record_operation(self, message, *, level="info", source="应用", source_path="", session=None,
+                         title=None, detail=""):
+        if self._disposed or not hasattr(self, "operation_log"):
+            return
+        if session is not None:
+            path = Path(session) if isinstance(session, (str, Path)) else session.document.path
+            source, source_path = (path.name, str(path)) if path else ("未命名", "")
+        self.operation_log.append_entry(message, level=level, source=source, source_path=source_path,
+                                        title=title, detail=detail)
+
+    def report_tool_error(self, tool_id, error):
+        super().report_tool_error(tool_id, error)
+        self.record_operation(f"无法创建工具窗口 {tool_id}：{error}", level="error")
+
+    def new_document(self, path=None, *, provider_id=None):
+        if provider_id is None and path is not None and Path(path).suffix:
+            provider_id = self.provider_for(path)
+            if provider_id is None:
+                return False
+        if provider_id is None:
+            provider_id = self.documents.providers.get(self.documents.active_id) or next(iter(self.providers), None)
+        if provider_id not in self.providers:
+            return False
+        result = self.providers[provider_id][1].new_document(Path(path) if path else None)
+        self._report_result(result)
+        return bool(result)
+
+    def provider_for(self, path):
+        extension = Path(path).suffix.lower()
+        return next((key for key, (_, provider) in self.providers.items() if extension in provider.extensions), None)
+
+    def open_path(self, path):
+        identifier = self.provider_for(path)
+        if identifier is None:
+            raise ValueError(f"没有启用的编辑器支持此文件：{path}")
+        existing = self.documents.find_path(path)
+        if existing and not isinstance(existing, MissingView):
+            self.manager.activate_document(existing.id)
+            self.remember_path(path)
+            self.record_operation("激活已打开的文档", session=existing)
+            return True
+        result = self.providers[identifier][1].open_document(Path(path), None, None)
+        if result.status == OperationStatus.FAILED:
+            error = result.error or ValueError(result.message)
+            error._workbench_reported = result.reported
+            raise error
+        if result and existing:
+            self.documents.remove_view(existing.id)
+        self._report_result(result)
+        return bool(result)
+
+    def _report_result(self, result):
+        if not result and result.message:
+            self.show_status_message(result.message)
+            if result.status == OperationStatus.FAILED and not result.reported:
+                self.record_operation(result.message, level="error")
+
+    def open_dialog(self):
+        filters = [f"{provider.title} ({' '.join('*' + ext for ext in provider.extensions)})"
+                   for _, provider in self.providers.values()]
+        extensions = " ".join("*" + ext for _, provider in self.providers.values() for ext in provider.extensions)
+        path, _ = QFileDialog.getOpenFileName(self, "打开文件", "",
+                                             ";;".join([f"支持的文件 ({extensions})", *filters]))
+        return self.open_path(path) if path else False
+
+    def save(self, *, save_as=False):
+        return bool(self.documents.save(save_as=save_as))
+
+    def save_all(self):
+        return bool(self.documents.save_all())
+
+    def remember_path(self, path):
+        try:
+            self.state.remember(path)
+        except OSError as error:
+            self.show_status_message(f"最近文件未能保存：{error}")
+            self.record_operation(f"最近文件未能保存：{error}", level="warning")
+
+    def clear_recent_files(self):
+        self.call(self.state.clear_recent)
+
+    def open_file_directory(self, session_id=None):
+        view = self.documents.active if session_id is None else self.documents.views.get(session_id)
+        if self._disposed or view is None or view.document.path is None:
+            return False
+        directory = view.document.path.parent
+        try:
+            if not directory.is_dir() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+                raise OSError(f"无法打开文件夹：{directory}")
+        except Exception as error:
+            self.record_operation(f"打开所在文件夹失败：{error}", session=view, level="error")
+            self.show_status_message(f"打开所在文件夹失败：{error}")
+            return False
+        self.record_operation(f"打开所在文件夹：{directory}", session=view)
+        return True
+
+    def appearance_menu(self):
+        menu = super().appearance_menu()
+        menu.setTitle("设置")
+        if self._ready:
+            menu.addSeparator()
+            menu.addAction("插件管理…", self.show_plugin_manager)
+        return menu
+
+    def show_plugin_manager(self):
+        self.plugins.show_dialog(self)
+
+    def main_menu(self):
+        self.edit_commands.refresh()
+        menu = super().main_menu()
+        sections = {item.text(): item.menu() for item in menu.actions() if item.menu()}
+        anchor = next((item for item in menu.actions() if item.text() == "设置"), None)
+        for title in ("编辑", "视图"):
+            section = QMenu(title, menu)
+            sections[title] = section
+            menu.insertMenu(anchor, section)
+        view = self.documents.active
+        if view:
+            for title, actions in getattr(view, "menu_actions", {}).items():
+                for action in actions:
+                    standard = next((key for key, value in getattr(view, "edit_actions", {}).items()
+                                     if value is action), None)
+                    sections[title].addAction(self.edit_commands.actions[standard] if standard else action)
+        if not view or isinstance(view, MissingView):
+            sections["编辑"].addActions(list(self.edit_commands.actions.values()))
+        for identifier, (_owner, provider) in self.providers.items():
+            sections["文件"].insertAction(self.action("app.open"), self._new_action(sections["文件"], identifier, provider))
+        for contribution in self.menu_contributions:
+            if contribution.menu in sections:
+                contribution.populate(sections[contribution.menu])
+        for identifier, spec in self.command_specs.items():
+            if spec.menu in sections:
+                sections[spec.menu].addAction(self.action(identifier))
+        sections["视图"].addAction(self.log_action)
+        return menu
+
+    def _sync_log_action(self):
+        """日志属于平台，在没有任何编辑器插件时也要同步面板勾选状态。"""
+        self.log_action.setChecked(self.manager.states["operation_log"].visible)
+
+    def _new_action(self, menu, identifier, provider):
+        action = menu.addAction("新建" + provider.title)
+        action.setIcon(self.manager.theme.icon(provider.icon))
+        action.setProperty("workbench_icon", provider.icon)
+        action.triggered.connect(lambda: self.new_document(provider_id=identifier))
+        menu.removeAction(action)
+        return action
+
+    def refresh_document(self, *_):
+        if not self._ready or self._disposed:
+            return
+        view = self.documents.active
+        self.edit_commands.refresh()
+        usable = view is not None and not isinstance(view, MissingView)
+        for key in ("save", "save_as"):
+            self.action("app." + key).setEnabled(usable)
+        self.action("app.save_all").setEnabled(bool(self.documents.views))
+        self.action("app.open_directory").setEnabled(view is not None and view.document.path is not None)
+        self.action("app.new").setEnabled(bool(self.providers))
+        self.action("app.open").setEnabled(bool(self.providers))
+        title = self.config.title
+        self.setWindowTitle(f"{'* ' if view.document.is_dirty else ''}{view.title} — {title}" if view else title)
+        self.status_label.setText("  " + (getattr(view, "status_text", "就绪") if view else "新建或打开文件以开始"))
+        for identifier, spec in self.command_specs.items():
+            self.action(identifier).setEnabled(spec.enabled())
+        for spec in self.status_items.values():
+            spec.widget.setVisible(spec.visible())
+        self.recent_files_button.refresh_document()
+
+    def refresh_theme(self):
+        super().refresh_theme()
+        if not self._ready:
+            return
+        self.operation_log.set_ui_colors(colors_from_theme(self.manager.theme), compact=self.manager.theme.compact)
+        self.log_action.setIcon(self.manager.theme.icon("log"))
+        self.recent_files_button.refresh_theme()
+        for group in self.host.editor.groups:
+            if group.empty_widget:
+                group.empty_widget.refresh_theme()
+
+    def _save_pin(self, value):
+        self.settings.setValue("window/always_on_top", value)
+        self.settings.sync()
+
+    def confirm_close(self, view):
+        return QMessageBox.question(self, "保存修改", f"是否保存“{view.title}”的修改？",
+                                    QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
+                                    QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+
+    def eventFilter(self, watched, event):
+        if (not self._ready or self._disposed or self._opening_dropped_files or
+                event.type() not in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop) or
+                not isinstance(watched, QWidget) or (watched is not self and not self.isAncestorOf(watched))):
+            return super().eventFilter(watched, event)
+        mime = event.mimeData()
+        paths = [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile() and
+                 Path(url.toLocalFile()).is_absolute() and
+                 self.provider_for(url.toLocalFile())] if mime.hasUrls() else []
+        if not paths:
+            return super().eventFilter(watched, event)
+        if not event.possibleActions() & Qt.DropAction.CopyAction:
+            return False
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        if event.type() == QEvent.Type.Drop:
+            self._opening_dropped_files = True
+            QTimer.singleShot(0, self, lambda: self._open_dropped_files(paths))
+        return True
+
+    def _open_dropped_files(self, paths):
+        try:
+            for path in paths:
+                if self._disposed:
+                    break
+                if not path.is_dir() and self.call(lambda: self.open_path(path)) is False:
+                    break
+        finally:
+            self._opening_dropped_files = False
+
+    def closeEvent(self, event):
+        if self._disposed:
+            event.accept()
+            return
+        if not self.documents.prepare_close(list(self.documents.views)):
+            event.ignore()
+            return
+        # 先捕获仍然存活的视图与分屏，再提交退出快照；释放过程不能反写空会话。
+        try:
+            self.manager.save_session()
+            self.state.save_session(self.documents.snapshot(), self.documents.active_id)
+            self.settings.sync()
+        except OSError as error:
+            self.show_status_message(f"退出会话未能保存：{error}")
+            event.ignore()
+            return
+        self.dispose()
+        event.accept()
+
+    def dispose(self):
+        if self._disposed:
+            return
+        self._disposed = True
+        QApplication.instance().removeEventFilter(self)
+        self.edit_commands.dispose()
+        self.manager.shutdown()
+        self.state.restoring = True
+        self.documents.dispose()
+        self.plugins.dispose()

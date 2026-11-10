@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+CANVAS_TESTS = "plugins/workbench-plugin-mindmap/qt/mindmap-qt-canvas/tests"
 
 
 def run_offscreen(arguments):
@@ -26,9 +27,9 @@ def run_offscreen(arguments):
 
 
 @pytest.mark.parametrize("test_path", [
-    "packages/qt/mindmap-qt-canvas/tests/test_extensions.py::test_clipboard_uses_injected_codec_and_rejects_old_version",
-    "packages/qt/mindmap-qt-canvas/tests/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo[bitmap]",
-    "packages/qt/mindmap-qt-canvas/tests/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo[file]",
+    f"{CANVAS_TESTS}/test_extensions.py::test_clipboard_uses_injected_codec_and_rejects_old_version",
+    f"{CANVAS_TESTS}/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo[bitmap]",
+    f"{CANVAS_TESTS}/test_image_clipboard.py::test_text_editor_pastes_image_after_committing_text_with_separate_undo[file]",
 ])
 def test_clipboard_pytest_process_exits_normally(tmp_path, test_path):
     """每个参数场景独立运行一次，既要通过断言，pytest 完成析构后也须正常退出。"""
@@ -44,7 +45,7 @@ def test_desktop_launcher_releases_offscreen_mime_before_qt_shutdown(tmp_path):
     """正式事件循环退出也要释放 Python MIME，不依赖 pytest 的测试清理。"""
     source = textwrap.dedent("""\
         import sys
-        from mindmap_shell import AppSpec, WorkbenchWindow, run_desktop
+        from workbench_shell import AppSpec, WorkbenchWindow, run_desktop
         from PySide6.QtCore import QMimeData, QTimer
         from PySide6.QtGui import QImage
         from PySide6.QtWidgets import QApplication

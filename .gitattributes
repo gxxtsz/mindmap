@@ -1,4 +1,4 @@
 # 主题、资源清单与图标按原始字节校验摘要，统一使用 LF，覆盖自动换行配置。
-# 路径跟随桌面包目录；所有现有及新增的 JSON、SVG 都必须保持检出和打包字节一致。
-packages/desktop/mindmap-docking/src/mindmap_docking/resources/*.json text eol=lf
-packages/desktop/mindmap-docking/src/mindmap_docking/resources/icons/*.svg text eol=lf
+# 按桌面资源目录匹配，包改名时仍生效；JSON、SVG 的检出和打包字节必须一致。
+packages/desktop/*/src/*/resources/*.json text eol=lf
+packages/desktop/*/src/*/resources/icons/*.svg text eol=lf

@@ -1,0 +1,22 @@
+[project]
+name = "workbench-shell"
+version = "0.1.0"
+description = "通用 Qt 桌面外壳、应用动作、启动流程与项目脚手架"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "workbench-docking>=0.1.0,<0.2",
+    "PySide6>=6.12,<6.13",
+]
+
+[project.scripts]
+workbench-new = "workbench_shell.scaffold:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/workbench_shell"]

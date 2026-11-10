@@ -7,14 +7,42 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import tomllib
 from pathlib import Path
+from zipfile import ZipFile
 
 from workspace_members import workspace_members
 
 # 业务验收按包名声明，真实成员位置与版本均由根工作区元数据发现。
 CHECKS = {
+    "workbench-api": r'''
+from workbench_api import OperationResult, PluginManifest, API_VERSION
+assert OperationResult() and not OperationResult.cancelled()
+assert PluginManifest("sample", "示例", "1", lambda context: None).api_version == API_VERSION
+''',
+    "workbench-runtime": r'''
+from workbench_runtime import WorkbenchRuntimeWindow
+window = WorkbenchRuntimeWindow(storage_dir=Path("runtime-state"), manifests=[], restore=False)
+assert not window.providers
+assert "mindmap_core" not in sys.modules and "mindmap_qt_canvas" not in sys.modules
+window.dispose()
+''',
+    "workbench-plugin-mindmap": r'''
+from importlib.metadata import entry_points
+from workbench_plugin_mindmap import manifest
+assert manifest.id == "mindmap"
+assert "mindmap_qt_canvas" not in sys.modules
+assert any(item.name == "mindmap" for item in entry_points(group="personal_workbench.plugins"))
+''',
+    "workbench-plugin-text": r'''
+from importlib.metadata import entry_points
+from workbench_plugin_text import manifest
+assert manifest.id == "text"
+assert any(item.name == "text" for item in entry_points(group="personal_workbench.plugins"))
+assert "workbench_runtime" not in sys.modules
+''',
     "mindmap-qt-render": r'''
 
 from mindmap_core import LayoutConfig, LayoutInfo, LayoutRegistry, LayoutResult, MindMapDocument, Rect
@@ -103,18 +131,18 @@ assert PanelHost.__module__ == "mindmap_qt_panels.contracts"
 host.close()
 
 ''',
-    "mindmap-docking": r'''
+    "workbench-docking": r'''
 
 import hashlib, importlib.util, json, sys
 from pathlib import Path
-import mindmap_docking
-from mindmap_docking import DockHost, DockManager, DocumentSpec
+import workbench_docking
+from workbench_docking import DockHost, DockManager, DocumentSpec
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
-assert importlib.util.find_spec("mindmap_shell") is None
+assert importlib.util.find_spec("workbench_shell") is None
 assert importlib.util.find_spec("mindmap_engine") is None
 assert importlib.util.find_spec("mindmap_qt") is None
-assert Path(mindmap_docking.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-resources = Path(mindmap_docking.__file__).parent / "resources"
+assert Path(workbench_docking.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+resources = Path(workbench_docking.__file__).parent / "resources"
 manifest = json.loads((resources / "manifest.json").read_text("utf-8"))
 expected = {entry["path"] for entry in manifest["files"]}
 actual = {path.relative_to(resources).as_posix() for path in resources.rglob("*")
@@ -136,20 +164,20 @@ window.close()
 print(json.dumps({"停靠包独立安装与资源完整性": True, "停靠包依赖隔离": True}))
 
 ''',
-    "mindmap-shell": r'''
+    "workbench-shell": r'''
 
 import importlib.util, json, sys, tomllib
 from pathlib import Path
-import mindmap_shell
-from mindmap_shell.scaffold import generate_project
+import workbench_shell
+from workbench_shell.scaffold import generate_project
 from PySide6.QtWidgets import QApplication
 assert importlib.util.find_spec("mindmap_engine") is None
 assert importlib.util.find_spec("mindmap_qt") is None
 assert importlib.util.find_spec("mindmap_workbench") is None
-assert Path(mindmap_shell.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+assert Path(workbench_shell.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 generated = generate_project(Path("generated-desktop"), project_name="example-desktop", title="安装模板验收")
 metadata = tomllib.loads((generated / "pyproject.toml").read_text("utf-8"))
-assert {item.split(">", 1)[0] for item in metadata["project"]["dependencies"]} == {"mindmap-shell", "mindmap-docking", "PySide6"}
+assert {item.split(">", 1)[0] for item in metadata["project"]["dependencies"]} == {"workbench-shell", "workbench-docking", "PySide6"}
 assert "sources" not in metadata.get("tool", {}).get("uv", {})
 assert (generated / ".python-version").is_file() and (generated / "LICENSE").is_file()
 source = generated / "src/example_desktop/app.py"
@@ -165,41 +193,40 @@ window.close()
 print(json.dumps({"外壳包独立安装与依赖隔离": True, "随包模板生成与运行": True}))
 
 ''',
-    "mindmap-workbench": r'''
+    "personal-workbench": r'''
 
 import importlib.util, json, sys
 from importlib.metadata import distributions
 from pathlib import Path
-import mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_core
+import workbench_docking, workbench_shell, personal_workbench, mindmap_core
 import mindmap_qt_canvas, mindmap_qt_panels, mindmap_qt_ui, mindmap_qt_render
 assert importlib.util.find_spec("mindmap_qt") is None
 assert importlib.util.find_spec("mindmap_qt_workspace") is None
-from mindmap_docking import DockPosition, DockTarget
+from workbench_docking import DockPosition, DockTarget
 from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
-from mindmap_workbench.shell_adapter import build_window
-from mindmap_core import MindMapError
+from personal_workbench.app import build_window
 from mindmap_formats import load_document
 app = QApplication([])
 window = build_window(storage_dir=Path("workbench-state").absolute(), restore=False)
-assert window.canvas is None and not len(window.sessions)
+assert window.plugins.instance("mindmap").canvas is None and not len(window.plugins.instance("mindmap").sessions)
 assert window.new_document(Path("workbench.mindmap").absolute())
-primary = window.active_session
+primary = window.plugins.instance("mindmap").active_session
 window.show()
 app.processEvents()
-assert window.panels.properties.fields["style.font_size"].isVisible()
-original = window.engine.document.root.text
-window.engine.update_node(window.engine.root_id, text="安装包工作台")
-assert window.engine.undo() and window.engine.document.root.text == original
-assert window.engine.redo() and window.engine.document.root.text == "安装包工作台"
-window.panels.properties.fields["style.font_size"].setValue(23)
-window.panels.flush_pending_edits()
-node = window.engine.add_child(window.engine.root_id, "完整流程")
-window.canvas.select_nodes([node])
-window.panels.properties.fields["style.font_size"].setValue(24)
-window.panels.flush_pending_edits()
-assert window.engine.get_node(node).style["font_size"] == 24
+assert window.plugins.instance("mindmap").panels.properties.fields["style.font_size"].isVisible()
+original = window.plugins.instance("mindmap").engine.document.root.text
+window.plugins.instance("mindmap").engine.update_node(window.plugins.instance("mindmap").engine.root_id, text="安装包工作台")
+assert window.plugins.instance("mindmap").engine.undo() and window.plugins.instance("mindmap").engine.document.root.text == original
+assert window.plugins.instance("mindmap").engine.redo() and window.plugins.instance("mindmap").engine.document.root.text == "安装包工作台"
+window.plugins.instance("mindmap").panels.properties.fields["style.font_size"].setValue(23)
+window.plugins.instance("mindmap").panels.flush_pending_edits()
+node = window.plugins.instance("mindmap").engine.add_child(window.plugins.instance("mindmap").engine.root_id, "完整流程")
+window.plugins.instance("mindmap").canvas.select_nodes([node])
+window.plugins.instance("mindmap").panels.properties.fields["style.font_size"].setValue(24)
+window.plugins.instance("mindmap").panels.flush_pending_edits()
+assert window.plugins.instance("mindmap").engine.get_node(node).style["font_size"] == 24
 window.manager.move("outline", DockTarget(DockPosition.BOTTOM_LEFT))
 window.manager.activate("outline", focus=False)
 assert window.manager.states["outline"].position == DockPosition.BOTTOM_LEFT
@@ -208,32 +235,32 @@ image.fill(QColor("#ee8044"))
 buffer = QBuffer()
 buffer.open(QIODevice.OpenModeFlag.WriteOnly)
 assert image.save(buffer, "PNG")
-window.engine.attach_image(node, bytes(buffer.data()))
-window.canvas.select_nodes([window.engine.root_id])
-window.canvas.set_branch_style("round")
-window.canvas.select_nodes([node])
-window.canvas.set_branch_style("arrow2", scope="level")
+window.plugins.instance("mindmap").engine.attach_image(node, bytes(buffer.data()))
+window.plugins.instance("mindmap").canvas.select_nodes([window.plugins.instance("mindmap").engine.root_id])
+window.plugins.instance("mindmap").canvas.set_branch_style("round")
+window.plugins.instance("mindmap").canvas.select_nodes([node])
+window.plugins.instance("mindmap").canvas.set_branch_style("arrow2", scope="level")
 assert window.save()
-assert load_document(window.files.path) == window.engine.document
-assert window.engine.document.root.style["font_size"] == 23
-assert window.open_path(window.files.path)
-before = window.engine.document
+assert load_document(window.plugins.instance("mindmap").files.path) == window.plugins.instance("mindmap").engine.document
+assert window.plugins.instance("mindmap").engine.document.root.style["font_size"] == 23
+assert window.open_path(window.plugins.instance("mindmap").files.path)
+before = window.plugins.instance("mindmap").engine.document
 window.manager.set_theme("dark")
-assert window.engine.document == before
+assert window.plugins.instance("mindmap").engine.document == before
 for suffix in ("png", "svg", "pdf"):
     target = Path("workbench." + suffix)
-    window.canvas.export(target)
+    window.plugins.instance("mindmap").canvas.export(target)
     assert target.stat().st_size > 500
-for module in (mindmap_docking, mindmap_shell, mindmap_workbench, mindmap_core,
+for module in (workbench_docking, workbench_shell, personal_workbench, mindmap_core,
                mindmap_qt_canvas, mindmap_qt_panels, mindmap_qt_ui, mindmap_qt_render):
     assert Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 assert window.new_document(Path("second.mindmap").absolute())
-secondary = window.active_session
+secondary = window.plugins.instance("mindmap").active_session
 secondary.engine.update_node(secondary.engine.root_id, text="独立保存")
 assert window.save_all() and not secondary.files.is_dirty
 assert load_document(secondary.files.path).root.text == "独立保存"
-assert window.files.format_filters("open") == "思维导图 (*.mindmap)"
-assert window.files.format_filters("save") == "思维导图 (*.mindmap)"
+assert window.plugins.instance("mindmap").files.format_filters("open") == "思维导图 (*.mindmap)"
+assert window.plugins.instance("mindmap").files.format_filters("save") == "思维导图 (*.mindmap)"
 unsupported = Path("unsupported.json").absolute()
 assert not window.new_document(unsupported) and not unsupported.exists()
 # 安装后的保存边界同样拒绝手工绑定的错误后缀，不调用可注入写入器。
@@ -243,15 +270,15 @@ assert not window.save() and not unsupported.exists()
 secondary.files.path = original_path
 try:
     window.open_path(unsupported)
-except MindMapError as error:
-    assert "仅支持打开 .mindmap" in str(error)
+except ValueError as error:
+    assert "没有启用的编辑器支持" in str(error)
 else:
     raise AssertionError("安装后的工作台不能打开非原生导图")
-assert window.active_session is secondary
-assert window.open_path(primary.files.path) and window.active_session is primary
-assert len(window.sessions) == 2
+assert window.plugins.instance("mindmap").active_session is secondary
+assert window.open_path(primary.files.path) and window.plugins.instance("mindmap").active_session is primary
+assert len(window.plugins.instance("mindmap").sessions) == 2
 window.manager.restore_default_layout()
-assert len(window.sessions) == 2 and window.active_session is primary
+assert len(window.plugins.instance("mindmap").sessions) == 2 and window.plugins.instance("mindmap").active_session is primary
 owner = primary.engine.add_child(primary.engine.root_id, "发行子导图入口")
 primary.canvas.select_nodes([owner])
 page = primary.canvas.create_submap()
@@ -265,8 +292,19 @@ assert page in load_document(primary.files.path).submaps
 primary.canvas.return_to_parent_page()
 assert primary.canvas.current_page_id is None
 window.close()
-assert primary.disposed and secondary.disposed and not len(window.sessions)
-print(json.dumps({"工作台独立安装与框架依赖解析": True, "工作台文件与导出": True, "多导图与自动保存边界": True,
+assert primary.disposed and secondary.disposed and not len(window.plugins.instance("mindmap").sessions)
+from personal_workbench.app import build_window
+window = build_window(storage_dir=Path("personal-state"), restore=False)
+assert set(window.providers) == {"mindmap.editor", "text.editor"}
+assert window.new_document(Path("personal.mindmap").absolute())
+path = Path("text.txt").absolute()
+path.write_text("独立安装文本", "utf-8")
+assert window.open_path(path)
+assert window.documents.active.widget.toPlainText() == "独立安装文本"
+assert window.documents.active.duplicate()
+assert window.save_all()
+assert window.close()
+print(json.dumps({"混合编辑器独立运行": True, "工作台独立安装与框架依赖解析": True, "工作台文件与导出": True, "多导图与自动保存边界": True,
                   "仅打开和保存原生导图": True, "子导图与页面路径": True,
                   "编辑与撤销重做": True, "图片与分支样式": True, "侧栏属性与工作区": True,
                   "已验证运行依赖": {item.metadata["Name"]: item.version for item in distributions()}}))
@@ -325,6 +363,59 @@ assert loads(dumps(document)) == document
 }
 
 
+def verify_archive_contents(repository: Path, members: dict, wheels: dict) -> dict:
+    """检查实际发行文件与当前源码一致，防止目录迁移后误用旧构建产物。
+
+    每个 wheel 的 Python 模块必须恰好来自该成员自己的 src 目录，逐字节比较，
+    因而既能发现漏包和多包，也能发现仍沿用旧位置或旧内容的构建结果。
+    导图适配包的源码发行包另行检查：同组业务成员通过依赖安装，不能重复发行。
+    """
+    # uv build 不会自动删除已移除成员的旧包。发行目录必须与当前清单一致，
+    # 防止发布时用通配符把旧引擎、旧桌面包或其他历史产物重新安装进用户环境。
+    expected = {path.name for path in wheels.values()} | {
+        f"{name.replace('-', '_')}-{metadata['version']}.tar.gz" for name, (_, metadata) in members.items()
+    }
+    dist = repository / "dist"
+    actual = {path.name for pattern in ("*.whl", "*.tar.gz") for path in dist.glob(pattern)}
+    if actual != expected:
+        raise RuntimeError(f"发行目录与当前成员不一致：缺失 {sorted(expected - actual)}，过期 {sorted(actual - expected)}")
+    module_counts = {}
+    for name, (directory, _) in members.items():
+        source_root = directory / "src"
+        source = {file.relative_to(source_root).as_posix(): file.read_bytes()
+                  for file in source_root.rglob("*.py")}
+        with ZipFile(wheels[name]) as archive:
+            modules = [entry for entry in archive.infolist() if entry.filename.endswith(".py")]
+            packed = {entry.filename: archive.read(entry) for entry in modules}
+        if len(packed) != len(modules):
+            raise RuntimeError(f"{name} 的 wheel 存在重复 Python 模块")
+        missing = sorted(source.keys() - packed.keys())
+        extra = sorted(packed.keys() - source.keys())
+        changed = sorted(path for path in source.keys() & packed.keys() if source[path] != packed[path])
+        if missing or extra or changed:
+            raise RuntimeError(f"{name} 的 wheel 与源码不一致：缺失 {missing}，多余 {extra}，内容变化 {changed}")
+        module_counts[name] = len(source)
+
+    _, metadata = members["workbench-plugin-mindmap"]
+    sdist = repository / "dist" / f"workbench_plugin_mindmap-{metadata['version']}.tar.gz"
+    if not sdist.is_file():
+        raise RuntimeError("缺少导图插件源码发行包，请运行 uv build --all-packages")
+    with tarfile.open(sdist, "r:gz") as archive:
+        # 源码发行包首层是名称与版本；下一层只允许本包源码、测试和发行元数据。
+        # Hatch 会自动附带 .gitignore；它属于构建元数据，不包含业务实现。
+        # 额外限制源码命名空间，防止把同组业务包复制到 src 后绕过目录检查。
+        allowed = {"src", "tests", "README.md", "LICENSE", "pyproject.toml", "PKG-INFO", ".gitignore"}
+        unexpected = [entry.name for entry in archive.getmembers()
+                      if len(parts := Path(entry.name).parts) > 1
+                      and (parts[1] not in allowed or
+                           (parts[1] == "src" and len(parts) > 2 and parts[2] != "workbench_plugin_mindmap"))]
+    if unexpected:
+        raise RuntimeError(f"导图适配包收录了其他成员的内容：{unexpected}")
+    print(f"发行包内容检查通过：{len(module_counts)} 个 wheel，{sum(module_counts.values())} 个 Python 模块", flush=True)
+    return {"发行目录仅含当前成员": True, "源码与wheel一致": True,
+            "逐包源码模块数": module_counts, "导图源码包仅含适配包": True}
+
+
 def run():
     """只安装当前成员的构建结果，独立环境不会引用源码或相邻工程。"""
     repository = Path(__file__).resolve().parents[1]
@@ -337,6 +428,7 @@ def run():
     }
     if not all(wheel.is_file() for wheel in wheels.values()):
         raise RuntimeError("请先运行 uv build --all-packages 构建全部成员")
+    archive_report = verify_archive_contents(repository, members, wheels)
     uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("未找到 uv")
@@ -381,7 +473,8 @@ def run():
             execute([uv, "pip", "install", "--python", interpreter, "--constraint", constraints, wheels[name]])
             closure = dependencies(name)
             forbidden = {item.replace("-", "_") for item in set(members) - closure}
-            forbidden.update({"mindmap_engine", "mindmap_qt", "mindmap_qt_workspace"})
+            forbidden.update({"mindmap_engine", "mindmap_qt", "mindmap_qt_workspace", "mindmap_workbench",
+                              "mindmap_docking", "mindmap_shell"})
             module = name.replace("-", "_")
             prelude = ("import importlib.util, sys, json\nfrom pathlib import Path\n"
                        + f"for module in {sorted(forbidden)!r}:\n"
@@ -389,14 +482,48 @@ def run():
                        + f"import {module} as installed\n"
                        + "assert Path(installed.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())\n")
             has_qt = any(any(value.startswith("PySide6") for value in members[item][1]["dependencies"]) for item in closure)
-            if has_qt and name not in {"mindmap-docking", "mindmap-shell", "mindmap-workbench"}:
+            if has_qt and name not in {"workbench-docking", "workbench-shell", "personal-workbench"}:
                 prelude += "from PySide6.QtWidgets import QApplication\napp = QApplication([])\n"
             elif not has_qt:
                 prelude += 'assert importlib.util.find_spec("PySide6") is None\n'
             result = execute([interpreter, "-c", prelude + CHECKS[name]])
+            if name == "workbench-runtime":
+                # 真实最小安装组合：安装平台和文本插件后，导图包仍不可导入。
+                execute([uv, "pip", "install", "--python", interpreter, "--constraint", constraints,
+                         wheels["workbench-plugin-text"]])
+                execute([interpreter, "-c", r'''
+import importlib.util
+from pathlib import Path
+from PySide6.QtWidgets import QApplication
+from workbench_runtime import WorkbenchRuntimeWindow
+app = QApplication([])
+assert importlib.util.find_spec("mindmap_core") is None
+assert importlib.util.find_spec("workbench_plugin_mindmap") is None
+window = WorkbenchRuntimeWindow(storage_dir=Path("text-only-state"), restore=False)
+assert set(window.providers) == {"text.editor"}
+path = Path("text-only.txt").absolute()
+path.write_text("最小安装组合", encoding="utf-8")
+assert window.open_path(path)
+view = window.documents.active
+view.widget.insertPlainText("文本编辑：")
+assert view.duplicate()
+assert window.save_all()
+assert path.read_text("utf-8") == "文本编辑：最小安装组合"
+assert window.close()
+'''])
             independent[name] = True
-            if name == "mindmap-workbench":
+            if name == "workbench-shell":
+                # 包名、导入名与生成器命令同步改名，干净环境不能残留旧启动器。
+                command = interpreter.parent / ("workbench-new.exe" if os.name == "nt" else "workbench-new")
+                assert command.is_file() and not list(interpreter.parent.glob("mindmap-new*"))
+                execute([command, "--help"])
+            if name == "personal-workbench":
                 workbench = json.loads(result)
+                # 同时验证模块入口与已安装命令，旧命令不能因残留构建产物继续出现。
+                execute([interpreter, "-m", "personal_workbench", "--help"])
+                command = interpreter.parent / ("personal-workbench.exe" if os.name == "nt" else "personal-workbench")
+                assert command.is_file() and not list(interpreter.parent.glob("mindmap-workbench*"))
+                execute([command, "--help"])
             print(f"{name}：独立安装、依赖隔离及功能验收通过", flush=True)
         pins = workbench.pop("已验证运行依赖", {})
         pins = {name.lower().replace("_", "-"): version for name, version in pins.items()}
@@ -406,7 +533,7 @@ def run():
         (artifacts / "release-constraints.txt").write_text(
             "# 本次通过独立安装验收的固定版本。\n"
             + "".join(f"{name}=={version}\n" for name, version in sorted(pins.items())), "utf-8")
-        report = {"独立能力包": independent, "成员数量": len(members), **workbench}
+        report = {"独立能力包": independent, "成员数量": len(members), **archive_report, **workbench}
         (artifacts / "wheel-verification.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
         return 0
     finally:
