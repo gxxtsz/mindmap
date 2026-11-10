@@ -24,5 +24,3 @@ uv run --locked --no-sync python plugins/workbench-plugin-mindmap/scripts/verify
 uv run --locked --no-sync python plugins/workbench-plugin-mindmap/scripts/benchmark_interactions.py --nodes 10000
 uv run --locked --no-sync python plugins/workbench-plugin-mindmap/scripts/verify_text_rendering.py --platform windows --baseline-ref HEAD
 ```
-
-工作区构建与独立安装见[验收脚本说明](../../../scripts/README.md)。导图专项脚本随仓库提供。

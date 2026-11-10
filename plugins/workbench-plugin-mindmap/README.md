@@ -42,4 +42,4 @@ uv run --locked --package personal-workbench personal-workbench
 ## 开发与验收
 
 - 公开协议、注册、生命周期及兼容策略见[工作台运行时](../../packages/workbench-runtime/README.md)。
-- 构建和隔离安装见[工作区验收脚本](../../scripts/README.md)，性能验证见[导图专项脚本](scripts/README.md)。
+- 导图性能与桌面专项验收见[导图专项脚本](scripts/README.md)。

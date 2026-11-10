@@ -34,7 +34,7 @@ personal-workbench = { workspace = true }
 dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.11,<1"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages", "plugins", "apps", "tests/integration"]
+testpaths = ["packages", "plugins", "apps"]
 addopts = "--import-mode=importlib"
 qt_api = "pyside6"
 

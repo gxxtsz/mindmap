@@ -35,7 +35,7 @@ uv run --locked --package personal-workbench personal-workbench
 ## 目录结构
 
 ```text
-apps/personal-workbench/          产品入口、内置插件装配和旧配置迁移
+apps/personal-workbench/          产品入口、插件装配、旧配置迁移和工作区分发验收
 packages/
   workbench-api/                 插件与编辑器公开协议
   workbench-runtime/             插件宿主、文档与会话、桌面外壳与停靠
@@ -47,8 +47,6 @@ plugins/
     workbench-adapter/          工作台插件入口、文档会话与自动保存
     tests/integration/          导图组件组合测试
     scripts/                    导图性能与桌面专项验收
-scripts/                        工作区发现、发行和桌面验收
-tests/integration/              跨包架构、桌面组合和进程生命周期验收
 ```
 
 工作区包含 **7 个独立分发包**。通用能力使用 `workbench-*` 名称，产品入口使用 `personal-workbench`，导图专属组件使用 `mindmap-*`。
@@ -66,8 +64,6 @@ uv run --locked --no-sync pytest
 uv run --locked --no-sync ruff check .
 uv lock --check
 uv build --all-packages
-uv run --locked --no-sync python scripts/verify_wheels.py
-uv run --locked --no-sync python scripts/verify_plugins.py
 ```
 
 性能与导图专项命令见[导图验收脚本](plugins/workbench-plugin-mindmap/scripts/README.md)。
@@ -75,5 +71,4 @@ uv run --locked --no-sync python scripts/verify_plugins.py
 ## 开发文档
 
 - 插件协议、生命周期、文档服务和数据兼容见[工作台运行时](packages/workbench-runtime/README.md)。
-- 独立构建、安装和桌面验收见[工作区验收脚本](scripts/README.md)。
 - 导图组件的使用入口见[思维导图 Python 接口](plugins/workbench-plugin-mindmap/README.md#python-接口)。

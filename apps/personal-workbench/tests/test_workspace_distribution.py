@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 MINDMAP_DIRECTORIES = {
     "mindmap-core": "core",
     "mindmap-qt-render": "qt-render",
@@ -130,22 +130,8 @@ def assert_source_boundary(file, name, declared):
             assert node.attr not in forbidden, file
 
 
-def test_platform_and_plugins_obey_business_boundaries():
-    """平台不能导入业务包；插件不能反向导入运行时或应用装配层。"""
-    for name in ("workbench-api", "workbench-runtime", "workbench-plugin-mindmap"):
-        path, _ = members()[name]
-        forbidden = ({name.replace("-", "_") for name in MINDMAP_DIRECTORIES}
-                     if name in {"workbench-api", "workbench-runtime"} else
-                     {"workbench_runtime", "personal_workbench"})
-        for file in runtime_sources(path / "src"):
-            for node in ast.walk(ast.parse(file.read_text("utf-8"))):
-                imported = ([alias.name for alias in node.names] if isinstance(node, ast.Import) else
-                            [node.module or ""] if isinstance(node, ast.ImportFrom) and not node.level else [])
-                assert all(module.split(".")[0] not in forbidden for module in imported), file
-
-
 def test_runtime_dependencies_are_explicit_and_point_downward():
-    """每个成员使用单一导入命名空间，并为跨包导入声明直接依赖。"""
+    """核对声明的依赖与实际导入，确保平台、业务组件和插件适配层按层依赖。"""
     for name, (path, metadata) in members().items():
         declared = {re.split(r"[<>=!~ ;\[]", item)[0].lower() for item in metadata["dependencies"]}
         assert declared == DEPENDENCIES[name]
