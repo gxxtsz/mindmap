@@ -1,5 +1,15 @@
-# workbench-api
+# 工作台插件接口
 
-本包定义插件清单、编辑器与文档协议，以及命令、面板和主题等 Qt 扩展接口。当前插件协议为第 2 版，宿主与插件共同使用这些声明。接入方式和生命周期见[工作台运行时](../workbench-runtime/README.md#插件接入-api)。
+`workbench-api` 定义宿主和插件共用的公开协议，Python 导入名为 `workbench_api`。当前插件协议版本为 `API_VERSION = 2`。
 
-使用根目录的 uv workspace 同步、测试和构建本包。代码接口与关键生命周期说明均使用中文。
+## 接口范围
+
+- `PluginManifest` 声明插件标识、版本、依赖和激活函数。`PluginContext` 为插件提供编辑器注册、文档、设置、会话状态和日志等服务。
+- `EditorProvider` 声明支持的扩展名以及新建、打开操作。`DocumentHandle` 表示可由多个标签共享的文档，`EditorView` 表示每个标签独立的视图。
+- `workbench_api.qt` 定义命令、停靠面板、菜单和状态栏的扩展声明，并提供主题查询与界面事件订阅的接口。
+
+完整类型和方法见[核心协议](src/workbench_api/contracts.py)和 [Qt 扩展协议](src/workbench_api/qt.py)。
+
+## 插件接入
+
+插件在 `pyproject.toml` 的 `personal_workbench.plugins` 入口点组中公开清单，入口名称须与 `PluginManifest.id` 一致。宿主调用清单的 `activate(context)`，插件通过上下文注册扩展，并返回实现 `dispose()` 的实例。参见[运行时的插件接入说明](../workbench-runtime/README.md#插件接入-api)。
