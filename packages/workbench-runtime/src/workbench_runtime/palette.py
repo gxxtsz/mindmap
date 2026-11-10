@@ -3,7 +3,8 @@
 from dataclasses import dataclass
 
 from PySide6.QtGui import QColor, QPalette
-from workbench_docking import Theme
+
+from .ui.docking import Theme
 
 
 @dataclass(frozen=True)

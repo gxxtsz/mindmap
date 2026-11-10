@@ -296,7 +296,7 @@ class MindMapEditorView(QObject):
     def _show_inspiration(self):
         """导航成功后打开共享左侧灵感工具；后台恢复候选不抢占其他文件焦点。"""
         if not self._navigating_recent_page and self.owner.get(self.id) is self and self.owner.active is self:
-            self.owner.window.manager.activate("inspiration", focus=False)
+            self.owner.window.context.ui.activate_panel("inspiration", focus=False)
 
     def dispose(self):
         """停止计时器和订阅并延迟销毁组件；关闭标签和退出窗口均不缓存旧画布。

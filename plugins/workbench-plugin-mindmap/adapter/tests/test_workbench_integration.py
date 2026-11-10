@@ -20,7 +20,7 @@ from personal_workbench.app import build_window
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QIcon, QImage, QWheelEvent
 from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMenu, QMessageBox, QToolButton
-from workbench_docking import DockPosition, DockTarget, ViewMode
+from workbench_runtime.ui.docking import DockPosition, DockTarget, ViewMode
 
 
 @pytest.fixture

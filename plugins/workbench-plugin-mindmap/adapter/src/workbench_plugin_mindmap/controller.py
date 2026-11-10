@@ -7,7 +7,7 @@ from mindmap_qt_render import ensure_fonts
 from mindmap_qt_ui import UiColors
 from PySide6.QtCore import QObject, QSignalBlocker, QTimer
 from PySide6.QtGui import QAction, QIcon, QPalette
-from PySide6.QtWidgets import QLabel, QMenu, QStackedWidget
+from PySide6.QtWidgets import QLabel, QMenu, QStackedWidget, QWidget
 from workbench_api import EditorProvider, OperationResult
 from workbench_api.qt import CommandSpec, MenuContribution, PanelSpec, StatusItemSpec
 
@@ -17,11 +17,11 @@ from .page_history import PageHistoryState
 from .status_controls import _StatusViewControls
 
 
-def ui_colors_from_shell(theme):
+def ui_colors_from_host(ui):
     """把平台颜色令牌转换为导图组件自己的界面色板。"""
     keys = ("main-window-bg", "tool-window-bg", "editor-bg", "text-default", "text-muted",
             "tool-window-border", "toolbar-bg-hovered", "toolbar-selected-bg-active", "control-brand-border", "danger")
-    return UiColors(*(theme.color(key).name() for key in keys))
+    return UiColors(*(ui.theme_color(key).name() for key in keys))
 
 
 class MindMapController(QObject):
@@ -29,7 +29,6 @@ class MindMapController(QObject):
     def __init__(self, context):
         super().__init__(context.ui.parent)
         self.context = context
-        self.manager = context.ui.docking
         self._disposed = False
         self._restoring_recent_pages = True
         self._updating_preferences = False
@@ -44,8 +43,12 @@ class MindMapController(QObject):
         self._recent_pages_timer.setSingleShot(True)
         self._recent_pages_timer.setInterval(500)
         self._recent_pages_timer.timeout.connect(self.flush_recent_pages)
+        # 面板首次挂载时由宿主接管堆栈。一直未挂载的堆栈随隐藏容器释放。
+        panel_staging = QWidget(context.ui.parent)
+        panel_staging.hide()
+        context.own(panel_staging.deleteLater)
         for name in ("outline", "favorites", "inspiration", "recent_pages", "properties", "settings"):
-            stack = QStackedWidget(self.manager.parking)
+            stack = QStackedWidget(panel_staging)
             stack.addWidget(QLabel("没有打开的导图"))
             setattr(self, "_" + name + "_stack", stack)
         self._depth_action = QAction("显示层级", self)
@@ -65,11 +68,13 @@ class MindMapController(QObject):
             ("properties", "节点属性", self._properties_stack, "properties", "right_top", "Alt+2"),
             ("map_settings", "导图设置", self._settings_stack, "settings", "right_top", ""),
         ):
-            context.ui.register_panel(PanelSpec(identifier, title, lambda content=stack: content,
-                                               icon, position, shortcut, headers.get(identifier, ()),
-                                               identifier in ("recent_pages", "properties")))
-        self.recent_pages_action = self.manager.actions["tool:recent_pages"]
-        self.recent_pages_action.setCheckable(True)
+            action = context.ui.register_panel(PanelSpec(identifier, title, lambda content=stack: content,
+                                                        icon, position, shortcut, headers.get(identifier, ()),
+                                                        identifier in ("recent_pages", "properties")))
+            if identifier == "recent_pages":
+                assert action is not None
+                self.recent_pages_action = action
+                action.setCheckable(True)
         self.settings_action = context.commands.register(CommandSpec(
             "mindmap.settings", "导图设置", self.show_settings_panel, "Alt+3", "settings",
             enabled=lambda: self.active_session is not None))
@@ -147,7 +152,7 @@ class MindMapController(QObject):
         if self.active_session is None:
             return
         exports = QMenu("导出图形", menu)
-        exports.setIcon(self.manager.theme.icon("export-image"))
+        exports.setIcon(self.context.ui.theme_icon("export-image"))
         exports.menuAction().setProperty("workbench_icon", "export-image")
         exports.setEnabled(bool(self.canvas.document_view.nodes))
         for format_id, title in (("png", "PNG 图片"), ("svg", "SVG 矢量图"), ("pdf", "PDF 文档")):
@@ -156,7 +161,7 @@ class MindMapController(QObject):
             action.triggered.connect(lambda checked=False, selected=format_id: self.call(lambda: self.files.export_dialog(selected)))
         menu.insertMenu(self.action("app.quit"), exports)
         action = QAction("导出当前页为 TXT…", menu)
-        action.setIcon(self.manager.theme.icon("export-text"))
+        action.setIcon(self.context.ui.theme_icon("export-text"))
         action.setProperty("workbench_icon", "export-text")
         action.setEnabled(bool(self.canvas.document_view.nodes))
         action.triggered.connect(lambda: self.call(lambda: self.files.export_dialog("txt")))
@@ -170,6 +175,7 @@ class MindMapController(QObject):
 
     def refresh_theme(self, *_):
         colors = self.ui_colors
+        panel_background = self.context.ui.theme_color("tool-window-bg")
         for session in self.sessions.values():
             session.canvas.set_ui_colors(colors)
             session.panels.set_ui_colors(colors)
@@ -178,10 +184,10 @@ class MindMapController(QObject):
         for stack in (self._outline_stack, self._favorites_stack, self._inspiration_stack,
                       self._recent_pages_stack, self._properties_stack, self._settings_stack):
             palette = stack.palette()
-            palette.setColor(QPalette.ColorRole.Window, self.manager.theme.color("tool-window-bg"))
+            palette.setColor(QPalette.ColorRole.Window, panel_background)
             stack.setPalette(palette)
             stack.setAutoFillBackground(True)
-        self._status_controls.set_ui_colors(colors, compact=self.manager.theme.compact)
+        self._status_controls.set_ui_colors(colors, compact=self.context.ui.compact)
         self._sync_depth_action()
 
     def dispose(self):
@@ -287,7 +293,7 @@ class MindMapController(QObject):
 
         查询不缓存主题、不修改偏好或导图，后续主题切换仍由 refresh_theme 统一同步。
         """
-        return ui_colors_from_shell(self.manager.theme)
+        return ui_colors_from_host(self.context.ui)
 
 
     def _save_wheel_mode(self, mode):
@@ -383,8 +389,9 @@ class MindMapController(QObject):
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。
         # 关闭活动标签到下一标签的短暂空绑定不暂停，只有关闭全部导图才回欢迎页。
-        tools = ("outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings")
-        self.manager.set_tools_suspended(tuple(key for key in tools if key in self.manager.specs), session is None)
+        if not self._disposed:
+            panels = ("outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings")
+            self.context.ui.set_panels_suspended(panels, session is None)
 
 
     def _set_read_only(self, checked):
@@ -395,9 +402,9 @@ class MindMapController(QObject):
     def _show_properties(self, session=None):
         session = session or self.active_session
         if session:
-            self.manager.activate_document(session.id)
+            self.context.documents.activate_view(session.id)
             session.canvas.finish_edit(commit=True)
-            self.manager.activate("properties")
+            self.context.ui.activate_panel("properties")
 
 
     def show_settings_panel(self):
@@ -407,7 +414,7 @@ class MindMapController(QObject):
         focus=False 使快捷键查看设置时保留正文草稿，编辑期间控件维持禁用。
         """
         if self.active_session and not self._disposed:
-            self.manager.activate("map_settings", focus=False)
+            self.context.ui.activate_panel("map_settings", focus=False)
 
 
     def schedule_recent_pages_save(self) -> None:
@@ -434,12 +441,12 @@ class MindMapController(QObject):
     def _layout_changed(self):
         if self._disposed:
             return
-        self.recent_pages_action.setChecked(self.manager.states["recent_pages"].visible)
-        visible = self.manager.states["properties"].visible
+        self.recent_pages_action.setChecked(self.context.ui.panel_visible("recent_pages"))
+        visible = self.context.ui.panel_visible("properties")
         if getattr(self, "_properties_visible", visible) and not visible and self.panels:
             self.panels.flush_pending_edits()
         self._properties_visible = visible
-        settings_visible = self.manager.states["map_settings"].visible
+        settings_visible = self.context.ui.panel_visible("map_settings")
         if getattr(self, "_settings_visible", settings_visible) and not settings_visible and self.panels:
             self.panels.settings.flush()
         self._settings_visible = settings_visible

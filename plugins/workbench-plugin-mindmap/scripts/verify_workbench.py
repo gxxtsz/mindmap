@@ -19,7 +19,7 @@ def child(scale, platform):
     from PySide6.QtGui import QEnterEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
-    from workbench_docking import ViewMode
+    from workbench_runtime.ui.docking import ViewMode
 
     app = QApplication([])
     output = ROOT / ".artifacts/workbench-visual" / platform / f"{scale:g}x"

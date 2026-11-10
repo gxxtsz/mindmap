@@ -1,10 +1,10 @@
 """Qt 界面扩展声明；业务组件只接触公开桥，不访问宿主窗口实现。"""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QColor, QIcon
 from PySide6.QtWidgets import QMenu, QWidget
 
 from .contracts import Disposable
@@ -69,14 +69,42 @@ class UiService(Protocol):
         ...
 
     @property
-    def docking(self):
-        """现有停靠组件的公开接口，可用于面板暂停、恢复、定位及分屏。"""
+    def compact(self) -> bool:
+        """当前主题的紧凑模式，供插件调整控件尺寸和间距。"""
         ...
 
     @property
     def restoring(self) -> bool: ...
 
-    def register_panel(self, spec: PanelSpec) -> QAction | None: ...
+    def register_panel(self, spec: PanelSpec) -> QAction | None:
+        """登记面板并绑定插件生命周期。有快捷键时返回可复用的面板动作。"""
+        ...
+
+    def panel_visible(self, panel_id: str) -> bool:
+        """读取面板在布局中的显隐偏好。暂停期间保留该值，未知标识抛出 KeyError。"""
+        ...
+
+    def activate_panel(self, panel_id: str, *, focus: bool = True) -> bool:
+        """显示并激活面板，成功返回 True。focus=False 时保留当前输入焦点。
+
+        面板暂停或不可用时返回 False，未知标识抛出 KeyError。
+        """
+        ...
+
+    def set_panels_suspended(self, panel_ids: Iterable[str], suspended: bool) -> None:
+        """批量暂停或恢复面板，保留显隐、位置和尺寸等布局偏好。
+
+        暂停期间面板暂时隐藏且动作禁用。全部标识通过校验后才修改，未知标识抛出 KeyError。
+        """
+        ...
+
+    def theme_color(self, token: str) -> QColor:
+        """根据当前主题解析颜色令牌。切换主题后可在主题订阅回调中重新查询。"""
+        ...
+
+    def theme_icon(self, name: str) -> QIcon:
+        """按图标标识返回当前主题的 Qt 图标，供插件菜单和控件复用。"""
+        ...
 
     def register_status(self, spec: StatusItemSpec) -> Disposable: ...
 

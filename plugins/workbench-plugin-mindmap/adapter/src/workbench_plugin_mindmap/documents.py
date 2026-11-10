@@ -163,7 +163,7 @@ class MindMapDocumentHandle(QObject):
             if view.is_composing:
                 self._failed("请先完成输入法候选，再保存或关闭导图")
                 if self.owner.get(view.id) is view:
-                    self.owner.window.manager.activate_document(view.id)
+                    self.owner.window.context.documents.activate_view(view.id)
                 return False
         self._preparing = True
         try:

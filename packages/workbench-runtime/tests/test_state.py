@@ -57,7 +57,7 @@ def test_atomic_write_failure_preserves_file_and_cleans_temporary_file(tmp_path,
     def fail(*args):
         raise OSError("模拟原子替换失败")
 
-    monkeypatch.setattr("workbench_docking.storage.os.replace", fail)
+    monkeypatch.setattr("workbench_runtime.storage.os.replace", fail)
     with pytest.raises(OSError, match="替换失败"):
         state.remember(tmp_path / "乙.txt")
     assert state.store.path.read_bytes() == original

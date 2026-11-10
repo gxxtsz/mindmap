@@ -5,7 +5,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from workbench_api import path_key
-from workbench_docking import JsonLayoutStore
+
+from .storage import JsonLayoutStore
 
 
 class Settings:

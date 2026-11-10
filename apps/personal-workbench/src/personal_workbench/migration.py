@@ -4,7 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
-from workbench_docking import JsonLayoutStore
+from workbench_runtime.storage import JsonLayoutStore
 
 
 def migrate_legacy(directory):

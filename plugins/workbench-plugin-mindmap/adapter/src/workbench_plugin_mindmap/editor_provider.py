@@ -22,7 +22,7 @@ class MindMapEditorProvider(QObject):
         self._known_paths = {}
         self.active_id = ""
         self._switching = False
-        window.manager.document_activated.connect(self._activate)
+        self._active_subscription = window.context.ui.subscribe_active(self._activate)
 
     def __len__(self):
         return len(self._sessions)
@@ -97,7 +97,7 @@ class MindMapEditorProvider(QObject):
             # 回滚安装途中已注册的容器，不再执行可能写盘的业务关闭检查。
             self.window.context.documents.remove_view(candidate.id)
             candidate.dispose()
-            self.window.manager.activate_document(source.id)
+            self.window.context.documents.activate_view(source.id)
             self.window.show_status_message(f"复制标签失败：{error}")
             return False
 
@@ -139,7 +139,7 @@ class MindMapEditorProvider(QObject):
         source = MindMapFileController.validate_open_path(path)
         existing = self.find_path(source)
         if existing is not None and session_id is None:
-            self.window.manager.activate_document(existing.id)
+            self.window.context.documents.activate_view(existing.id)
             if remember:
                 self.window._remember_path(existing.files.path)
             self.window.record_operation("激活已打开的导图", session=existing)
@@ -164,8 +164,9 @@ class MindMapEditorProvider(QObject):
             raise
 
 
-    def _activate(self, session_id):
+    def _activate(self, view):
         """切换页面前提交原会话有效输入；侧栏获得焦点时不改变逻辑活动会话。"""
+        session_id = view.id if view is not None else ""
         if self._switching or session_id == self.active_id:
             return
         self._switching = True
@@ -226,7 +227,7 @@ class MindMapEditorProvider(QObject):
 
     def dispose(self):
         """主窗口已经通过全部保存检查后释放资源，不再执行二次关闭或写入。"""
-        self.window.manager.document_activated.disconnect(self._activate)
+        self._active_subscription.dispose()
         self.active_id = ""
         self.window._bind_session(None)
         for session in self.values():

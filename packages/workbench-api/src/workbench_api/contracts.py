@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from .qt import CommandService, UiService
 
-API_VERSION = 1
+API_VERSION = 2
 
 
 def path_key(path: str | Path) -> str:
@@ -170,6 +170,13 @@ class DocumentService(Protocol):
     def ordered(self) -> list[EditorView]: ...
 
     def find_path(self, path: str | Path) -> EditorView | None: ...
+
+    def activate_view(self, view_id: str) -> None:
+        """激活已登记的视图及其所在分屏，复用标签和控件，并更新编辑焦点。
+
+        活动视图发生变化时沿用宿主的通知。标识对应的视图尚未打开时抛出 ValueError。
+        """
+        ...
 
     def register_view(self, provider_id: str, view: EditorView, *, after: str | None = None,
                       remember: bool = True) -> Disposable: ...

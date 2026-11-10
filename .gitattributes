@@ -1,4 +1,4 @@
 # 主题、资源清单与图标按原始字节校验摘要，统一使用 LF，覆盖自动换行配置。
 # 按包内资源目录匹配，保证 JSON 和 SVG 的检出与打包字节一致。
-packages/*/src/*/resources/*.json text eol=lf
-packages/*/src/*/resources/icons/*.svg text eol=lf
+packages/workbench-runtime/src/workbench_runtime/ui/docking/resources/*.json text eol=lf
+packages/workbench-runtime/src/workbench_runtime/ui/docking/resources/icons/*.svg text eol=lf

@@ -23,11 +23,45 @@ assert OperationResult() and not OperationResult.cancelled()
 assert PluginManifest("sample", "示例", "1", lambda context: None).api_version == API_VERSION
 ''',
     "workbench-runtime": r'''
+import hashlib
+from PySide6.QtWidgets import QLabel, QMainWindow
 from workbench_runtime import WorkbenchRuntimeWindow
+from workbench_runtime.ui import docking
+from workbench_runtime.ui.docking import DockHost, DockManager, DocumentSpec
+from workbench_runtime.ui.shell import AppSpec, WorkbenchWindow
+
 window = WorkbenchRuntimeWindow(storage_dir=Path("runtime-state"), manifests=[], restore=False)
 assert not window.providers
 assert "mindmap_core" not in sys.modules and "mindmap_qt_canvas" not in sys.modules
 window.dispose()
+
+resources = Path(docking.__file__).parent / "resources"
+manifest = json.loads((resources / "manifest.json").read_text("utf-8"))
+expected = {entry["path"] for entry in manifest["files"]}
+actual = {path.relative_to(resources).as_posix() for path in resources.rglob("*")
+          if path.is_file() and path.name != "manifest.json"}
+assert len(expected) == len(manifest["files"])
+assert expected == actual and {"dark.json", "light.json", "icons/mindmap.svg"} <= expected
+for entry in manifest["files"]:
+    assert hashlib.sha256((resources / entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
+
+window = QMainWindow()
+manager = DockManager(storage_dir=Path("docking-state"))
+window.setCentralWidget(DockHost(manager, "main", window))
+manager.register_document(DocumentSpec("document", "独立停靠组件", lambda: QLabel("内容")))
+assert not manager.theme.icon("mindmap").isNull()
+manager.set_theme("dark")
+assert not manager.theme.icon("mindmap").isNull()
+manager.shutdown()
+window.close()
+
+window = WorkbenchWindow(AppSpec("shell-check", "安装外壳验收", storage_dir=Path("shell-state")))
+window.manager.register_document(DocumentSpec("document", "测试文档", lambda: QLabel("内容")))
+window.show()
+app.processEvents()
+assert window.spec.title == "安装外壳验收" and len(window.manager.documents) == 1
+window.manager.set_theme("dark")
+assert window.close()
 ''',
     "workbench-plugin-mindmap": r'''
 from importlib.metadata import entry_points
@@ -131,72 +165,16 @@ assert PanelHost.__module__ == "mindmap_qt_panels.contracts"
 host.close()
 
 ''',
-    "workbench-docking": r'''
-
-import hashlib, importlib.util, json, sys
-from pathlib import Path
-import workbench_docking
-from workbench_docking import DockHost, DockManager, DocumentSpec
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow
-assert importlib.util.find_spec("workbench_shell") is None
-assert importlib.util.find_spec("mindmap_engine") is None
-assert importlib.util.find_spec("mindmap_qt") is None
-assert Path(workbench_docking.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-resources = Path(workbench_docking.__file__).parent / "resources"
-manifest = json.loads((resources / "manifest.json").read_text("utf-8"))
-expected = {entry["path"] for entry in manifest["files"]}
-actual = {path.relative_to(resources).as_posix() for path in resources.rglob("*")
-          if path.is_file() and path.name != "manifest.json"}
-assert len(expected) == len(manifest["files"])
-assert expected == actual and {"dark.json", "light.json", "icons/mindmap.svg"} <= expected
-for entry in manifest["files"]:
-    assert hashlib.sha256((resources / entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
-app = QApplication([])
-window = QMainWindow()
-manager = DockManager(storage_dir=Path("docking-state"))
-window.setCentralWidget(DockHost(manager, "main", window))
-manager.register_document(DocumentSpec("document", "独立停靠组件", lambda: QLabel("内容")))
-assert not manager.theme.icon("mindmap").isNull()
-manager.set_theme("dark")
-assert not manager.theme.icon("mindmap").isNull()
-manager.shutdown()
-window.close()
-print(json.dumps({"停靠包独立安装与资源完整性": True, "停靠包依赖隔离": True}))
-
-''',
-    "workbench-shell": r'''
-
-import importlib.util, json, sys
-from pathlib import Path
-import workbench_shell
-from workbench_docking import DocumentSpec
-from workbench_shell import AppSpec, WorkbenchWindow
-from PySide6.QtWidgets import QApplication, QLabel
-assert importlib.util.find_spec("mindmap_engine") is None
-assert importlib.util.find_spec("mindmap_qt") is None
-assert importlib.util.find_spec("mindmap_workbench") is None
-assert Path(workbench_shell.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-app = QApplication([])
-window = WorkbenchWindow(AppSpec("shell-check", "安装外壳验收", storage_dir=Path("shell-state")))
-window.manager.register_document(DocumentSpec("document", "测试文档", lambda: QLabel("内容")))
-window.show()
-app.processEvents()
-assert window.spec.title == "安装外壳验收" and len(window.manager.documents) == 1
-window.manager.set_theme("dark")
-assert window.close()
-print(json.dumps({"外壳包独立安装与依赖隔离": True}))
-
-''',
     "personal-workbench": r'''
 
 import importlib.util, json, sys
 from importlib.metadata import distributions
 from pathlib import Path
-import workbench_docking, workbench_shell, personal_workbench, mindmap_core
+import workbench_runtime, personal_workbench, mindmap_core
 import mindmap_qt_canvas, mindmap_qt_panels, mindmap_qt_ui, mindmap_qt_render
 assert importlib.util.find_spec("mindmap_qt") is None
 assert importlib.util.find_spec("mindmap_qt_workspace") is None
-from workbench_docking import DockPosition, DockTarget
+from workbench_runtime.ui.docking import DockPosition, DockTarget
 from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
@@ -245,7 +223,7 @@ for suffix in ("png", "svg", "pdf"):
     target = Path("workbench." + suffix)
     window.plugins.instance("mindmap").canvas.export(target)
     assert target.stat().st_size > 500
-for module in (workbench_docking, workbench_shell, personal_workbench, mindmap_core,
+for module in (workbench_runtime, personal_workbench, mindmap_core,
                mindmap_qt_canvas, mindmap_qt_panels, mindmap_qt_ui, mindmap_qt_render):
     assert Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 assert window.new_document(Path("second.mindmap").absolute())
@@ -468,7 +446,7 @@ def run():
             closure = dependencies(name)
             forbidden = {item.replace("-", "_") for item in set(members) - closure}
             forbidden.update({"mindmap_engine", "mindmap_qt", "mindmap_qt_workspace", "mindmap_workbench",
-                              "mindmap_docking", "mindmap_shell"})
+                              "mindmap_docking", "mindmap_shell", "workbench_docking", "workbench_shell"})
             module = name.replace("-", "_")
             prelude = ("import importlib.util, sys, json\nfrom pathlib import Path\n"
                        + f"for module in {sorted(forbidden)!r}:\n"
@@ -476,7 +454,7 @@ def run():
                        + f"import {module} as installed\n"
                        + "assert Path(installed.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())\n")
             has_qt = any(any(value.startswith("PySide6") for value in members[item][1]["dependencies"]) for item in closure)
-            if has_qt and name not in {"workbench-docking", "workbench-shell", "personal-workbench"}:
+            if has_qt and name != "personal-workbench":
                 prelude += "from PySide6.QtWidgets import QApplication\napp = QApplication([])\n"
             elif not has_qt:
                 prelude += 'assert importlib.util.find_spec("PySide6") is None\n'

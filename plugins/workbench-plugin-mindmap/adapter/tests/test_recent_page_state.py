@@ -75,7 +75,7 @@ def test_page_write_failure_preserves_file_and_memory_for_retry(tmp_path, monkey
     with monkeypatch.context() as patch:
         def fail(*args):
             raise OSError("磁盘不可写")
-        patch.setattr("workbench_docking.storage.os.replace", fail)
+        patch.setattr("workbench_runtime.storage.os.replace", fail)
         with pytest.raises(OSError, match="磁盘不可写"):
             state.flush()
     assert owner.store.path.read_bytes() == original and state.dirty

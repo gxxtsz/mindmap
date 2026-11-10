@@ -7,8 +7,8 @@ import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
-from workbench_docking import DockPosition, DockTarget, ViewMode
-from workbench_shell import AppSpec, WorkbenchWindow
+from workbench_runtime.ui.docking import DockPosition, DockTarget, ViewMode
+from workbench_runtime.ui.shell import AppSpec, WorkbenchWindow
 
 REGIONS = {
     "left": (DockPosition.LEFT_TOP, DockPosition.LEFT_BOTTOM),

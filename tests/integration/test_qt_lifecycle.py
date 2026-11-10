@@ -45,7 +45,7 @@ def test_desktop_launcher_releases_offscreen_mime_before_qt_shutdown(tmp_path):
     """正式事件循环退出也要释放 Python MIME，不依赖 pytest 的测试清理。"""
     source = textwrap.dedent("""\
         import sys
-        from workbench_shell import AppSpec, WorkbenchWindow, run_desktop
+        from workbench_runtime.ui.shell import AppSpec, WorkbenchWindow, run_desktop
         from PySide6.QtCore import QMimeData, QTimer
         from PySide6.QtGui import QImage
         from PySide6.QtWidgets import QApplication

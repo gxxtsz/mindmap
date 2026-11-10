@@ -78,7 +78,7 @@ def test_bad_plugin_metadata_does_not_activate(qtbot, tmp_path, kind):
     if kind == "duplicate":
         manifests = [PluginManifest("a", "甲", "1", activate), PluginManifest("a", "乙", "1", activate)]
     elif kind == "version":
-        manifests = [PluginManifest("a", "甲", "1", activate, api_version=999)]
+        manifests = [PluginManifest("a", "甲", "1", activate, api_version=1)]
     elif kind == "missing":
         manifests = [PluginManifest("a", "甲", "1", activate, requires=("missing",))]
     else:
@@ -112,7 +112,7 @@ def test_activation_failure_removes_ui_commands_and_blocks_dependents(qtbot, tmp
 
     def fail(context):
         context.commands.register(CommandSpec("broken.command", "测试动作", lambda: None, "Ctrl+Alt+J"))
-        context.ui.register_panel(PanelSpec("broken.panel", "测试面板", QLabel))
+        context.ui.register_panel(PanelSpec("broken.panel", "测试面板", QLabel, default_visible=True))
         context.ui.register_status(StatusItemSpec("broken.status", QLabel("状态")))
         context.ui.contribute_menu(MenuContribution("视图", lambda menu: menu.addAction("不应存在")))
         context.ui.subscribe_active(lambda view: calls.append("残留订阅"))
@@ -125,6 +125,37 @@ def test_activation_failure_removes_ui_commands_and_blocks_dependents(qtbot, tmp
     qtbot.addWidget(window, before_close_func=lambda item: item.dispose())
     assert "broken.command" not in window.manager.actions
     assert "broken.panel" not in window.manager.specs
+    assert "broken.panel" not in window.default_panel_ids
     assert not window.status_items and not window.menu_contributions
     text_view(window)
     assert calls == [] and window.plugins.records[1].status == "加载失败"
+
+
+def test_panel_service_suspension_keeps_layout_and_validates_entire_batch(qtbot, tmp_path):
+    """公开面板服务保留布局偏好，并在批量标识无效时保留原有动作状态。"""
+    panel_id = "sample.panel"
+
+    def activate(context):
+        action = context.ui.register_panel(PanelSpec(
+            panel_id, "测试面板", QLabel, shortcut="Ctrl+Alt+J", default_visible=True))
+        return SimpleNamespace(dispose=lambda: None, action=action)
+
+    manifest = PluginManifest("sample", "面板示例", "1", activate)
+    window = WorkbenchRuntimeWindow(storage_dir=tmp_path, restore=False, manifests=[manifest])
+    qtbot.addWidget(window, before_close_func=lambda item: item.dispose())
+    ui = window.plugins.records[0].context.ui
+    action = window.plugins.instance("sample").action
+    assert not hasattr(ui, "docking")
+    assert ui.panel_visible(panel_id) and action.isEnabled()
+
+    with pytest.raises(KeyError):
+        ui.set_panels_suspended((panel_id, "missing"), True)
+    assert ui.panel_visible(panel_id) and action.isEnabled()
+
+    ui.set_panels_suspended((panel_id,), True)
+    assert ui.panel_visible(panel_id) and not action.isEnabled()
+    assert ui.activate_panel(panel_id, focus=False) is False
+
+    ui.set_panels_suspended((panel_id,), False)
+    assert ui.panel_visible(panel_id) and action.isEnabled()
+    assert ui.activate_panel(panel_id, focus=False) is True

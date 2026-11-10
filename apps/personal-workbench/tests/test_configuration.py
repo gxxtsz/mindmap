@@ -5,7 +5,7 @@ import pytest
 from personal_workbench.app import build_window
 from PySide6.QtCore import QSettings, QStandardPaths, Qt
 from PySide6.QtWidgets import QApplication
-from workbench_docking import DockManager
+from workbench_runtime.ui.docking import DockManager
 
 
 def test_project_configuration_namespace_and_preferences_are_isolated(qtbot, tmp_path, monkeypatch):

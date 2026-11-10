@@ -1,6 +1,11 @@
 """按插件隔离的注册服务及 Qt 桥，资源清理由 PluginContext 统一拥有。"""
 
-from workbench_docking import ToolWindowSpec
+from collections.abc import Iterable
+
+from PySide6.QtGui import QAction, QColor, QIcon
+from workbench_api.qt import PanelSpec
+
+from .ui.docking import ToolWindowSpec
 
 
 class EditorRegistry:
@@ -36,7 +41,7 @@ class CommandRegistry:
 
 
 class UiService:
-    """公开 UI 服务：允许使用公共停靠接口，业务不接触运行时的内部管理字段。"""
+    """将插件的界面声明与操作转换为宿主调用，并在插件卸载时释放注册项。"""
 
     def __init__(self, window, context):
         self._window, self.context = window, context
@@ -47,27 +52,54 @@ class UiService:
         return self._window
 
     @property
-    def docking(self):
-        """现有停靠组件的公共接口；新编辑器注册统一经过文档服务。"""
-        return self._window.manager
+    def compact(self) -> bool:
+        """读取当前主题的紧凑模式，随宿主外观设置变化。"""
+        return self._window.manager.theme.compact
 
     @property
     def restoring(self):
         """恢复屏障供插件暂停访问历史等副作用，避免把后台恢复当成用户导航。"""
         return self._window.state.restoring
 
-    def register_panel(self, spec):
-        manager = self.docking
+    def register_panel(self, spec: PanelSpec) -> QAction | None:
+        """登记面板工厂和默认布局。有快捷键时返回动作，注册项随插件清理。"""
+        manager = self._window.manager
         manager.register_tool_window(ToolWindowSpec(
             spec.id, spec.title, spec.factory, spec.icon, spec.position, spec.shortcut,
             header_actions=spec.header_actions,
         ))
-        self.context.own(lambda: manager.unregister_tool_window(spec.id, keep_layout=False)
-                         if spec.id in manager.specs else None)
+
+        def remove():
+            if spec.default_visible:
+                self._window.default_panel_ids.discard(spec.id)
+            if spec.id in manager.specs:
+                manager.unregister_tool_window(spec.id, keep_layout=False)
+
+        self.context.own(remove)
         if spec.default_visible:
             self._window.default_panel_ids.add(spec.id)
             manager.activate(spec.id, focus=False)
         return manager.actions.get("tool:" + spec.id)
+
+    def panel_visible(self, panel_id: str) -> bool:
+        """查询已登记面板的布局显隐标志。暂时暂停面板不会改变此标志。"""
+        return self._window.manager.states[panel_id].visible
+
+    def activate_panel(self, panel_id: str, *, focus: bool = True) -> bool:
+        """显示面板并沿用停靠规则。focus=False 时保留原输入焦点。"""
+        return self._window.manager.activate(panel_id, focus=focus)
+
+    def set_panels_suspended(self, panel_ids: Iterable[str], suspended: bool) -> None:
+        """统一校验面板标识，再批量暂停或恢复，保留用户已有的布局偏好。"""
+        self._window.manager.set_tools_suspended(panel_ids, suspended)
+
+    def theme_color(self, token: str) -> QColor:
+        """按颜色令牌查询当前主题，插件可直接用于 Qt 色板。"""
+        return self._window.manager.theme.color(token)
+
+    def theme_icon(self, name: str) -> QIcon:
+        """按图标标识查询当前主题，插件可直接用于 Qt 动作和控件。"""
+        return self._window.manager.theme.icon(name)
 
     def register_status(self, spec):
         if spec.id in self._window.status_items:
@@ -91,12 +123,14 @@ class UiService:
         return self.context.own(lambda: self._window.documents.active_changed.disconnect(callback))
 
     def subscribe_theme(self, callback):
-        self.docking.theme_changed.connect(callback)
-        return self.context.own(lambda: self.docking.theme_changed.disconnect(callback))
+        signal = self._window.manager.theme_changed
+        signal.connect(callback)
+        return self.context.own(lambda: signal.disconnect(callback))
 
     def subscribe_layout(self, callback):
-        self.docking.layout_changed.connect(callback)
-        return self.context.own(lambda: self.docking.layout_changed.disconnect(callback))
+        signal = self._window.manager.layout_changed
+        signal.connect(callback)
+        return self.context.own(lambda: signal.disconnect(callback))
 
     def show_message(self, message):
         self._window.show_status_message(message)
@@ -114,7 +148,7 @@ class UiService:
         self._window.remember_path(path)
 
     def current_layout(self):
-        return self.docking.capture_layout()
+        return self._window.manager.capture_layout()
 
 
 class ScopedDocuments:
@@ -132,6 +166,10 @@ class ScopedDocuments:
 
     def find_path(self, path):
         return self.service.find_path(path)
+
+    def activate_view(self, view_id: str) -> None:
+        """切换到已有视图及其实际标签，沿用宿主的焦点和活动视图通知。"""
+        self.service.activate_view(view_id)
 
     def register_view(self, provider_id, view, **kwargs):
         if self.service.window.providers[provider_id][0] != self.context.plugin_id:

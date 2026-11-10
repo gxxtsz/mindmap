@@ -4,8 +4,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QLibraryInfo, QStandardPaths, QTranslator
 from PySide6.QtWidgets import QApplication
-from workbench_runtime import WorkbenchConfig, WorkbenchRuntimeWindow
-from workbench_shell import run_desktop
+from workbench_runtime import WorkbenchConfig, WorkbenchRuntimeWindow, run_desktop
 
 from .migration import migrate_legacy
 

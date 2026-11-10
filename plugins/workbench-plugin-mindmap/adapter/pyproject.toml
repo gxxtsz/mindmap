@@ -6,7 +6,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 description = "思维导图的工作台接入、编辑视图、业务面板与自动保存"
 requires-python = ">=3.12,<3.14"
-dependencies = ['workbench-api>=0.1.0,<0.2', 'mindmap-core>=0.1.0,<0.2', 'mindmap-layouts>=0.1.0,<0.2', 'mindmap-formats>=0.1.0,<0.2', 'mindmap-qt-canvas>=0.1.0,<0.2', 'mindmap-qt-panels>=0.1.0,<0.2', 'mindmap-qt-ui>=0.1.0,<0.2', 'mindmap-qt-render>=0.1.0,<0.2', 'workbench-docking>=0.1.0,<0.2', 'PySide6>=6.12,<6.13']
+dependencies = ['workbench-api>=0.1.0,<0.2', 'mindmap-core>=0.1.0,<0.2', 'mindmap-layouts>=0.1.0,<0.2', 'mindmap-formats>=0.1.0,<0.2', 'mindmap-qt-canvas>=0.1.0,<0.2', 'mindmap-qt-panels>=0.1.0,<0.2', 'mindmap-qt-ui>=0.1.0,<0.2', 'mindmap-qt-render>=0.1.0,<0.2', 'PySide6>=6.12,<6.13']
 
 [project.entry-points."personal_workbench.plugins"]
 mindmap = "workbench_plugin_mindmap:manifest"

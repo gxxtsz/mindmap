@@ -6,7 +6,7 @@ import pytest
 from personal_workbench.app import build_window
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
-from workbench_docking import DockPosition, DockTarget
+from workbench_runtime.ui.docking import DockPosition, DockTarget
 
 
 @pytest.fixture

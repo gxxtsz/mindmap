@@ -31,5 +31,5 @@ uv run --locked --package personal-workbench personal-workbench
 
 - [使用指南](docs/使用指南.md)：多标签、共享文档、保存、面板、日志与偏好。
 - [编辑与页面](docs/编辑与页面.md)：节点、图片、子导图、详情页、引用与灵感。
-- [插件接入机制](../../docs/插件化工作台.md)：公开协议、注册、生命周期及兼容策略。
+- 公开协议、注册、生命周期及兼容策略见[工作台运行时](../../packages/workbench-runtime/README.md)。
 - [开发与验收](../../docs/开发与验收.md)：工作区、构建和性能验收命令。

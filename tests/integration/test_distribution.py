@@ -13,27 +13,24 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {
     "mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-qt-render",
-    "mindmap-qt-ui", "mindmap-qt-canvas", "mindmap-qt-panels", "workbench-docking",
-    "workbench-shell", "personal-workbench", "workbench-api", "workbench-runtime",
+    "mindmap-qt-ui", "mindmap-qt-canvas", "mindmap-qt-panels",
+    "personal-workbench", "workbench-api", "workbench-runtime",
     "workbench-plugin-mindmap", "workbench-plugin-text",
 }
 REMOVED = {"mindmap_engine", "mindmap_qt", "mindmap_qt_workspace", "mindmap_workbench",
-           "mindmap_docking", "mindmap_shell"}
+           "mindmap_docking", "mindmap_shell", "workbench_docking", "workbench_shell"}
 DEPENDENCIES = {
     "mindmap-core": set(), "mindmap-layouts": {"mindmap-core"}, "mindmap-formats": {"mindmap-core"},
     "mindmap-qt-render": {"mindmap-core"},
     "mindmap-qt-ui": {"mindmap-core", "mindmap-layouts", "mindmap-qt-render"},
     "mindmap-qt-canvas": {"mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-qt-render", "mindmap-qt-ui"},
     "mindmap-qt-panels": {"mindmap-core", "mindmap-layouts", "mindmap-qt-ui"},
-    "workbench-docking": set(), "workbench-shell": {"workbench-docking"},
     "workbench-api": set(),
-    "workbench-runtime": {"workbench-api", "workbench-shell", "workbench-docking"},
+    "workbench-runtime": {"workbench-api"},
     "workbench-plugin-mindmap": {"workbench-api", "mindmap-core", "mindmap-layouts", "mindmap-formats",
-                               "mindmap-qt-canvas", "mindmap-qt-panels", "mindmap-qt-ui", "mindmap-qt-render",
-                               "workbench-docking"},
+                               "mindmap-qt-canvas", "mindmap-qt-panels", "mindmap-qt-ui", "mindmap-qt-render"},
     "workbench-plugin-text": {"workbench-api"},
-    "personal-workbench": {"workbench-api", "workbench-runtime", "workbench-plugin-mindmap",
-                           "workbench-plugin-text", "workbench-docking", "workbench-shell"},
+    "personal-workbench": {"workbench-runtime", "workbench-plugin-mindmap", "workbench-plugin-text"},
 }
 
 
@@ -49,7 +46,7 @@ def members():
 
 
 def test_workspace_and_lock_only_reference_current_repository():
-    """四个工作台包直接位于 packages，全部成员及其锁定路径均来自当前仓库。"""
+    """两个工作台包直接位于 packages，全部成员及其锁定路径均来自当前仓库。"""
     packages = members()
     assert set(packages) == EXPECTED
     config = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
@@ -61,10 +58,10 @@ def test_workspace_and_lock_only_reference_current_repository():
     assert set(installed) == EXPECTED
     for name, package in installed.items():
         assert (ROOT / package["source"]["editable"]).resolve() == packages[name][0].resolve()
-    for name in ("workbench-api", "workbench-docking", "workbench-runtime", "workbench-shell"):
+    for name in ("workbench-api", "workbench-runtime"):
         assert packages[name][0] == ROOT / "packages" / name
-    for group in ("desktop", "platform"):
-        assert not (ROOT / "packages" / group).exists()
+    for directory in ("desktop", "platform", "workbench-docking", "workbench-shell"):
+        assert not (ROOT / "packages" / directory).exists()
     for module in REMOVED:
         assert importlib.util.find_spec(module) is None
     assert not (ROOT / "plugins/workbench-plugin-mindmap/workbench").exists()

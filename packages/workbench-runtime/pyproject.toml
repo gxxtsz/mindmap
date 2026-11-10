@@ -4,9 +4,9 @@ version = "0.1.0"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-description = "通用工作台宿主、插件生命周期、文档协调与会话恢复"
+description = "桌面工作台宿主、插件生命周期、文档协调与会话恢复"
 requires-python = ">=3.12,<3.14"
-dependencies = ['workbench-api>=0.1.0,<0.2', 'workbench-shell>=0.1.0,<0.2', 'workbench-docking>=0.1.0,<0.2', 'PySide6>=6.12,<6.13']
+dependencies = ['workbench-api>=0.1.0,<0.2', 'PySide6>=6.12,<6.13']
 
 [build-system]
 requires = ["hatchling>=1.27,<2"]

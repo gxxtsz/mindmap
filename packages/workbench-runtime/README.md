@@ -1,20 +1,21 @@
 # workbench-runtime 工作台运行时
 
-`workbench-runtime` 是可独立装配的 PySide6 工作台宿主，Python 导入名为 `workbench_runtime`。它在桌面外壳和停靠组件之上协调插件、文档、命令与会话。安装运行时即可启动空工作台，安装并启用编辑器插件后才具备相应的文件编辑能力。
+`workbench-runtime` 是可独立装配的 PySide6 工作台宿主，Python 导入名为 `workbench_runtime`。它提供桌面外壳和停靠布局，并协调插件、文档、命令与会话。安装运行时即可启动空工作台，安装并启用编辑器插件后才具备相应的文件编辑能力。
 
 ## 模块职责
 
 | 层级 | 职责 |
 | --- | --- |
-| `workbench-shell` 和 `workbench-docking` | 提供主窗口、标签、分屏、停靠面板、局部主题和布局能力。 |
+| `workbench_runtime.ui.shell` 和 `workbench_runtime.ui.docking` | 提供主窗口、标签、分屏、停靠面板和局部主题，生成并应用布局快照。 |
 | `workbench-runtime` | 装配窗口，发现并激活插件，协调文档标签、编辑命令、保存与关闭，管理欢迎页、最近文件、操作日志和会话恢复。 |
+| `workbench_runtime.storage` | 提供宿主与产品迁移共用的 JSON 原子存储。 |
 | `workbench-api` | 定义插件清单、上下文服务、文档与视图等接入协议。 |
 | 编辑器插件 | 实现文件格式、编码、文档内容、编辑控件和实际读写，并提供可恢复的视图状态。 |
 | 产品入口 | 选择应用标识、显示名称、插件配置和配置目录。已有历史数据的产品还负责提供迁移函数。 |
 
 ## 快速开始
 
-本包支持 Python 3.12、3.13，依赖 `workbench-api`、`workbench-shell`、`workbench-docking` 和 PySide6 `>=6.12,<6.13`。下方示例另外需要 `workbench-plugin-text`，它提供 `.txt` 和 `.md` 纯文本编辑。详见[文本插件](../../plugins/workbench-plugin-text/README.md)。
+本包支持 Python 3.12、3.13，依赖 `workbench-api` 和 PySide6 `>=6.12,<6.13`。下方示例另外需要 `workbench-plugin-text`，它提供 `.txt` 和 `.md` 纯文本编辑。详见[文本插件](../../plugins/workbench-plugin-text/README.md)。
 
 在仓库根目录同步 uv 工作区。
 
@@ -64,7 +65,7 @@ uv run --locked --no-sync python .\运行文本工作台.py .\README.md
 
 ## 宿主 API
 
-通过 `from workbench_runtime import WorkbenchConfig, WorkbenchRuntimeWindow` 使用包级入口。窗口继承 `WorkbenchWindow`，可复用外壳的公共窗口接口。详见[桌面外壳](../workbench-shell/README.md)。
+从 `workbench_runtime` 导入 `WorkbenchConfig` 和 `WorkbenchRuntimeWindow` 装配工作台。产品入口可使用同包导出的 `run_desktop()` 处理 Qt 启动流程。窗口继承 `WorkbenchWindow`，可复用外壳的窗口接口。详见[桌面外壳](docs/桌面外壳.md)。
 
 ### WorkbenchConfig
 
@@ -167,7 +168,7 @@ def activate(context):
 manifest = PluginManifest("text", "文本编辑", "0.1.0", activate)
 ```
 
-`PluginManifest(id, name, version, activate, api_version=API_VERSION, requires=())` 声明稳定的插件 ID、显示名、插件版本和激活函数。`api_version` 须与宿主的 `API_VERSION` 一致，当前值为 `1`。`requires` 填写必须先启用的插件 ID。详见[文本插件入口声明](../../plugins/workbench-plugin-text/pyproject.toml)和[清单实现](../../plugins/workbench-plugin-text/src/workbench_plugin_text/__init__.py)。
+`PluginManifest(id, name, version, activate, api_version=API_VERSION, requires=())` 声明稳定的插件 ID、显示名、插件版本和激活函数。`api_version` 须与宿主的 `API_VERSION` 一致，当前值为 `2`。`requires` 填写必须先启用的插件 ID。第 2 版通过下述界面与文档服务提供面板、主题和标签操作。详见[文本插件入口声明](../../plugins/workbench-plugin-text/pyproject.toml)和[清单实现](../../plugins/workbench-plugin-text/src/workbench_plugin_text/__init__.py)。
 
 1. 启动时读取清单和保存的启用偏好，默认启用候选插件，依赖先于使用它的插件激活。入口加载异常、重复 ID、版本冲突、依赖循环或依赖不可用会标记相关插件失败，其余可用插件继续启动。
 2. `activate(context)` 注册能力并返回提供 `dispose()` 的插件实例。激活异常时，运行时通过上下文撤销已完成的注册与订阅。
@@ -187,6 +188,7 @@ manifest = PluginManifest("text", "文本编辑", "0.1.0", activate)
 | `context.documents.active` | 当前活动视图，没有活动视图时返回 `None`。恢复失败的标签可能是占位视图，访问编辑器特有属性前应确认视图类型。 |
 | `context.documents.ordered()` | 按当前分屏和标签顺序返回视图列表。 |
 | `context.documents.find_path(path)` | 按规范化路径查询，优先返回匹配的活动视图，否则按布局顺序返回首个匹配视图，找不到时返回 `None`。查询可用于检测跨插件路径冲突。 |
+| `context.documents.activate_view(view_id)` | 选中已打开的标签及其所在分屏，并聚焦视图控件。活动视图变化时发出原有通知，标识未知时抛出 `ValueError`。 |
 | `context.documents.register_view(provider_id, view, *, after=None, remember=True)` | 使用当前插件已注册的提供者登记并激活视图，返回 `Disposable`。可用 `after` 将视图插入指定标签之后。恢复或复制标签时传 `remember=False` 可保留最近文件顺序。 |
 | `context.documents.sync(view)` | 同步标签标题、修改标记及窗口状态，返回 `None`。 |
 | `context.documents.remove_view(view_id)` | 直接释放当前插件拥有的视图，返回 `None`。用于注册回滚或插件清理。正常关闭标签由宿主执行保存检查。 |
@@ -199,16 +201,20 @@ manifest = PluginManifest("text", "文本编辑", "0.1.0", activate)
 | --- | --- |
 | `commands.register(spec)` | 接收 `CommandSpec`，返回可复用的 `QAction`。声明包含 ID、标题和回调，可指定快捷键、图标、菜单和 `enabled()`。标识或快捷键冲突时抛出 `ValueError`。文档状态刷新时重新计算命令可用性。 |
 | `ui.register_panel(spec)` | 接收 `PanelSpec`，由宿主按需调用控件工厂。可声明停靠位置、图标、快捷键、标题动作和默认显隐。设置了快捷键时返回工具动作，否则返回 `None`。 |
+| `ui.panel_visible(panel_id)` | 读取布局中的显隐偏好，暂停面板时保留该值。 |
+| `ui.activate_panel(panel_id, *, focus=True)` | 激活可用面板并返回 `True`，面板暂停或不可用时返回 `False`。传入 `focus=False` 可保留输入焦点。 |
+| `ui.set_panels_suspended(panel_ids, suspended)` | 批量暂停或恢复面板，保留位置、尺寸和显隐偏好。先校验全部标识，再更新状态。以上三种面板操作遇到未知标识均抛出 `KeyError`。 |
+| `ui.theme_color(token)`、`ui.theme_icon(name)` 和 `ui.compact` | 分别提供当前主题的 Qt 颜色、图标和紧凑模式。 |
 | `ui.contribute_menu(contribution)` | 接收 `MenuContribution`。构建指定菜单时调用 `populate(menu)`，可根据当前文档加入动作。返回 `Disposable`。 |
 | `ui.register_status(spec)` | 接收 `StatusItemSpec`，向状态栏添加控件，随文档状态变化计算 `visible()`。返回 `Disposable`。 |
 | `ui.subscribe_active(callback)` | 订阅活动视图变化，回调收到当前视图或 `None`。返回 `Disposable`。 |
 | `ui.subscribe_theme(callback)` 和 `ui.subscribe_layout(callback)` | 分别接收主题名称和无参数的布局变更通知。各自返回 `Disposable`。 |
-| `ui.parent`、`ui.docking`、`ui.restoring` | 分别提供对话框父控件、公共停靠管理器和启动恢复标志。插件可据此延后恢复期间的历史记录等副作用。 |
+| `ui.parent` 和 `ui.restoring` | 分别提供对话框父控件和启动恢复标志。插件可据此延后恢复期间的历史记录等副作用。 |
 | `ui.action(identifier)` 和 `ui.current_layout()` | 分别返回已注册的 `QAction` 和当前布局字典。 |
 | `ui.show_message(message)` 和 `ui.refresh()` | 分别显示状态提示和刷新文档相关界面，均返回 `None`。 |
 | `ui.open_directory(view_id=None)` 和 `ui.remember_path(path)` | 分别打开指定视图的所在目录和更新最近文件，返回值沿用对应的宿主方法。 |
 
-命令和菜单贡献使用宿主已有菜单名称，如“文件”“编辑”“视图”或“设置”。面板的稳定 ID 还用于恢复布局。停靠操作详见[停靠组件](../workbench-docking/README.md)。
+命令和菜单贡献使用宿主已有菜单名称，如“文件”“编辑”“视图”或“设置”。面板的稳定 ID 还用于恢复布局。宿主的布局行为详见[停靠与分屏](docs/停靠与分屏.md)。
 
 ### 设置、状态、日志与资源
 

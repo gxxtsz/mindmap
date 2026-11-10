@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QPlainTextEdit
-from workbench_docking import DockHost, DockManager, DockPosition, ToolWindowSpec, ViewMode
+from workbench_runtime.ui.docking import DockHost, DockManager, DockPosition, ToolWindowSpec, ViewMode
 
 
 @dataclass

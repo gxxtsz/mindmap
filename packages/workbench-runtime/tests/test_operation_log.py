@@ -5,9 +5,9 @@ import re
 import pytest
 from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
 from PySide6.QtWidgets import QAbstractItemView, QApplication
-from workbench_docking import DockPosition
 from workbench_plugin_mindmap.operation_log import describe_display
 from workbench_runtime.operation_log import OperationLogPanel
+from workbench_runtime.ui.docking import DockPosition
 
 
 @pytest.fixture

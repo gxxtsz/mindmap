@@ -7,10 +7,10 @@ from personal_workbench.app import build_window
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QInputMethodEvent
 from PySide6.QtWidgets import QApplication, QFileDialog
-from workbench_docking import DockPosition, DockTarget
 from workbench_plugin_mindmap.page_history import RECENT_PAGE_LIMIT, PageHistoryState
 from workbench_plugin_mindmap.recent_pages import RecentPageHistory
 from workbench_runtime.state import StateStore
+from workbench_runtime.ui.docking import DockPosition, DockTarget
 
 
 @pytest.fixture

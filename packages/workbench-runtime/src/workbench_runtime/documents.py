@@ -6,7 +6,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QLabel, QMessageBox, QWidget
 from workbench_api import Disposable, OperationResult, SavePolicy, path_key
-from workbench_docking import DocumentSpec
+
+from .ui.docking import DocumentSpec
 
 
 class DocumentService(QObject):
@@ -30,6 +31,10 @@ class DocumentService(QObject):
     @property
     def active(self):
         return self.views.get(self.active_id)
+
+    def activate_view(self, view_id: str) -> None:
+        """选中现有标签并聚焦其控件，由停靠信号同步活动视图。"""
+        self.window.manager.activate_document(view_id)
 
     def find_path(self, path):
         key = path_key(path)
@@ -78,7 +83,7 @@ class DocumentService(QObject):
             for action in getattr(view, "edit_actions", {}).values():
                 action.changed.connect(self.window.edit_commands.refresh)
             self.sync(view)
-            self.window.manager.activate_document(view.id)
+            self.activate_view(view.id)
             if remember and view.document.path:
                 self.window.remember_path(view.document.path)
         except Exception:
@@ -164,7 +169,7 @@ class DocumentService(QObject):
             seen.add(view.document.id)
             result = self.save(view, reason="batch")
             if not result:
-                self.window.manager.activate_document(view.id)
+                self.activate_view(view.id)
                 return result
         self.window.record_operation(f"保存全部完成，共 {len(seen)} 份文档")
         self.window.show_status_message("全部文档已保存")
@@ -181,7 +186,7 @@ class DocumentService(QObject):
         targets = [self.views[key] for key in ids if key in self.views]
         for view in targets:
             if not view.prepare_input():
-                self.window.manager.activate_document(view.id)
+                self.activate_view(view.id)
                 return False
         seen = set()
         for view in targets:
@@ -191,16 +196,16 @@ class DocumentService(QObject):
             seen.add(document.id)
             if document.save_policy == SavePolicy.AUTOMATIC:
                 if not self.save(view, reason="close"):
-                    self.window.manager.activate_document(view.id)
+                    self.activate_view(view.id)
                     return False
             elif document.is_dirty and not any(item.document is document and item.id not in ids
                                                 for item in self.views.values()):
                 answer = self.window.confirm_close(view)
                 if answer == QMessageBox.StandardButton.Cancel:
-                    self.window.manager.activate_document(view.id)
+                    self.activate_view(view.id)
                     return False
                 if answer == QMessageBox.StandardButton.Save and not self.save(view, reason="close"):
-                    self.window.manager.activate_document(view.id)
+                    self.activate_view(view.id)
                     return False
         return True
 
@@ -240,7 +245,7 @@ class DocumentService(QObject):
         if selected is None or isinstance(selected, MissingView):
             selected = next((view for view in self.views.values() if not isinstance(view, MissingView)), selected)
         if selected is not None:
-            self.window.manager.activate_document(selected.id)
+            self.activate_view(selected.id)
         return failures
 
     def dispose(self):

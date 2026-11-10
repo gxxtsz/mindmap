@@ -30,8 +30,14 @@ def test_two_plugins_register_and_route_mixed_editors(window, tmp_path):
     assert text.document.is_dirty
     assert window.plugins.instance("mindmap").active_session is None
     assert window.manager.is_tool_available("properties") is False
-    window.manager.activate_document(mindmap.id)
-    assert window.plugins.instance("mindmap").active_session is mindmap
+    plugin = window.plugins.instance("mindmap")
+    with pytest.raises(ValueError, match="文档尚未打开"):
+        plugin.context.documents.activate_view("missing")
+    assert window.documents.active is text
+    plugin.context.documents.activate_view(mindmap.id)
+    group, index = window.host.editor.find_token(mindmap.id)
+    assert group.currentIndex() == index
+    assert window.documents.active is mindmap and plugin.active_session is mindmap
     assert window.manager.is_tool_available("properties")
     assert window.action("app.save").isEnabled()
 

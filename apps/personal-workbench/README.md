@@ -15,4 +15,4 @@ uv run --locked --package personal-workbench python -m personal_workbench
 
 旧应用包、命令和 Python 兼容接口已移除。默认配置目录仍为系统配置位置下的 `mindmap/mindmap-workbench`；原文件保留，只读导入历史配置，已有新版会话直接恢复。
 
-架构、插件选项与验证流程见[插件化工作台](../../docs/插件化工作台.md)，导图详细操作见[思维导图插件](../../plugins/workbench-plugin-mindmap/README.md)。
+架构、插件选项与验证流程见[工作台运行时](../../packages/workbench-runtime/README.md)，导图详细操作见[思维导图插件](../../plugins/workbench-plugin-mindmap/README.md)。

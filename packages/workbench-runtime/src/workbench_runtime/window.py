@@ -15,8 +15,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from workbench_api import OperationStatus, PluginContext
-from workbench_docking import DockManager, DockPosition, JsonLayoutStore, Theme, ToolWindowSpec
-from workbench_shell import ActionSpec, AppSpec, WorkbenchWindow
 
 from .commands import EditCommandRouter
 from .config import WorkbenchConfig
@@ -27,6 +25,9 @@ from .plugins import PluginManager
 from .recent_files import RecentFilesButton
 from .services import CommandRegistry, EditorRegistry, ScopedDocuments, UiService
 from .state import Settings, StateStore, WorkspaceLayoutStore
+from .storage import JsonLayoutStore
+from .ui.docking import DockManager, DockPosition, Theme, ToolWindowSpec
+from .ui.shell import ActionSpec, AppSpec, WorkbenchWindow
 
 
 class WelcomePage(QWidget):
@@ -128,7 +129,7 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
                 selected = self.documents.active_id
                 manager.load_session()
                 if selected in self.documents.views:
-                    manager.activate_document(selected)
+                    self.documents.activate_view(selected)
         if theme is not None:
             manager.set_theme(theme)
         self.state.restoring = False
@@ -219,7 +220,7 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
             raise ValueError(f"没有启用的编辑器支持此文件：{path}")
         existing = self.documents.find_path(path)
         if existing and not isinstance(existing, MissingView):
-            self.manager.activate_document(existing.id)
+            self.documents.activate_view(existing.id)
             self.remember_path(path)
             self.record_operation("激活已打开的文档", session=existing)
             return True
