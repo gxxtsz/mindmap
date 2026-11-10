@@ -15,7 +15,6 @@ package = false
 # 插件适配包与业务组件分别注册，工作台宿主统一交付桌面实现。
 members = [
     "packages/*",
-    "plugins/workbench-plugin-text",
     "plugins/workbench-plugin-mindmap/adapter",
     "plugins/workbench-plugin-mindmap/engine/*",
     "plugins/workbench-plugin-mindmap/qt/*",
@@ -33,7 +32,6 @@ mindmap-qt-panels = { workspace = true }
 workbench-api = { workspace = true }
 workbench-runtime = { workspace = true }
 workbench-plugin-mindmap = { workspace = true }
-workbench-plugin-text = { workspace = true }
 personal-workbench = { workspace = true }
 
 [dependency-groups]

@@ -9,16 +9,7 @@ import pytest
 from PySide6.QtWidgets import QLabel
 from workbench_api import EditorProvider, PluginManifest
 from workbench_api.qt import CommandSpec, MenuContribution, PanelSpec, StatusItemSpec
-from workbench_plugin_text import manifest as text_manifest
 from workbench_runtime import WorkbenchRuntimeWindow
-
-
-def text_view(window, content=""):
-    """通过实际文本插件登记文档，核验平台协调的真实生命周期。"""
-    assert window.new_document(provider_id="text.editor")
-    view = window.documents.active
-    view.widget.insertPlainText(content)
-    return view
 
 
 def test_empty_runtime_and_disabled_plugins_do_not_import_business_modules(tmp_path):
@@ -28,21 +19,16 @@ import json
 from pathlib import Path
 from PySide6.QtWidgets import QApplication
 from workbench_runtime import WorkbenchRuntimeWindow
-from workbench_plugin_text import manifest
 app = QApplication([])
 disabled = Path(sys.argv[1]) / "disabled"
 disabled.mkdir()
 (disabled / "workbench-settings-v1.json").write_text(json.dumps({"schema_version": 1,
-    "values": {"plugins": {"enabled/mindmap": False, "enabled/text": False}}}), encoding="utf-8")
+    "values": {"plugins": {"enabled/mindmap": False}}}), encoding="utf-8")
 window = WorkbenchRuntimeWindow(storage_dir=disabled, restore=False)
 assert not window.providers and all(record.status == "已禁用" for record in window.plugins.records)
 assert "workbench_plugin_mindmap.controller" not in sys.modules
-assert "workbench_plugin_text.editor" not in sys.modules
-window.dispose()
-window = WorkbenchRuntimeWindow(storage_dir=sys.argv[1], manifests=[manifest], restore=False)
 assert 'mindmap_core' not in sys.modules
 assert 'mindmap_qt_canvas' not in sys.modules
-assert window.new_document(provider_id='text.editor')
 window.dispose()
 window = WorkbenchRuntimeWindow(storage_dir=sys.argv[1], manifests=[], restore=False)
 assert not window.providers
@@ -53,20 +39,20 @@ window.dispose()
     assert result.returncode == 0, result.stderr
 
 
-def test_plugin_registration_failure_rolls_back_and_other_plugin_starts(qtbot, tmp_path):
+def test_plugin_registration_failure_rolls_back_and_other_plugin_starts(qtbot, tmp_path, sample_manifest):
     released = []
 
     def broken(context):
         context.own(lambda: released.append("已清理"))
-        context.editors.register(EditorProvider("broken.editor", "示例", (".example",), lambda p: None,
+        context.editors.register(EditorProvider("broken.editor", "示例", (".broken",), lambda p: None,
                                                lambda p, i, s: None))
         raise RuntimeError("激活失败")
 
     manifest = PluginManifest("broken", "失败插件", "1", broken)
-    window = WorkbenchRuntimeWindow(storage_dir=tmp_path, restore=False, manifests=[manifest, text_manifest])
+    window = WorkbenchRuntimeWindow(storage_dir=tmp_path, restore=False, manifests=[manifest, sample_manifest])
     qtbot.addWidget(window, before_close_func=lambda item: item.dispose())
     assert released == ["已清理"]
-    assert set(window.providers) == {"text.editor"}
+    assert set(window.providers) == {"sample.editor"}
     assert window.plugins.records[0].error == "激活失败"
 
 
@@ -107,7 +93,7 @@ def test_plugin_dependency_activation_failure_and_reverse_release(qtbot, tmp_pat
     assert events == ["启动 a", "启动 b", "释放 b", "注销 b", "释放 a", "注销 a"]
 
 
-def test_activation_failure_removes_ui_commands_and_blocks_dependents(qtbot, tmp_path):
+def test_activation_failure_removes_ui_commands_and_blocks_dependents(qtbot, tmp_path, sample_manifest):
     calls = []
 
     def fail(context):
@@ -120,14 +106,14 @@ def test_activation_failure_removes_ui_commands_and_blocks_dependents(qtbot, tmp
 
     manifests = [PluginManifest("broken", "失败插件", "1", fail),
                  PluginManifest("dependent", "依赖插件", "1", lambda ctx: calls.append("依赖启动"),
-                                requires=("broken",)), text_manifest]
+                                requires=("broken",)), sample_manifest]
     window = WorkbenchRuntimeWindow(storage_dir=tmp_path, restore=False, manifests=manifests)
     qtbot.addWidget(window, before_close_func=lambda item: item.dispose())
     assert "broken.command" not in window.manager.actions
     assert "broken.panel" not in window.manager.specs
     assert "broken.panel" not in window.default_panel_ids
     assert not window.status_items and not window.menu_contributions
-    text_view(window)
+    assert window.new_document(provider_id="sample.editor")
     assert calls == [] and window.plugins.records[1].status == "加载失败"
 
 

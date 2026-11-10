@@ -15,10 +15,10 @@ EXPECTED = {
     "mindmap-core", "mindmap-layouts", "mindmap-formats", "mindmap-qt-render",
     "mindmap-qt-ui", "mindmap-qt-canvas", "mindmap-qt-panels",
     "personal-workbench", "workbench-api", "workbench-runtime",
-    "workbench-plugin-mindmap", "workbench-plugin-text",
+    "workbench-plugin-mindmap",
 }
 REMOVED = {"mindmap_engine", "mindmap_qt", "mindmap_qt_workspace", "mindmap_workbench",
-           "mindmap_docking", "mindmap_shell", "workbench_docking", "workbench_shell"}
+           "mindmap_docking", "mindmap_shell", "workbench_docking", "workbench_shell", "workbench_plugin_text"}
 DEPENDENCIES = {
     "mindmap-core": set(), "mindmap-layouts": {"mindmap-core"}, "mindmap-formats": {"mindmap-core"},
     "mindmap-qt-render": {"mindmap-core"},
@@ -29,8 +29,7 @@ DEPENDENCIES = {
     "workbench-runtime": {"workbench-api"},
     "workbench-plugin-mindmap": {"workbench-api", "mindmap-core", "mindmap-layouts", "mindmap-formats",
                                "mindmap-qt-canvas", "mindmap-qt-panels", "mindmap-qt-ui", "mindmap-qt-render"},
-    "workbench-plugin-text": {"workbench-api"},
-    "personal-workbench": {"workbench-runtime", "workbench-plugin-mindmap", "workbench-plugin-text"},
+    "personal-workbench": {"workbench-runtime", "workbench-plugin-mindmap"},
 }
 
 
@@ -71,7 +70,7 @@ def test_mindmap_components_are_owned_by_plugin_directory():
     """导图业务包与适配入口同目录归属，通用基础设施仍可独立于导图安装。
 
     目录聚合不合并分发包：七个组件须保持各自元数据、源码和测试，
-    平台及文本插件不得放入导图插件目录，也不能重新出现顶层业务分组。
+    通用平台和产品入口各自保留独立目录，业务组件集中在导图插件下。
     """
     packages = members()
     plugin_root = ROOT / "plugins/workbench-plugin-mindmap"
@@ -142,11 +141,11 @@ def assert_source_boundary(file, name, declared):
 
 def test_platform_and_plugins_obey_business_boundaries():
     """平台不能导入业务包；插件不能反向导入运行时或应用装配层。"""
-    for name in ("workbench-api", "workbench-runtime", "workbench-plugin-mindmap", "workbench-plugin-text"):
+    for name in ("workbench-api", "workbench-runtime", "workbench-plugin-mindmap"):
         path, _ = members()[name]
         forbidden = ({"mindmap_core", "mindmap_layouts", "mindmap_formats", "mindmap_qt_canvas",
-                      "mindmap_qt_panels", "mindmap_qt_render", "mindmap_qt_ui", "workbench_plugin_mindmap",
-                      "workbench_plugin_text"} if name in {"workbench-api", "workbench-runtime"} else
+                      "mindmap_qt_panels", "mindmap_qt_render", "mindmap_qt_ui",
+                      "workbench_plugin_mindmap"} if name in {"workbench-api", "workbench-runtime"} else
                      {"workbench_runtime", "personal_workbench", "mindmap_workbench"})
         for file in runtime_sources(path / "src"):
             for node in ast.walk(ast.parse(file.read_text("utf-8"))):

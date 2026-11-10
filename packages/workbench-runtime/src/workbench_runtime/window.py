@@ -1,5 +1,6 @@
 """通用个人工作台宿主；所有编辑器行为均从已注册的插件能力取得。"""
 
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
@@ -64,11 +65,16 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
     """统一的窗口装配器，不导入编辑器业务模块，也不判断具体插件标识。"""
 
     def __init__(self, *, config: WorkbenchConfig | None = None, storage_dir=None, theme=None,
-                 restore=True, manifests=None, migration=None, plugin_options=None):
+                 restore=True, manifests=None, migration=None, plugin_options=None,
+                 profile_upgrade: Callable[[dict, dict], tuple[bool, bool]] | None = None):
         """装配插件宿主；产品配置和历史转换由应用注入，空清单可启动空工作台。
 
         storage_dir 显式提供时优先使用该位置，保证测试隔离及历史目录连续性。
         config 只影响产品标识与显示信息，不改变文档资源、插件 ID 或布局格式。
+        profile_upgrade 在插件激活与会话恢复前接收已加载的状态和设置值字典，
+        允许原地修改，并按顺序返回状态、设置是否变更。即使 restore=False 也会调用。
+        只有有效的现有配置在变更后才立即原子写回，缺失或损坏配置沿用常规保存流程。
+        写回失败时保留原文件，窗口继续使用升级后的内存数据，并在操作日志中报告。
         """
         self.config = config or WorkbenchConfig()
         self._disposed = False
@@ -86,6 +92,7 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         self.state = StateStore(directory, initial_state)
         settings_store = JsonLayoutStore(directory / "workbench-settings-v1.json")
         self.settings, settings_error = Settings.load(settings_store, initial_settings)
+        upgrade_warnings = self._upgrade_profile(profile_upgrade, settings_error) if profile_upgrade is not None else ()
         manager = DockManager(application_id=self.config.application_id, storage_dir=directory,
                               theme=Theme(theme or "light"), preserve_open_documents=True,
                               shortcut_context=Qt.ShortcutContext.WindowShortcut,
@@ -140,14 +147,35 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         for record in self.plugins.records:
             if record.error:
                 self.record_operation(f"插件 {record.name} 加载失败：{record.error}", level="error")
+        for warning in upgrade_warnings:
+            self.record_operation(warning, level="warning")
         if failures:
             self.show_status_message("部分文件暂不可用：" + "；".join(failures))
         elif self.state.error:
             self.show_status_message(self.state.error)
         elif settings_error:
             self.show_status_message(settings_error)
+        elif upgrade_warnings:
+            self.show_status_message("；".join(upgrade_warnings))
         self.setAcceptDrops(True)
         QApplication.instance().installEventFilter(self)
+
+    def _upgrade_profile(self, upgrade, settings_error):
+        """将升级前已校验的两份配置分别提交，单个文件失败可在正常保存时重试。"""
+        state_changed, settings_changed = upgrade(self.state.data, self.settings.values)
+        warnings = []
+        # 此时会话尚未恢复，直接提交清理过的完整快照，保留恢复期间的保存屏障。
+        for changed, load_error, path, save in (
+            (state_changed, self.state.error, self.state.store.path, lambda: self.state.store.save(self.state.data)),
+            (settings_changed, settings_error, self.settings.store.path, self.settings.sync),
+        ):
+            if changed and not load_error:
+                try:
+                    if path.is_file():
+                        save()
+                except OSError as error:
+                    warnings.append(f"启动时未能更新配置 {path.name}：{error}")
+        return warnings
 
     def _make_context(self, plugin_id):
         context = PluginContext(plugin_id, None, None, None, None, self.settings.scoped(plugin_id),

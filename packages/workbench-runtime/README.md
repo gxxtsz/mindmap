@@ -14,8 +14,10 @@
 
 构造窗口时，可用 `storage_dir` 指定状态、布局和设置的存储目录，用 `restore=False` 跳过启动时的文档与布局恢复。
 
+产品可传入 `profile_upgrade(state, settings)` 处理已加载的配置。回调在插件激活和会话恢复前修改状态及设置值字典，返回两份数据各自的变更标记。运行时将有变更且通过校验的现有配置原子写回，即使跳过会话恢复也会运行回调。
+
 ## 插件接入 API
 
 省略 `manifests` 时，运行时从 `personal_workbench.plugins` 入口点组发现插件。传入清单列表可指定候选插件，传入空列表可单独启动桌面宿主。运行时根据设置启用插件，校验协议版本，并为每个激活的插件提供独立的 `PluginContext`。
 
-可参考文本插件的[入口声明](../../plugins/workbench-plugin-text/pyproject.toml)和[清单实现](../../plugins/workbench-plugin-text/src/workbench_plugin_text/__init__.py)。
+可参考思维导图插件的[入口声明](../../plugins/workbench-plugin-mindmap/adapter/pyproject.toml)和[清单实现](../../plugins/workbench-plugin-mindmap/adapter/src/workbench_plugin_mindmap/__init__.py)。

@@ -1,4 +1,4 @@
-"""桌面验收两个插件的混合分屏、中文输入、拖放、插件管理及重启恢复。"""
+"""桌面验收导图分屏、中文输入、拖放、插件管理及重启恢复。"""
 
 import json
 import os
@@ -10,6 +10,8 @@ from tempfile import TemporaryDirectory
 def main():
     """只使用临时文档和配置，截图及验收结果保留在项目的 .artifacts 目录。"""
     os.environ.setdefault("QT_QPA_PLATFORM", "windows" if sys.platform == "win32" else "offscreen")
+    from mindmap_core import MindMapDocument
+    from mindmap_formats import load_document, save_document
     from personal_workbench.app import build_window
     from PySide6.QtCore import (
         QCoreApplication,
@@ -47,78 +49,73 @@ def main():
             mindmap.engine.update_node(mindmap.engine.root_id, text="个人工作台")
             for label in ("整理思路", "编写文档", "扩展自己的工具"):
                 mindmap.engine.add_child(mindmap.engine.root_id, label)
-            text_path = root / f"{theme}-工作笔记.md"
-            text_path.write_text("# 工作笔记\n\n今天的计划\n\n- 整理项目思路\n- 记录实现过程\n- 验证插件之间的协作\n", encoding="utf-8")
-            # 使用真实窗口拖放事件打开文本，验证资源选择不依赖当前导图插件。
+            notes_path = root / f"{theme}-工作笔记.mindmap"
+            save_document(MindMapDocument.new("工作笔记"), notes_path)
+            # 从窗口的拖放入口打开第二份导图。
             mime = QMimeData()
-            mime.setUrls([QUrl.fromLocalFile(str(text_path))])
+            mime.setUrls([QUrl.fromLocalFile(str(notes_path))])
             args = (QPointF(500, 200), Qt.DropAction.CopyAction, mime,
                     Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
             for event in (QDragEnterEvent(*args), QDragMoveEvent(*args), QDropEvent(*args)):
                 QApplication.sendEvent(window.windowHandle(), event)
                 assert event.isAccepted()
             QTest.qWait(100)
-            text = window.documents.active
-            assert text.document.path == text_path, (text.document.path, window.status.currentMessage())
-            window.host.editor.split_token(text.id, Qt.Orientation.Horizontal)
+            notes = window.documents.active
+            assert notes.document.path == notes_path, (notes.document.path, window.status.currentMessage())
+            window.host.editor.split_token(notes.id, Qt.Orientation.Horizontal)
             app.processEvents()
             window.activateWindow()
-            text.widget.setFocus()
-            app.processEvents()
-            candidate = QInputMethodEvent("zhongwen", [])
-            QApplication.sendEvent(text.widget, candidate)
-            assert not window.save()
+            notes.canvas.begin_edit(notes.engine.root_id)
+            notes.canvas.scene.sendEvent(notes.canvas.editor, QInputMethodEvent("zhongwen", []))
+            assert notes.canvas.is_composing and not window.save()
             committed = QInputMethodEvent()
-            committed.setCommitString("中文输入验证\n\n")
-            QApplication.sendEvent(text.widget, committed)
+            committed.setCommitString("中文输入验证")
+            notes.canvas.scene.sendEvent(notes.canvas.editor, committed)
             assert window.save_all()
-            assert "中文输入验证" in text_path.read_text("utf-8"), (
-                text.widget.toPlainText(), text.document.content.toPlainText(),
-                [(type(item).__name__, str(item.document.path)) for item in window.documents.ordered()],
-                window.operation_log.plain_text())
+            expected_title = load_document(notes_path).root.text
+            assert "中文输入验证" in expected_title, window.operation_log.plain_text()
             window.manager.activate_document(mindmap.id)
-            app.processEvents()
             mindmap.canvas.action("fit").trigger()
             app.processEvents()
-            assert window.grab().save(str(output / f"{theme}-mixed-mindmap.png"))
-            window.manager.activate_document(text.id)
-            app.processEvents()
-            assert not window.manager.is_tool_available("properties")
-            assert window.grab().save(str(output / f"{theme}-mixed-text.png"))
-            checked = []
+            assert len(window.host.editor.groups) == 2
+            assert window.grab().save(str(output / f"{theme}-mindmap-split.png"))
+            plugin_ids, screenshots = [], []
 
             def inspect_dialog():
-                """在真实模态窗口中保存文本插件开关，验证本次运行不立即卸载编辑器。"""
+                """在真实模态窗口中记录插件列表，切换导图开关并保存。"""
                 dialog = QApplication.activeModalWidget()
                 if not isinstance(dialog, QDialog):
                     return
-                tree = dialog.findChild(QTreeWidget)
-                assert tree.topLevelItemCount() == 2
-                for index in range(tree.topLevelItemCount()):
-                    item = tree.topLevelItem(index)
-                    if item.data(0, Qt.ItemDataRole.UserRole) == "text":
-                        item.setCheckState(0, Qt.CheckState.Unchecked)
-                assert dialog.grab().save(str(output / f"{theme}-plugins.png"))
-                checked.append(True)
-                dialog.accept()
+                try:
+                    tree = dialog.findChild(QTreeWidget)
+                    for index in range(tree.topLevelItemCount()):
+                        item = tree.topLevelItem(index)
+                        plugin_id = item.data(0, Qt.ItemDataRole.UserRole)
+                        plugin_ids.append(plugin_id)
+                        if plugin_id == "mindmap":
+                            item.setCheckState(0, Qt.CheckState.Unchecked)
+                    screenshots.append(dialog.grab().save(str(output / f"{theme}-plugins.png")))
+                finally:
+                    dialog.accept()
 
             QTimer.singleShot(150, inspect_dialog)
             window.show_plugin_manager()
-            assert checked and "text.editor" in window.providers
+            assert plugin_ids == ["mindmap"] and screenshots == [True]
+            assert set(window.providers) == {"mindmap.editor"}
             ids = set(window.documents.views)
             assert window.close()
             restored = build_window(storage_dir=directory)
-            assert "text.editor" not in restored.providers
+            assert not restored.providers
             assert set(restored.documents.views) == ids
-            assert "暂不可用" in restored.documents.views[text.id].title
-            restored.plugins.settings.setValue("enabled/text", True)
+            assert all("暂不可用" in view.title for view in restored.documents.views.values())
+            restored.plugins.settings.setValue("enabled/mindmap", True)
             assert restored.close()
             enabled = build_window(storage_dir=directory)
             enabled.resize(1440, 900)
             enabled.show()
             app.processEvents()
             assert set(enabled.documents.views) == ids
-            assert enabled.documents.views[text.id].widget.toPlainText() == text_path.read_text("utf-8")
+            assert enabled.documents.views[notes.id].engine.document.root.text == expected_title
             assert len(enabled.host.editor.groups) == 2
             assert enabled.grab().save(str(output / f"{theme}-restored.png"))
             assert enabled.close()
@@ -126,10 +123,10 @@ def main():
                 item.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             app.processEvents()
-            results.append({"主题": theme, "平台": app.platformName(), "混合分屏": True, "文本拖放": True,
+            results.append({"主题": theme, "平台": app.platformName(), "导图分屏": True, "导图拖放": True,
                             "中文组合输入": True, "插件管理与重启": True, "文档与布局恢复": True})
     (output / "report.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("混合编辑器桌面验收通过：明暗主题、拖放、中文输入、插件管理及重启恢复")
+    print("导图桌面验收通过，覆盖明暗主题、拖放、中文输入、插件管理及重启恢复")
     return 0
 
 

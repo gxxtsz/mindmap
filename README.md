@@ -28,10 +28,9 @@ uv run --locked --package personal-workbench personal-workbench
 | 插件 | 功能与保存方式 |
 | --- | --- |
 | [思维导图](plugins/workbench-plugin-mindmap/README.md) | `.mindmap` 编辑、布局、图片、页面与业务面板；防抖自动保存 |
-| [文本编辑](plugins/workbench-plugin-text/README.md) | `.txt`、`.md` 纯文本编辑；手动保存、UTF-8/BOM 和原子写入 |
 
-两个插件默认启用，可在“设置 → 插件管理”中调整，重启生效。相同文件的多个视图共享内容与撤销历史，各自保留导航或光标状态。
-关闭时统一检查输入和保存决策；取消或失败保留待关闭标签。未保存文本正文不写入会话配置。
+思维导图插件默认启用，可在“设置 → 插件管理”中调整，重启生效。相同导图的多个视图共享内容与撤销历史，各自保留页面和导航状态。
+关闭时统一检查输入和保存决策，取消或失败时保留待关闭标签。会话配置只保存文档路径、视图状态和布局等元数据。
 
 ## 目录结构
 
@@ -41,7 +40,6 @@ packages/
   workbench-api/                 插件与编辑器公开协议
   workbench-runtime/             插件宿主、文档与会话、桌面外壳与停靠
 plugins/
-  workbench-plugin-text/         文本插件
   workbench-plugin-mindmap/
     adapter/                    导图插件接入层
     engine/                     核心、布局、格式三个独立包
@@ -49,18 +47,18 @@ plugins/
     tests/integration/          导图组件组合测试
     scripts/                    导图性能与桌面专项验收
     docs/                       导图操作说明
-scripts/                        工作区发现、发行和混合编辑器验收
+scripts/                        工作区发现、发行和桌面验收
 tests/integration/              跨包架构、桌面组合和进程生命周期验收
 docs/                           通用架构、开发与发行说明
 ```
 
-工作区包含 **12 个独立分发包**。通用能力使用 `workbench-*` 名称，产品入口使用 `personal-workbench`，导图专属组件使用 `mindmap-*`。
+工作区包含 **11 个独立分发包**。通用能力使用 `workbench-*` 名称，产品入口使用 `personal-workbench`，导图专属组件使用 `mindmap-*`。
 分发包使用 `src/` 布局，单包测试随源码放置，插件专属组件集中到插件分组目录。新增插件不需要修改主窗口。
 
 ## 配置兼容
 
 默认配置位置继续使用系统配置目录下的 `mindmap/mindmap-workbench`。产品入口注入历史应用标识及路径，通用运行时不解释历史产品名称。
-`.mindmap` 文件格式和布局标识保持稳定；旧配置只读导入，已有新版配置直接恢复。
+`.mindmap` 文件格式和布局标识保持稳定。历史格式的配置只读导入，现有工作台配置在启动时升级后恢复。
 
 ## 检查与构建
 

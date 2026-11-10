@@ -8,8 +8,8 @@ from workbench_runtime.state import StateStore
 
 def payload(tmp_path):
     return {"schema_version": 1, "active_id": "view.a", "views": [
-        {"id": "view.a", "document_id": "document.a", "plugin_id": "text",
-         "editor_type": "text.editor", "path": str(tmp_path / "正文.txt")},
+        {"id": "view.a", "document_id": "document.a", "plugin_id": "sample",
+         "editor_type": "sample.editor", "path": str(tmp_path / "示例.example")},
     ], "recent_files": [], "plugins": {}}
 
 
@@ -45,6 +45,6 @@ def test_conflicting_document_resource_identity_keeps_original_state(tmp_path, s
     if same_resource:
         second["document_id"] = "document.b"
     else:
-        second["path"] = str(tmp_path / "另一正文.txt")
+        second["path"] = str(tmp_path / "另一示例.example")
     data["views"].append(second)
     assert_recovery_preserves_bytes(tmp_path, data)

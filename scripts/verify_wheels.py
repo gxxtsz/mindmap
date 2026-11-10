@@ -30,8 +30,8 @@ from workbench_runtime.ui import docking
 from workbench_runtime.ui.docking import DockHost, DockManager, DocumentSpec
 from workbench_runtime.ui.shell import AppSpec, WorkbenchWindow
 
-window = WorkbenchRuntimeWindow(storage_dir=Path("runtime-state"), manifests=[], restore=False)
-assert not window.providers
+window = WorkbenchRuntimeWindow(storage_dir=Path("runtime-state"), restore=False)
+assert not window.providers and not window.plugins.records
 assert "mindmap_core" not in sys.modules and "mindmap_qt_canvas" not in sys.modules
 window.dispose()
 
@@ -69,13 +69,6 @@ from workbench_plugin_mindmap import manifest
 assert manifest.id == "mindmap"
 assert "mindmap_qt_canvas" not in sys.modules
 assert any(item.name == "mindmap" for item in entry_points(group="personal_workbench.plugins"))
-''',
-    "workbench-plugin-text": r'''
-from importlib.metadata import entry_points
-from workbench_plugin_text import manifest
-assert manifest.id == "text"
-assert any(item.name == "text" for item in entry_points(group="personal_workbench.plugins"))
-assert "workbench_runtime" not in sys.modules
 ''',
     "mindmap-qt-render": r'''
 
@@ -168,7 +161,7 @@ host.close()
     "personal-workbench": r'''
 
 import importlib.util, json, sys
-from importlib.metadata import distributions
+from importlib.metadata import distributions, entry_points
 from pathlib import Path
 import workbench_runtime, personal_workbench, mindmap_core
 import mindmap_qt_canvas, mindmap_qt_panels, mindmap_qt_ui, mindmap_qt_render
@@ -182,6 +175,8 @@ from personal_workbench.app import build_window
 from mindmap_formats import load_document
 app = QApplication([])
 window = build_window(storage_dir=Path("workbench-state").absolute(), restore=False)
+assert {item.name for item in entry_points(group="personal_workbench.plugins")} == {"mindmap"}
+assert set(window.providers) == {"mindmap.editor"}
 assert window.plugins.instance("mindmap").canvas is None and not len(window.plugins.instance("mindmap").sessions)
 assert window.new_document(Path("workbench.mindmap").absolute())
 primary = window.plugins.instance("mindmap").active_session
@@ -263,20 +258,13 @@ assert window.save_all()
 assert page in load_document(primary.files.path).submaps
 primary.canvas.return_to_parent_page()
 assert primary.canvas.current_page_id is None
-window.close()
-assert primary.disposed and secondary.disposed and not len(window.plugins.instance("mindmap").sessions)
-from personal_workbench.app import build_window
-window = build_window(storage_dir=Path("personal-state"), restore=False)
-assert set(window.providers) == {"mindmap.editor", "text.editor"}
-assert window.new_document(Path("personal.mindmap").absolute())
-path = Path("text.txt").absolute()
-path.write_text("独立安装文本", "utf-8")
-assert window.open_path(path)
-assert window.documents.active.widget.toPlainText() == "独立安装文本"
-assert window.documents.active.duplicate()
+assert primary.duplicate()
+duplicate = window.documents.active
+assert duplicate is not primary and duplicate.document is primary.document
 assert window.save_all()
 assert window.close()
-print(json.dumps({"混合编辑器独立运行": True, "工作台独立安装与框架依赖解析": True, "工作台文件与导出": True, "多导图与自动保存边界": True,
+assert primary.disposed and secondary.disposed and duplicate.disposed and not len(window.plugins.instance("mindmap").sessions)
+print(json.dumps({"导图共享视图": True, "工作台独立安装与框架依赖解析": True, "工作台文件与导出": True, "多导图与自动保存边界": True,
                   "仅打开和保存原生导图": True, "子导图与页面路径": True,
                   "编辑与撤销重做": True, "图片与分支样式": True, "侧栏属性与工作区": True,
                   "已验证运行依赖": {item.metadata["Name"]: item.version for item in distributions()}}))
@@ -446,7 +434,8 @@ def run():
             closure = dependencies(name)
             forbidden = {item.replace("-", "_") for item in set(members) - closure}
             forbidden.update({"mindmap_engine", "mindmap_qt", "mindmap_qt_workspace", "mindmap_workbench",
-                              "mindmap_docking", "mindmap_shell", "workbench_docking", "workbench_shell"})
+                              "mindmap_docking", "mindmap_shell", "workbench_docking", "workbench_shell",
+                              "workbench_plugin_text"})
             module = name.replace("-", "_")
             prelude = ("import importlib.util, sys, json\nfrom pathlib import Path\n"
                        + f"for module in {sorted(forbidden)!r}:\n"
@@ -459,30 +448,6 @@ def run():
             elif not has_qt:
                 prelude += 'assert importlib.util.find_spec("PySide6") is None\n'
             result = execute([interpreter, "-c", prelude + CHECKS[name]])
-            if name == "workbench-runtime":
-                # 真实最小安装组合：安装平台和文本插件后，导图包仍不可导入。
-                execute([uv, "pip", "install", "--python", interpreter, "--constraint", constraints,
-                         wheels["workbench-plugin-text"]])
-                execute([interpreter, "-c", r'''
-import importlib.util
-from pathlib import Path
-from PySide6.QtWidgets import QApplication
-from workbench_runtime import WorkbenchRuntimeWindow
-app = QApplication([])
-assert importlib.util.find_spec("mindmap_core") is None
-assert importlib.util.find_spec("workbench_plugin_mindmap") is None
-window = WorkbenchRuntimeWindow(storage_dir=Path("text-only-state"), restore=False)
-assert set(window.providers) == {"text.editor"}
-path = Path("text-only.txt").absolute()
-path.write_text("最小安装组合", encoding="utf-8")
-assert window.open_path(path)
-view = window.documents.active
-view.widget.insertPlainText("文本编辑：")
-assert view.duplicate()
-assert window.save_all()
-assert path.read_text("utf-8") == "文本编辑：最小安装组合"
-assert window.close()
-'''])
             independent[name] = True
             if name == "personal-workbench":
                 workbench = json.loads(result)

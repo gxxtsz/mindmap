@@ -178,7 +178,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "设置"]
     files = next(action.menu() for action in main.actions() if action.text() == "文件")
     assert [action.text() for action in files.actions()] == [
-        "新建", "新建导图", "新建文本", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "导出当前页为 TXT…", "退出",
+        "新建", "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出图形", "导出当前页为 TXT…", "退出",
     ]
     assert next(action for action in files.actions() if action.text() == "导出当前页为 TXT…").isEnabled()
     exports = next(action.menu() for action in files.actions() if action.text() == "导出图形")

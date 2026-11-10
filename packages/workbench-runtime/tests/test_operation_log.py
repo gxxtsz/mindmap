@@ -12,7 +12,7 @@ from workbench_runtime.ui.docking import DockPosition
 
 @pytest.fixture
 def log_window(window):
-    """复用仅装文本插件的通用窗口，日志能力不依赖具体编辑器。"""
+    """复用装有测试插件的通用窗口，日志能力不依赖具体编辑器。"""
     window.resize(1200, 820)
     QApplication.processEvents()
     return window

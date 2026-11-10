@@ -10,8 +10,8 @@ from workbench_runtime.state import StateStore
 
 
 def record(tmp_path):
-    return {"id": "view.saved", "path": str(tmp_path / "退出文档.txt"),
-            "plugin_id": "text", "editor_type": "text.editor"}
+    return {"id": "view.saved", "path": str(tmp_path / "退出文档.example"),
+            "plugin_id": "sample", "editor_type": "sample.editor"}
 
 
 def writable_state(tmp_path):

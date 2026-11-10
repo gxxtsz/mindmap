@@ -137,7 +137,7 @@ class DocumentService(QObject):
         self.window.manager.set_document_modified(view.id, view.document.is_dirty)
         location = self.window.host.editor.find_token(view.id)
         if location:
-            location[0].setTabToolTip(location[1], str(view.document.path or "未保存的文本") +
+            location[0].setTabToolTip(location[1], str(view.document.path or "未保存的文档") +
                                     ("\n保存失败：" + view.document.last_error if getattr(view.document, "last_error", "") else ""))
         self.changed.emit()
 

@@ -5,8 +5,8 @@
 | 脚本 | 职责 |
 | --- | --- |
 | `workspace_members.py` | 按根配置发现真实成员，不通过包名猜测目录 |
-| `verify_wheels.py` | 比较源码与发行内容，验证十二个包独立安装、宿主桌面资源和仅安装文本插件的组合 |
-| `verify_plugins.py` | 验证产品明暗主题、混合分屏、中文组合输入、插件管理及重启恢复 |
+| `verify_wheels.py` | 比较源码与发行内容，验证 11 个包独立安装、空宿主的桌面资源和产品默认插件 |
+| `verify_plugins.py` | 验证产品明暗主题、导图拖放与分屏、中文组合输入、插件管理及重启恢复 |
 
 ```powershell
 uv build --all-packages

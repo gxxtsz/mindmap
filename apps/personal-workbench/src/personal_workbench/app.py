@@ -6,7 +6,7 @@ from PySide6.QtCore import QLibraryInfo, QStandardPaths, QTranslator
 from PySide6.QtWidgets import QApplication
 from workbench_runtime import WorkbenchConfig, WorkbenchRuntimeWindow, run_desktop
 
-from .migration import migrate_legacy
+from .migration import migrate_legacy, upgrade_profile
 
 # 产品的历史应用标识和目录必须保持稳定；代码包改名不能导致已有会话失联。
 PRODUCT_CONFIG = WorkbenchConfig(application_id="mindmap-workbench", title="个人工作台", icon="mindmap")
@@ -22,12 +22,14 @@ def build_window(*, storage_dir=None, theme=None, restore=True, manifests=None, 
     """构造通用窗口；plugin_options 按插件 ID 隔离，由插件自行解释配置。
 
     例如导图的布局和格式注册表放入 plugin_options["mindmap"]，产品不理解
-    这些业务对象，也不向窗口注入编辑器属性。历史数据仅由迁移函数只读导入。
+    这些业务对象，也不向窗口注入编辑器属性。历史文件只读导入，已停用功能的配置
+    记录在恢复会话前由产品迁移回调清理。
     """
     directory = default_storage_dir() if storage_dir is None else storage_dir
     return WorkbenchRuntimeWindow(config=PRODUCT_CONFIG, storage_dir=directory,
                                    theme=theme, restore=restore, manifests=manifests,
-                                   migration=migrate_legacy, plugin_options=plugin_options)
+                                   migration=migrate_legacy, plugin_options=plugin_options,
+                                   profile_upgrade=upgrade_profile)
 
 
 def run(argv=None):

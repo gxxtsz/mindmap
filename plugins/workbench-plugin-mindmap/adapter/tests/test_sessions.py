@@ -354,7 +354,7 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     assert window.manager.documents == {}
     group = window.host.editor.groups[0]
     assert group.empty_widget.isVisible() and group.count() == 0
-    assert {button.text() for button in group.empty_widget.findChildren(QPushButton)} == {"新建导图", "新建文本", "打开文件", "插件管理"}
+    assert {button.text() for button in group.empty_widget.findChildren(QPushButton)} == {"新建导图", "打开文件", "插件管理"}
     assert not any(window.action("app." + key).isEnabled()
                    for key in ("open_directory", "save", "save_all", "save_as"))
     assert not window.plugins.instance("mindmap").settings_action.isEnabled()
@@ -367,7 +367,7 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     menu = window.main_menu()
     files = menu.actions()[0].menu()
     assert [action.text() for action in files.actions()] == [
-        "新建", "新建导图", "新建文本", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "退出",
+        "新建", "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "退出",
     ]
     for title in ("导出图形", "导出当前页为 TXT…"):
         assert all(action.text() != title for action in files.actions())
@@ -684,7 +684,7 @@ def test_open_dialog_works_without_session_and_cancel_preserves_active(empty_win
 
     monkeypatch.setattr(QFileDialog, "getOpenFileName", choose)
     assert empty_window.open_dialog()
-    assert dialogs == [("打开文件", "", "支持的文件 (*.mindmap *.txt *.md);;导图 (*.mindmap);;文本 (*.txt *.md)")]
+    assert dialogs == [("打开文件", "", "支持的文件 (*.mindmap);;导图 (*.mindmap)")]
     session = empty_window.plugins.instance("mindmap").active_session
     assert session.engine.document.root.text == "已有文件"
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
@@ -711,7 +711,7 @@ def test_open_dialog_and_old_format_parameter_cannot_bypass_native_limit(empty_w
     for operation in (empty_window.open_path, empty_window.plugins.instance("mindmap").sessions.open_path, first.files.open_path):
         with pytest.raises(TypeError):
             operation(source, format_id="json")
-    assert selections == ["支持的文件 (*.mindmap *.txt *.md);;导图 (*.mindmap);;文本 (*.txt *.md)", "思维导图 (*.mindmap)"]
+    assert selections == ["支持的文件 (*.mindmap);;导图 (*.mindmap)", "思维导图 (*.mindmap)"]
     assert empty_window.plugins.instance("mindmap").active_session is first and len(empty_window.plugins.instance("mindmap").sessions) == 1
 
 
@@ -768,7 +768,7 @@ def test_file_drop_opens_native_document_from_main_window(empty_window, tmp_path
 
 
 def test_file_drop_filters_batch_and_reuses_tabs(empty_window, tmp_path, qtbot, monkeypatch):
-    """批次内逐项打开，失败保留现有文档，最后一项重复打开时激活原标签。"""
+    """批次先过滤不支持的文件，逐项打开导图，重复项激活原标签。"""
     window = empty_window
     original = create(window, tmp_path / "原有.mindmap")
     original.engine.update_node(original.engine.root_id, text="尚未保存的编辑")
@@ -794,8 +794,8 @@ def test_file_drop_filters_batch_and_reuses_tabs(empty_window, tmp_path, qtbot, 
 
     monkeypatch.setattr(window, "open_path", track_open)
     assert drop_file_urls(window.title_bar, urls)
-    qtbot.waitUntil(lambda: len(attempted) == 6)
-    assert attempted == [first, broken, other, missing, last, original.files.path]
+    qtbot.waitUntil(lambda: len(attempted) == 5)
+    assert attempted == [first, broken, missing, last, original.files.path]
     assert [view.files.path for view in window.plugins.instance("mindmap").sessions.ordered()] == [original.files.path, first, last]
     assert window.host.editor.find_token(original.id) == tab and window.plugins.instance("mindmap").active_session is original
     assert original.files.is_dirty and original.engine.document.root.text == "尚未保存的编辑"
