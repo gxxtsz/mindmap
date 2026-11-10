@@ -113,11 +113,8 @@ def test_each_member_discovers_repository_workspace(name):
 
 
 def runtime_sources(source_root):
-    """递归收集实际运行模块；随包交付、另有元数据的独立项目模板单独验收。"""
-    templates = [metadata.parent for metadata in source_root.rglob("pyproject.toml")
-                 if metadata.parent.name == "project_template"]
-    return (file for file in source_root.rglob("*.py")
-            if not any(file.is_relative_to(template) for template in templates))
+    """递归收集源码目录中的 Python 模块，包括子目录中的模块。"""
+    return source_root.rglob("*.py")
 
 
 def assert_source_boundary(file, name, declared):
@@ -185,27 +182,11 @@ def test_nested_module_cannot_hide_dependency_or_private_import(tmp_path, source
         assert_source_boundary(file, "mindmap-layouts", {"mindmap-core"})
 
 
-def test_own_private_module_is_allowed_and_project_template_is_separate(tmp_path):
-    """包内私有协作保持可用；独立模板不按外层包的运行依赖检查。"""
+def test_own_private_module_is_allowed(tmp_path):
+    """包内模块可以导入同一包的私有实现。"""
     own = tmp_path / "module.py"
     own.write_text("from mindmap_layouts._internal import _helper", "utf-8")
-    template = tmp_path / "project_template" / "src"
-    template.mkdir(parents=True)
-    (template.parent / "pyproject.toml").write_text('[project]\nname = "example-desktop"\n', "utf-8")
-    (template / "app.py").write_text("import workbench_shell", "utf-8")
-    assert list(runtime_sources(tmp_path)) == [own]
     assert_source_boundary(own, "mindmap-layouts", set())
-
-
-def test_folder_name_alone_cannot_exclude_runtime_sources(tmp_path):
-    """只有名称而没有独立元数据的目录仍属于运行代码，不能绕过递归边界检查。"""
-    directory = tmp_path / "project_template"
-    directory.mkdir()
-    file = directory / "module.py"
-    file.write_text("import mindmap_qt_canvas", "utf-8")
-    assert list(runtime_sources(tmp_path)) == [file]
-    with pytest.raises(AssertionError):
-        assert_source_boundary(file, "mindmap-layouts", {"mindmap-core"})
 
 
 def test_canvas_does_not_use_layout_implementation_indexes():

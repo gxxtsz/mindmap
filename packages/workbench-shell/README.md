@@ -11,7 +11,6 @@
 - [标题栏与导航](#标题栏与导航)
 - [窗口控制与外观](#窗口控制与外观)
 - [启动与生命周期](#启动与生命周期)
-- [可选项目模板](#可选项目模板)
 - [相关接口与文档](#相关接口与文档)
 
 ## 安装与构建
@@ -145,22 +144,6 @@ raise SystemExit(run_desktop(build_window))
 - 共用菜单不再内置工作区菜单、工具搜索和重复关闭入口；工作台在业务文件菜单中提供退出操作。
 
 - `WorkbenchWindow` 的宿主标识仅允许 `main`，窗口控制按钮仍由系统窗口状态管理。
-
-## 可选项目模板
-
-随包保留一个独立桌面项目模板，生成器入口改名为 `workbench-new`。
-
-```powershell
-uv run --locked --all-packages workbench-new ../example-desktop --name example-desktop --title "示例桌面应用" --framework-root .
-```
-
-- `--framework-root` 指向当前仓库的根目录，将生成工程的依赖绑定到 `packages/` 下的外壳与停靠包。
-
-- 从 wheel 安装后也可使用生成器；未指定源码位置时保留普通版本依赖，需要提供已构建的 wheel 或发布包。
-
-- 目标目录必须尚不存在，生成器不会覆盖已有目录。
-
-- 模板唯一来源为本包的 `project_template/`。
 
 ## 相关接口与文档
 

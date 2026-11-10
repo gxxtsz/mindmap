@@ -41,7 +41,7 @@ packages/
   workbench-api/                 插件与编辑器公开协议
   workbench-docking/             通用停靠、标签、分屏、主题和布局
   workbench-runtime/             插件、文档、命令和会话协调
-  workbench-shell/               通用窗口、启动器和项目脚手架
+  workbench-shell/               通用窗口和启动器
 plugins/
   workbench-plugin-text/         文本插件
   workbench-plugin-mindmap/
@@ -74,7 +74,6 @@ uv run --locked --no-sync python scripts/verify_wheels.py
 uv run --locked --no-sync python scripts/verify_plugins.py
 ```
 
-生成独立桌面工程可使用 `uv run --locked --package workbench-shell workbench-new 目标目录`。
 性能与导图专项命令见[导图验收脚本](plugins/workbench-plugin-mindmap/scripts/README.md)。
 
 ## 开发文档

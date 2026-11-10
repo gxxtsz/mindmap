@@ -166,31 +166,25 @@ print(json.dumps({"停靠包独立安装与资源完整性": True, "停靠包依
 ''',
     "workbench-shell": r'''
 
-import importlib.util, json, sys, tomllib
+import importlib.util, json, sys
 from pathlib import Path
 import workbench_shell
-from workbench_shell.scaffold import generate_project
-from PySide6.QtWidgets import QApplication
+from workbench_docking import DocumentSpec
+from workbench_shell import AppSpec, WorkbenchWindow
+from PySide6.QtWidgets import QApplication, QLabel
 assert importlib.util.find_spec("mindmap_engine") is None
 assert importlib.util.find_spec("mindmap_qt") is None
 assert importlib.util.find_spec("mindmap_workbench") is None
 assert Path(workbench_shell.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-generated = generate_project(Path("generated-desktop"), project_name="example-desktop", title="安装模板验收")
-metadata = tomllib.loads((generated / "pyproject.toml").read_text("utf-8"))
-assert {item.split(">", 1)[0] for item in metadata["project"]["dependencies"]} == {"workbench-shell", "workbench-docking", "PySide6"}
-assert "sources" not in metadata.get("tool", {}).get("uv", {})
-assert (generated / ".python-version").is_file() and (generated / "LICENSE").is_file()
-source = generated / "src/example_desktop/app.py"
-namespace = {"__name__": "template_acceptance"}
-exec(compile(source.read_text("utf-8"), str(source), "exec"), namespace)
 app = QApplication([])
-window = namespace["build_window"](storage_dir=Path("shell-state"), restore=False)
+window = WorkbenchWindow(AppSpec("shell-check", "安装外壳验收", storage_dir=Path("shell-state")))
+window.manager.register_document(DocumentSpec("document", "测试文档", lambda: QLabel("内容")))
 window.show()
 app.processEvents()
-assert window.spec.title == "安装模板验收" and len(window.manager.documents) == 1
+assert window.spec.title == "安装外壳验收" and len(window.manager.documents) == 1
 window.manager.set_theme("dark")
-window.close()
-print(json.dumps({"外壳包独立安装与依赖隔离": True, "随包模板生成与运行": True}))
+assert window.close()
+print(json.dumps({"外壳包独立安装与依赖隔离": True}))
 
 ''',
     "personal-workbench": r'''
@@ -512,11 +506,6 @@ assert path.read_text("utf-8") == "文本编辑：最小安装组合"
 assert window.close()
 '''])
             independent[name] = True
-            if name == "workbench-shell":
-                # 包名、导入名与生成器命令同步改名，干净环境不能残留旧启动器。
-                command = interpreter.parent / ("workbench-new.exe" if os.name == "nt" else "workbench-new")
-                assert command.is_file() and not list(interpreter.parent.glob("mindmap-new*"))
-                execute([command, "--help"])
             if name == "personal-workbench":
                 workbench = json.loads(result)
                 # 同时验证模块入口与已安装命令，旧命令不能因残留构建产物继续出现。
