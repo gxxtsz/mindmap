@@ -189,9 +189,9 @@ finally:
 
 - 参数、异常、所有权和生命周期说明见[公共模型](src/workbench_docking/models.py)、[管理器](src/workbench_docking/manager.py)、[扩展协议](src/workbench_docking/storage.py)。
 
-- 默认用户配置位于 Qt 用户配置位置下的 `mindmap/<application_id>/`，详见[桌面框架说明](../../../docs/桌面框架.md)。
+- 默认用户配置位于 Qt 用户配置位置下的 `mindmap/<application_id>/`，详见[桌面框架说明](../../docs/桌面框架.md)。
 
-- 资源与 MIT 许可见[资源与许可](../../../docs/资源与许可.md)和 [LICENSE](LICENSE)。
+- 资源与 MIT 许可见[资源与许可](../../docs/资源与许可.md)和 [LICENSE](LICENSE)。
 
 ## 通用宿主关闭协调
 

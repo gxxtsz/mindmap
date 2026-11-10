@@ -38,12 +38,10 @@ uv run --locked --package personal-workbench personal-workbench
 ```text
 apps/personal-workbench/          产品入口、内置插件装配和旧配置迁移
 packages/
-  desktop/
-    workbench-docking/           通用停靠、标签、分屏、主题和布局
-    workbench-shell/             通用窗口、启动器和项目脚手架
-  platform/
-    workbench-api/               插件与编辑器公开协议
-    workbench-runtime/           插件、文档、命令和会话协调
+  workbench-api/                 插件与编辑器公开协议
+  workbench-docking/             通用停靠、标签、分屏、主题和布局
+  workbench-runtime/             插件、文档、命令和会话协调
+  workbench-shell/               通用窗口、启动器和项目脚手架
 plugins/
   workbench-plugin-text/         文本插件
   workbench-plugin-mindmap/

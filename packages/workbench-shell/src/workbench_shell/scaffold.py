@@ -17,9 +17,10 @@ def generate_project(destination, *, project_name="my-desktop-app", module_name=
     修改或运行。project_name、module_name 和 title 非法时抛出 ValueError，目标
     已存在时抛出 FileExistsError，文件读写失败保留原有目标并传播 OSError。
 
-    framework_root 指向工作台仓库时，将两项依赖显式绑定到本地路径，未发布到
-    包索引也能立即运行。省略时自动检测当前源码工作区；安装版无法检测时保留
-    标准版本依赖，发布或安装本地 wheel 后由调用方正常解析。
+    framework_root 可指定工作台仓库的根目录。省略时从本模块向上查找声明 uv
+    工作区的目录。找到根目录后，检查其 packages 下的外壳包与停靠包，再将
+    两个包的绝对路径写入生成工程的可编辑依赖配置。包目录缺少 pyproject.toml
+    时抛出 ValueError。从 wheel 安装后若无法找到源码工作区，则保留版本依赖。
     """
     if not re.fullmatch(r"[a-z][a-z0-9-]{1,63}", project_name):
         raise ValueError("项目名应为 2 至 64 个小写字母、数字或连字符")
@@ -33,7 +34,7 @@ def generate_project(destination, *, project_name="my-desktop-app", module_name=
         raise FileExistsError("目标目录已经存在；生成器不会覆盖已有文件")
     source = Path(__file__).parent / "project_template"
     if framework_root is None:
-        # 包按子系统分组后目录深度不再固定；仅将包含 uv workspace 的祖先当作源码根。
+        # 通过工作区声明识别源码根目录，避免依赖脚手架模块所在的固定层级。
         import tomllib
 
         for candidate in Path(__file__).resolve().parents:
@@ -41,11 +42,12 @@ def generate_project(destination, *, project_name="my-desktop-app", module_name=
             if metadata.is_file() and "workspace" in tomllib.loads(metadata.read_text("utf-8")).get("tool", {}).get("uv", {}):
                 framework_root = candidate
                 break
+    local_sources = {}
     if framework_root is not None:
-        framework_root = Path(framework_root).resolve()
-        if not all((framework_root / path / "pyproject.toml").is_file()
-                   for path in ("packages/desktop/workbench-docking", "packages/desktop/workbench-shell")):
-            raise ValueError("框架目录必须包含 packages/desktop 下的停靠与外壳成员")
+        packages_dir = Path(framework_root).resolve() / "packages"
+        local_sources = {name: packages_dir / name for name in ("workbench-shell", "workbench-docking")}
+        if not all((path / "pyproject.toml").is_file() for path in local_sources.values()):
+            raise ValueError("框架目录必须包含 packages 下的停靠与外壳成员")
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix="workbench-new-", dir=destination.parent)).resolve()
     try:
@@ -59,10 +61,10 @@ def generate_project(destination, *, project_name="my-desktop-app", module_name=
             text = text.replace("my_desktop_app", module_name).replace("my-desktop-app", project_name)
             text = text.replace('"我的桌面应用"', json.dumps(title, ensure_ascii=False))
             text = text.replace("# 我的桌面应用", "# " + title)
-            if relative == "pyproject.toml" and framework_root is not None:
+            if relative == "pyproject.toml" and local_sources:
                 text += "\n[tool.uv.sources]\n"
-                for name in ("workbench-shell", "workbench-docking"):
-                    path = json.dumps((framework_root / "packages/desktop" / name).as_posix())
+                for name, package_dir in local_sources.items():
+                    path = json.dumps(package_dir.as_posix())
                     text += f"{name} = {{ path = {path}, editable = true }}\n"
             output.write_text(text, "utf-8")
         # 发布前再次确认目标尚不存在，完整写入的临时目录才可提交为最终工程。

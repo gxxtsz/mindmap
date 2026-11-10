@@ -154,7 +154,7 @@ raise SystemExit(run_desktop(build_window))
 uv run --locked --all-packages workbench-new ../example-desktop --name example-desktop --title "示例桌面应用" --framework-root .
 ```
 
-- `--framework-root` 指向当前 mindmap 仓库，将生成工程的依赖绑定到本仓库两个基础包。
+- `--framework-root` 指向当前仓库的根目录，将生成工程的依赖绑定到 `packages/` 下的外壳与停靠包。
 
 - 从 wheel 安装后也可使用生成器；未指定源码位置时保留普通版本依赖，需要提供已构建的 wheel 或发布包。
 
@@ -168,6 +168,6 @@ uv run --locked --all-packages workbench-new ../example-desktop --name example-d
 
 - 公共参数与生命周期见[外壳配置](src/workbench_shell/specs.py)、[主窗口](src/workbench_shell/window.py)、[启动器](src/workbench_shell/cli.py)。
 
-- 实际工作台的接入方式见[产品入口](../../../apps/personal-workbench/src/personal_workbench/app.py)。
+- 实际工作台的接入方式见[产品入口](../../apps/personal-workbench/src/personal_workbench/app.py)。
 
-- 资源与 MIT 许可见[资源与许可](../../../docs/资源与许可.md)和 [LICENSE](LICENSE)。
+- 资源与 MIT 许可见[资源与许可](../../docs/资源与许可.md)和 [LICENSE](LICENSE)。

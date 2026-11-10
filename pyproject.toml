@@ -14,8 +14,7 @@ package = false
 # 导图分组目录不放 pyproject.toml，避免 uv 从子包向上查找时误判工作区边界。
 # 适配包和业务组件并列注册，保持十四个独立分发包及原有依赖方向。
 members = [
-    "packages/desktop/*",
-    "packages/platform/*",
+    "packages/*",
     "plugins/workbench-plugin-text",
     "plugins/workbench-plugin-mindmap/adapter",
     "plugins/workbench-plugin-mindmap/engine/*",

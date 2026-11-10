@@ -49,7 +49,7 @@ def members():
 
 
 def test_workspace_and_lock_only_reference_current_repository():
-    """全部成员从当前仓库解析，已删除的入口既不安装也不进入锁文件。"""
+    """四个工作台包直接位于 packages，全部成员及其锁定路径均来自当前仓库。"""
     packages = members()
     assert set(packages) == EXPECTED
     config = tomllib.loads((ROOT / "pyproject.toml").read_text("utf-8"))
@@ -61,10 +61,12 @@ def test_workspace_and_lock_only_reference_current_repository():
     assert set(installed) == EXPECTED
     for name, package in installed.items():
         assert (ROOT / package["source"]["editable"]).resolve() == packages[name][0].resolve()
+    for name in ("workbench-api", "workbench-docking", "workbench-runtime", "workbench-shell"):
+        assert packages[name][0] == ROOT / "packages" / name
+    for group in ("desktop", "platform"):
+        assert not (ROOT / "packages" / group).exists()
     for module in REMOVED:
         assert importlib.util.find_spec(module) is None
-    assert not (ROOT / "packages/desktop/mindmap-docking").exists()
-    assert not (ROOT / "packages/desktop/mindmap-shell").exists()
     assert not (ROOT / "plugins/workbench-plugin-mindmap/workbench").exists()
 
 

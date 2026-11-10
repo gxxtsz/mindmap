@@ -14,7 +14,7 @@
 
 ## 快速开始
 
-本包支持 Python 3.12、3.13，依赖 `workbench-api`、`workbench-shell`、`workbench-docking` 和 PySide6 `>=6.12,<6.13`。下方示例另外需要 `workbench-plugin-text`，它提供 `.txt` 和 `.md` 纯文本编辑。详见[文本插件](../../../plugins/workbench-plugin-text/README.md)。
+本包支持 Python 3.12、3.13，依赖 `workbench-api`、`workbench-shell`、`workbench-docking` 和 PySide6 `>=6.12,<6.13`。下方示例另外需要 `workbench-plugin-text`，它提供 `.txt` 和 `.md` 纯文本编辑。详见[文本插件](../../plugins/workbench-plugin-text/README.md)。
 
 在仓库根目录同步 uv 工作区。
 
@@ -64,7 +64,7 @@ uv run --locked --no-sync python .\运行文本工作台.py .\README.md
 
 ## 宿主 API
 
-通过 `from workbench_runtime import WorkbenchConfig, WorkbenchRuntimeWindow` 使用包级入口。窗口继承 `WorkbenchWindow`，可复用外壳的公共窗口接口。详见[桌面外壳](../../desktop/workbench-shell/README.md)。
+通过 `from workbench_runtime import WorkbenchConfig, WorkbenchRuntimeWindow` 使用包级入口。窗口继承 `WorkbenchWindow`，可复用外壳的公共窗口接口。详见[桌面外壳](../workbench-shell/README.md)。
 
 ### WorkbenchConfig
 
@@ -167,7 +167,7 @@ def activate(context):
 manifest = PluginManifest("text", "文本编辑", "0.1.0", activate)
 ```
 
-`PluginManifest(id, name, version, activate, api_version=API_VERSION, requires=())` 声明稳定的插件 ID、显示名、插件版本和激活函数。`api_version` 须与宿主的 `API_VERSION` 一致，当前值为 `1`。`requires` 填写必须先启用的插件 ID。详见[文本插件入口声明](../../../plugins/workbench-plugin-text/pyproject.toml)和[清单实现](../../../plugins/workbench-plugin-text/src/workbench_plugin_text/__init__.py)。
+`PluginManifest(id, name, version, activate, api_version=API_VERSION, requires=())` 声明稳定的插件 ID、显示名、插件版本和激活函数。`api_version` 须与宿主的 `API_VERSION` 一致，当前值为 `1`。`requires` 填写必须先启用的插件 ID。详见[文本插件入口声明](../../plugins/workbench-plugin-text/pyproject.toml)和[清单实现](../../plugins/workbench-plugin-text/src/workbench_plugin_text/__init__.py)。
 
 1. 启动时读取清单和保存的启用偏好，默认启用候选插件，依赖先于使用它的插件激活。入口加载异常、重复 ID、版本冲突、依赖循环或依赖不可用会标记相关插件失败，其余可用插件继续启动。
 2. `activate(context)` 注册能力并返回提供 `dispose()` 的插件实例。激活异常时，运行时通过上下文撤销已完成的注册与订阅。
@@ -208,7 +208,7 @@ manifest = PluginManifest("text", "文本编辑", "0.1.0", activate)
 | `ui.show_message(message)` 和 `ui.refresh()` | 分别显示状态提示和刷新文档相关界面，均返回 `None`。 |
 | `ui.open_directory(view_id=None)` 和 `ui.remember_path(path)` | 分别打开指定视图的所在目录和更新最近文件，返回值沿用对应的宿主方法。 |
 
-命令和菜单贡献使用宿主已有菜单名称，如“文件”“编辑”“视图”或“设置”。面板的稳定 ID 还用于恢复布局。停靠操作详见[停靠组件](../../desktop/workbench-docking/README.md)。
+命令和菜单贡献使用宿主已有菜单名称，如“文件”“编辑”“视图”或“设置”。面板的稳定 ID 还用于恢复布局。停靠操作详见[停靠组件](../workbench-docking/README.md)。
 
 ### 设置、状态、日志与资源
 
@@ -252,14 +252,14 @@ manifest = PluginManifest("text", "文本编辑", "0.1.0", activate)
 
 `migration(directory)` 接收最终配置目录的 `Path`。返回的 `initial_state` 可为 `None`，或包含 `schema_version=1` 的状态字典。若提供视图记录，每条须包含 `id`、`plugin_id`、`editor_type` 和绝对 `path`，可携带 `document_id` 与 `view_state`。返回的 `initial_settings` 是按命名空间分组的字典，空字符串命名空间用于宿主设置，插件 ID 用于对应插件。
 
-已成功读取的新版状态和设置各自优先，迁移返回值作为加载回退。旧路径、旧字段的解释和只读导入由产品实现。个人工作台的历史目录和迁移逻辑可见[产品装配](../../../apps/personal-workbench/src/personal_workbench/app.py)和[迁移实现](../../../apps/personal-workbench/src/personal_workbench/migration.py)。
+已成功读取的新版状态和设置各自优先，迁移返回值作为加载回退。旧路径、旧字段的解释和只读导入由产品实现。个人工作台的历史目录和迁移逻辑可见[产品装配](../../apps/personal-workbench/src/personal_workbench/app.py)和[迁移实现](../../apps/personal-workbench/src/personal_workbench/migration.py)。
 
 ## 开发验证
 
 在仓库根目录同步工作区后，运行本包测试或构建 wheel。
 
 ```powershell
-uv run --locked --no-sync pytest -q packages/platform/workbench-runtime
+uv run --locked --no-sync pytest -q packages/workbench-runtime
 uv build --package workbench-runtime
 ```
 

@@ -19,7 +19,7 @@ ROOT = next(parent for parent in Path(__file__).resolve().parents if (parent / "
 
 def test_desktop_resource_manifest_and_project_license_are_complete():
     """主题与图标完整随包交付，资源摘要和本项目许可保持一致。"""
-    resources = ROOT / "packages/desktop/workbench-docking/src/workbench_docking/resources"
+    resources = ROOT / "packages/workbench-docking/src/workbench_docking/resources"
     manifest = json.loads((resources / "manifest.json").read_text("utf-8"))
     assert manifest["license"] == "MIT"
     expected = {entry["path"] for entry in manifest["files"]}
@@ -36,7 +36,7 @@ def test_desktop_resource_manifest_and_project_license_are_complete():
         else:
             assert "SPDX-License-Identifier: MIT; Copyright (c) 2026 mindmap contributors" in path.read_text("utf-8")
     for package in ("workbench-docking", "workbench-shell"):
-        license_text = (ROOT / "packages/desktop" / package / "LICENSE").read_text("utf-8")
+        license_text = (ROOT / "packages" / package / "LICENSE").read_text("utf-8")
         assert "MIT License" in license_text and "mindmap contributors" in license_text
 
 
@@ -50,7 +50,7 @@ def test_resource_hashes_survive_git_checkout(tmp_path, autocrlf):
     git = shutil.which("git")
     if git is None:
         pytest.skip("跨平台检出回归需要 Git")
-    resources_path = Path("packages/desktop/workbench-docking/src/workbench_docking/resources")
+    resources_path = Path("packages/workbench-docking/src/workbench_docking/resources")
     repository = tmp_path / "repository"
     repository.mkdir()
     shutil.copyfile(ROOT / ".gitattributes", repository / ".gitattributes")
@@ -84,7 +84,7 @@ def test_resource_hashes_survive_git_checkout(tmp_path, autocrlf):
 def test_packaged_icons_render_at_small_sizes_and_multiple_dpi(qapp, theme_name):
     """所有随包 SVG 都能解析，并在菜单、侧栏与高分屏尺寸生成非空像素。"""
     theme = Theme(theme_name)
-    resources = ROOT / "packages/desktop/workbench-docking/src/workbench_docking/resources/icons"
+    resources = ROOT / "packages/workbench-docking/src/workbench_docking/resources/icons"
     for path in resources.glob("*.svg"):
         assert QSvgRenderer(str(path)).isValid(), path.name
         icon = theme.icon(path.stem)

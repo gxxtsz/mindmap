@@ -168,12 +168,12 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-api", editable = "packages/platform/workbench-api" },
-    { name = "workbench-docking", editable = "packages/desktop/workbench-docking" },
+    { name = "workbench-api", editable = "packages/workbench-api" },
+    { name = "workbench-docking", editable = "packages/workbench-docking" },
     { name = "workbench-plugin-mindmap", editable = "plugins/workbench-plugin-mindmap/adapter" },
     { name = "workbench-plugin-text", editable = "plugins/workbench-plugin-text" },
-    { name = "workbench-runtime", editable = "packages/platform/workbench-runtime" },
-    { name = "workbench-shell", editable = "packages/desktop/workbench-shell" },
+    { name = "workbench-runtime", editable = "packages/workbench-runtime" },
+    { name = "workbench-shell", editable = "packages/workbench-shell" },
 ]
 
 [[package]]
@@ -372,7 +372,7 @@ wheels = [
 [[package]]
 name = "workbench-api"
 version = "0.1.0"
-source = { editable = "packages/platform/workbench-api" }
+source = { editable = "packages/workbench-api" }
 dependencies = [
     { name = "pyside6" },
 ]
@@ -383,7 +383,7 @@ requires-dist = [{ name = "pyside6", specifier = ">=6.12,<6.13" }]
 [[package]]
 name = "workbench-docking"
 version = "0.1.0"
-source = { editable = "packages/desktop/workbench-docking" }
+source = { editable = "packages/workbench-docking" }
 dependencies = [
     { name = "pyside6" },
 ]
@@ -418,8 +418,8 @@ requires-dist = [
     { name = "mindmap-qt-render", editable = "plugins/workbench-plugin-mindmap/qt/mindmap-qt-render" },
     { name = "mindmap-qt-ui", editable = "plugins/workbench-plugin-mindmap/qt/mindmap-qt-ui" },
     { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-api", editable = "packages/platform/workbench-api" },
-    { name = "workbench-docking", editable = "packages/desktop/workbench-docking" },
+    { name = "workbench-api", editable = "packages/workbench-api" },
+    { name = "workbench-docking", editable = "packages/workbench-docking" },
 ]
 
 [[package]]
@@ -434,13 +434,13 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-api", editable = "packages/platform/workbench-api" },
+    { name = "workbench-api", editable = "packages/workbench-api" },
 ]
 
 [[package]]
 name = "workbench-runtime"
 version = "0.1.0"
-source = { editable = "packages/platform/workbench-runtime" }
+source = { editable = "packages/workbench-runtime" }
 dependencies = [
     { name = "pyside6" },
     { name = "workbench-api" },
@@ -451,15 +451,15 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-api", editable = "packages/platform/workbench-api" },
-    { name = "workbench-docking", editable = "packages/desktop/workbench-docking" },
-    { name = "workbench-shell", editable = "packages/desktop/workbench-shell" },
+    { name = "workbench-api", editable = "packages/workbench-api" },
+    { name = "workbench-docking", editable = "packages/workbench-docking" },
+    { name = "workbench-shell", editable = "packages/workbench-shell" },
 ]
 
 [[package]]
 name = "workbench-shell"
 version = "0.1.0"
-source = { editable = "packages/desktop/workbench-shell" }
+source = { editable = "packages/workbench-shell" }
 dependencies = [
     { name = "pyside6" },
     { name = "workbench-docking" },
@@ -468,5 +468,5 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-docking", editable = "packages/desktop/workbench-docking" },
+    { name = "workbench-docking", editable = "packages/workbench-docking" },
 ]

@@ -20,7 +20,7 @@ def test_generated_project_is_independent_and_has_mit_license(tmp_path):
     root = next(parent for parent in Path(__file__).resolve().parents if (parent / "uv.lock").is_file())
     assert {name: Path(source["path"]).resolve()
             for name, source in project["tool"]["uv"]["sources"].items()} == {
-        name: root / "packages/desktop" / name for name in ("workbench-shell", "workbench-docking")
+        name: root / "packages" / name for name in ("workbench-shell", "workbench-docking")
     }
     source = (output / "src/example_desktop/app.py").read_text("utf-8")
     ast.parse(source)
