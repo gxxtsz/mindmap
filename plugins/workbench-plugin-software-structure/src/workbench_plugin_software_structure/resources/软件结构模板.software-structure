@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "template_instructions": [
+    "分析用户提供的目标项目源码、构建配置或架构说明，提取模块及其直接依赖。用目标项目的实际数据替换下方示例中的模块和依赖。",
+    "按职责将项目划分为组件、子系统或包，并保持模块粒度一致。依据材料中明确的导入、调用、构建依赖或架构关系记录直接依赖。仅纳入可核实的模块和依赖，保留已识别的孤立模块。",
+    "将 schema_version 设为整数 1。modules 是必填数组，每项是模块对象。没有可核实的模块时填写空数组。",
+    "为每个模块填写必填字符串 id 和 name，二者都至少包含一个非空白字符。使用在整个文档中唯一的 id，引用时按原文匹配并区分大小写。name 填图中展示的名称。需要概括模块职责时，在可选字符串 description 中填写简短说明。",
+    "将直接依赖写入可选数组 module_dependencies。每项是对象，必填字符串 source 和 target 都必须引用 modules 中已声明的 id。source 是依赖方，target 是被依赖方。例如模块 A 调用模块 B 时，source 填 A 的 id，target 填 B 的 id。",
+    "每组有序的 source 和 target 只写一次。按项目实际情况保留自依赖、双向依赖和其他循环依赖。没有可核实的依赖时，将 module_dependencies 设为空数组或省略该字段。",
+    "输出前检查模块 ID 是否唯一、依赖引用是否有效、方向是否正确，以及有序依赖对是否重复。只输出原始 JSON 对象，顶层字段限于 schema_version、modules 和可选的 module_dependencies。输出内容应可直接保存为 UTF-8 编码的 .software-structure 文件。"
+  ],
+  "modules": [
+    {"id": "app", "name": "应用入口", "description": "启动应用并调用业务服务。"},
+    {"id": "service", "name": "业务服务", "description": "执行业务逻辑并访问数据存储。"},
+    {"id": "storage", "name": "数据存储", "description": "提供数据读写能力。"}
+  ],
+  "module_dependencies": [
+    {"source": "app", "target": "service"},
+    {"source": "service", "target": "storage"}
+  ]
+}

@@ -4,16 +4,25 @@ from workbench_api import Disposable, PluginContext, PluginManifest
 
 
 def activate(context: PluginContext) -> Disposable:
-    """通过宿主公开接口登记文档提供者和窗口状态栏控件。
+    """通过宿主公开接口登记模板下载命令、文档提供者和状态栏控件。
 
-    状态栏按活动视图切换画布。注册项由插件上下文接管，以便激活失败时回滚，
-    返回的注销句柄会在移除控件之前断开订阅并释放画布引用。
+    下载命令由插件上下文托管，文件菜单和各软件结构视图共用该动作。
+    状态栏按活动视图切换画布，返回的注销句柄在移除控件前断开订阅并释放画布引用。
     """
-    from workbench_api.qt import StatusItemSpec
+    from workbench_api.qt import CommandSpec, MenuLocation, StatusItemSpec
 
     from .status_controls import SoftwareStructureStatusControls
+    from .template import DOWNLOAD_TEMPLATE_COMMAND_ID, download_template
     from .viewer import SoftwareStructureView, register_document_provider
 
+    download = context.commands.register(CommandSpec(
+        id=DOWNLOAD_TEMPLATE_COMMAND_ID,
+        title="下载软件结构模板…",
+        callback=lambda: download_template(context.ui),
+        icon="export-text",
+        menu=MenuLocation.FILE,
+    ))
+    download.setToolTip("下载软件结构模板（含 AI 生成说明）")
     provider = register_document_provider(context)
     controls = SoftwareStructureStatusControls(context.ui)
     registrations = (

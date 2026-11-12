@@ -6,18 +6,22 @@ from pathlib import Path
 import pytest
 from mindmap_core.formats import load_document
 from personal_workbench.app import build_window
-from PySide6.QtCore import QLineF, QPoint, QPointF, Qt
+from PySide6.QtCore import QLineF, QPoint, QPointF, QSaveFile, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QIcon, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QGraphicsPathItem,
     QGraphicsPolygonItem,
     QGraphicsSimpleTextItem,
+    QMessageBox,
     QToolButton,
     QWidget,
 )
 from workbench_api import SavePolicy
+
+_DOWNLOAD_ACTION_ID = "software-structure.download-template"
 
 
 @pytest.fixture
@@ -81,6 +85,170 @@ def test_open_dialog_recent_files_and_repeat_open(window, graph_path, monkeypatc
     action = next(action for action in menu.actions() if action.data() == str(graph_path))
     action.trigger()
     assert window.documents.active.document.path == graph_path
+
+
+def test_download_template_from_file_menu_and_open(window, tmp_path, monkeypatch, qtbot):
+    """从无文档的工作台下载模板，再通过正常打开入口查看示例依赖。"""
+    target = tmp_path / "生成用模板.software-structure"
+
+    def downloads(location):
+        assert location == QStandardPaths.StandardLocation.DownloadLocation
+        return str(tmp_path)
+
+    monkeypatch.setattr(QStandardPaths, "writableLocation", downloads)
+
+    def choose_file(dialog):
+        assert dialog.parentWidget() is window
+        assert Path(dialog.directory().absolutePath()) == tmp_path
+        assert Path(dialog.selectedFiles()[0]).name == "软件结构模板.software-structure"
+        dialog.selectFile(target.stem)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QFileDialog, "exec", choose_file)
+    assert window.documents.active is None
+    bar = window.title_bar.menu_bar
+    file_entry = next(action for action in bar.actions() if action.text() == "文件")
+    menu = file_entry.menu()
+    qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.actionGeometry(file_entry).center())
+    qtbot.waitUntil(menu.isVisible)
+    download = next(action for action in menu.actions() if action.text() == "下载软件结构模板…")
+    assert download is window.action(_DOWNLOAD_ACTION_ID)
+    menu.setActiveAction(download)
+    qtbot.keyClick(menu, Qt.Key.Key_Return)
+
+    instructions = "\n".join(json.loads(target.read_text(encoding="utf-8"))["template_instructions"])
+    assert "source 是依赖方，target 是被依赖方" in instructions
+    assert "只输出原始 JSON 对象" in instructions
+    assert str(target) in window.status.currentMessage()
+    assert window.documents.active is None and not window.state.recent_files
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(target), ""))
+    assert window.open_dialog()
+    view = window.documents.active
+    assert view.document.path == target and view.document.save_policy == SavePolicy.READ_ONLY
+    items = view.widget.scene().items()
+    assert {item.text() for item in items if isinstance(item, QGraphicsSimpleTextItem)} == {
+        "应用入口", "业务服务", "数据存储",
+    }
+    assert sorted(item.toolTip() for item in items if isinstance(item, QGraphicsPolygonItem)) == [
+        "<qt>模块依赖：app → service</qt>", "<qt>模块依赖：service → storage</qt>",
+    ]
+
+
+def test_download_template_from_split_toolbar(window, graph_path, tmp_path, monkeypatch, qtbot):
+    """每个分屏的按钮跟随本组标签，点击按钮可保存模板副本。"""
+    assert window.open_path(graph_path)
+    first = window.documents.active
+    assert window.manager.duplicate_document(first.id)
+    second = window.documents.active
+    window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
+    first_group, _ = window.host.editor.find_token(first.id)
+    second_group, _ = window.host.editor.find_token(second.id)
+    assert first_group is not second_group
+    first_toolbar = first_group.cornerWidget(Qt.Corner.TopRightCorner)
+    second_toolbar = second_group.cornerWidget(Qt.Corner.TopRightCorner)
+    download = window.action(_DOWNLOAD_ACTION_ID)
+    assert first_toolbar.actions() == second_toolbar.actions() == [download]
+
+    window.documents.activate_view(second.id)
+    assert window.new_document(tmp_path / "同组导图.mindmap")
+    assert window.host.editor.find_token(window.documents.active.id)[0] is second_group
+    assert download in first_toolbar.actions() and download not in second_toolbar.actions()
+    window.documents.activate_view(second.id)
+
+    target = tmp_path / "从分屏保存.software-structure"
+
+    def choose_file(dialog):
+        dialog.selectFile(str(target))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QFileDialog, "exec", choose_file)
+    button = second_toolbar.widgetForAction(download)
+    qtbot.waitUntil(button.isVisible)
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert target.is_file()
+    assert window.documents.active is second
+    assert str(target) not in window.state.recent_files
+
+
+def test_download_template_confirms_overwrite_after_suffix_completion(window, tmp_path, monkeypatch):
+    """用 Qt 的覆盖提示拒绝和接受同名文件，核对提示检查的是补全后的路径。"""
+    target = tmp_path / "已有模板.software-structure"
+    original = b"original"
+    target.write_bytes(original)
+    answers = iter((QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes))
+    confirmations = []
+
+    def choose_file(dialog):
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog)
+        dialog.selectFile(str(target.with_suffix("")))
+        answer = next(answers)
+
+        def answer_overwrite():
+            prompt = dialog.findChild(QMessageBox)
+            if prompt is not None:
+                confirmations.append(prompt.text())
+                prompt.button(answer).click()
+
+        # accept 会启动确认对话框的事件循环，此时由定时器点击覆盖选项。
+        timer = QTimer(dialog)
+        timer.setSingleShot(True)
+        timer.timeout.connect(answer_overwrite)
+        timer.start(0)
+        dialog.accept()
+        timer.stop()
+        return dialog.result()
+
+    monkeypatch.setattr(QFileDialog, "exec", choose_file)
+    download = window.action(_DOWNLOAD_ACTION_ID)
+    download.trigger()
+    assert target.read_bytes() == original
+    download.trigger()
+    assert json.loads(target.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert len(confirmations) == 2 and all(target.name in prompt for prompt in confirmations)
+
+
+@pytest.mark.parametrize(("filename", "accepted", "message"), [
+    ("取消.software-structure", False, None),
+    ("扩展名错误.txt", True, "请使用 .software-structure 扩展名保存模板"),
+])
+def test_download_template_without_valid_destination(window, tmp_path, monkeypatch, filename, accepted, message):
+    """取消保存或输入其他后缀时，目标目录中没有模板副本。"""
+    original_log = window.operation_log.plain_text()
+
+    def choose_file(dialog):
+        dialog.selectFile(str(tmp_path / filename))
+        return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QFileDialog, "exec", choose_file)
+    window.action(_DOWNLOAD_ACTION_ID).trigger()
+    assert not any(tmp_path.glob("*.software-structure")) and not (tmp_path / filename).exists()
+    if message:
+        assert message in window.status.currentMessage() and message in window.operation_log.plain_text()
+    else:
+        assert window.operation_log.plain_text() == original_log
+
+
+def test_download_template_write_failure_keeps_existing_file(window, tmp_path, monkeypatch):
+    """模拟模板写入中断，原有内容得到保留，宿主同时报告失败。"""
+    target = tmp_path / "已有模板.software-structure"
+    original = b"original"
+    target.write_bytes(original)
+    write = QSaveFile.write
+
+    def choose_file(dialog):
+        dialog.selectFile(str(target))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QFileDialog, "exec", choose_file)
+    monkeypatch.setattr(QSaveFile, "write", lambda file, content: write(file, content[:1]))
+    window.action(_DOWNLOAD_ACTION_ID).trigger()
+
+    assert target.read_bytes() == original
+    assert {item for item in tmp_path.iterdir() if item.is_file()} == {target}
+    message = "保存软件结构模板失败"
+    assert message in window.status.currentMessage() and str(target) in window.status.currentMessage()
+    assert message in window.operation_log.plain_text()
 
 
 def test_file_icon_tracks_theme_and_remains_in_recent_files_after_close(window, graph_path, monkeypatch):
@@ -154,15 +322,21 @@ def test_graph_shows_modules_arrows_cycles_and_theme(window, graph_path):
 
     group, _ = window.host.editor.find_token(view.id)
     toolbar = group.cornerWidget(Qt.Corner.TopRightCorner)
-    assert toolbar.isHidden() and not toolbar.actions()
+    download = window.action(_DOWNLOAD_ACTION_ID)
+    assert toolbar.actions() == [download]
+    download_button = toolbar.widgetForAction(download)
     controls, fit, zoom = _status_controls(window)
     for theme in ("dark", "light"):
         window.manager.set_theme(theme)
         assert canvas.backgroundBrush().color() == window.manager.theme.color("editor-bg")
         assert all(item.pen().color() == window.manager.theme.color("warning") for item in cycles)
+        icon = window.manager.theme.icon("export-text")
+        assert not icon.isNull()
+        assert download_button.icon().pixmap(18, 18).toImage() == icon.pixmap(18, 18).toImage()
         for compact in (True, False):
             window.manager.set_option("compact", compact)
             QApplication.processEvents()
+            assert download_button.isVisible() and toolbar.rect().contains(download_button.geometry())
             assert window.status.height() == (24 if compact else 28)
             assert window.status.rect().contains(controls.geometry())
             assert controls.geometry().center().x() > window.status.rect().center().x()

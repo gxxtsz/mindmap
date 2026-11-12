@@ -9,6 +9,7 @@ from workbench_api import Disposable, EditorProvider, OperationResult, PluginCon
 
 from .document import SoftwareStructure, load_software_structure
 from .module_deps.canvas import ModuleDependencyCanvas
+from .template import DOWNLOAD_TEMPLATE_COMMAND_ID
 
 _PROVIDER_ID = "software-structure.document"
 
@@ -64,6 +65,11 @@ class SoftwareStructureView:
         """为活动文档状态栏提供图规模和只读状态。"""
         content = self.document.content
         return f"{len(content.modules)} 个模块 · {len(content.module_dependencies)} 条依赖 · 只读"
+
+    @property
+    def toolbar_actions(self) -> tuple[QAction, ...]:
+        """提供当前分屏标签栏右侧的动作。各视图与文件菜单共用宿主注册的命令。"""
+        return (self._context.ui.action(DOWNLOAD_TEMPLATE_COMMAND_ID),)
 
     def prepare_input(self) -> bool:
         """只读画布可直接参与标签切换和关闭检查。"""

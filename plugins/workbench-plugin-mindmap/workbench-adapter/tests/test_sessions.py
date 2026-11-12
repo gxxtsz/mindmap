@@ -448,7 +448,7 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     menu = window.main_menu()
     files = menu.actions()[0].menu()
     assert [action.text() for action in files.actions()] == [
-        "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "退出",
+        "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "下载软件结构模板…", "退出",
     ]
     assert not menu.actions()[1].menu().actions()[0].isEnabled()
     panels = menu.actions()[2].menu().actions()[0].menu()

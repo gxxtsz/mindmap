@@ -173,7 +173,8 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert [action.text() for action in main.actions()] == ["文件", "编辑", "视图", "设置"]
     files = next(action.menu() for action in main.actions() if action.text() == "文件")
     assert [action.text() for action in files.actions()] == [
-        "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…", "导出当前页", "退出",
+        "新建导图", "打开…", "打开所在文件夹", "保存", "保存全部", "另存为…",
+        "下载软件结构模板…", "导出当前页", "退出",
     ]
     assert files.actions()[0] is window.action("app.new")
     assert files.actions()[0].shortcut().toString() == "Ctrl+N"
