@@ -15,6 +15,7 @@ from .storage import write_atomic
 from .template import DOWNLOAD_TEMPLATE_COMMAND_ID
 
 _PROVIDER_ID = "software-structure.document"
+MODULE_API_PANEL_ID = "software-structure.module-apis"
 
 
 class SoftwareStructureDocument(QObject):
@@ -102,6 +103,7 @@ class SoftwareStructureView:
         self._apply_theme()
         self._theme_subscription: Disposable | None = context.ui.subscribe_theme(self._apply_theme)
         self.widget.viewport_changed.connect(self._view_state_changed)
+        self.widget.module_clicked.connect(self._module_clicked)
         self.document.edge_filter_changed.connect(self.widget.apply_edge_filter)
 
     @property
@@ -145,11 +147,12 @@ class SoftwareStructureView:
             return OperationResult.failed(error, reported=True)
 
     def dispose(self) -> None:
-        """幂等断开主题、视口和文件筛选通知，宿主负责已登记控件的销毁。"""
+        """幂等断开主题、视口、模块点击和文件筛选通知，由宿主销毁已登记的控件。"""
         if self._theme_subscription is not None:
             self._theme_subscription.dispose()
             self._theme_subscription = None
             self.widget.viewport_changed.disconnect(self._view_state_changed)
+            self.widget.module_clicked.disconnect(self._module_clicked)
             self.document.edge_filter_changed.disconnect(self.widget.apply_edge_filter)
 
     def _apply_theme(self, *_):
@@ -157,6 +160,17 @@ class SoftwareStructureView:
 
     def _view_state_changed(self) -> None:
         self._context.documents.view_state_changed(self.id)
+
+    def _module_clicked(self, module_id: str | None) -> None:
+        """先同步被点击的分屏，再按需显示侧栏，输入焦点留在当前画布。
+
+        宿主的焦点通知可能在下一轮事件循环才到达。主动激活被点击的标签，让侧栏
+        即使在首次点击另一分屏时也能读取正确的选择。空白点击只更新选择和活动标签。
+        """
+        if self._context.documents.active is not self:
+            self._context.documents.activate_view(self.id)
+        if module_id is not None and not self._context.ui.panel_visible(MODULE_API_PANEL_ID):
+            self._context.ui.activate_panel(MODULE_API_PANEL_ID, focus=False)
 
 
 def _register_view(context: PluginContext, document: SoftwareStructureDocument, *, view_id: str | None = None,

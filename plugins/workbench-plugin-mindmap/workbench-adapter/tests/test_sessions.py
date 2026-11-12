@@ -1258,10 +1258,10 @@ def test_layout_restore_preserves_live_documents_and_restart_reopens_files(empty
     assert window.plugins.instance("mindmap").active_session is first
     assert all(window.host.editor.find_token(session.id) for session in (first, second))
     window.manager.save_session()
-    payload = json.loads(window.manager.storage_file.read_bytes())
-    text = json.dumps(payload["layout"], ensure_ascii=False)
+    layout = json.loads(window.manager.storage_file.read_bytes())["layout"]
+    assert set(layout) == {"schema_version", "session", "window_placement"}
+    text = json.dumps(layout, ensure_ascii=False)
     assert str(first.files.path) not in text and "甲.mindmap" not in text
-    assert set(json.loads(text)) == {"schema_version", "session"}
     storage = window.manager.storage_dir
     assert window.close()
     restarted = build_window(storage_dir=storage)

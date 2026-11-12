@@ -7,6 +7,8 @@ from importlib.resources import as_file, files
 import pytest
 from workbench_plugin_software_structure.document import (
     Module,
+    ModuleApi,
+    ModuleApiGroup,
     ModuleDependency,
     SoftwareStructure,
     SoftwareStructureFormatError,
@@ -47,6 +49,42 @@ def test_empty_graph_and_omitted_dependencies(tmp_path):
     assert load_software_structure(path) == SoftwareStructure(())
 
 
+def test_reads_module_apis_and_class_members_in_file_order(tmp_path):
+    """接口组引用原始模块 ID，递归保留类成员及显式空清单。"""
+    path = tmp_path / "模块接口.software-structure"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": name, "name": name} for name in ("app", "Core", "core")],
+        "module_apis": [
+            {"module_id": "core", "apis": []},
+            {"module_id": "Core", "apis": [
+                {"name": "检查项目", "description": "判断项目能否打开。"},
+                {"kind": "class", "name": "项目版本管理", "description": "整理项目的历史版本。", "members": [
+                    {"name": "保存版本", "description": "保存项目当前内容。"},
+                    {"name": "恢复版本", "description": "恢复选定的项目版本。"},
+                    {"kind": "class", "name": "自动保存设置", "description": "管理自动保存的选项。", "members": [
+                        {"name": "设置保存周期", "description": "修改自动保存的时间间隔。"},
+                    ]},
+                ]},
+            ]},
+        ],
+    }, ensure_ascii=False), "utf-8")
+
+    assert load_software_structure(path).module_apis == (
+        ModuleApiGroup("core", ()),
+        ModuleApiGroup("Core", (
+            ModuleApi("检查项目", "判断项目能否打开。"),
+            ModuleApi("项目版本管理", "整理项目的历史版本。", "class", (
+                ModuleApi("保存版本", "保存项目当前内容。"),
+                ModuleApi("恢复版本", "恢复选定的项目版本。"),
+                ModuleApi("自动保存设置", "管理自动保存的选项。", "class", (
+                    ModuleApi("设置保存周期", "修改自动保存的时间间隔。"),
+                )),
+            )),
+        )),
+    )
+
+
 @pytest.mark.parametrize("hidden", [[], ["core"]])
 def test_saved_filter_takes_precedence_over_legacy_marks(tmp_path, hidden):
     """新字段存在时以其为准，空列表也能覆盖旧勾选。"""
@@ -60,7 +98,7 @@ def test_saved_filter_takes_precedence_over_legacy_marks(tmp_path, hidden):
 
 
 def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_path):
-    """在一次重写中移除直接旧键，保留 CRLF、缩进、旧阈值和扩展字段。"""
+    """在一次重写中移除直接旧键，保留 CRLF、缩进、接口清单和扩展字段。"""
     path = tmp_path / "保留原文.software-structure"
     original = (
         '\ufeff{\r\n'
@@ -77,6 +115,9 @@ def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_pat
         '\t\t}\r\n'
         '\t],\r\n'
         '\t"public_dependency_thresholds": {"component_size": 0, "direct_dependent_percent": 0},\r\n'
+        '\t"module_apis": [{ "module_id": "Core", "apis": [\r\n'
+        '\t\t{"name": "读取 {项目}", "description": "读取项目的 \\"当前版本\\"。"}\r\n'
+        '\t]}],\r\n'
         '\t"其它": ["is_public_dependency", "}"]\r\n'
         '}\r\n'
     ).encode("utf-8")
@@ -103,11 +144,11 @@ def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_pat
 
 
 def test_bundled_template_is_a_valid_graph():
-    """从已安装的插件资源取得下载模板，使用正式读取器验证示例图数据。"""
+    """通过正式读取器验证插件资源内的示例图和接口数据。"""
     resource = files("workbench_plugin_software_structure").joinpath("resources", "软件结构模板.software-structure")
     with as_file(resource) as path:
         template = load_software_structure(path)
-    assert template.modules and template.module_dependencies
+    assert template.modules and template.module_dependencies and template.module_apis
 
 
 @pytest.mark.parametrize(("overrides", "message"), [
@@ -143,6 +184,49 @@ def test_invalid_fields_include_their_location(tmp_path, overrides, message):
     with pytest.raises(SoftwareStructureFormatError) as raised:
         load_software_structure(path)
     assert message in str(raised.value)
+
+
+@pytest.mark.parametrize(("groups", "message"), [
+    (None, "module_apis 必须是数组"),
+    ([False], "module_apis[0] 必须是对象"),
+    ([{"apis": []}], "module_apis[0].module_id 必须是非空字符串"),
+    ([{"module_id": "App", "apis": []}], "module_apis[0].module_id 引用了未声明的模块 ID"),
+    ([{"module_id": "app", "apis": []}] * 2, "module_apis[1].module_id 与前面的模块 ID 重复"),
+    ([{"module_id": "app"}], "module_apis[0].apis 必须是数组"),
+    ([{"module_id": "app", "apis": [False]}], "module_apis[0].apis[0] 必须是对象"),
+])
+def test_invalid_module_api_groups_include_their_location(tmp_path, groups, message):
+    path = tmp_path / "无效接口组.software-structure"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": "app", "name": "应用"}],
+        "module_apis": groups,
+    }), "utf-8")
+    with pytest.raises(SoftwareStructureFormatError) as raised:
+        load_software_structure(path)
+    assert message in str(raised.value)
+
+
+@pytest.mark.parametrize(("overrides", "message"), [
+    ({"name": " "}, "name 必须是非空字符串"),
+    ({"description": None}, "description 必须是非空字符串"),
+    ({"kind": "http"}, 'kind 必须是字符串 "class"'),
+    ({"members": []}, "members 只能在类条目中填写"),
+    ({"kind": "class", "members": {}}, "members 必须是数组"),
+    ({"kind": "class", "members": [{"name": "成员"}]}, "members[0].description 必须是非空字符串"),
+])
+def test_invalid_api_entries_include_their_location(tmp_path, overrides, message):
+    path = tmp_path / "无效接口.software-structure"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": "app", "name": "应用"}],
+        "module_apis": [{"module_id": "app", "apis": [{
+            "name": "打开项目", "description": "读取已有项目。", **overrides,
+        }]}],
+    }), "utf-8")
+    with pytest.raises(SoftwareStructureFormatError) as raised:
+        load_software_structure(path)
+    assert f"module_apis[0].apis[0].{message}" in str(raised.value)
 
 
 @pytest.mark.parametrize(("content", "message"), [

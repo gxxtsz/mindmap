@@ -41,6 +41,9 @@ class ModuleDependencyCanvas(QGraphicsView):
     viewport_changed = Signal()
     # 筛选可用性或临时预览变更后发送，供活动标签的状态栏同步图标。
     dependency_view_changed = Signal()
+    # 有效的左键点击在选中状态更新后发送。空白处发送 None，重复点击同一模块也发送，
+    # 以便侧栏关闭后可通过同一张卡片重新打开。
+    module_clicked = Signal(object)
 
     def __init__(self, document: SoftwareStructure):
         """先布置完整依赖图，再应用文件筛选。首次显示时按实际视口计算缩放。"""
@@ -76,7 +79,7 @@ class ModuleDependencyCanvas(QGraphicsView):
         if self._has_modules:
             self._draw_graph(scene, document)
             self.setAccessibleDescription(
-                "滚轮缩放，右键拖动平移。左键选中模块并高亮可见的直接依赖线，点击空白处清除选中。"
+                "滚轮缩放，右键拖动平移。左键选中模块、查看接口并高亮直接依赖线，点击空白处清除选中。"
                 "虚线表示循环依赖。可在右侧「连线筛选」面板隐藏与模块相连的依赖线。"
             )
         else:
@@ -315,7 +318,8 @@ class ModuleDependencyCanvas(QGraphicsView):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """结束对应按键的手势，在系统阈值内提交命中同一目标的左键点击。
 
-        点击卡片选中模块，点击空白处清除选中。右键松开时结束平移并恢复光标。
+        点击卡片选中模块，点击空白处清除选中，两种情况都通知接口侧栏。右键松开时
+        结束平移并恢复光标。跨过拖动阈值或松开时目标不同的手势不发送点击通知。
         """
         if self._gesture_button == Qt.MouseButton.NoButton:
             super().mouseReleaseEvent(event)
@@ -334,6 +338,7 @@ class ModuleDependencyCanvas(QGraphicsView):
             self._selected_module = module_id
             if self._theme_color is not None:
                 self.apply_theme(self._theme_color)
+        self.module_clicked.emit(module_id)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
         """处理系统伴随右键手势产生的鼠标菜单事件，键盘菜单事件沿用 Qt 路由。"""
@@ -341,6 +346,11 @@ class ModuleDependencyCanvas(QGraphicsView):
             event.accept()
             return
         super().contextMenuEvent(event)
+
+    @property
+    def selected_module_id(self) -> str | None:
+        """返回当前标签选中的模块 ID。切换活动标签时侧栏用它读取已有选择。"""
+        return self._selected_module
 
     @property
     def zoom_factor(self) -> float:

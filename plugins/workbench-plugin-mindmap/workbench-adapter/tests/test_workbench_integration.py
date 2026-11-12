@@ -162,12 +162,13 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     qtbot.waitUntil(view_menu.isVisible)
     assert not menu.isVisible()
     panels = next(action.menu() for action in view_menu.actions() if action.text() == "面板")
-    assert "公共依赖" not in {action.text() for action in panels.actions()}
+    # 软件结构面板已经注册，切到软件结构文档时才出现在面板菜单中。
+    assert {"公共依赖", "连线筛选", "模块接口"}.isdisjoint(action.text() for action in panels.actions())
     qtbot.keyClick(view_menu, Qt.Key.Key_Escape)
     assert not view_menu.isVisible()
     assert set(window.manager.specs) == {
         "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "operation_log",
-        "software-structure.public-dependencies",
+        "software-structure.public-dependencies", "software-structure.module-apis",
     }
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
@@ -494,7 +495,7 @@ def test_legacy_settings_tool_is_ignored_in_saved_session(window, qtbot):
         assert restored.manager.states["properties"].visible
         assert restored.host.right.isHidden()
         restored.manager.save_session()
-        assert set(restored.manager.layout_store.load()) == {"schema_version", "session"}
+        assert set(restored.manager.layout_store.load()) == {"schema_version", "session", "window_placement"}
     finally:
         restored.close()
 

@@ -15,8 +15,10 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem,
     QGraphicsPolygonItem,
     QGraphicsSimpleTextItem,
+    QLabel,
     QListWidget,
     QMessageBox,
+    QScrollArea,
     QStyle,
     QStyleOptionViewItem,
     QToolButton,
@@ -27,6 +29,7 @@ from workbench_runtime.ui.docking import DockPosition, DockTarget
 
 _DOWNLOAD_ACTION_ID = "software-structure.download-template"
 _DEPENDENCY_FILTER_PANEL_ID = "software-structure.public-dependencies"
+_MODULE_API_PANEL_ID = "software-structure.module-apis"
 
 
 @pytest.fixture
@@ -91,6 +94,16 @@ def _dependency_filter_header_button(window):
     """取得宿主为连线筛选侧栏创建的标题栏按钮。"""
     button, = window.manager.panel(_DEPENDENCY_FILTER_PANEL_ID).action_buttons
     return button
+
+
+def _module_api_panel(window):
+    """取得宿主停靠的模块接口面板。"""
+    return window.manager.panel(_MODULE_API_PANEL_ID).content
+
+
+def _visible_api_text(panel, object_name):
+    """按界面顺序读取可见的接口标题、说明或提示。"""
+    return [label.text() for label in panel.findChildren(QLabel, object_name) if label.isVisible()]
 
 
 def _status_filter_button(window):
@@ -207,7 +220,7 @@ def test_open_dialog_recent_files_and_repeat_open(window, graph_path, monkeypatc
 
 
 def test_download_template_from_file_menu_and_open(window, tmp_path, monkeypatch, qtbot):
-    """从无文档的工作台下载模板，再通过正常打开入口查看示例依赖。"""
+    """从无文档的工作台下载模板，再通过正常打开入口查看依赖、接口和类成员。"""
     target = tmp_path / "生成用模板.software-structure"
 
     def downloads(location):
@@ -238,6 +251,7 @@ def test_download_template_from_file_menu_and_open(window, tmp_path, monkeypatch
     instructions = "\n".join(json.loads(target.read_text(encoding="utf-8"))["template_instructions"])
     assert "source 是依赖方，target 是被依赖方" in instructions
     assert "只输出原始 JSON 对象" in instructions
+    assert "给第一次了解项目的人看" in instructions and "module_apis" in instructions
     assert str(target) in window.status.currentMessage()
     assert window.documents.active is None and not window.state.recent_files
 
@@ -252,6 +266,34 @@ def test_download_template_from_file_menu_and_open(window, tmp_path, monkeypatch
     assert sorted(item.toolTip() for item in items if isinstance(item, QGraphicsPolygonItem)) == [
         "<qt>模块依赖：app → service</qt>", "<qt>模块依赖：service → storage</qt>",
     ]
+    assert not window.manager.states[_MODULE_API_PANEL_ID].visible
+    # 离屏环境在关闭菜单后不会自动重新激活主窗口，显式建立点击前的画布焦点。
+    qtbot.waitUntil(lambda: not menu.isVisible())
+    window.activateWindow()
+    qtbot.waitUntil(lambda: bool(view.capture_state()) and view.widget.hasFocus())
+    _click_module_title(qtbot, view.widget, "数据存储")
+    panel = _module_api_panel(window)
+    assert panel.isVisible() and view.widget.hasFocus()
+    assert _visible_api_text(panel, "module_api_module_name") == ["数据存储"]
+    assert _visible_api_text(panel, "module_api_module_description") == ["保存项目内容，方便下次打开时继续使用。"]
+    assert _visible_api_text(panel, "module_api_name") == ["检查项目文件", "项目版本管理"]
+    assert _visible_api_text(panel, "module_api_description") == [
+        "判断项目文件能否打开，并说明失败原因。", "按时间整理项目的历史版本，方便选择要恢复的内容。",
+    ]
+    toggle = panel.findChild(QToolButton, "module_api_members_toggle")
+    assert not toggle.isChecked() and toggle.arrowType() == Qt.ArrowType.RightArrow
+    qtbot.mouseClick(toggle, Qt.MouseButton.LeftButton)
+    assert toggle.isChecked() and toggle.arrowType() == Qt.ArrowType.DownArrow
+    expanded = ["检查项目文件", "项目版本管理", "保存当前版本", "恢复历史版本"]
+    assert _visible_api_text(panel, "module_api_name") == expanded
+    assert _visible_api_text(panel, "module_api_description")[-2:] == [
+        "把项目当前内容保存为一个新的历史版本。", "用选定的历史版本恢复项目内容。",
+    ]
+    assert toggle.hasFocus()
+    qtbot.keyClick(toggle, Qt.Key.Key_Space)
+    assert not toggle.isChecked() and _visible_api_text(panel, "module_api_name") == expanded[:2]
+    qtbot.keyClick(toggle, Qt.Key.Key_Space)
+    assert toggle.isChecked() and _visible_api_text(panel, "module_api_name") == expanded
 
 
 def test_download_template_from_split_toolbar(window, graph_path, tmp_path, monkeypatch, qtbot):
@@ -407,16 +449,23 @@ def test_file_icon_tracks_theme_and_remains_in_recent_files_after_close(window, 
     assert ("software-structure", 16) in painted_icons
 
 
-def test_invalid_file_reports_field_without_creating_a_tab(window, graph_path, tmp_path):
+@pytest.mark.parametrize(("fields", "message"), [
+    ({"module_dependencies": [{"source": "app", "target": "missing"}]},
+     "module_dependencies[0].target 引用了未声明的模块 ID"),
+    ({"module_apis": [{"module_id": "app", "apis": [{
+        "name": "项目版本管理", "description": "整理项目的历史版本。", "kind": "class", "members": [{"name": "保存"}],
+    }]}]}, "module_apis[0].apis[0].members[0].description 必须是非空字符串"),
+])
+def test_invalid_file_reports_field_without_creating_a_tab(window, graph_path, tmp_path, fields, message):
     assert window.open_path(graph_path)
     existing = window.documents.active
     invalid = tmp_path / "坏引用.software-structure"
-    invalid.write_text(
-        '{"schema_version":1,"modules":[{"id":"app","name":"应用"}],'
-        '"module_dependencies":[{"source":"app","target":"missing"}]}', "utf-8",
-    )
+    invalid.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": "app", "name": "应用"}],
+        **fields,
+    }, ensure_ascii=False), "utf-8")
     assert window.call(lambda: window.open_path(invalid)) is None
-    message = "module_dependencies[0].target 引用了未声明的模块 ID"
     assert message in window.status.currentMessage()
     assert message in window.operation_log.plain_text()
     assert list(window.documents.views.values()) == [existing]
@@ -492,7 +541,10 @@ def test_module_selection_highlights_direct_dependencies_in_each_theme(window, g
     scene, viewport_state = canvas.scene(), view.capture_state()
     orders = _click_module_title(qtbot, canvas, "订单服务")
     assert _highlighted_dependencies(canvas) == {"app → orders", "orders → billing", "orders → storage"}
-    assert canvas.scene() is scene and view.capture_state() == viewport_state
+    opened_state = view.capture_state()
+    assert canvas.scene() is scene and opened_state["zoom"] == viewport_state["zoom"]
+    # 首次打开侧栏会缩小画布。场景中心只允许产生 Qt 视口像素取整的偏移。
+    assert opened_state["center"] == pytest.approx(viewport_state["center"], abs=3 / canvas.zoom_factor)
 
     billing = _module_label(canvas, "支付适配").parentItem()
     bounds = billing.sceneBoundingRect()
@@ -536,6 +588,124 @@ def test_module_selection_highlights_direct_dependencies_in_each_theme(window, g
     qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=blank)
     assert isolated.pen().color() == color("editor-border")
     assert _highlighted_dependencies(canvas) == set()
+
+
+def test_module_api_panel_shares_right_side_and_wraps_long_descriptions(window, graph_path, qtbot):
+    """两种侧栏可同时使用，接口在窄面板中换行并跟随选择和主题。"""
+    description = "核对订单、商品和用户填写的信息，确认可以提交后生成订单号，并说明需要补充哪些信息。"
+    graph = json.loads(graph_path.read_bytes())
+    next(module for module in graph["modules"] if module["id"] == "diagnostics").pop("description")
+    graph["module_apis"] = [
+        {"module_id": "orders", "apis": [
+            {"name": "核对订单", "description": description},
+            {"name": "订单记录", "description": "整理订单和付款信息。", "kind": "class", "members": [
+                {"name": "查看订单", "description": "显示订单和当前处理状态。"},
+            ]},
+            *({"name": f"订单操作 {index}", "description": description} for index in range(4)),
+        ]},
+        {"module_id": "catalog", "apis": []},
+    ]
+    original = json.dumps(graph, ensure_ascii=False, indent=2).encode("utf-8")
+    graph_path.write_bytes(original)
+    assert window.open_path(graph_path)
+    canvas = window.documents.active.widget
+    qtbot.waitUntil(lambda: bool(canvas.capture_viewport()))
+    assert window.manager.activate(_DEPENDENCY_FILTER_PANEL_ID, focus=False)
+    filter_panel, modules = _dependency_filter_list(window)
+    menu = window.main_menu()
+    view_menu = next(action.menu() for action in menu.actions() if action.text() == "视图")
+    panels = next(action.menu() for action in view_menu.actions() if action.text() == "面板")
+    api_action = next(action for action in panels.actions() if action.text() == "模块接口")
+    assert not api_action.isChecked()
+    api_action.trigger()
+    panel = _module_api_panel(window)
+    assert panel.isVisible() and filter_panel.isVisible()
+    assert _visible_api_text(panel, "module_api_hint") == ["点击画布中的模块查看接口"]
+
+    _click_module_title(qtbot, canvas, "订单服务")
+    toggle = panel.findChild(QToolButton, "module_api_members_toggle")
+    qtbot.mouseClick(toggle, Qt.MouseButton.LeftButton)
+    assert toggle.isChecked()
+    _click_dependency_filter_checkbox(qtbot, modules, _dependency_filter_item(modules, "billing"))
+    assert graph_path.read_bytes() == (
+        original.removesuffix(b"\n}") + b',\n  "hidden_edge_module_ids": ["billing"]\n}'
+    )
+
+    window.host._set_region_extent(DockPosition.RIGHT_BOTTOM, 170)
+    scroll = panel.findChild(QScrollArea, "module_api_scroll")
+    first_description = panel.findChild(QLabel, "module_api_description")
+    qtbot.waitUntil(lambda: first_description.height() > 2 * first_description.fontMetrics().lineSpacing())
+    assert panel.width() < 240 and first_description.text() == description
+    assert first_description.textFormat() == Qt.TextFormat.PlainText
+    assert scroll.horizontalScrollBar().maximum() == 0 and scroll.verticalScrollBar().maximum() > 0
+    for theme in ("light", "dark"):
+        window.manager.set_theme(theme)
+        background = panel.grab(QRect(1, 1, 1, 1)).toImage().pixelColor(0, 0)
+        assert background == window.manager.theme.color("tool-window-bg")
+        assert toggle.isChecked()
+
+    button = window.host.right_rail._buttons[_MODULE_API_PANEL_ID]
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert not panel.isVisible() and filter_panel.isVisible()
+    _click_module_title(qtbot, canvas, "订单服务")
+    assert panel.isVisible() and filter_panel.isVisible() and toggle.isChecked()
+    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+    _click_module_title(qtbot, canvas, "商品服务")
+    assert _visible_api_text(panel, "module_api_hint") == ["暂无符合收录范围的接口"]
+    assert scroll.verticalScrollBar().value() == 0
+    _click_module_title(qtbot, canvas, "订单服务")
+    assert not panel.findChild(QToolButton, "module_api_members_toggle").isChecked()
+    _click_module_title(qtbot, canvas, "巡检工具")
+    assert _visible_api_text(panel, "module_api_hint") == ["暂无职责说明", "文件未提供接口说明"]
+    blank = QPoint(8, 8)
+    assert canvas.itemAt(blank) is None
+    qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=blank)
+    assert panel.isVisible() and _visible_api_text(panel, "module_api_hint") == ["点击画布中的模块查看接口"]
+
+
+def test_module_api_panel_follows_split_selection_and_legacy_files(window, graph_path, tmp_path, qtbot):
+    """分屏各自保存选择，切换到旧文档或其他编辑器时清除旧接口内容。"""
+    path = tmp_path / "含接口的结构.software-structure"
+    graph = json.loads(graph_path.read_bytes())
+    graph["module_apis"] = [{"module_id": "orders", "apis": [
+        {"name": "提交订单", "description": "核对订单信息后发起支付。"},
+    ]}]
+    path.write_text(json.dumps(graph, ensure_ascii=False), "utf-8")
+    assert window.open_path(path)
+    first = window.documents.active
+    qtbot.waitUntil(lambda: bool(first.capture_state()))
+    _click_module_title(qtbot, first.widget, "订单服务")
+    panel = _module_api_panel(window)
+    assert _visible_api_text(panel, "module_api_name") == ["提交订单"]
+
+    assert window.manager.duplicate_document(first.id)
+    second = window.documents.active
+    assert first.document is second.document and second.widget.selected_module_id is None
+    assert _visible_api_text(panel, "module_api_hint") == ["点击画布中的模块查看接口"]
+    window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
+    window.documents.activate_view(second.id)
+    qtbot.waitUntil(lambda: first.widget.isVisible() and second.widget.isVisible())
+    first.widget.fit_to_view()
+    second.widget.fit_to_view()
+    _click_module_title(qtbot, second.widget, "商品服务")
+    assert _visible_api_text(panel, "module_api_module_name") == ["商品服务"]
+    _click_module_title(qtbot, first.widget, "订单服务")
+    assert window.documents.active is first and first.widget.hasFocus()
+    assert _visible_api_text(panel, "module_api_name") == ["提交订单"]
+    window.documents.activate_view(second.id)
+    assert _visible_api_text(panel, "module_api_module_name") == ["商品服务"]
+
+    assert window.open_path(graph_path)
+    legacy = window.documents.active
+    qtbot.waitUntil(lambda: bool(legacy.capture_state()))
+    _click_module_title(qtbot, legacy.widget, "订单服务")
+    assert _visible_api_text(panel, "module_api_module_description") == ["处理订单并发起支付。"]
+    assert _visible_api_text(panel, "module_api_hint") == ["文件未提供接口说明"]
+    assert not _visible_api_text(panel, "module_api_name")
+    assert window.new_document(tmp_path / "导图.mindmap")
+    assert not panel.isVisible() and not window.manager.is_tool_available(_MODULE_API_PANEL_ID)
+    window.documents.activate_view(first.id)
+    assert panel.isVisible() and _visible_api_text(panel, "module_api_name") == ["提交订单"]
 
 
 def test_dashed_dependencies_join_the_arrowhead_when_highlighted(window, tmp_path, qtbot):
@@ -1145,6 +1315,7 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
         qtbot.waitUntil(lambda: view.widget.transform().m11() == pytest.approx(state["zoom"]))
         assert view.capture_state()["center"] == pytest.approx(state["center"], abs=2)
         assert restored_zoom.text() == f"{state['zoom']:.0%}"
+        assert view.widget.selected_module_id is None
         assert _highlighted_dependencies(view.widget) == set()
         assert restored_filter.isChecked() and _dependency_arrow_count(view) == 8
     # 旧会话的全量或展开状态由当前文件筛选替代，边界内的视口仍可恢复。
