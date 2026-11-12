@@ -2,7 +2,7 @@
 name = "workbench-runtime"
 version = "0.1.0"
 readme = "README.md"
-license = "MIT"
+license = "MIT AND ISC"
 license-files = ["LICENSE"]
 description = "桌面工作台宿主、插件生命周期、文档协调与会话恢复"
 requires-python = ">=3.12,<3.14"

@@ -325,7 +325,8 @@ def test_recent_button_elides_long_names_and_fits_minimum_window(history_window,
     assert button.height() == 32 and button.width() <= 280
     assert button.text() != session.files.path.stem and "…" in button.text()
     assert button.toolTip() == str(session.files.path)
-    assert not button.icon().isNull()
+    expected_icon = window.manager.theme.icon("mindmap", 16).pixmap(16, 16).toImage()
+    assert not expected_icon.isNull() and button.icon().pixmap(16, 16).toImage() == expected_icon
     assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
     button.menu().aboutToShow.emit()
     assert button.menu().palette().color(button.menu().foregroundRole()) == window.manager.theme.color("text-default")
@@ -344,6 +345,8 @@ def test_recent_menu_disambiguates_names_and_offers_open_and_clear(history_windo
     assert second.text().splitlines() == ["同名&&导图.mindmap", str(tmp_path / "工作")]
     assert first.toolTip() != second.toolTip() and first.data() != second.data()
     assert first.isChecked() and not second.isChecked()
+    expected_icon = window.manager.theme.icon("mindmap", 16).pixmap(16, 16).toImage()
+    assert window.file_icon(Path(second.data())).pixmap(16, 16).toImage() == expected_icon
     called = []
     monkeypatch.setattr(window, "open_dialog", lambda: called.append(True))
     next(action for action in menu.actions() if action.text() == "打开文件…").trigger()

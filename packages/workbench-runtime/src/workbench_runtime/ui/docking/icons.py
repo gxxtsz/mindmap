@@ -1,4 +1,4 @@
-"""本项目原创矢量图标注册表；业务可注入自己的 QIcon 或 SVG 文件。"""
+"""工作台矢量图标注册表；业务可注入自己的 QIcon 或 SVG 文件。"""
 
 import hashlib
 import tempfile
@@ -37,7 +37,7 @@ def _svg_cache_file(data: bytes) -> Path:
 
 
 class IconRegistry:
-    """默认提供随包原创 SVG；register 接受可信业务代码给出的路径或 QIcon。
+    """默认提供随包 SVG；register 接受可信业务代码给出的路径或 QIcon。
 
     名称查找不会拼接任意相对路径，避免布局或标签文本意外成为文件读取入口。
     业务资源与内置图标同名时优先使用业务版本，不会修改磁盘上的原始文件。

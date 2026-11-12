@@ -77,13 +77,15 @@ class RecentFilesButton(QToolButton):
         self._full_text = text
         self.setToolTip(tooltip)
         self.setAccessibleName(f"{self._full_text}，展开最近文件")
+        self.setIcon(self.window.file_icon(path))
         self._update_text()
         self.updateGeometry()
 
     def refresh_theme(self):
         """菜单独立同步主题，使弹出窗口在明暗切换和紧凑模式下继续使用正确色板。"""
         theme = self.window.manager.theme
-        self.setIcon(theme.icon("document", 16))
+        active = self.window.documents.active
+        self.setIcon(self.window.file_icon(active.document.path if active else None))
         # 默认与标题栏融为一体，交互时使用窗控的中性底色。透明边框为键盘焦点留出
         # 一像素位置，焦点切换时图标、文件名和箭头都保持原位。
         self.setStyleSheet(f"""
@@ -172,8 +174,13 @@ class _RecentFilesMenu(QMenu):
     """使用 Qt 的菜单交互，按文档按钮的右边缘对齐弹层。"""
 
     @property
+    def workbench(self):
+        """通过所属按钮取得宿主，菜单绘制始终读取窗口当前的主题及文件提供者。"""
+        return self.parentWidget().window
+
+    @property
     def theme(self):
-        return self.parentWidget().window.manager.theme
+        return self.workbench.manager.theme
 
     def showEvent(self, event):
         """Qt 决定垂直方向和可见高度，水平方向按按钮所在屏幕的工作区约束。"""
@@ -195,6 +202,7 @@ class _RecentFileRow(QWidget):
         super().__init__()
         self._menu = menu
         self._action = action
+        self._path = path
         self._file_name = path.name
         self._directory = str(path.parent)
         self._width_limit = width_limit
@@ -235,7 +243,8 @@ class _RecentFileRow(QWidget):
             painter.setPen(theme.color("control-brand-border") if checked and active else Qt.PenStyle.NoPen)
             painter.setBrush(theme.color("toolbar-selected-bg-active" if checked else "toolbar-bg-hovered"))
             painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 5, 5)
-        theme.icon("document", 16).paint(painter, QRect(10, (rect.height() - 16) // 2, 16, 16))
+        # 菜单行绘制时再解析图标，已关闭的文件仍按类型显示，并使用当前主题颜色。
+        self._menu.workbench.file_icon(self._path).paint(painter, QRect(10, (rect.height() - 16) // 2, 16, 16))
 
         # 分别省略文件名和目录，避免长文件名把目录或右侧勾选挤出菜单。
         name_metrics = self.fontMetrics()

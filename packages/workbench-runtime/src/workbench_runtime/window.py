@@ -4,7 +4,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -266,6 +266,19 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
     def provider_for(self, path):
         extension = Path(path).suffix.lower()
         return next((key for key, (_, provider) in self.providers.items() if extension in provider.extensions), None)
+
+    def file_icon(self, path: Path | None, size: int = 16) -> QIcon:
+        """按文件扩展名从当前主题获取图标，文件未打开时也可在最近文件中显示。
+
+        空路径、未启用的文件提供者和缺失的专用图标均使用通用文档图标。
+        """
+        theme = self.manager.theme
+        provider_id = self.provider_for(path) if path is not None else None
+        if provider_id is not None:
+            icon = theme.icon(self.providers[provider_id][1].file_icon, size)
+            if not icon.isNull():
+                return icon
+        return theme.icon("document", size)
 
     def open_path(self, path):
         identifier = self.provider_for(path)

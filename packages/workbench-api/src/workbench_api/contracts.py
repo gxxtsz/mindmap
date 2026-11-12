@@ -147,6 +147,7 @@ class EditorProvider:
     新建快捷键。欢迎页按提供了新建回调的类型显示按钮。
     open_document(path, view_id, state) 用于普通打开和恢复；view_id 为 None 表示普通打开。
     创建失败或取消时不得注册半初始化视图。扩展名包含小数点并使用小写。
+    icon 用于新建菜单。file_icon 用于按文件类型显示的图标，供标题栏、最近文件及未单独指定图标的标签复用。
     """
 
     id: str
@@ -155,6 +156,7 @@ class EditorProvider:
     new_document: Callable[[Path | None], OperationResult] | None
     open_document: Callable[[Path, str | None, dict | None], OperationResult]
     icon: str = "document"
+    file_icon: str = "document"
 
 
 @dataclass(frozen=True)

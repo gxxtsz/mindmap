@@ -67,14 +67,15 @@ class DocumentService(QObject):
             raise ValueError("文件已绑定其他文档，请为已有共享文档创建视图")
         if any(item.document.id == view.document.id and item.document is not view.document for item in self.views.values()):
             raise ValueError("不同文档不能复用同一文档标识")
-        owner, _provider = self.window.providers[provider_id]
+        owner, provider = self.window.providers[provider_id]
         area = self.window.host.editor
         anchor = area.find_token(after) if after else None
         target = anchor or area.find_token(self.active_id)
         self.views[view.id], self.providers[view.id], self.owners[view.id] = view, provider_id, owner
         try:
+            # 视图可指定自己的标签图标，其余标签沿用提供者声明的文件类型图标。
             self.window.manager.register_document(DocumentSpec(
-                view.id, view.title, lambda: view.widget, icon=getattr(view, "icon", "document"),
+                view.id, view.title, lambda: view.widget, icon=getattr(view, "icon", provider.file_icon),
                 can_close=lambda: self.prepare_close([view.id]), on_closed=lambda: self._closed(view.id),
                 dispose_on_close=True, on_duplicate=lambda: bool(view.duplicate()),
                 on_open_directory=lambda: self.window.open_file_directory(view.id),

@@ -83,6 +83,43 @@ def test_open_dialog_recent_files_and_repeat_open(window, graph_path, monkeypatc
     assert window.documents.active.document.path == graph_path
 
 
+def test_file_icon_tracks_theme_and_remains_in_recent_files_after_close(window, graph_path, monkeypatch):
+    """真实标签与标题栏使用同一组件图形，关闭后菜单仍按历史文件的扩展名绘制。"""
+    assert window.open_path(graph_path)
+    view = window.documents.active
+    group, index = window.host.editor.find_token(view.id)
+    button = window.recent_files_button
+
+    def assert_file_icons():
+        theme = window.manager.theme
+        icon = theme.icon("software-structure")
+        assert not icon.isNull()
+        assert group.tabIcon(index).pixmap(14, 14).toImage() == icon.pixmap(14, 14).toImage()
+        assert button.icon().pixmap(16, 16).toImage() == icon.pixmap(16, 16).toImage()
+        assert button.icon().pixmap(16, 16).toImage() != theme.icon("document").pixmap(16, 16).toImage()
+
+    assert_file_icons()
+    window.manager.set_theme("dark")
+    assert_file_icons()
+    assert window.manager.close_document(view.id)
+    theme = window.manager.theme
+    assert button.icon().pixmap(16, 16).toImage() == theme.icon("document").pixmap(16, 16).toImage()
+
+    menu = button.menu()
+    menu.aboutToShow.emit()
+    action = next(action for action in menu.actions() if action.data() == str(graph_path))
+    resolve_icon = theme.icon
+    painted_icons = []
+
+    def record_icon(name, size=20):
+        painted_icons.append((name, size))
+        return resolve_icon(name, size)
+
+    monkeypatch.setattr(theme, "icon", record_icon)
+    assert not action.defaultWidget().grab().isNull()
+    assert ("software-structure", 16) in painted_icons
+
+
 def test_invalid_file_reports_field_without_creating_a_tab(window, graph_path, tmp_path):
     assert window.open_path(graph_path)
     existing = window.documents.active

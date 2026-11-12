@@ -27,13 +27,19 @@ def test_desktop_resource_manifest_and_project_license_are_complete():
     actual = {path.relative_to(resources).as_posix() for path in resources.rglob("*")
               if path.is_file() and path.name != "manifest.json"}
     assert len(expected) == len(manifest["files"])
-    assert expected == actual and {"dark.json", "light.json", "icons/mindmap.svg"} <= expected
+    assert expected == actual and {"dark.json", "light.json", "icons/mindmap.svg", "icons/software-structure.svg"} <= expected
     for entry in manifest["files"]:
         path = resources / entry["path"]
         # 清单描述实际交付的原始字节；校验时不能转换换行符来掩盖检出或打包问题。
         assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"], entry["path"]
         if path.suffix == ".json":
             assert json.loads(path.read_text("utf-8"))["author"] == "mindmap contributors"
+        elif entry["path"] == "icons/software-structure.svg":
+            # Lucide 组件图标单独保留许可，主题着色及打包均须保留源文件内的版权声明。
+            assert entry["license"] == "ISC" and entry["origin"] == "https://lucide.dev/icons/blocks"
+            source = path.read_text("utf-8")
+            assert "SPDX-License-Identifier: ISC; Copyright (c) 2026 Lucide Icons and Contributors" in source
+            assert "copyright notice and this permission notice appear in all copies" in source
         else:
             assert "SPDX-License-Identifier: MIT; Copyright (c) 2026 mindmap contributors" in path.read_text("utf-8")
     license_text = (ROOT / PACKAGE / "LICENSE").read_text("utf-8")

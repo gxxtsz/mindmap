@@ -76,8 +76,10 @@ class MindMapController(QObject):
             enabled=lambda: self.active_session is not None))
         self.read_only_action = QAction("只读模式", self, checkable=True)
         self.read_only_action.toggled.connect(self._set_read_only)
+        # 文件入口按扩展名查询此图标，标题栏和最近文件与导图标签使用同一图形。
         context.editors.register(EditorProvider("mindmap.editor", "导图", (".mindmap",),
-                                               self.new_operation, self.open_operation, icon="mindmap"))
+                                               self.new_operation, self.open_operation, icon="mindmap",
+                                               file_icon="mindmap"))
         context.ui.subscribe_theme(self.refresh_theme)
         context.ui.subscribe_layout(self._layout_changed)
         context.ui.subscribe_active(self._finish_restoring)

@@ -147,4 +147,5 @@ def register_document_provider(context: PluginContext) -> Disposable:
         extensions=(".software-structure",),
         new_document=None,
         open_document=partial(_open_document, context),
+        file_icon="software-structure",
     ))

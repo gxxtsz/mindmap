@@ -1,6 +1,6 @@
 {
   "license": "MIT",
-  "origin": "本工程原创几何与调色板，无外部提取素材",
+  "origin": "主题和未单独标注来源的图标由本工程绘制",
   "files": [
     {
       "path": "dark.json",
@@ -125,6 +125,12 @@
     {
       "path": "icons/settings.svg",
       "sha256": "c4d5e39eb21377d196045203a88c02faf8183cf7e71c9c77e92e007ef9c39a62"
+    },
+    {
+      "path": "icons/software-structure.svg",
+      "sha256": "62e136f92f42805ea147120eab12d6e9eb0dafbd47f866d79d5686578bcf6a76",
+      "license": "ISC",
+      "origin": "https://lucide.dev/icons/blocks"
     },
     {
       "path": "icons/workbench.svg",
