@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from workbench_api import SavePolicy
+from workbench_runtime.ui.docking import DockPosition, DockTarget
 
 _DOWNLOAD_ACTION_ID = "software-structure.download-template"
 _DEPENDENCY_FILTER_PANEL_ID = "software-structure.public-dependencies"
@@ -822,6 +823,48 @@ def test_dependency_filter_sidebar_edits_active_file_and_restores_marks(window, 
     window.documents.activate_view(reopened.id)
     assert panel.isVisible() and _dependency_filter_item(modules, "ledger").checkState() == Qt.CheckState.Checked
     assert graph_path.read_bytes() != original
+
+
+@pytest.mark.parametrize(("mindmap_panel_id", "position"), [
+    ("outline", DockPosition.LEFT_TOP),
+    ("properties", DockPosition.RIGHT_TOP),
+])
+def test_switching_document_types_preserves_panels_in_shared_slot(
+    window, graph_path, tmp_path, qtbot, mindmap_panel_id, position,
+):
+    """两种标签共用同一停靠格时，切换后恢复各自面板原有的展开状态。"""
+    manager = window.manager
+    assert window.new_document(tmp_path / "侧栏切换.mindmap")
+    mindmap = window.documents.active
+    assert manager.activate(mindmap_panel_id, focus=False)
+    mindmap_panel = manager.panel(mindmap_panel_id)
+    assert mindmap_panel.isVisible()
+
+    assert window.open_path(graph_path)
+    graph = window.documents.active
+    manager.move(_DEPENDENCY_FILTER_PANEL_ID, DockTarget(position))
+    filter_panel = manager.panel(_DEPENDENCY_FILTER_PANEL_ID)
+    assert filter_panel.isVisible() and not mindmap_panel.isVisible()
+
+    def click_tab(view):
+        group, index = window.host.editor.find_token(view.id)
+        tab_bar = group.tabBar()
+        qtbot.mouseClick(tab_bar, Qt.MouseButton.LeftButton, pos=tab_bar.tabRect(index).center())
+        assert window.documents.active is view
+
+    original_tools = manager.capture_layout()["tools"]
+    click_tab(mindmap)
+    assert mindmap_panel.isVisible() and not filter_panel.isVisible()
+    click_tab(graph)
+    assert filter_panel.isVisible() and not mindmap_panel.isVisible()
+    assert manager.capture_layout()["tools"] == original_tools
+
+    click_tab(mindmap)
+    manager.hide(mindmap_panel_id)
+    click_tab(graph)
+    assert filter_panel.isVisible()
+    click_tab(mindmap)
+    assert not mindmap_panel.isVisible() and not filter_panel.isVisible()
 
 
 @pytest.mark.parametrize("external_edit", [False, True], ids=["short_write", "external_edit"])

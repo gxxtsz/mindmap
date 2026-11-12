@@ -116,8 +116,17 @@ class DocumentService(QObject):
         self._update_file_qualifiers()
         if self.active_id == view_id:
             self.active_id = ""
-            self.active_changed.emit(None)
+            self.notify_active_changed()
         self.changed.emit()
+
+    def notify_active_changed(self) -> None:
+        """在切换、关闭及会话恢复后同步通知当前活动视图，可传递空视图。
+
+        等所有订阅方更新面板状态后再刷新停靠布局，避免旧视图的面板暂时占用
+        新视图的停靠位置。返回时本轮订阅触发的布局刷新已经完成。
+        """
+        with self.window.manager.defer_layout_refresh():
+            self.active_changed.emit(self.active)
 
     def activate(self, view_id):
         if self._switching or view_id == self.active_id:
@@ -127,7 +136,7 @@ class DocumentService(QObject):
             if self.active:
                 self.active.prepare_input()
             self.active_id = view_id
-            self.active_changed.emit(self.active)
+            self.notify_active_changed()
             self.changed.emit()
         finally:
             self._switching = False

@@ -92,6 +92,8 @@ class DockManager(QObject):
         self.parking.hide()
         self.active_id = ""
         self.refreshing = False
+        self._layout_refresh_depth = 0
+        self._layout_refresh_pending = False
         self.closing = False
         self._dragging = False
         self.session_token = uuid4().hex
@@ -462,9 +464,29 @@ class DockManager(QObject):
         for host in self.hosts.values():
             host.clear_panels()
 
+    @contextmanager
+    def defer_layout_refresh(self):
+        """在 Qt 主线程合并同一轮状态更新触发的布局刷新。
+
+        作用域内状态照常更新，控件挂载、停靠冲突处理和布局通知推迟到退出时。
+        允许嵌套，有刷新请求时由最外层在退出前统一刷新一次。适用于文档切换时
+        多个插件各自暂停或恢复面板，避免过渡状态中的同格冲突改写展开偏好。
+        """
+        self._layout_refresh_depth += 1
+        try:
+            yield
+        finally:
+            self._layout_refresh_depth -= 1
+            if self._layout_refresh_depth == 0 and self._layout_refresh_pending:
+                self._layout_refresh_pending = False
+                self.refresh()
+
     def refresh(self):
         """批量提交状态到 Qt 容器；迁移期间屏蔽焦点回调，完成后只发一次布局信号。"""
         if self.refreshing or self.closing:
+            return
+        if self._layout_refresh_depth:
+            self._layout_refresh_pending = True
             return
         self.refreshing = True
         try:

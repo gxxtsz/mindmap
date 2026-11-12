@@ -144,7 +144,7 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         self.state.restoring = False
         self._ready = True
         self.refresh_theme()
-        self.documents.active_changed.emit(self.documents.active)
+        self.documents.notify_active_changed()
         self.refresh_document()
         for record in self.plugins.records:
             if record.error:
