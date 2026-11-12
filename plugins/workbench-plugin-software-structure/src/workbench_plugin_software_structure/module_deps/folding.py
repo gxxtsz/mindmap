@@ -19,10 +19,11 @@ def find_public_dependencies(
 ) -> PublicDependencies:
     """以弱连通子图为范围计算覆盖率，保留循环警示和普通模块的关联。
 
-    每个子图超过十个模块才参与折叠。直接依赖方按模块计数，自依赖不计入
-    分子或分母。文件已经校验同一对模块的同向依赖只出现一次。
+    模块数和直接依赖比例分别与文档阈值做严格比较。直接依赖方按模块计数，
+    自依赖不计入分子或分母。文件已经校验同一对模块的同向依赖只出现一次。
     """
-    if len(document.modules) <= 10:
+    thresholds = document.public_dependency_thresholds
+    if len(document.modules) <= thresholds.component_size or thresholds.direct_dependent_percent == 100:
         return PublicDependencies({}, frozenset())
 
     neighbors: dict[str, set[str]] = {module.id: set() for module in document.modules}
@@ -48,8 +49,10 @@ def find_public_dependencies(
             unvisited = neighbors[node] - visited
             visited.update(unvisited)
             pending.extend(unvisited)
-        if len(component) > 10:
-            public.update((node, incoming[node]) for node in component if 2 * incoming[node] > len(component) - 1)
+        if len(component) > thresholds.component_size:
+            # 交叉相乘保证恰好等于百分比阈值的节点留在普通分组，包括比例为零的边界。
+            required = thresholds.direct_dependent_percent * (len(component) - 1)
+            public.update((node, incoming[node]) for node in component if 100 * incoming[node] > required)
 
     folded = {edge for edge in document.module_dependencies if edge.target in public and edge not in cyclic}
     connected = {

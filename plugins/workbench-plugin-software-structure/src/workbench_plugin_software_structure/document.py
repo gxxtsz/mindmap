@@ -1,8 +1,14 @@
-"""读取软件结构文档并校验共享模块目录和模块依赖。"""
+"""校验软件结构文档，在原 JSON 文本中读写公共依赖阈值。"""
 
 import json
+import re
+from codecs import BOM_UTF8
 from dataclasses import dataclass
 from pathlib import Path
+
+MAX_COMPONENT_SIZE = 2_147_483_647
+_THRESHOLDS_FIELD = "public_dependency_thresholds"
+_JSON_SPACE = re.compile(r"[ \t\r\n]*")
 
 
 class SoftwareStructureFormatError(ValueError):
@@ -27,11 +33,29 @@ class ModuleDependency:
 
 
 @dataclass(frozen=True, slots=True)
+class PublicDependencyThresholds:
+    """保存严格比较的阈值。模块数和直接依赖比例都要超过相应数值才归为公共依赖。"""
+
+    component_size: int = 10
+    direct_dependent_percent: int = 50
+
+    def __post_init__(self) -> None:
+        """对文件加载和侧栏输入使用同一组整数约束，错误包含完整字段名。"""
+        for name, value, maximum in (
+            ("component_size", self.component_size, MAX_COMPONENT_SIZE),
+            ("direct_dependent_percent", self.direct_dependent_percent, 100),
+        ):
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise SoftwareStructureFormatError(f"{_THRESHOLDS_FIELD}.{name} 必须是 0 至 {maximum} 之间的整数")
+
+
+@dataclass(frozen=True, slots=True)
 class SoftwareStructure:
-    """已校验的只读文档内容，供同一文件的多个标签共享。"""
+    """已校验的文档快照，包含模块目录、直接依赖和该文件的公共依赖阈值。"""
 
     modules: tuple[Module, ...]
     module_dependencies: tuple[ModuleDependency, ...] = ()
+    public_dependency_thresholds: PublicDependencyThresholds = PublicDependencyThresholds()
 
 
 def _required_text(record: dict, key: str, location: str) -> str:
@@ -89,14 +113,19 @@ def _reject_json_constant(value: str) -> None:
 
 
 def load_software_structure(path: str | Path) -> SoftwareStructure:
-    """从磁盘加载版本 1 的 UTF-8 JSON 软件结构文档。
+    """从磁盘加载并校验版本 1 的 UTF-8 JSON 软件结构文档。"""
+    return read_software_structure(path)[0]
 
-    支持 UTF-8 BOM 和额外字段。已识别的字段须符合类型和引用约束，
-    自依赖及循环依赖均是有效数据。任何读取或校验失败都抛出带中文说明的
+
+def read_software_structure(path: str | Path) -> tuple[SoftwareStructure, bytes]:
+    """同一次读取返回已校验内容和原始字节，供保存时定位字段和检查外部改动。
+
+    支持 UTF-8 BOM、扩展字段、自依赖和循环依赖。读取或校验失败时抛出带中文说明的
     SoftwareStructureFormatError，错误消息包含可用的行列或字段位置。
     """
     try:
-        content = Path(path).read_text(encoding="utf-8-sig")
+        snapshot = Path(path).read_bytes()
+        content = snapshot.decode("utf-8-sig")
     except UnicodeDecodeError as error:
         raise SoftwareStructureFormatError("软件结构文件必须使用 UTF-8 编码") from error
     except OSError as error:
@@ -121,4 +150,66 @@ def load_software_structure(path: str | Path) -> SoftwareStructure:
 
     modules = _read_modules(data.get("modules"))
     dependencies = _read_dependencies(data.get("module_dependencies", []), {module.id for module in modules})
-    return SoftwareStructure(modules, dependencies)
+    settings = data.get(_THRESHOLDS_FIELD, {})
+    if not isinstance(settings, dict):
+        raise SoftwareStructureFormatError(f"{_THRESHOLDS_FIELD} 必须是对象")
+    defaults = PublicDependencyThresholds()
+    thresholds = PublicDependencyThresholds(
+        settings.get("component_size", defaults.component_size),
+        settings.get("direct_dependent_percent", defaults.direct_dependent_percent),
+    )
+    return SoftwareStructure(modules, dependencies, thresholds), snapshot
+
+
+def _json_object_members(content: str, start: int) -> tuple[dict[str, tuple[int, int]], int, str]:
+    """记录已校验对象的值范围、追加位置和首个字段的缩进。"""
+    decode = json.JSONDecoder().raw_decode
+    position = _JSON_SPACE.match(content, start).end() + 1
+    end = position
+    members = {}
+    spacing = " "
+    while content[key_start := _JSON_SPACE.match(content, position).end()] != "}":
+        if not members:
+            spacing = content[position:key_start] or spacing
+        key, after_key = decode(content, key_start)
+        colon = _JSON_SPACE.match(content, after_key).end()
+        value_start = _JSON_SPACE.match(content, colon + 1).end()
+        # 用 JSON 解码器跨过整个值。字符串转义、嵌套对象和数组中的分隔符都按 JSON 语义处理。
+        _, end = decode(content, value_start)
+        members[key] = (value_start, end)
+        delimiter = _JSON_SPACE.match(content, end).end()
+        if content[delimiter] == "}":
+            break
+        position = delimiter + 1
+    return members, end, spacing
+
+
+def rewrite_public_dependency_thresholds(snapshot: bytes, thresholds: PublicDependencyThresholds) -> bytes:
+    """在读取器返回的原始快照上编辑两个阈值，保留其余 JSON 文本、换行与 BOM。"""
+    content = snapshot.decode("utf-8-sig")
+    members, tail, spacing = _json_object_members(content, 0)
+    values = {"component_size": thresholds.component_size,
+              "direct_dependent_percent": thresholds.direct_dependent_percent}
+    if bounds := members.get(_THRESHOLDS_FIELD):
+        members, tail, spacing = _json_object_members(content, bounds[0])
+        fields = {key: str(value) for key, value in values.items()}
+    else:
+        fields = {_THRESHOLDS_FIELD: json.dumps(values)}
+
+    edits = []
+    new_members = []
+    for key, value in fields.items():
+        if key in members:
+            start, end = members[key]
+            edits.append((start, end, value))
+        else:
+            new_members.append(f'{json.dumps(key)}: {value}')
+    if new_members:
+        separator = "," + spacing
+        addition = (separator if members else "") + separator.join(new_members)
+        edits.append((tail, tail, addition))
+    # 从后往前应用修改，前面的字段范围可继续使用原文坐标。
+    for start, end, value in sorted(edits, reverse=True):
+        content = content[:start] + value + content[end:]
+    bom = BOM_UTF8 if snapshot.startswith(BOM_UTF8) else b""
+    return bom + content.encode("utf-8")

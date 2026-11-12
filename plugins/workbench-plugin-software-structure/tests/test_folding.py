@@ -1,6 +1,13 @@
 """验证公共依赖的覆盖率边界，以及折叠后的连线保护。"""
 
-from workbench_plugin_software_structure.document import Module, ModuleDependency, SoftwareStructure
+from dataclasses import replace
+
+from workbench_plugin_software_structure.document import (
+    Module,
+    ModuleDependency,
+    PublicDependencyThresholds,
+    SoftwareStructure,
+)
 from workbench_plugin_software_structure.module_deps.folding import find_public_dependencies
 from workbench_plugin_software_structure.module_deps.layout import find_cyclic_dependencies
 
@@ -21,9 +28,33 @@ def test_public_dependencies_use_strict_majority_inside_each_connected_graph():
         ModuleDependency("small-b", "small"),
     )
     document = SoftwareStructure(modules, edges)
-    public = find_public_dependencies(document, find_cyclic_dependencies(document))
+    cyclic = find_cyclic_dependencies(document)
+    public = find_public_dependencies(document, cyclic)
     assert public.dependent_counts == {"shared": 6}
     assert public.folded == frozenset(shared_edges[1:])
+
+    # 两个阈值均取严格大于。小子图单独判断，自依赖也不影响百分比的精确边界。
+    for size, percent, expected in (
+        (11, 50, {}),
+        (10, 60, {}),
+        (10, 49, {"shared": 6, "half": 5}),
+        (2, 50, {"shared": 6, "small": 2}),
+        (0, 100, {}),
+    ):
+        configured = replace(document, public_dependency_thresholds=PublicDependencyThresholds(size, percent))
+        assert find_public_dependencies(configured, cyclic).dependent_counts == expected
+
+
+def test_zero_thresholds_require_an_incoming_edge_from_another_module():
+    """只有自依赖的模块仍为普通模块，唯一关联的入边得到保留。"""
+    document = SoftwareStructure(
+        tuple(Module(name, name) for name in ("alone", "source", "target")),
+        (ModuleDependency("alone", "alone"), ModuleDependency("source", "target")),
+        PublicDependencyThresholds(0, 0),
+    )
+    public = find_public_dependencies(document, find_cyclic_dependencies(document))
+    assert public.dependent_counts == {"target": 1}
+    assert public.folded == frozenset()
 
 
 def test_folding_preserves_one_connection_for_every_ordinary_module():

@@ -226,17 +226,32 @@ class ModuleDependencyCanvas(QGraphicsView):
         """读取本标签当前的全量开关，供分屏切换和会话恢复同步控件。"""
         return self._show_all
 
+    def apply_public_dependency_thresholds(self, document: SoftwareStructure) -> None:
+        """应用同一文件保存后的阈值快照，按新分组校验本标签的显示方式。"""
+        self._document = document
+        public = find_public_dependencies(document, self._cyclic_dependencies)
+        if public == self._public:
+            return
+        self._public = public
+        self._folded_counts = Counter(edge.target for edge in public.folded)
+        show_all = self._show_all and self.has_folded_dependencies
+        expanded = self._expanded_module if self._expanded_module in self._folded_counts else None
+        # 总览的可见边或分组已变，沿用安全换场景流程。有效的全量模式继续使用原视口。
+        if self._set_dependency_view(show_all, expanded, relayout=not show_all):
+            self.fit_to_view()
+
     def set_show_all_dependencies(self, show_all: bool) -> None:
         """在默认总览与全量依赖之间切换，按新图的边界重新适配窗口。"""
         if self.has_folded_dependencies and self._set_dependency_view(show_all, None):
             self.fit_to_view()
 
-    def _set_dependency_view(self, show_all: bool, expanded: str | None) -> bool:
+    def _set_dependency_view(self, show_all: bool, expanded: str | None, *, relayout: bool = False) -> bool:
         """替换本标签显示的边并重建场景，待新边界就绪后再保存视口。"""
-        # 全量切换或会话恢复会替换当前显示意图，同时取消尚未执行的画布点击。
+        # 切换模式、修改阈值或恢复会话时，取消旧场景上尚未完成的点选。
         self._public_click_timer.stop()
         self._pending_public_module = None
-        if (show_all, expanded) == (self._show_all, self._expanded_module):
+        self._pressed_public_module = None
+        if not relayout and (show_all, expanded) == (self._show_all, self._expanded_module):
             return False
         self._show_all, self._expanded_module = show_all, expanded
         self._initial_view_pending = True
@@ -286,8 +301,8 @@ class ModuleDependencyCanvas(QGraphicsView):
 
     def _apply_public_click(self) -> None:
         """在下一次事件循环展开或收起指定模块，此时原鼠标事件已返回。"""
-        module_id = self._pending_public_module
-        if module_id is None:
+        module_id, self._pending_public_module = self._pending_public_module, None
+        if module_id is None or self._show_all or module_id not in self._folded_counts:
             return
         expanded = None if module_id == self._expanded_module else module_id
         if self._set_dependency_view(False, expanded):
@@ -316,17 +331,19 @@ class ModuleDependencyCanvas(QGraphicsView):
         """保存缩放、中心和可选折叠状态，复制标签时保留当前的依赖显示方式。"""
         if not self._has_modules:
             return {}
-        if self._initial_view_pending:
-            if self._restored_viewport is None:
-                return {}
-            zoom, center = self._restored_viewport
-        else:
-            zoom, center = self.zoom_factor, self._viewport_center()
-        state = {"version": _VIEW_STATE_VERSION, "zoom": zoom, "center": [center.x(), center.y()]}
+        state = {}
         if self._show_all:
             state["show_all_dependencies"] = True
         if self._expanded_module is not None:
             state["expanded_public_module"] = self._expanded_module
+        # 隐藏标签随文件阈值重排后，要等再次显示才能适配新图。先保存依赖显示方式。
+        viewport = (self._restored_viewport if self._initial_view_pending
+                    else (self.zoom_factor, self._viewport_center()))
+        if viewport is not None:
+            zoom, center = viewport
+            state.update(zoom=zoom, center=[center.x(), center.y()])
+        if state:
+            state["version"] = _VIEW_STATE_VERSION
         return state
 
     def restore_viewport(self, state: dict | None) -> None:

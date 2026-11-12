@@ -3,9 +3,11 @@
 from importlib.resources import files
 from pathlib import Path
 
-from PySide6.QtCore import QIODevice, QSaveFile, QStandardPaths
+from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QDialog, QFileDialog
 from workbench_api.qt import UiService
+
+from .storage import write_atomic
 
 DOWNLOAD_TEMPLATE_COMMAND_ID = "software-structure.download-template"
 _SUFFIX = "software-structure"
@@ -39,22 +41,7 @@ def download_template(ui: UiService) -> None:
 
     try:
         content = files(__package__).joinpath("resources", _TEMPLATE_NAME).read_bytes()
-        _write_template(target, content)
+        write_atomic(target, content)
     except OSError as error:
         raise OSError(f"保存软件结构模板失败（{target}，{error.strerror or error}）") from error
     ui.show_message(f"软件结构模板已保存到 {target}")
-
-
-def _write_template(target: Path, content: bytes) -> None:
-    """将资源原样写入同目录的临时文件，完整写入后再原子替换目标。"""
-    output = QSaveFile(str(target))
-    # 临时文件创建失败时直接报错，确保原文件始终由原子提交保护。
-    output.setDirectWriteFallback(False)
-    if not output.open(QIODevice.OpenModeFlag.WriteOnly):
-        raise OSError(output.errorString())
-    if output.write(content) != len(content):
-        detail = output.errorString()
-        output.cancelWriting()
-        raise OSError(f"模板内容写入不完整（{detail}）")
-    if not output.commit():
-        raise OSError(output.errorString())

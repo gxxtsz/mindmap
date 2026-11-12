@@ -161,11 +161,13 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     qtbot.keyClick(menu, Qt.Key.Key_Left)
     qtbot.waitUntil(view_menu.isVisible)
     assert not menu.isVisible()
-    assert any(action.text() == "面板" for action in view_menu.actions())
+    panels = next(action.menu() for action in view_menu.actions() if action.text() == "面板")
+    assert "公共依赖" not in {action.text() for action in panels.actions()}
     qtbot.keyClick(view_menu, Qt.Key.Key_Escape)
     assert not view_menu.isVisible()
     assert set(window.manager.specs) == {
         "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "operation_log",
+        "software-structure.public-dependencies",
     }
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")

@@ -1,30 +1,46 @@
-"""接入工作台的只读软件结构文档、标签复制和会话恢复。"""
+"""接入工作台的软件结构文档、阈值自动保存、标签复制和会话恢复。"""
 
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QAction
 from workbench_api import Disposable, EditorProvider, OperationResult, PluginContext, SavePolicy
 
-from .document import SoftwareStructure, load_software_structure
+from .document import (
+    PublicDependencyThresholds,
+    read_software_structure,
+    rewrite_public_dependency_thresholds,
+)
 from .module_deps.canvas import ModuleDependencyCanvas
+from .storage import write_atomic
 from .template import DOWNLOAD_TEMPLATE_COMMAND_ID
 
 _PROVIDER_ID = "software-structure.document"
 
 
-class SoftwareStructureDocument:
-    """同一路径的标签共享一份只读文档，内容和磁盘路径在打开后固定。"""
+class SoftwareStructureDocument(QObject):
+    """同一路径的标签共享模块、依赖和最近一次保存成功的阈值。"""
 
     save_policy = SavePolicy.READ_ONLY
     is_dirty = False
+    thresholds_changed = Signal(object)
+    threshold_save_failed = Signal()
 
-    def __init__(self, path: Path, content: SoftwareStructure):
-        """绑定已解析的绝对文件路径和已校验的数据，生成本次会话的文档标识。"""
+    def __init__(self, context: PluginContext, path: Path):
+        """绑定绝对路径，读取用于显示的文档和自动保存所需的磁盘快照。"""
+        super().__init__()
         self.id = uuid4().hex
+        self._context = context
         self._path = path
-        self.content = content
+        self.content, self._snapshot = read_software_structure(path)
+        self._pending_thresholds: PublicDependencyThresholds | None = None
+        self._threshold_timer = QTimer(self)
+        self._threshold_timer.setSingleShot(True)
+        self._threshold_timer.setInterval(250)
+        self._threshold_timer.timeout.connect(self.flush_public_dependency_thresholds)
 
     @property
     def path(self) -> Path:
@@ -37,8 +53,39 @@ class SoftwareStructureDocument:
         return self.path.as_uri()
 
     def save(self, *, save_as: bool = False, reason: str = "explicit") -> OperationResult:
-        """为直接调用方返回明确的取消结果，保持磁盘文件和资源绑定。"""
-        return OperationResult.cancelled("软件结构文档为只读")
+        """通过宿主的只读策略处理通用保存动作，阈值通过侧栏独立提交。"""
+        return OperationResult.cancelled("软件结构的模块与连线为只读")
+
+    def queue_public_dependency_thresholds(self, thresholds: PublicDependencyThresholds) -> None:
+        """合并短时间内的连续输入，待保存值与当前文档绑定。"""
+        if thresholds == self.content.public_dependency_thresholds:
+            self._pending_thresholds = None
+            self._threshold_timer.stop()
+        else:
+            self._pending_thresholds = thresholds
+            self._threshold_timer.start()
+
+    def flush_public_dependency_thresholds(self) -> None:
+        """立即提交排队的阈值。成功后将新快照广播给同文件的各个标签。"""
+        self._threshold_timer.stop()
+        thresholds, self._pending_thresholds = self._pending_thresholds, None
+        if thresholds is None:
+            return
+
+        try:
+            snapshot = rewrite_public_dependency_thresholds(self._snapshot, thresholds)
+            write_atomic(self.path, snapshot, expected=self._snapshot)
+        except OSError as error:
+            # 文件提交失败时，侧栏从文档取回上一次成功值，画布继续使用该快照。
+            self.threshold_save_failed.emit()
+            message = f"保存公共依赖阈值失败：{error}"
+            self._context.log(message, level="error", source=self.path.name, source_path=str(self.path))
+            self._context.ui.show_message(message)
+            return
+
+        self._snapshot = snapshot
+        self.content = replace(self.content, public_dependency_thresholds=thresholds)
+        self.thresholds_changed.emit(self.content)
 
 
 class SoftwareStructureView:
@@ -54,6 +101,8 @@ class SoftwareStructureView:
         self._apply_theme()
         self._theme_subscription: Disposable | None = context.ui.subscribe_theme(self._apply_theme)
         self.widget.viewport_changed.connect(self._view_state_changed)
+        self.widget.dependency_view_changed.connect(self._view_state_changed)
+        self.document.thresholds_changed.connect(self.widget.apply_public_dependency_thresholds)
 
     @property
     def title(self) -> str:
@@ -62,9 +111,9 @@ class SoftwareStructureView:
 
     @property
     def status_text(self) -> str:
-        """为活动文档状态栏提供图规模和只读状态。"""
+        """为活动文档状态栏提供图规模。"""
         content = self.document.content
-        return f"{len(content.modules)} 个模块 · {len(content.module_dependencies)} 条依赖 · 只读"
+        return f"{len(content.modules)} 个模块 · {len(content.module_dependencies)} 条依赖"
 
     @property
     def toolbar_actions(self) -> tuple[QAction, ...]:
@@ -72,7 +121,8 @@ class SoftwareStructureView:
         return (self._context.ui.action(DOWNLOAD_TEMPLATE_COMMAND_ID),)
 
     def prepare_input(self) -> bool:
-        """只读画布可直接参与标签切换和关闭检查。"""
+        """宿主切换或关闭标签前，立即保存该文档在侧栏中的有效输入。"""
+        self.document.flush_public_dependency_thresholds()
         return True
 
     def capture_state(self) -> dict:
@@ -86,6 +136,7 @@ class SoftwareStructureView:
     def duplicate(self) -> OperationResult:
         """将同一文档的独立画布插在源标签之后，从源标签当前视口开始浏览。"""
         try:
+            self.document.flush_public_dependency_thresholds()
             return _register_view(self._context, self.document, state=self.capture_state(),
                                   after=self.id, remember=False)
         except Exception as error:
@@ -96,11 +147,13 @@ class SoftwareStructureView:
             return OperationResult.failed(error, reported=True)
 
     def dispose(self) -> None:
-        """幂等断开主题订阅和视口通知，宿主负责已登记控件的销毁。"""
+        """幂等断开主题、视图状态和阈值通知，宿主负责已登记控件的销毁。"""
         if self._theme_subscription is not None:
             self._theme_subscription.dispose()
             self._theme_subscription = None
             self.widget.viewport_changed.disconnect(self._view_state_changed)
+            self.widget.dependency_view_changed.disconnect(self._view_state_changed)
+            self.document.thresholds_changed.disconnect(self.widget.apply_public_dependency_thresholds)
 
     def _apply_theme(self, *_):
         self.widget.apply_theme(self._context.ui.theme_color)
@@ -135,7 +188,7 @@ def _open_document(context: PluginContext, path: Path, view_id: str | None, stat
                 return OperationResult(view_id=existing.id)
             document = existing.document
         else:
-            document = SoftwareStructureDocument(source, load_software_structure(source))
+            document = SoftwareStructureDocument(context, source)
         return _register_view(context, document, view_id=view_id, state=state, remember=view_id is None)
     except Exception as error:
         return OperationResult.failed(error)

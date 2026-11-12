@@ -16,12 +16,15 @@ from PySide6.QtWidgets import (
     QGraphicsPolygonItem,
     QGraphicsSimpleTextItem,
     QMessageBox,
+    QPushButton,
+    QSpinBox,
     QToolButton,
     QWidget,
 )
 from workbench_api import SavePolicy
 
 _DOWNLOAD_ACTION_ID = "software-structure.download-template"
+_PUBLIC_DEPENDENCY_PANEL_ID = "software-structure.public-dependencies"
 
 
 @pytest.fixture
@@ -42,6 +45,23 @@ def graph_path(tmp_path):
     return path
 
 
+@pytest.fixture
+def threshold_graph_path(tmp_path):
+    """十一模块子图中，两个公共节点分别被七个和六个模块直接依赖。"""
+    ordinary = [f"module-{index}" for index in range(9)]
+    pairs = [*zip(ordinary, ordinary[1:]),
+             *((module_id, "shared-a") for module_id in ordinary[:7]),
+             *((module_id, "shared-b") for module_id in ordinary[:6])]
+    path = tmp_path / "调整公共依赖.software-structure"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": name, "name": name} for name in [*ordinary, "shared-a", "shared-b"]],
+        "module_dependencies": [{"source": source, "target": target} for source, target in pairs],
+        "apis": [{"module_id": "shared-a", "path": "/world"}],
+    }, indent=2), encoding="utf-8-sig")
+    return path
+
+
 def _status_controls(window):
     """在窗口状态栏中定位软件结构插件的实际按钮。"""
     controls = window.status.findChild(QWidget, "software_structure_status_controls")
@@ -50,6 +70,20 @@ def _status_controls(window):
     zoom = controls.findChild(QToolButton, "status_reset_zoom")
     assert fit is not None and zoom is not None
     return controls, fit, zoom
+
+
+def _threshold_fields(window):
+    """定位实际停靠内容与两个数值控件。"""
+    panel = window.manager.panel(_PUBLIC_DEPENDENCY_PANEL_ID).content
+    size = panel.findChild(QSpinBox, "public_dependency_component_size")
+    percent = panel.findChild(QSpinBox, "public_dependency_direct_dependent_percent")
+    assert size is not None and percent is not None
+    return panel, size, percent
+
+
+def _dependency_arrow_count(view):
+    """按场景中实际绘制的箭头统计可见依赖。"""
+    return sum(isinstance(item, QGraphicsPolygonItem) for item in view.widget.scene().items())
 
 
 def _visible_center(canvas):
@@ -362,9 +396,6 @@ def test_public_dependency_click_and_all_view_follow_the_active_tab(window, tmp_
     show_all = controls.findChild(QToolButton, "status_show_all_dependencies")
     assert show_all.isVisible() and not show_all.isChecked()
 
-    def arrow_count(view):
-        return sum(isinstance(item, QGraphicsPolygonItem) for item in view.widget.scene().items())
-
     def click_shared():
         scene = canvas.scene()
         note = next(item for item in scene.items() if isinstance(item, QGraphicsSimpleTextItem)
@@ -376,15 +407,15 @@ def test_public_dependency_click_and_all_view_follow_the_active_tab(window, tmp_
         assert canvas.scene() is scene
         return scene
 
-    assert arrow_count(first) == 9
+    assert _dependency_arrow_count(first) == 9
     overview = click_shared()
-    assert arrow_count(first) == 9
+    assert _dependency_arrow_count(first) == 9
     qtbot.waitUntil(lambda: canvas.scene() is not overview)
-    assert arrow_count(first) == 15 and not show_all.isChecked()
+    assert _dependency_arrow_count(first) == 15 and not show_all.isChecked()
     assert first.capture_state()["expanded_public_module"] == "shared"
     expanded = click_shared()
     qtbot.waitUntil(lambda: canvas.scene() is not expanded)
-    assert arrow_count(first) == 9
+    assert _dependency_arrow_count(first) == 9
 
     # 全量按钮的同步操作取代本轮还未执行的展开请求。
     click_shared()
@@ -392,26 +423,167 @@ def test_public_dependency_click_and_all_view_follow_the_active_tab(window, tmp_
     full_scene = canvas.scene()
     QApplication.processEvents()
     assert canvas.scene() is full_scene
-    assert arrow_count(first) == 15 and show_all.isChecked()
+    assert _dependency_arrow_count(first) == 15 and show_all.isChecked()
     assert window.manager.duplicate_document(first.id)
     second = window.documents.active
     assert second.document is first.document and second.widget is not canvas
-    assert arrow_count(second) == 15 and show_all.isChecked()
+    assert _dependency_arrow_count(second) == 15 and show_all.isChecked()
     qtbot.mouseClick(show_all, Qt.MouseButton.LeftButton)
-    assert arrow_count(second) == 9 and not show_all.isChecked()
-    assert arrow_count(first) == 15
+    assert _dependency_arrow_count(second) == 9 and not show_all.isChecked()
+    assert _dependency_arrow_count(first) == 15
     window.documents.activate_view(first.id)
     assert show_all.isChecked()
 
     # 旧布局的场景中心可能落在新图之外。恢复该标签时显示总览并适配整个新图。
     first.restore_state({"version": 1, "zoom": 0.1, "center": [20000, -20000]})
-    assert arrow_count(first) == 9 and not show_all.isChecked()
+    assert _dependency_arrow_count(first) == 9 and not show_all.isChecked()
     assert canvas.zoom_factor > 0.1
 
     # 上一版由 Graphviz 生成坐标，升级后继续恢复用户选择的依赖显示方式。
     first.restore_state({"version": 2, "show_all_dependencies": True, "zoom": 0.1, "center": [20000, -20000]})
-    assert arrow_count(first) == 15 and show_all.isChecked()
+    assert _dependency_arrow_count(first) == 15 and show_all.isChecked()
     assert canvas.zoom_factor > 0.1
+
+
+def test_public_dependency_sidebar_autosaves_and_refreshes_shared_views(window, threshold_graph_path, qtbot):
+    """从视图菜单展开侧栏，合并输入后同步标签，并校验各标签自己的展开或全量状态。"""
+    path = threshold_graph_path
+    original = path.read_bytes()
+    assert not window.manager.is_tool_available(_PUBLIC_DEPENDENCY_PANEL_ID)
+    assert window.open_path(path)
+    first = window.documents.active
+    assert not window.manager.states[_PUBLIC_DEPENDENCY_PANEL_ID].visible
+    menu = window.main_menu()
+    view_menu = next(action.menu() for action in menu.actions() if action.text() == "视图")
+    panels = next(action.menu() for action in view_menu.actions() if action.text() == "面板")
+    panel_action = next(action for action in panels.actions() if action.text() == "公共依赖")
+    assert not panel_action.isChecked()
+    panel_action.trigger()
+    panel, size, percent = _threshold_fields(window)
+    assert panel.isVisible() and (size.value(), percent.value()) == (10, 50)
+    assert _dependency_arrow_count(first) == 8 and path.read_bytes() == original
+
+    first.restore_state({"version": 4, "expanded_public_module": "shared-a"})
+    assert _dependency_arrow_count(first) == 15
+    assert window.manager.duplicate_document(first.id)
+    second = window.documents.active
+    assert second.document is first.document
+    controls, _, _ = _status_controls(window)
+    show_all = controls.findChild(QToolButton, "status_show_all_dependencies")
+    show_all.click()
+    full_scene = second.widget.scene()
+    assert _dependency_arrow_count(second) == 21 and show_all.isChecked()
+
+    # 同一轮输入只提交最后一对合法值。六个依赖方恰好达到 60%，因此 shared-b 归回普通组。
+    with qtbot.waitSignal(first.document.thresholds_changed):
+        size.setValue(9)
+        percent.setValue(59)
+        size.setValue(10)
+        percent.setValue(60)
+        assert path.read_bytes() == original
+    saved = json.loads(path.read_bytes())
+    assert saved.pop("public_dependency_thresholds") == {"component_size": 10, "direct_dependent_percent": 60}
+    assert saved == json.loads(original)
+    assert first.capture_state()["expanded_public_module"] == "shared-a"
+    assert _dependency_arrow_count(first) == 21
+    assert second.widget.scene() is full_scene and show_all.isChecked()
+
+    window.documents.activate_view(first.id)
+    first.restore_state({"version": 4})
+    assert _dependency_arrow_count(first) == 14
+    with qtbot.waitSignal(first.document.thresholds_changed):
+        size.setValue(11)
+    assert not show_all.isVisible()
+    assert _dependency_arrow_count(first) == 21 and not second.widget.shows_all_dependencies
+
+    with qtbot.waitSignal(first.document.thresholds_changed):
+        qtbot.mouseClick(panel.findChild(QPushButton, "public_dependency_restore_defaults"), Qt.MouseButton.LeftButton)
+    assert _dependency_arrow_count(first) == _dependency_arrow_count(second) == 8
+    assert show_all.isVisible() and not show_all.isChecked()
+    assert json.loads(path.read_bytes())["public_dependency_thresholds"] == {
+        "component_size": 10, "direct_dependent_percent": 50,
+    }
+
+
+def test_public_dependency_sidebar_flushes_on_switch_close_and_exit(window, graph_path, tmp_path, qtbot):
+    """快速切换与关闭时提交原文件的输入，重开文件后从磁盘读取，并恢复侧栏布局。"""
+    other_path = tmp_path / "另一份结构.software-structure"
+    original = graph_path.read_bytes()
+    other_path.write_bytes(original)
+    assert window.open_path(graph_path)
+    first = window.documents.active
+    assert window.open_path(other_path)
+    other = window.documents.active
+    window.documents.activate_view(first.id)
+    button = window.host.right_rail._buttons[_PUBLIC_DEPENDENCY_PANEL_ID]
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    panel, size, percent = _threshold_fields(window)
+    assert panel.isVisible()
+
+    percent.setValue(72)
+    window.documents.activate_view(other.id)
+    assert json.loads(graph_path.read_bytes())["public_dependency_thresholds"]["direct_dependent_percent"] == 72
+    assert (size.value(), percent.value()) == (10, 50) and other_path.read_bytes() == original
+    size.setValue(1)
+    assert window.manager.close_document(other.id)
+    assert json.loads(other_path.read_bytes())["public_dependency_thresholds"] == {
+        "component_size": 1, "direct_dependent_percent": 50,
+    }
+    assert (size.value(), percent.value()) == (10, 72)
+
+    assert window.open_path(other_path)
+    reopened = window.documents.active
+    assert (size.value(), percent.value()) == (1, 50)
+    assert window.new_document(tmp_path / "导图.mindmap")
+    assert not panel.isVisible() and not window.manager.is_tool_available(_PUBLIC_DEPENDENCY_PANEL_ID)
+    window.documents.activate_view(reopened.id)
+    assert panel.isVisible() and (size.value(), percent.value()) == (1, 50)
+
+    percent.setValue(81)
+    assert window.close()
+    assert json.loads(other_path.read_bytes())["public_dependency_thresholds"]["direct_dependent_percent"] == 81
+
+
+@pytest.mark.parametrize("external_edit", [False, True], ids=["short_write", "external_edit"])
+def test_public_dependency_save_failure_restores_saved_values(window, threshold_graph_path, qtbot, monkeypatch,
+                                                             external_edit):
+    """短写或提交前发现外部修改时保留文件与已显示的图，后续输入可重新提交。"""
+    path = threshold_graph_path
+    assert window.open_path(path)
+    assert window.manager.activate(_PUBLIC_DEPENDENCY_PANEL_ID)
+    _, _, percent = _threshold_fields(window)
+    view = window.documents.active
+    scene = view.widget.scene()
+    original = path.read_bytes()
+    expected = original.replace(b'"/world"', b'"/updated"') if external_edit else original
+    write = QSaveFile.write
+
+    def fail_write(output, content):
+        if external_edit:
+            count = write(output, content)
+            path.write_bytes(expected)
+            return count
+        return write(output, content[:1])
+
+    existing_files = set(path.parent.iterdir())
+    with monkeypatch.context() as patches:
+        patches.setattr(QSaveFile, "write", fail_write)
+        with qtbot.waitSignal(view.document.threshold_save_failed):
+            percent.setValue(100)
+    message = "文件已在外部修改" if external_edit else "文件内容写入不完整"
+    assert message in window.status.currentMessage() and message in window.operation_log.plain_text()
+    assert percent.value() == 50 and view.widget.scene() is scene
+    assert path.read_bytes() == expected and set(path.parent.iterdir()) == existing_files
+
+    if external_edit:
+        assert window.manager.close_document(view.id) and window.open_path(path)
+        view = window.documents.active
+    with qtbot.waitSignal(view.document.thresholds_changed):
+        percent.setValue(60)
+    assert _dependency_arrow_count(view) == 14
+    saved = json.loads(path.read_bytes())
+    assert saved.pop("public_dependency_thresholds")["direct_dependent_percent"] == 60
+    assert saved == json.loads(expected)
 
 
 def test_empty_graph_has_an_empty_message(window, tmp_path):
