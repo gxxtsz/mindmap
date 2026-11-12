@@ -15,13 +15,19 @@ from .layout import LayeredLayout, build_layout
 _RANK_GAP = 46.0
 _NODE_GAP = 22.0
 _LANE_GAP = 7.0
+# 箭头放大后长 9.6 个场景单位，两端的直段需容纳放大后的箭头。
+_PORT_STRAIGHT = 11.0
 _COORDINATE_SCALE = 2
 _SINGLE_MODULE_ALIGNMENT_WEIGHT = 64
 
 
 @dataclass(frozen=True, slots=True)
 class GraphGeometry:
-    """Qt 画布所需的全部节点矩形、依赖曲线与箭头，依赖按原始方向索引。"""
+    """Qt 画布所需的节点矩形、依赖线身和箭头，依赖按原始方向索引。
+
+    每条线身从依赖方的卡片边缘出发，终止于箭头底边内侧。箭头的第一个顶点
+    是尖端，落在被依赖方的卡片边缘，可用作放大箭头的锚点。
+    """
 
     boxes: dict[str, QRectF]
     edges: dict[ModuleDependency, tuple[QPainterPath, QPolygonF]]
@@ -174,7 +180,10 @@ def _ports(
 
 
 def _join_lanes(path: QPainterPath, start: tuple[float, float], end: tuple[float, float]) -> None:
-    """在两层的净空内调整横向坐标，曲线两端沿纵轴接入相邻走线。"""
+    """在指定的层间净空内改变横坐标，转弯两端以纵向切线接入相邻走线。
+
+    调用方传入已避开箭头直段的转弯起止坐标。到达转弯区之前沿当前走线直行。
+    """
     start_x, start_y = start
     end_x, end_y = end
     middle_y = (start_y + end_y) / 2
@@ -182,13 +191,15 @@ def _join_lanes(path: QPainterPath, start: tuple[float, float], end: tuple[float
     path.cubicTo(start_x, middle_y, end_x, middle_y, end_x, end_y)
 
 
-def _arrowhead(tip: QPointF, direction: QPointF) -> QPolygonF:
-    """按路径末端方向构造箭头，首个顶点与被依赖模块的连接点重合。"""
-    length = math.hypot(direction.x(), direction.y())
-    unit = direction / length
-    base = tip - unit * 8
-    side = QPointF(-unit.y(), unit.x()) * 3.3
-    return QPolygonF([tip, base + side, base - side])
+def _arrowhead(tip: QPointF, direction: int) -> tuple[QPointF, QPolygonF]:
+    """返回线身末点和箭头三角形。direction 为 1 时向下，为 -1 时向上。
+
+    线身从底边正中伸入 1 个场景单位，使抗锯齿绘制后依然贴合，同时保留尖端
+    的轮廓。尖端固定在卡片端口，选中放大时仍可使用同一个线身末点。
+    """
+    base = tip - QPointF(0, 8 * direction)
+    side = QPointF(3.3, 0)
+    return base + QPointF(0, direction), QPolygonF([tip, base - side, base + side])
 
 
 def build_geometry(
@@ -225,6 +236,15 @@ def build_geometry(
         boxes[module_id] = rect
 
     endpoints = _ports(layout, across, half_widths)
+    # 层顶保留入边的直段。逆向边和自环的箭头位于层底，对这些层的出边也延后转弯，
+    # 使附近的线身在箭头占用的高度内互相平行。
+    ranks_with_upward_arrows = {
+        ranks[route[0]] for edge, route in layout.routes.items()
+        if route[0] == route[-1] or edge.source != layout.modules[route[0]]
+    }
+    bend_starts = [end + _PORT_STRAIGHT if rank in ranks_with_upward_arrows else end
+                   for rank, end in enumerate(ends)]
+    bend_ends = [start - _PORT_STRAIGHT for start in starts]
     left_corridor = min(position - half for position, half in zip(across, half_widths)) - _NODE_GAP
     right_corridor = max(position + half for position, half in zip(across, half_widths)) + _NODE_GAP
     edges = {}
@@ -233,33 +253,35 @@ def build_geometry(
         first_rank, last_rank = ranks[start], ranks[end]
         start_y = centers[first_rank] + half_heights[start]
         start_x, end_x = endpoints[edge, False], endpoints[edge, True]
-        path = QPainterPath(QPointF(start_x, start_y))
+        start_port = QPointF(start_x, start_y)
         if start == end:
-            # 自依赖使用节点下方的净空。控制点限制在节点的横向范围内。
-            first_control = QPointF(max(across[start] - half_widths[start], start_x - 12), start_y + 30)
-            last_control = QPointF(min(across[start] + half_widths[start], end_x + 12), start_y + 30)
-            tip = QPointF(end_x, start_y)
-            path.cubicTo(first_control, last_control, tip)
-            edges[edge] = path, _arrowhead(tip, tip - last_control)
+            # 自依赖在卡片下方回转，两端以纵向切线与直段相接。
+            shaft_end, arrow = _arrowhead(QPointF(end_x, start_y), -1)
+            turn_y = start_y + _PORT_STRAIGHT
+            control_y = start_y + 27
+            path = QPainterPath(start_port)
+            path.lineTo(start_x, turn_y)
+            path.cubicTo(start_x, control_y, end_x, control_y, end_x, turn_y)
+            path.lineTo(shaft_end)
+            edges[edge] = path, arrow
             continue
 
+        end_port = QPointF(end_x, centers[last_rank] - half_heights[end])
+        reversed_route = edge.source != layout.modules[start]
+        # 仍按从上往下的顺序绘制。逆向边从上方箭头底边内侧起笔，之后再反转路径。
+        shaft_end, arrow = _arrowhead(start_port, -1) if reversed_route else _arrowhead(end_port, 1)
+        path = QPainterPath(shaft_end if reversed_route else start_port)
         if len(route) == 2 and last_rank - first_rank > 1:
             # 极密集的图将部分长边送入外侧共享通道。两端均从层间净空转弯。
             corridor = left_corridor if start_x + end_x < left_corridor + right_corridor else right_corridor
-            _join_lanes(path, (start_x, ends[first_rank]), (corridor, starts[first_rank + 1]))
-            _join_lanes(path, (corridor, ends[last_rank - 1]), (end_x, starts[last_rank]))
+            _join_lanes(path, (start_x, bend_starts[first_rank]), (corridor, bend_ends[first_rank + 1]))
+            _join_lanes(path, (corridor, bend_starts[last_rank - 1]), (end_x, bend_ends[last_rank]))
         else:
             # 跨过一层时沿其虚拟顶点直行，在两层之间以相同切线方向接上三次贝塞尔曲线。
             lanes = (start_x, *(across[vertex] for vertex in route[1:-1]), end_x)
             for rank, (lane_a, lane_b) in enumerate(pairwise(lanes), start=first_rank):
-                _join_lanes(path, (lane_a, ends[rank]), (lane_b, starts[rank + 1]))
-        tip = QPointF(end_x, centers[last_rank] - half_heights[end])
-        path.lineTo(tip)
-        direction = QPointF(0, 1)
-        if edge.source != layout.modules[start]:
-            # 布局时可能逆转环内的边。最终沿文档中的实际方向放置箭头。
-            path = path.toReversed()
-            tip, direction = path.currentPosition(), QPointF(0, -1)
-        edges[edge] = path, _arrowhead(tip, direction)
+                _join_lanes(path, (lane_a, bend_starts[rank]), (lane_b, bend_ends[rank + 1]))
+        path.lineTo(end_port if reversed_route else shaft_end)
+        edges[edge] = (path.toReversed() if reversed_route else path), arrow
 
     return GraphGeometry(boxes, edges)

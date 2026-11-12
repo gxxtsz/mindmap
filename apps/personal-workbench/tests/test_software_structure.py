@@ -7,7 +7,7 @@ import pytest
 from mindmap_core.formats import load_document
 from personal_workbench.app import build_window
 from PySide6.QtCore import QEvent, QLineF, QPoint, QPointF, QRect, QSaveFile, QStandardPaths, Qt, QTimer
-from PySide6.QtGui import QFocusEvent, QFont, QIcon, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QFocusEvent, QFont, QIcon, QMouseEvent, QPainterPathStroker, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -536,6 +536,37 @@ def test_module_selection_highlights_direct_dependencies_in_each_theme(window, g
     qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=blank)
     assert isolated.pen().color() == color("editor-border")
     assert _highlighted_dependencies(canvas) == set()
+
+
+def test_dashed_dependencies_join_the_arrowhead_when_highlighted(window, tmp_path, qtbot):
+    """循环边的虚线末端和放大的箭头保持贴合，包含逆向边和自环。"""
+    path = tmp_path / "循环依赖.software-structure"
+    edges = (("a", "a"), ("a", "b"), ("b", "c"), ("c", "a"))
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": name, "name": name} for name in "abc"],
+        "module_dependencies": [{"source": source, "target": target} for source, target in edges],
+    }), encoding="utf-8")
+    assert window.open_path(path)
+    view = window.documents.active
+    qtbot.waitUntil(lambda: "zoom" in view.capture_state())
+    canvas = view.widget
+    dependencies = _dependency_items(canvas)
+    assert set(dependencies) == {"a → a", "a → b", "b → c", "c → a"}
+
+    for selected in (False, True):
+        if selected:
+            _click_module_title(qtbot, canvas, "a")
+            assert _highlighted_dependencies(canvas) == {"a → a", "a → b", "c → a"}
+        for theme in ("light", "dark"):
+            window.manager.set_theme(theme)
+            for line, arrow in dependencies.values():
+                assert line.pen().style() == Qt.PenStyle.DashLine
+                tip, left, right = arrow.polygon()
+                base = line.mapFromScene(arrow.mapToScene((left + right) / 2))
+                stroke = QPainterPathStroker(line.pen()).createStroke(line.path())
+                assert stroke.contains(base)
+                assert not stroke.contains(line.mapFromScene(arrow.mapToScene(tip)))
 
 
 def test_edge_filter_hides_incident_lines_without_moving_cards(window, graph_path, qtbot):

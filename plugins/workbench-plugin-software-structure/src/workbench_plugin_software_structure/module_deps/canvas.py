@@ -122,6 +122,14 @@ class ModuleDependencyCanvas(QGraphicsView):
             self._nodes[module_id] = node, label
 
         for dependency, (path, polygon) in geometry.edges.items():
+            cyclic = dependency in self._cyclic_dependencies
+            if cyclic:
+                # 末端直段至少有 4 个场景单位。叠加同样长的子路径会从虚线的实段
+                # 起笔，使线身接上箭头底边。
+                end = path.currentPosition()
+                direction = 1 if polygon[0].y() > end.y() else -1
+                path.moveTo(end.x(), end.y() - 4 * direction)
+                path.lineTo(end)
             line = scene.addPath(path)
             arrow = scene.addPolygon(polygon)
             arrow.setPen(QPen(Qt.PenStyle.NoPen))
@@ -129,7 +137,7 @@ class ModuleDependencyCanvas(QGraphicsView):
             arrow.setTransformOriginPoint(polygon[0])
             line.setZValue(-2)
             arrow.setZValue(-1)
-            label = "循环依赖" if dependency in self._cyclic_dependencies else "模块依赖"
+            label = "循环依赖" if cyclic else "模块依赖"
             tip = f"<qt>{label}：{escape(dependency.source)} → {escape(dependency.target)}</qt>"
             line.setToolTip(tip)
             arrow.setToolTip(tip)

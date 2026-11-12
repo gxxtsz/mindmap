@@ -1,7 +1,7 @@
 """验证分层顺序、交叉优化以及 Qt 路由的避让和箭头方向。"""
 
 from PySide6.QtCore import QSizeF
-from PySide6.QtGui import QPainterPathStroker
+from PySide6.QtGui import QPainterPath, QPainterPathStroker
 from workbench_plugin_software_structure.document import Module, ModuleDependency, SoftwareStructure
 from workbench_plugin_software_structure.module_deps.constraints import SpanConstraint, minimize_spans
 from workbench_plugin_software_structure.module_deps.geometry import build_geometry
@@ -92,8 +92,35 @@ def test_vertical_splines_avoid_nodes_and_point_to_the_original_target():
     stroker = QPainterPathStroker()
     stroker.setWidth(1)
     for edge, (curve, arrow) in geometry.edges.items():
-        assert curve.currentPosition() == arrow[0]
-        assert geometry.boxes[edge.target].adjusted(-1, -1, 1, 1).contains(arrow[0])
+        source, target = geometry.boxes[edge.source], geometry.boxes[edge.target]
+        forward = source.top() < target.top()
+        assert curve.pointAtPercent(0).y() == (source.bottom() if forward or edge.source == edge.target else source.top())
+        assert arrow[0].y() == (target.top() if forward else target.bottom())
+        assert target.contains(arrow[0])
         stroke = stroker.createStroke(curve)
+        assert stroke.contains((arrow[1] + arrow[2]) / 2)
+        assert not stroke.contains(arrow[0])
         assert all(not stroke.intersects(box) for name, box in geometry.boxes.items()
                    if name not in (edge.source, edge.target))
+
+
+def test_converging_lines_join_their_own_arrow_bases():
+    """多条横向偏移较大的连线汇入同一卡片时，线身从各自的底边正中接入。"""
+    sizes = {name: QSizeF(150, 38) for name in ("a", "b", "c", "d", "e", "target")}
+    edges = tuple(ModuleDependency(source, "target") for source in "abcde")
+    geometry = build_geometry(sizes, edges)
+
+    stroker = QPainterPathStroker()
+    stroker.setWidth(2.6)
+    heads = {}
+    for edge, (_, arrow) in geometry.edges.items():
+        head = QPainterPath()
+        head.addPolygon(arrow)
+        head.closeSubpath()
+        heads[edge] = head
+
+    for edge, (path, arrow) in geometry.edges.items():
+        stroke = stroker.createStroke(path)
+        assert stroke.contains((arrow[1] + arrow[2]) / 2)
+        assert not stroke.contains(arrow[0])
+        assert all(not stroke.intersects(head) for other, head in heads.items() if other != edge)
