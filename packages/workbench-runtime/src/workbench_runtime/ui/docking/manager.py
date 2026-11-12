@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QTabWidget, QWidget
 from shiboken6 import isValid
 
 from ...storage import JsonLayoutStore
+from .._window_placement import capture_window_placement, restore_window_placement
 from .models import (
     MODE_LABELS,
     POSITION_LABELS,
@@ -53,7 +54,7 @@ class DockManager(QObject):
     def __init__(self, storage_dir=None, parent=None, *, application_id="mindmap-app",
                  theme=None, layout_store=None,
                  shortcut_context=Qt.ShortcutContext.WidgetWithChildrenShortcut,
-                 preserve_open_documents=False):
+                 preserve_open_documents=False, remember_window_placement=False):
         """创建独立会话，可注入主题和存储；不会修改应用全局样式。
 
         application_id 是配置目录的稳定标识，不能包含路径分隔符。默认快捷键仅在
@@ -61,6 +62,8 @@ class DockManager(QObject):
         preserve_open_documents 默认关闭，恢复快照时按记录控制文档可见状态；
         多文件宿主启用后只恢复容器布局，保留全部当前文档及逻辑活动文档，忽略
         快照中已不存在的文档标识。该策略不负责重开文件或序列化业务内容。
+        remember_window_placement 供独立桌面宿主启用，将主窗口位置与显示状态
+        一并写入会话，并在 load_session 时恢复。恢复默认停靠布局不移动主窗口。
         """
         super().__init__(parent)
         if QApplication.instance() is None:
@@ -78,6 +81,7 @@ class DockManager(QObject):
         self.documents = {}
         self.active_document_id = ""
         self.preserve_open_documents = preserve_open_documents
+        self.remember_window_placement = remember_window_placement
         self._closing_documents = False
         # 可选的文档级批量决策。宿主据此合并同文件多视图的保存和关闭询问；
         # 仅在全部检查通过后，本层才实际移除标签。独立使用时沿用逐标签回调。
@@ -1398,12 +1402,15 @@ class DockManager(QObject):
 
         保留版本 1 的会话外层及快照格式，不再写入命名布局集合或当前布局名称。
         读取旧配置后的下一次正常保存也会自然清除这些废弃字段。
+        启用窗口位置记忆时，主窗口记录随布局一起原子提交。
         定时保存遇到写入错误时通过 message 通知。显式退出可传 raise_errors=True，
         由窗口捕获错误并保留所有控件，供用户重试。
         """
         if self.closing or self._session_save_depth or not self.hosts:
             return
         payload = {"schema_version": 1, "session": self.capture_layout()}
+        if self.remember_window_placement:
+            payload["window_placement"] = capture_window_placement(self.hosts["main"].window())
         try:
             self.layout_store.save(payload)
         except (OSError, TypeError, ValueError) as error:
@@ -1412,7 +1419,11 @@ class DockManager(QObject):
             self.message.emit(f"布局未能保存：{error}")
 
     def load_session(self):
-        """加载保存的会话并返回成功标记；损坏配置回到内建模板，不执行配置中的代码。"""
+        """加载保存的会话并返回成功标记，损坏配置回到内建模板。
+
+        独立桌面宿主启用窗口位置记忆时，应在首次显示前调用本方法。布局恢复
+        成功后，再按当前显示器恢复主窗口位置及最大化或全屏状态。
+        """
         try:
             payload = self.layout_store.load()
             if payload is None:
@@ -1422,7 +1433,13 @@ class DockManager(QObject):
             # 旧文件中的命名布局字段已经废弃；只校验实际会话，避免废弃数据损坏
             # 导致仍然有效的窗口排布、主题和尺寸无法恢复。
             self._validate_snapshot(payload["session"])
-            self._restore_snapshot(self._normalize_snapshot(payload["session"]))
+            layout = self._normalize_snapshot(payload["session"])
+            self._restore_snapshot(layout)
+            if self.remember_window_placement:
+                restore_window_placement(
+                    self.hosts["main"].window(), payload.get("window_placement"),
+                    layout["hosts"]["main"].get("geometry"),
+                )
             return True
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             if self._default_snapshot:

@@ -29,6 +29,7 @@ from .recent_files import RecentFilesButton
 from .services import CommandRegistry, EditorRegistry, ScopedDocuments, UiService, menu_location
 from .state import Settings, StateStore, WorkspaceLayoutStore
 from .storage import JsonLayoutStore
+from .ui._window_placement import restore_window_placement
 from .ui.docking import DockManager, DockPosition, Theme, ToolWindowSpec
 from .ui.shell import ActionSpec, AppSpec, WorkbenchWindow
 
@@ -99,12 +100,14 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         upgrade_warnings = self._upgrade_profile(profile_upgrade, settings_error) if profile_upgrade is not None else ()
         manager = DockManager(application_id=self.config.application_id, storage_dir=directory,
                               theme=Theme(theme or "light"), preserve_open_documents=True,
+                              remember_window_placement=True,
                               shortcut_context=Qt.ShortcutContext.WindowShortcut,
                               layout_store=WorkspaceLayoutStore(
                                   self.state, lambda: (self.documents.snapshot(), self.documents.active_id)))
         manager.storage_file = manager.layout_store.path
         super().__init__(AppSpec(self.config.application_id, self.config.title, icon=self.config.icon,
                                  storage_dir=directory, theme=manager.theme), manager=manager)
+        restore_window_placement(self)
         self.documents = DocumentService(self)
         self.operation_log = OperationLogPanel(manager.parking)
         manager.register_tool_window(ToolWindowSpec(

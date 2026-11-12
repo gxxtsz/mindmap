@@ -1,6 +1,10 @@
 """大文件后台恢复期间，旧布局不得被尚未完成的启动状态覆盖。"""
 
 import json
+import os
+import subprocess
+import sys
+from textwrap import dedent
 from threading import Event
 
 import pytest
@@ -9,6 +13,91 @@ from mindmap_qt_editor.canvas import loading
 from personal_workbench.app import build_window
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QPushButton
+
+
+def test_startup_restores_window_placement_on_the_saved_display(tmp_path):
+    """在独立 Qt 进程使用两块虚拟屏幕，验证真实关闭和启动入口。"""
+    (tmp_path / "screens.json").write_text(json.dumps({"screens": [
+        {"name": "left", "x": 0, "y": 0, "width": 1920, "height": 1080},
+        {"name": "right", "x": 2560, "y": -200, "width": 1707, "height": 960},
+    ]}), encoding="utf-8")
+    script = dedent("""
+        import json
+        from pathlib import Path
+
+        from personal_workbench.app import build_window
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication([])
+        app.setQuitOnLastWindowClosed(False)
+        left, right = app.screens()
+        work = right.availableGeometry()
+        normal = work.adjusted(160, 90, -160, -90)
+        modes = {"normal": Qt.WindowState.WindowNoState, "maximized": Qt.WindowState.WindowMaximized,
+                 "fullscreen": Qt.WindowState.WindowFullScreen}
+        geometries = {"normal": normal, "maximized": work, "fullscreen": right.geometry()}
+
+        for name, mode in modes.items():
+            profile = Path(name)
+            window = build_window(storage_dir=profile, restore=False, manifests=[])
+            assert left.availableGeometry().contains(window.geometry())
+            window.setGeometry(normal)
+            window.show()
+            window.setWindowState(mode)
+            app.processEvents()
+            assert window.screen() is right and window.close()
+
+            reopened = build_window(storage_dir=profile, manifests=[])
+            assert reopened.isHidden()
+            reopened.show()
+            app.processEvents()
+            assert reopened.screen() is right
+            assert reopened.isMaximized() == (name == "maximized")
+            assert reopened.isFullScreen() == (name == "fullscreen")
+            assert reopened.normalGeometry() == normal
+            assert reopened.geometry() == geometries[name]
+            reopened.manager.restore_default_layout()
+            assert reopened.geometry() == geometries[name]
+            assert reopened.close()
+
+        # 旧布局只有窗口矩形，右屏工作区应被识别为最大化。
+        snapshot = json.loads(Path("maximized/workbench-state-v1.json").read_bytes())
+        legacy = Path("legacy")
+        legacy.mkdir()
+        payload = snapshot["layout"].copy()
+        del payload["window_placement"]
+        assert payload["session"]["hosts"]["main"]["geometry"] == list(work.getRect())
+        (legacy / "workbench-layout-v1.json").write_text(json.dumps(payload), encoding="utf-8")
+        reopened = build_window(storage_dir=legacy, manifests=[])
+        reopened.show()
+        app.processEvents()
+        assert reopened.screen() is right and reopened.isMaximized() and reopened.geometry() == work
+        assert reopened.close()
+
+        # 保存的显示器已断开，即使旧坐标落在桌面之外，也应在主屏显示。
+        placement = snapshot["layout"]["window_placement"]
+        placement["screen_name"] = "disconnected"
+        placement["work_area"][:2] = [-4000, -200]
+        placement["normal_geometry"][:2] = [-3840, -110]
+        profile = Path("disconnected")
+        profile.mkdir()
+        (profile / "workbench-state-v1.json").write_text(json.dumps(snapshot), encoding="utf-8")
+        reopened = build_window(storage_dir=profile, manifests=[])
+        reopened.show()
+        app.processEvents()
+        assert reopened.screen() is left and reopened.isMaximized()
+        assert left.availableGeometry().contains(reopened.normalGeometry())
+        assert reopened.geometry() == left.availableGeometry()
+        assert reopened.close()
+    """)
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script], cwd=tmp_path,
+        env={**os.environ, "QT_QPA_PLATFORM": "offscreen:configfile=screens.json", "QT_SCALE_FACTOR": "1",
+             "PYTHONIOENCODING": "utf-8"},
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_live_checkpoint_restores_tabs_split_and_latest_view(qtbot, tmp_path):
