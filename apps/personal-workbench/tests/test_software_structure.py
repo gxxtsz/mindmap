@@ -163,6 +163,17 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
 
 
 def test_read_only_actions_and_mindmap_saving(window, graph_path, tmp_path, monkeypatch, qtbot):
+    bar = window.title_bar.menu_bar
+    entry = bar.actions()[0]
+    files = entry.menu()
+
+    def open_file_menu():
+        qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.actionGeometry(entry).center())
+        qtbot.waitUntil(files.isVisible)
+
+    open_file_menu()
+    assert window.action("app.new") in files.actions()
+    files.close()
     assert window.open_path(graph_path)
     graph = window.documents.active
     monkeypatch.setattr(graph.document, "save", lambda **kwargs: pytest.fail("只读文档不应进入宿主保存流程"))
@@ -174,11 +185,11 @@ def test_read_only_actions_and_mindmap_saving(window, graph_path, tmp_path, monk
     assert not window.new_document(graph_path)
     assert not window.new_document()
 
-    menu = window.main_menu()
-    files = next(action.menu() for action in menu.actions() if action.text() == "文件")
+    open_file_menu()
     assert window.action("app.new") not in files.actions()
     assert window.action("app.open") in files.actions() and window.action("app.open").isEnabled()
-    menu.deleteLater()
+    assert all(action.text() != "导出当前页" for action in files.actions())
+    files.close()
     assert not window.action("app.new").isEnabled()
     qtbot.keyClick(graph.widget, Qt.Key.Key_N, Qt.KeyboardModifier.ControlModifier)
     assert list(window.documents.views.values()) == [graph]
@@ -188,10 +199,10 @@ def test_read_only_actions_and_mindmap_saving(window, graph_path, tmp_path, monk
     mindmap = window.documents.active
     assert mindmap.document.path == target
     assert window.action("app.new").isEnabled()
-    menu = window.main_menu()
-    files = next(action.menu() for action in menu.actions() if action.text() == "文件")
+    open_file_menu()
     assert window.action("app.new") in files.actions() and window.action("app.new").text() == "新建导图"
-    menu.deleteLater()
+    assert any(action.text() == "导出当前页" for action in files.actions())
+    files.close()
     mindmap.engine.update_node(mindmap.engine.root_id, text="批量保存的内容")
     mindmap.document.timer.stop()
     window.documents.activate_view(graph.id)

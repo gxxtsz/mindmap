@@ -1,8 +1,9 @@
 """按钮状态回归：自动焦点、键盘焦点与真实鼠标悬停须有不同的视觉反馈。"""
 
 import pytest
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QEnterEvent, QMouseEvent
+from PySide6.QtWidgets import QApplication, QLineEdit, QMenuBar
 from workbench_runtime.ui.docking import DockPosition, ToolWindowSpec
 from workbench_runtime.ui.shell import AppSpec, WorkbenchWindow
 
@@ -187,14 +188,13 @@ def test_keyboard_focus_uses_outline_and_still_opens_menu(button_window, qtbot, 
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-@pytest.mark.parametrize("source", ["more", "menu"])
-def test_hover_and_menu_cancel_leave_no_background(button_window, qtbot, theme, source):
-    """侧栏更多和左上角主菜单在悬停及取消弹窗后均恢复普通背景。"""
+def test_hover_and_menu_cancel_leave_no_background(button_window, qtbot, theme):
+    """侧栏更多按钮在悬停及取消弹窗后恢复普通背景。"""
     window = button_window
     window.manager.set_theme(theme)
-    button = window.host.left_rail.more if source == "more" else window.title_bar.menu
+    button = window.host.left_rail.more
     editor = window.manager.documents["editor"]["widget"]
-    x = 7 if source == "more" else 3
+    x = 7
     editor.setFocus()
     move_pointer(qtbot, button, button.rect().center())
     qtbot.waitUntil(button.underMouse)
@@ -218,14 +218,47 @@ def test_hover_and_menu_cancel_leave_no_background(button_window, qtbot, theme, 
     assert background_color(button, x) == window.manager.theme.color("main-window-bg")
 
 
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_menu_bar_colors_follow_hover_and_popup_state(button_window, qtbot, theme):
+    """常驻文字菜单有悬停和展开反馈，离开后恢复标题栏底色。"""
+    window = button_window
+    window.manager.set_theme(theme)
+    bar = window.title_bar.menu_bar
+    entry = bar.actions()[0]
+    rect = bar.actionGeometry(entry)
+    editor = window.manager.documents["editor"]["widget"]
+    colors = window.manager.theme
+
+    def item_background():
+        return background_color(bar, rect.left() + 5, rect.center().y())
+
+    editor.setFocus()
+    move_pointer(qtbot, editor, QPoint(20, 10))
+    assert item_background() == colors.color("main-window-titlebar-bg")
+    move_pointer(qtbot, bar, rect.center())
+    qtbot.waitUntil(lambda: item_background() == colors.color("toolbar-bg-hovered"))
+    qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=rect.center())
+    popup = entry.menu()
+    qtbot.waitUntil(popup.isVisible)
+    assert item_background() == colors.color("toolbar-selected-bg-active")
+    move_pointer(qtbot, editor, QPoint(20, 10))
+    qtbot.keyClick(popup, Qt.Key.Key_Escape)
+    assert not popup.isVisible()
+    if bar.hasFocus():
+        qtbot.keyClick(bar, Qt.Key.Key_Escape)
+    qtbot.waitUntil(lambda: item_background() == colors.color("main-window-titlebar-bg"))
+
+
 def move_pointer(qtbot, widget, point):
     """离屏插件没有原生指针窗口命中，显式发送同等的进入、离开事件。"""
-    from PySide6.QtCore import QEvent, QPointF
-    from PySide6.QtGui import QEnterEvent
-
     qtbot.mouseMove(widget, point)
     if QApplication.platformName() == "offscreen":
         for other in QApplication.allWidgets():
             if other is not widget and other.underMouse():
                 QApplication.sendEvent(other, QEvent(QEvent.Type.Leave))
-        QApplication.sendEvent(widget, QEnterEvent(QPointF(point), QPointF(point), QPointF(widget.mapToGlobal(point))))
+        local, screen = QPointF(point), QPointF(widget.mapToGlobal(point))
+        QApplication.sendEvent(widget, QEnterEvent(local, local, screen))
+        if isinstance(widget, QMenuBar):
+            QApplication.sendEvent(widget, QMouseEvent(QEvent.Type.MouseMove, local, screen,
+                                                       Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                                                       Qt.KeyboardModifier.NoModifier))

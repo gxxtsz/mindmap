@@ -19,7 +19,7 @@ from mindmap_core.layouts import TreeLayout, resolve_tree_spacing
 from personal_workbench.app import build_window
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QIcon, QImage, QWheelEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMenu, QMessageBox, QToolButton
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox, QToolButton
 from workbench_runtime.ui.docking import DockPosition, DockTarget, ViewMode
 
 
@@ -140,35 +140,30 @@ def test_properties_toggle_closes_visible_panel_without_focus(window, qtbot, ent
 
 @pytest.mark.parametrize("theme_name", ["light", "dark"])
 def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtbot, theme_name):
-    """明暗主题下点击左上角主菜单，核对设置子菜单中的三组平铺选项。"""
+    """明暗主题下直接点击标题栏的设置，核对下拉菜单的三组平铺选项。"""
     window.manager.set_theme(theme_name)
     expected = [
         "浅色", "深色", "紧凑模式", None,
         "显示停靠栏", "始终显示标题按钮", None, "宽屏布局", "左侧并排", "右侧并排", None, "插件管理…",
     ]
-    popped = []
-
-    def inspect_menu():
-        main = QApplication.activePopupWidget()
-        assert isinstance(main, QMenu)
-        try:
-            settings_action = next(action for action in main.actions() if action.text() == "设置")
-            menu = settings_action.menu()
-            # 菜单刚进入事件循环时使用键盘展开，避免模拟鼠标与子菜单延时竞争。
-            main.setActiveAction(settings_action)
-            qtbot.keyClick(main, Qt.Key.Key_Right)
-            qtbot.waitUntil(menu.isVisible)
-            popped.append([None if action.isSeparator() else action.text() for action in menu.actions()])
-            for action in menu.actions()[:2]:
-                assert action.isChecked() == (action.text() == ("浅色" if theme_name == "light" else "深色"))
-            assert all(action.menu() is None for action in menu.actions())
-            menu.close()
-        finally:
-            main.close()
-
-    QTimer.singleShot(0, inspect_menu)
-    qtbot.mouseClick(window.title_bar.menu, Qt.MouseButton.LeftButton)
-    assert popped == [expected]
+    bar = window.title_bar.menu_bar
+    assert [action.text() for action in bar.actions()] == ["文件", "编辑", "视图", "设置"]
+    entry = bar.actions()[-1]
+    menu = entry.menu()
+    qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.actionGeometry(entry).center())
+    qtbot.waitUntil(menu.isVisible)
+    assert QApplication.activePopupWidget() is menu
+    assert [None if action.isSeparator() else action.text() for action in menu.actions()] == expected
+    for action in menu.actions()[:2]:
+        assert action.isChecked() == (action.text() == ("浅色" if theme_name == "light" else "深色"))
+    assert all(action.menu() is None for action in menu.actions())
+    view_menu = bar.actions()[-2].menu()
+    qtbot.keyClick(menu, Qt.Key.Key_Left)
+    qtbot.waitUntil(view_menu.isVisible)
+    assert not menu.isVisible()
+    assert any(action.text() == "面板" for action in view_menu.actions())
+    qtbot.keyClick(view_menu, Qt.Key.Key_Escape)
+    assert not view_menu.isVisible()
     assert set(window.manager.specs) == {
         "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "operation_log",
     }

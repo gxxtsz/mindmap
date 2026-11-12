@@ -26,7 +26,7 @@ def frame_window(qtbot, tmp_path):
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("compact", [False, True])
-def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme, compact):
+def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme, compact, monkeypatch):
     """两种密度下顶栏、标签与按钮均完整可用，覆盖层仍透传真实输入。"""
     window = frame_window
     window.manager.set_theme(theme)
@@ -45,7 +45,8 @@ def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme
     group = window.host.editor.groups[0]
     assert group.tabBar().height() == (28 if compact else 32)
     bar = window.title_bar
-    assert bar.menu.size() == QSize(32, 32)
+    assert bar.rect().contains(bar.menu_bar.geometry())
+    assert all(bar.menu_bar.rect().contains(bar.menu_bar.actionGeometry(action)) for action in bar.menu_bar.actions())
     for control in (bar.pin, bar.minimize, bar.maximize, bar.close):
         assert control.size() == QSize(40, 32)
         assert control.iconSize() == QSize(16, 16)
@@ -68,6 +69,12 @@ def test_outline_preserves_layout_rendering_and_input(frame_window, qtbot, theme
     assert window.childAt(position) is button
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
     assert window._test_calls == [True]
+    blank = QPoint((button.geometry().right() + bar.pin.x()) // 2, bar.rect().center().y())
+    assert bar.childAt(blank) is None
+    moves = []
+    monkeypatch.setattr(window.windowHandle(), "startSystemMove", lambda: moves.append(True))
+    qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=blank)
+    assert moves == [True]
     editor = window.manager.documents["editor"]["widget"]
     editor.setFocus()
     qtbot.keyClicks(editor, "123")

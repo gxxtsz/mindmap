@@ -312,7 +312,9 @@ def test_recent_button_elides_long_names_and_fits_minimum_window(history_window,
     window.resize(860, 540)
     QApplication.processEvents()
     button, bar = window.recent_files_button, window.title_bar
-    assert bar.menu.geometry().right() < button.x()
+    assert [action.text() for action in bar.menu_bar.actions()] == ["文件", "编辑", "视图", "设置"]
+    assert all(bar.menu_bar.rect().contains(bar.menu_bar.actionGeometry(action)) for action in bar.menu_bar.actions())
+    assert bar.menu_bar.geometry().right() < button.x()
     assert button.geometry().right() < bar.minimize.x()
     assert bar.rect().contains(button.geometry())
     assert button.height() == 32 and button.width() <= 280

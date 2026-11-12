@@ -4,7 +4,7 @@
 
 
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QLineEdit, QToolButton
 from shiboken6 import isValid
 from workbench_runtime.ui.shell import ActionSpec, AppSpec, WorkbenchWindow
@@ -18,14 +18,22 @@ def test_workbench_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path
     qtbot.addWidget(window)
     window.show()
     assert window.spec.title == "定制业务软件"
-    window.add_action(ActionSpec("business.late", "稍后加入", lambda: calls.append(2), toolbar=True))
+    late = window.add_action(ActionSpec("business.late", "稍后加入", lambda: calls.append(2),
+                                        menu="业务", toolbar=True))
     assert any(item.text() == "稍后加入" for item in window.title_bar.action_buttons)
     # 动态业务动作仍在窗口控制按钮之前，且复用菜单中的同一 QAction。
     bar = window.title_bar
     assert bar.box.itemAt(bar.box.count() - 1).layout() is bar.window_controls
     assert all(bar.box.indexOf(button) < bar.box.count() - 1 for button in bar.action_buttons)
+    assert [action.text() for action in bar.menu_bar.actions()] == ["文件", "业务", "外观与布局"]
+    entry = bar.menu_bar.actions()[1]
+    qtbot.mouseClick(bar.menu_bar, Qt.MouseButton.LeftButton, pos=bar.menu_bar.actionGeometry(entry).center())
+    menu = entry.menu()
+    qtbot.waitUntil(menu.isVisible)
+    assert menu.actions() == [late]
+    qtbot.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(late).center())
     window.action("business.add").trigger()
-    assert calls == [1]
+    assert calls == [2, 1]
     window.manager.shutdown()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
@@ -40,7 +48,7 @@ def test_navigation_slot_inserts_replaces_and_releases_owned_widgets(qtbot, tmp_
     window.set_title_bar_navigation(first)
     bar = window.title_bar
     assert first.parentWidget() is bar and first.isVisible()
-    assert bar.box.indexOf(first) == bar.box.indexOf(bar.menu) + 1
+    assert bar.box.indexOf(first) == bar.box.indexOf(bar.menu_bar) + 1
     window.set_title_bar_navigation(first)
     assert isValid(first) and bar.navigation is first
     second = QLineEdit("替换导航")

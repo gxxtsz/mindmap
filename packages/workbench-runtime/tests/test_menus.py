@@ -1,9 +1,9 @@
 """验收主菜单的编辑路由、插件边界和临时控件生命周期。"""
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLineEdit
 from shiboken6 import isValid
 from workbench_api import Disposable, EditorProvider, OperationResult, PluginManifest
 from workbench_api.qt import CommandSpec, MenuContribution, MenuLocation
@@ -111,20 +111,78 @@ def test_menu_registration_validates_locations_and_isolates_failed_contributions
     menu.deleteLater()
 
 
-def test_title_bar_releases_popup_menus_and_keeps_shared_actions(window, monkeypatch):
-    """主菜单关闭后释放含设置在内的整棵临时菜单树，保留可重复使用的宿主动作。"""
+def test_title_bar_releases_popup_menus_and_keeps_shared_actions(window, qtbot, monkeypatch):
+    """常驻标题反复打开时，临时子菜单能触发命令并在关闭后释放。"""
     menus = []
+    calls = []
     build = window.main_menu
+
+    def contribute(menu):
+        nested = menu.addMenu("测试子菜单")
+        nested.addAction("测试命令", lambda: calls.append(True))
+        menus.append(nested)
+
+    context = window.plugins.instance("sample").context
+    context.ui.contribute_menu(MenuContribution(MenuLocation.FILE, contribute))
 
     def inspect():
         menu = build()
         menus.extend([menu, *(action.menu() for action in menu.actions())])
-        QTimer.singleShot(0, menu.close)
         return menu
 
     monkeypatch.setattr(window, "main_menu", inspect)
-    for _ in range(2):
-        window.title_bar.show_menu()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        assert all(not isValid(menu) for menu in menus)
-        assert isValid(window.action("app.open"))
+    bar = window.title_bar.menu_bar
+    entry = bar.actions()[0]
+    popup = entry.menu()
+    shared = window.action("app.open")
+    for trigger in (True, False):
+        qtbot.mouseClick(bar, Qt.MouseButton.LeftButton, pos=bar.actionGeometry(entry).center())
+        qtbot.waitUntil(popup.isVisible)
+        assert shared in popup.actions()
+        if trigger:
+            nested = submenu(popup, "测试子菜单")
+            popup.setActiveAction(nested.menuAction())
+            qtbot.keyClick(popup, Qt.Key.Key_Right)
+            qtbot.waitUntil(nested.isVisible)
+            nested.setActiveAction(nested.actions()[0])
+            qtbot.keyClick(nested, Qt.Key.Key_Return)
+            assert calls == [True]
+        else:
+            qtbot.keyClick(popup, Qt.Key.Key_Escape)
+        qtbot.waitUntil(lambda: all(not isValid(menu) for menu in menus))
+        assert not popup.isVisible() and not popup.actions()
+        assert isValid(shared) and isValid(entry)
+
+
+def test_keyboard_edit_menu_preserves_line_edit_selection(window, qtbot, qapp):
+    """Alt 导航借用原输入框及反向选区，菜单复制与粘贴仍作用于该选区。"""
+    field = QLineEdit("abcdefgh", window)
+    field.move(120, 80)
+    field.show()
+    window.activateWindow()
+    field.setFocus()
+    field.setSelection(5, -3)
+    bar = window.title_bar.menu_bar
+    file_entry, edit_entry, *_ = bar.actions()
+    edit = edit_entry.menu()
+
+    def execute(command):
+        qtbot.keyClick(field, Qt.Key.Key_Alt)
+        qtbot.waitUntil(lambda: qapp.focusWidget() is bar)
+        assert bar.activeAction() is file_entry
+        qtbot.keyClick(bar, Qt.Key.Key_Right)
+        assert bar.activeAction() is edit_entry
+        qtbot.keyClick(bar, Qt.Key.Key_Down)
+        qtbot.waitUntil(edit.isVisible)
+        assert field.selectedText() == "cde" and field.cursorPosition() == 2
+        action = window.action("app." + command)
+        assert action in edit.actions() and action.isEnabled()
+        edit.setActiveAction(action)
+        qtbot.keyClick(edit, Qt.Key.Key_Return)
+        qtbot.waitUntil(field.hasFocus)
+
+    execute("copy")
+    assert qapp.clipboard().text() == "cde"
+    qapp.clipboard().setText("替换")
+    execute("paste")
+    assert field.text() == "ab替换fgh"

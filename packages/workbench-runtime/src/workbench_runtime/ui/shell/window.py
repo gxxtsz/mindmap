@@ -3,7 +3,7 @@
 import logging
 import sys
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QMenuBar,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -171,7 +173,7 @@ class _WindowControlButton(QToolButton):
 
 
 class _TitleBar(QWidget):
-    """只显示应用图标与配置动作，标题空白处交由系统开始移动窗口。"""
+    """容纳应用图标、主菜单和窗控，标题空白处交由系统开始移动窗口。"""
 
     def __init__(self, window):
         super().__init__(window)
@@ -187,23 +189,21 @@ class _TitleBar(QWidget):
         self.logo.setToolTip(window.spec.title)
         self.logo.setAccessibleName(window.spec.title)
         self.box.addWidget(self.logo)
-        self.menu = QToolButton(self)
-        self.menu.setToolTip("主菜单")
-        self.menu.setAccessibleName("主菜单")
-        self.menu.clicked.connect(self.show_menu)
-        self.box.addWidget(self.menu)
+        self.menu_bar = QMenuBar(self)
+        self.menu_bar.setObjectName("workbench_shell_menu_bar")
+        self.menu_bar.setAccessibleName("主菜单")
+        self.menu_bar.setNativeMenuBar(False)
+        self.menu_bar.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.box.addWidget(self.menu_bar, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self._menu_popups: list[QMenu] = []
+        self._menu_snapshots: dict[QMenu, QMenu] = {}
+        self.sync_menu_bar()
         self.navigation = None
         self.box.addStretch(1)
         self.action_buttons = []
         for spec in window._action_specs:
             if spec.toolbar:
                 self.add_action(window.manager.actions[spec.id])
-        # 设置统一从左侧主菜单进入，不再创建右侧齿轮及其占位。
-        # 主菜单保持正方形命中区域，清除通用留白，避免挤压图标。
-        self.menu.setProperty("titleBarAction", True)
-        self.menu.setFixedSize(32, 32)
-        self.menu.setIconSize(QSize(20, 20))
-        self.menu.setStyleSheet("QToolButton { padding:0; }")
         self.pin = _WindowControlButton(self, "pin")
         self.pin.setCheckable(True)
         self.minimize = _WindowControlButton(self, "minimize")
@@ -247,9 +247,22 @@ class _TitleBar(QWidget):
     def refresh_theme(self):
         """同步顶栏尺寸、底色和按钮状态；文档标签继续由各自的编辑分屏持有。"""
         theme = self.window.manager.theme
-        # 仅匹配显式标记的顶栏按钮；窗口控制按钮保留独立的关闭警示色和绘制规则。
-        # 默认透明使图标融入外围背景，预留透明边框避免键盘聚焦时发生尺寸变化。
+        # 文字菜单和标记的顶栏工具按钮共用标题栏底色，窗控自行绘制。
+        # 工具按钮预留透明边框，键盘聚焦时尺寸稳定。
         self.setStyleSheet(f"""
+            QMenuBar#workbench_shell_menu_bar {{
+                background:transparent; border:0; spacing:2px;
+            }}
+            QMenuBar#workbench_shell_menu_bar::item {{
+                background:transparent; color:{theme.css('text-default')};
+                padding:6px 9px; border-radius:4px;
+            }}
+            QMenuBar#workbench_shell_menu_bar::item:selected {{
+                background:{theme.css('toolbar-bg-hovered')};
+            }}
+            QMenuBar#workbench_shell_menu_bar::item:pressed {{
+                background:{theme.css('toolbar-selected-bg-active')};
+            }}
             QToolButton[titleBarAction="true"] {{
                 background:transparent; border:1px solid transparent; border-radius:5px;
                 padding:4px 12px;
@@ -268,24 +281,58 @@ class _TitleBar(QWidget):
                 background:transparent; border-color:transparent; color:{theme.css('text-muted')};
             }}
         """)
-        # 双层布局保留独立标签栏；菜单仍为 32×32，窗口按钮为 40×32，不增加顶栏高度。
-        # 普通模式上下各留 3px，紧凑模式各留 2px，避免固定高度挤压按钮。
-        # 业务动作使用上方的局部内边距，保证带文字的工具按钮也能完整放入这一行。
+        # 标题栏内容区沿用窗控的 32 逻辑像素高度，菜单按文字尺寸横向排列。
+        # 普通模式上下各留 3px，紧凑模式各留 2px。
         vertical = 2 if theme.compact else 3
         self.box.setContentsMargins(12, vertical, 6, vertical)
         self.setFixedHeight(32 + vertical * 2)
         self.logo.setPixmap(theme.icon(self.window.spec.icon, 20).pixmap(20, 20))
-        self.menu.setIcon(theme.icon("menu"))
         for button in (self.pin, self.minimize, self.maximize, self.close):
             button.refresh_theme()
 
-    def show_menu(self):
-        """弹出本次装配的主菜单，关闭后释放临时菜单及其子菜单。"""
-        menu = self.window.main_menu()
-        try:
-            menu.exec(self.menu.mapToGlobal(QPoint(0, self.menu.height())))
-        finally:
-            menu.deleteLater()
+    def sync_menu_bar(self) -> None:
+        """按外壳的分区顺序建立常驻入口。只在分区变化时重建下拉容器。"""
+        titles = (*self.window._menu_group_titles(), self.window._appearance_menu_title)
+        if titles == tuple(popup.title() for popup in self._menu_popups):
+            return
+        for popup in self._menu_popups:
+            popup.close()
+            self.menu_bar.removeAction(popup.menuAction())
+            self._menu_snapshots.pop(popup, None)
+            popup.deleteLater()
+        self._menu_popups.clear()
+        for index, title in enumerate(titles):
+            popup = self.menu_bar.addMenu(title)
+            popup.aboutToShow.connect(lambda menu=popup, section=index: self._populate_menu_popup(menu, section))
+            popup.aboutToHide.connect(lambda menu=popup: self._schedule_menu_cleanup(menu))
+            self._menu_popups.append(popup)
+
+    def _populate_menu_popup(self, popup: QMenu, section: int) -> None:
+        """按打开瞬间的上下文装配菜单，由快照树持有临时动作和子菜单。"""
+        self._clear_menu_popup(popup)
+        snapshot = self.window.main_menu()
+        snapshot.setParent(popup, snapshot.windowFlags())
+        self._menu_snapshots[popup] = snapshot
+        source = snapshot.actions()[section].menu()
+        for action in source.actions():
+            source.removeAction(action)
+            popup.addAction(action)
+
+    def _schedule_menu_cleanup(self, popup: QMenu) -> None:
+        """动作触发可能晚于 aboutToHide，延迟释放且校验下拉菜单是否已经重开。"""
+        snapshot = self._menu_snapshots.get(popup)
+
+        def release():
+            if self._menu_snapshots.get(popup) is snapshot and not popup.isVisible():
+                self._clear_menu_popup(popup)
+
+        QTimer.singleShot(0, popup, release)
+
+    def _clear_menu_popup(self, popup: QMenu) -> None:
+        snapshot = self._menu_snapshots.pop(popup, None)
+        if snapshot is not None:
+            popup.clear()
+            snapshot.deleteLater()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.window.windowHandle():
@@ -305,6 +352,7 @@ class WorkbenchWindow(QMainWindow):
 
     # 仅在实际置顶标志变化后通知宿主；持久化策略由业务层自行决定。
     always_on_top_changed = Signal(bool)
+    _appearance_menu_title = "外观与布局"
 
     def __init__(self, spec: AppSpec, *, manager: DockManager | None = None, host_id="main"):
         flags = Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint
@@ -366,9 +414,10 @@ class WorkbenchWindow(QMainWindow):
         return action
 
     def add_action(self, spec: ActionSpec):
-        """运行期间追加业务动作，返回可用于按钮或菜单的 QAction。"""
+        """运行期间追加业务动作，更新顶栏分区，返回菜单与快捷键共用的 QAction。"""
         action = self._register_action(spec)
         self._action_specs.append(spec)
+        self.title_bar.sync_menu_bar()
         if spec.toolbar:
             for host in self.manager.hosts.values():
                 frame = host.window()
@@ -403,7 +452,7 @@ class WorkbenchWindow(QMainWindow):
         if widget is not None:
             # 插入到主菜单与伸缩留白之间；不能使用末尾索引，否则会落入业务动作区。
             widget.setParent(bar)
-            bar.box.insertWidget(bar.box.indexOf(bar.menu) + 1, widget)
+            bar.box.insertWidget(bar.box.indexOf(bar.menu_bar) + 1, widget)
             widget.show()
 
     @Slot()
@@ -560,16 +609,18 @@ class WorkbenchWindow(QMainWindow):
             handle.setFlag(flag, enabled)
 
     def main_menu(self) -> QMenu:
-        """构建供本次弹出使用的主菜单，调用方在使用完毕后负责释放。"""
+        """构建按顶栏顺序排列的临时菜单树，调用方负责在动作分发结束后释放。"""
         return self._build_main_menu()[0]
+
+    def _menu_group_titles(self) -> tuple[str, ...]:
+        """按首次声明顺序返回业务分区，供常驻标题和临时菜单共同使用。"""
+        return tuple(dict.fromkeys(spec.menu for spec in self._action_specs))
 
     def _build_main_menu(self):
         """返回临时根菜单及已装配的分区，供运行时复用共享动作和外观菜单。"""
         menu = QMenu(self)
-        groups = {}
+        groups = {title: menu.addMenu(title) for title in self._menu_group_titles()}
         for spec in self._action_specs:
-            if spec.menu not in groups:
-                groups[spec.menu] = menu.addMenu(spec.menu)
             groups[spec.menu].addAction(self.manager.actions[spec.id])
         settings = self.appearance_menu()
         # addMenu 接收现有 QMenu 时保留其所有者，显式挂到本次弹出的根菜单下。
@@ -583,7 +634,7 @@ class WorkbenchWindow(QMainWindow):
         业务可复用此菜单并插入自己的设置入口；每次展开时从管理器读取勾选状态，
         动作仍通过原主题和选项接口提交，沿用会话保存及界面刷新流程。
         """
-        menu = QMenu("外观与布局", self)
+        menu = QMenu(self._appearance_menu_title, self)
         for name, label in [("light", "浅色"), ("dark", "深色")]:
             action = menu.addAction(label)
             action.setCheckable(True)

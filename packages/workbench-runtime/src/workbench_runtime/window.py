@@ -66,6 +66,8 @@ class WelcomePage(QWidget):
 class WorkbenchRuntimeWindow(WorkbenchWindow):
     """统一的窗口装配器，不导入编辑器业务模块，也不判断具体插件标识。"""
 
+    _appearance_menu_title = "设置"
+
     def __init__(self, *, config: WorkbenchConfig | None = None, storage_dir=None, theme=None,
                  restore=True, manifests=None, migration=None, plugin_options=None,
                  profile_upgrade: Callable[[dict, dict], tuple[bool, bool]] | None = None):
@@ -331,8 +333,8 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         return True
 
     def appearance_menu(self):
+        """将插件管理加入工作台的设置菜单，供常驻菜单栏和临时菜单树共用。"""
         menu = super().appearance_menu()
-        menu.setTitle("设置")
         if self._ready:
             menu.addSeparator()
             menu.addAction("插件管理…", self.show_plugin_manager)
@@ -341,18 +343,21 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
     def show_plugin_manager(self):
         self.plugins.show_dialog(self)
 
+    def _menu_group_titles(self) -> tuple[str, ...]:
+        """保留已声明分区的顺序，补齐工作台常驻的文件、编辑和视图入口。"""
+        return tuple(dict.fromkeys((*super()._menu_group_titles(), "文件", "编辑", "视图")))
+
     def main_menu(self) -> QMenu:
         """按宿主分区装配临时主菜单，标准编辑动作始终由工作台摆放。"""
         self.edit_commands.refresh()
         menu, groups, settings = self._build_main_menu()
         files = groups["文件"]
-        sections = {MenuLocation.FILE: files, MenuLocation.SETTINGS: settings}
-        for location, title in ((MenuLocation.EDIT, "编辑"), (MenuLocation.VIEW, "视图")):
-            section = groups.get(title)
-            if section is None:
-                section = QMenu(title, menu)
-                menu.insertMenu(settings.menuAction(), section)
-            sections[location] = section
+        sections = {
+            MenuLocation.FILE: files,
+            MenuLocation.SETTINGS: settings,
+            MenuLocation.EDIT: groups["编辑"],
+            MenuLocation.VIEW: groups["视图"],
+        }
 
         self._populate_new_menu(files)
         edit = sections[MenuLocation.EDIT]
