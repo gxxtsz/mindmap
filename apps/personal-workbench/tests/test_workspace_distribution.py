@@ -19,7 +19,9 @@ MINDMAP_DIRECTORIES = {
     "mindmap-qt-editor": "qt-editor",
     "workbench-plugin-mindmap": "workbench-adapter",
 }
-EXPECTED = set(MINDMAP_DIRECTORIES) | {"personal-workbench", "workbench-api", "workbench-runtime"}
+EXPECTED = set(MINDMAP_DIRECTORIES) | {
+    "personal-workbench", "workbench-api", "workbench-runtime", "workbench-plugin-software-structure",
+}
 DEPENDENCIES = {
     "mindmap-core": set(),
     "mindmap-qt-render": {"mindmap-core", "pyside6"},
@@ -27,7 +29,8 @@ DEPENDENCIES = {
     "workbench-api": {"pyside6"},
     "workbench-runtime": {"workbench-api", "pyside6"},
     "workbench-plugin-mindmap": {"workbench-api", "mindmap-core", "mindmap-qt-editor", "mindmap-qt-render", "pyside6"},
-    "personal-workbench": {"workbench-runtime", "workbench-plugin-mindmap", "pyside6"},
+    "workbench-plugin-software-structure": {"workbench-api", "pyside6"},
+    "personal-workbench": {"workbench-runtime", "workbench-plugin-mindmap", "workbench-plugin-software-structure", "pyside6"},
 }
 
 

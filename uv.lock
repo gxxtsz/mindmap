@@ -11,6 +11,7 @@ members = [
     "personal-workbench-workspace",
     "workbench-api",
     "workbench-plugin-mindmap",
+    "workbench-plugin-software-structure",
     "workbench-runtime",
 ]
 
@@ -85,6 +86,7 @@ source = { editable = "apps/personal-workbench" }
 dependencies = [
     { name = "pyside6" },
     { name = "workbench-plugin-mindmap" },
+    { name = "workbench-plugin-software-structure" },
     { name = "workbench-runtime" },
 ]
 
@@ -92,6 +94,7 @@ dependencies = [
 requires-dist = [
     { name = "pyside6", specifier = ">=6.12,<6.13" },
     { name = "workbench-plugin-mindmap", editable = "plugins/workbench-plugin-mindmap/workbench-adapter" },
+    { name = "workbench-plugin-software-structure", editable = "plugins/workbench-plugin-software-structure" },
     { name = "workbench-runtime", editable = "packages/workbench-runtime" },
 ]
 
@@ -316,6 +319,21 @@ requires-dist = [
     { name = "mindmap-core", editable = "plugins/workbench-plugin-mindmap/core" },
     { name = "mindmap-qt-editor", editable = "plugins/workbench-plugin-mindmap/qt-editor" },
     { name = "mindmap-qt-render", editable = "plugins/workbench-plugin-mindmap/qt-render" },
+    { name = "pyside6", specifier = ">=6.12,<6.13" },
+    { name = "workbench-api", editable = "packages/workbench-api" },
+]
+
+[[package]]
+name = "workbench-plugin-software-structure"
+version = "0.1.0"
+source = { editable = "plugins/workbench-plugin-software-structure" }
+dependencies = [
+    { name = "pyside6" },
+    { name = "workbench-api" },
+]
+
+[package.metadata]
+requires-dist = [
     { name = "pyside6", specifier = ">=6.12,<6.13" },
     { name = "workbench-api", editable = "packages/workbench-api" },
 ]

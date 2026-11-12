@@ -191,9 +191,15 @@ class DocumentService(QObject):
         if view_id in self.views:
             self.window.manager.schedule_save()
 
+    @staticmethod
+    def can_save(view) -> bool:
+        """判断视图是否持有可保存的文档，供文件动作和批量保存统一使用。"""
+        return (view is not None and not isinstance(view, MissingView)
+                and view.document.save_policy != SavePolicy.READ_ONLY)
+
     def save(self, view=None, *, save_as=False, reason="explicit"):
         view = view or self.active
-        if view is None:
+        if not self.can_save(view):
             return OperationResult.cancelled()
         previous_path = view.document.path
         try:
@@ -214,7 +220,7 @@ class DocumentService(QObject):
     def save_all(self):
         seen = set()
         for view in self.ordered():
-            if view.document.id in seen or isinstance(view, MissingView):
+            if not self.can_save(view) or view.document.id in seen:
                 continue
             seen.add(view.document.id)
             result = self.save(view, reason="batch")
@@ -241,7 +247,7 @@ class DocumentService(QObject):
         seen = set()
         for view in targets:
             document = view.document
-            if document.id in seen or isinstance(view, MissingView):
+            if not self.can_save(view) or document.id in seen:
                 continue
             seen.add(document.id)
             if document.save_policy == SavePolicy.AUTOMATIC:

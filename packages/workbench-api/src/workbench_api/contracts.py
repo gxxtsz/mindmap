@@ -53,10 +53,16 @@ class OperationResult:
 
 
 class SavePolicy(StrEnum):
-    """平台按策略组织关闭；自动保存的具体时机和快照由插件管理。"""
+    """声明文档的保存能力和关闭策略。
+
+    自动保存的时机和快照由插件管理，关闭时由宿主协调最后一次保存。
+    手动保存文档仅在最后一个关联标签关闭且有修改时提示。只读文档可以
+    参与最近文件、标签复制和会话恢复，宿主会跳过其保存和关闭时的保存检查。
+    """
 
     AUTOMATIC = "automatic"
     MANUAL = "manual"
+    READ_ONLY = "read_only"
 
 
 class Disposable:
@@ -91,6 +97,7 @@ class DocumentHandle(Protocol):
         """提交所有关联视图并保存。reason 为 explicit、batch 或 close，批量及关闭不重复记录成功日志。
 
         失败不得清除修改状态；reason 只影响展示，不改变保存及输入检查的正确性。
+        宿主不会调用只读文档的保存方法。插件仍实现此接口，供直接调用时返回取消结果。
         """
         ...
 
@@ -135,6 +142,9 @@ class EditorView(Protocol):
 class EditorProvider:
     """编辑器提供者通过 context.documents.register_view 提交成功创建的视图。
 
+    new_document 接收目标路径或 None。提供者只负责打开既有文件时将此回调设为 None。
+    宿主保留其文件打开入口，在该提供者的文档处于活动状态时省略新建菜单项并停用
+    新建快捷键。欢迎页按提供了新建回调的类型显示按钮。
     open_document(path, view_id, state) 用于普通打开和恢复；view_id 为 None 表示普通打开。
     创建失败或取消时不得注册半初始化视图。扩展名包含小数点并使用小写。
     """
@@ -142,7 +152,7 @@ class EditorProvider:
     id: str
     title: str
     extensions: tuple[str, ...]
-    new_document: Callable[[Path | None], OperationResult]
+    new_document: Callable[[Path | None], OperationResult] | None
     open_document: Callable[[Path, str | None, dict | None], OperationResult]
     icon: str = "document"
 

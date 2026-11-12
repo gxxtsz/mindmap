@@ -2,7 +2,7 @@
 
 `personal-workbench` 是桌面应用入口，负责设置应用名称和图标、装配通用运行时，并接入历史配置迁移。参见[工作台运行时](../../packages/workbench-runtime/README.md)。
 
-应用默认启用思维导图插件，支持 `.mindmap` 文件。可在“设置 → 插件管理”中调整启用状态，重启后生效。详见[思维导图插件](../../plugins/workbench-plugin-mindmap/README.md)。
+应用默认启用思维导图和软件结构可视化插件。可在“设置 → 插件管理”中调整启用状态，重启后生效。文件格式和用法见[思维导图](../../plugins/workbench-plugin-mindmap/README.md)和[软件结构可视化](../../plugins/workbench-plugin-software-structure/README.md)。
 
 ## 启动
 

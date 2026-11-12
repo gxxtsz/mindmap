@@ -18,8 +18,10 @@ def window(qtbot, tmp_path):
 
 
 def test_mindmap_editor_registers_and_routes_view_activation(window, tmp_path):
-    assert set(window.providers) == {"mindmap.editor"}
-    assert [(item.id, item.status) for item in window.plugins.records] == [("mindmap", "已启用")]
+    assert set(window.providers) == {"mindmap.editor", "software-structure.document"}
+    assert [(item.id, item.status) for item in window.plugins.records] == [
+        ("mindmap", "已启用"), ("software-structure", "已启用"),
+    ]
     assert window.new_document(tmp_path / "导图.mindmap")
     mindmap = window.documents.active
     mindmap.engine.update_node(mindmap.engine.root_id, text="导图内容")
@@ -46,9 +48,13 @@ def test_plugin_enable_switch_is_persisted_for_next_start(window, qtbot, tmp_pat
     window.dispose()
     restored = build_window(storage_dir=tmp_path / "配置", restore=False)
     qtbot.addWidget(restored, before_close_func=lambda item: item.dispose())
-    assert not restored.providers
+    assert set(restored.providers) == {"software-structure.document"}
     assert not restored.new_document()
-    assert [(item.id, item.status) for item in restored.plugins.records] == [("mindmap", "已禁用")]
+    assert not restored.action("app.new").isEnabled()
+    assert restored.action("app.open").isEnabled()
+    assert [(item.id, item.status) for item in restored.plugins.records] == [
+        ("mindmap", "已禁用"), ("software-structure", "已启用"),
+    ]
 
 
 @pytest.mark.parametrize("suffix", [".txt", ".MD"])

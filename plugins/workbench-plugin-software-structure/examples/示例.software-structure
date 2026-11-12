@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "modules": [
+    {"id": "app", "name": "应用入口", "description": "装配订单服务和商品服务。"},
+    {"id": "orders", "name": "订单服务", "description": "处理订单并发起支付。"},
+    {"id": "catalog", "name": "商品服务", "description": "查询商品目录。"},
+    {"id": "billing", "name": "支付适配", "description": "调用支付渠道，并与账本模块互相依赖。"},
+    {"id": "ledger", "name": "账本模块", "description": "记录付款流水。"},
+    {"id": "storage", "name": "数据存储", "description": "提供业务数据读写。"},
+    {"id": "cache", "name": "缓存模块", "description": "演示自依赖。"},
+    {"id": "diagnostics", "name": "巡检工具", "description": "演示没有依赖连线的模块。"}
+  ],
+  "module_dependencies": [
+    {"source": "app", "target": "orders"},
+    {"source": "app", "target": "catalog"},
+    {"source": "orders", "target": "billing"},
+    {"source": "orders", "target": "storage"},
+    {"source": "catalog", "target": "storage"},
+    {"source": "billing", "target": "ledger"},
+    {"source": "ledger", "target": "billing"},
+    {"source": "ledger", "target": "storage"},
+    {"source": "cache", "target": "cache"}
+  ]
+}

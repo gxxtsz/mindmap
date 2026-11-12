@@ -18,6 +18,7 @@ members = [
     "plugins/workbench-plugin-mindmap/qt-render",
     "plugins/workbench-plugin-mindmap/qt-editor",
     "plugins/workbench-plugin-mindmap/workbench-adapter",
+    "plugins/workbench-plugin-software-structure",
     "apps/*",
 ]
 
@@ -28,6 +29,7 @@ mindmap-qt-editor = { workspace = true }
 workbench-api = { workspace = true }
 workbench-runtime = { workspace = true }
 workbench-plugin-mindmap = { workspace = true }
+workbench-plugin-software-structure = { workspace = true }
 personal-workbench = { workspace = true }
 
 [dependency-groups]

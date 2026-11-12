@@ -93,6 +93,7 @@ def test_disabled_plugin_restart_preserves_document_and_panel_layout(workspace, 
     view_id = window.documents.active.id
     window.plugins.instance("mindmap").show_settings_panel()
     window.plugins.settings.setValue("enabled/mindmap", False)
+    window.plugins.settings.setValue("enabled/software-structure", False)
     assert window.close()
     directory = tmp_path / "配置"
     disabled = build_window(storage_dir=directory)

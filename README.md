@@ -28,8 +28,9 @@ uv run --locked --package personal-workbench personal-workbench
 | 插件 | 功能与保存方式 |
 | --- | --- |
 | [思维导图](plugins/workbench-plugin-mindmap/README.md) | `.mindmap` 编辑、布局、图片、页面和业务面板。绑定保存路径后防抖自动保存。 |
+| [软件结构可视化](plugins/workbench-plugin-software-structure/README.md) | 打开 `.software-structure` 文档并只读浏览模块依赖图。 |
 
-思维导图插件默认启用，可在“设置 → 插件管理”中调整，重启生效。相同导图的多个视图共享内容与撤销历史，各自保留页面和导航状态。
+内置插件默认启用，可在“设置 → 插件管理”中调整，重启生效。相同导图的多个视图共享内容与撤销历史，各自保留页面和导航状态。
 关闭时统一检查输入和保存决策，取消或失败时保留待关闭标签。会话配置只保存文档路径、视图状态和布局等元数据。
 
 ## 目录结构
@@ -45,9 +46,10 @@ plugins/
     qt-render/                  Qt 测量、静态绘制与图形导出
     qt-editor/                  Qt 交互画布、业务面板和共享控件
     workbench-adapter/          工作台插件入口、文档会话与自动保存
+  workbench-plugin-software-structure/  软件结构文档、模块依赖图和示例
 ```
 
-工作区包含 **7 个独立分发包**。通用包使用 `workbench-*` 名称，导图核心、渲染和编辑器使用 `mindmap-*`，导图工作台适配包为 `workbench-plugin-mindmap`，产品入口为 `personal-workbench`。
+工作区包含 **8 个独立分发包**。通用包使用 `workbench-*` 名称，导图核心、渲染和编辑器使用 `mindmap-*`，内置插件适配包使用 `workbench-plugin-*`，产品入口为 `personal-workbench`。
 各分发包的源码和测试分别位于自身的 `src/` 和 `tests/` 目录。运行时通过入口点发现插件。
 
 ## 配置兼容

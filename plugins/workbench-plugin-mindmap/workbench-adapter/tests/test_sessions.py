@@ -765,7 +765,10 @@ def test_open_dialog_works_without_session_and_cancel_preserves_active(empty_win
 
     monkeypatch.setattr(QFileDialog, "getOpenFileName", choose)
     assert empty_window.open_dialog()
-    assert dialogs == [("打开文件", "", "支持的文件 (*.mindmap);;导图 (*.mindmap)")]
+    [(title, directory, filters)] = dialogs
+    assert (title, directory) == ("打开文件", "")
+    supported, *formats = filters.split(";;")
+    assert "*.mindmap" in supported and "导图 (*.mindmap)" in formats
     session = empty_window.plugins.instance("mindmap").active_session
     assert session.engine.document.root.text == "已有文件"
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
@@ -792,7 +795,10 @@ def test_open_dialog_and_old_format_parameter_cannot_bypass_native_limit(empty_w
     for operation in (empty_window.open_path, empty_window.plugins.instance("mindmap").sessions.open_path, first.files.open_path):
         with pytest.raises(TypeError):
             operation(source, format_id="json")
-    assert selections == ["支持的文件 (*.mindmap);;导图 (*.mindmap)", "思维导图 (*.mindmap)"]
+    workbench_filter, mindmap_filter = selections
+    assert "导图 (*.mindmap)" in workbench_filter.split(";;")
+    assert "*.json" not in workbench_filter
+    assert mindmap_filter == "思维导图 (*.mindmap)"
     assert empty_window.plugins.instance("mindmap").active_session is first and len(empty_window.plugins.instance("mindmap").sessions) == 1
 
 

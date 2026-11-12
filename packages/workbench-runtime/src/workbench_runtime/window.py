@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from shiboken6 import isValid
-from workbench_api import OperationStatus, PluginContext
+from workbench_api import EditorProvider, OperationStatus, PluginContext
 from workbench_api.qt import MenuLocation
 
 from .commands import EditCommandRouter
@@ -34,7 +34,7 @@ from .ui.shell import ActionSpec, AppSpec, WorkbenchWindow
 
 
 class WelcomePage(QWidget):
-    """按已启用编辑器生成新建入口；空平台仍提供插件管理入口。"""
+    """为支持新建的编辑器生成入口，并提供打开文件和插件管理。"""
 
     def __init__(self, window):
         super().__init__()
@@ -45,7 +45,7 @@ class WelcomePage(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size:24px;font-weight:600;")
         layout.addWidget(title)
-        for identifier, (_owner, provider) in window.providers.items():
+        for identifier, provider in window._new_document_providers(respect_active_view=False).items():
             button = QPushButton("新建" + provider.title, self)
             button.setFixedWidth(180)
             button.clicked.connect(lambda checked=False, key=identifier: window.new_document(provider_id=key))
@@ -226,17 +226,40 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         self.record_operation(f"无法创建工具窗口 {tool_id}：{error}", level="error")
 
     def new_document(self, path=None, *, provider_id=None):
+        """按显式标识、文件后缀或当前活动视图选择支持新建的提供者。
+
+        显式选择的提供者无法新建时返回 False。省略标识和文件后缀时，活动文档的
+        提供者只支持打开则返回 False。有新建能力时优先选活动提供者，否则在没有
+        可用活动提供者时按注册顺序选取。
+        """
         if provider_id is None and path is not None and Path(path).suffix:
             provider_id = self.provider_for(path)
             if provider_id is None:
                 return False
         if provider_id is None:
-            provider_id = self.documents.providers.get(self.documents.active_id) or next(iter(self.providers), None)
-        if provider_id not in self.providers:
+            providers = self._new_document_providers()
+            active = self.documents.providers.get(self.documents.active_id)
+            provider_id = active if active in providers else next(iter(providers), None)
+        entry = self.providers.get(provider_id)
+        create = entry[1].new_document if entry is not None else None
+        if create is None:
             return False
-        result = self.providers[provider_id][1].new_document(Path(path) if path else None)
+        result = create(Path(path) if path else None)
         self._report_result(result)
         return bool(result)
+
+    def _new_document_providers(self, *, respect_active_view: bool = True) -> dict[str, EditorProvider]:
+        """按注册顺序返回具备新建回调的提供者。
+
+        文件菜单、快捷键和隐式新建共用当前文档的能力判断。欢迎页的按钮带有明确的
+        提供者标识，可以列出工作台中所有支持新建的类型。
+        """
+        if respect_active_view:
+            entry = self.providers.get(self.documents.providers.get(self.documents.active_id))
+            if entry is not None and entry[1].new_document is None:
+                return {}
+        return {identifier: provider for identifier, (_, provider) in self.providers.items()
+                if provider.new_document is not None}
 
     def provider_for(self, path):
         extension = Path(path).suffix.lower()
@@ -352,19 +375,21 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         return menu
 
     def _populate_new_menu(self, menu):
-        """单编辑器复用新建动作，多编辑器从子菜单选择，窗口快捷键始终可路由。"""
+        """按当前文档能力装配新建菜单，单项复用主动作，多项从子菜单选择。"""
         action = self.action("app.new")
-        if len(self.providers) == 1:
-            _owner, provider = next(iter(self.providers.values()))
+        providers = self._new_document_providers()
+        if not providers:
+            menu.removeAction(action)
+            return
+        if len(providers) == 1:
+            provider = next(iter(providers.values()))
             action.setText("新建" + provider.title)
             return
         action.setText("新建")
-        if not self.providers:
-            return
         choices = QMenu("新建", menu)
         choices.setIcon(action.icon())
         choices.menuAction().setProperty("workbench_icon", action.property("workbench_icon"))
-        for identifier, (_owner, provider) in self.providers.items():
+        for identifier, provider in providers.items():
             choice = choices.addAction(self.manager.theme.icon(provider.icon), provider.title)
             choice.triggered.connect(lambda checked=False, key=identifier:
                                      self.call(lambda: self.new_document(provider_id=key)))
@@ -443,12 +468,13 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
             return
         view = self.documents.active
         self.edit_commands.refresh()
-        usable = view is not None and not isinstance(view, MissingView)
+        writable = self.documents.can_save(view)
         for key in ("save", "save_as"):
-            self.action("app." + key).setEnabled(usable)
-        self.action("app.save_all").setEnabled(bool(self.documents.views))
+            self.action("app." + key).setEnabled(writable)
+        self.action("app.save_all").setEnabled(
+            any(self.documents.can_save(item) for item in self.documents.views.values()))
         self.action("app.open_directory").setEnabled(view is not None and view.document.path is not None)
-        self.action("app.new").setEnabled(bool(self.providers))
+        self.action("app.new").setEnabled(bool(self._new_document_providers()))
         self.action("app.open").setEnabled(bool(self.providers))
         title = self.config.title
         if view:
