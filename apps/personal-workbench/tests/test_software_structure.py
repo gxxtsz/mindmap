@@ -35,10 +35,10 @@ def window(qtbot, tmp_path):
 
 @pytest.fixture
 def graph_path(tmp_path):
-    root = Path(__file__).resolve().parents[3]
-    example = root / "plugins/workbench-plugin-software-structure/examples/示例.software-structure"
+    """将包含循环依赖、自依赖和孤立模块的测试图复制到每个用例的独立目录。"""
+    fixture_path = Path(__file__).parent / "data" / "示例.software-structure"
     path = tmp_path / "软件结构示例.software-structure"
-    path.write_bytes(example.read_bytes())
+    path.write_bytes(fixture_path.read_bytes())
     return path
 
 

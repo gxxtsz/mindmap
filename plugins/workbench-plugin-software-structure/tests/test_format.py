@@ -1,7 +1,7 @@
 """核对软件结构文档的版本、编码、字段和引用契约。"""
 
 import json
-from pathlib import Path
+from importlib.resources import as_file, files
 
 import pytest
 from workbench_plugin_software_structure.document import (
@@ -42,10 +42,12 @@ def test_empty_graph_and_omitted_dependencies(tmp_path):
     assert load_software_structure(path) == SoftwareStructure(())
 
 
-def test_bundled_example_is_a_valid_graph():
-    directory = Path(__file__).resolve().parents[1] / "examples"
-    example = load_software_structure(directory / "示例.software-structure")
-    assert example.modules and example.module_dependencies
+def test_bundled_template_is_a_valid_graph():
+    """从已安装的插件资源取得下载模板，使用正式读取器验证示例图数据。"""
+    resource = files("workbench_plugin_software_structure").joinpath("resources", "软件结构模板.software-structure")
+    with as_file(resource) as path:
+        template = load_software_structure(path)
+    assert template.modules and template.module_dependencies
 
 
 @pytest.mark.parametrize(("overrides", "message"), [

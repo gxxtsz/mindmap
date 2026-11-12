@@ -46,7 +46,7 @@ plugins/
     qt-render/                  Qt 测量、静态绘制与图形导出
     qt-editor/                  Qt 交互画布、业务面板和共享控件
     workbench-adapter/          工作台插件入口、文档会话与自动保存
-  workbench-plugin-software-structure/  软件结构文档、模块依赖图和示例
+  workbench-plugin-software-structure/  软件结构文档、模块依赖图和 AI 生成模板
 ```
 
 工作区包含 **8 个独立分发包**。通用包使用 `workbench-*` 名称，导图核心、渲染和编辑器使用 `mindmap-*`，内置插件适配包使用 `workbench-plugin-*`，产品入口为 `personal-workbench`。
