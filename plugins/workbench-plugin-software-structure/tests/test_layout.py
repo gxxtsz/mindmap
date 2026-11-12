@@ -1,5 +1,6 @@
 """验证分层顺序、交叉优化以及 Qt 路由的避让和箭头方向。"""
 
+import pytest
 from PySide6.QtCore import QSizeF
 from PySide6.QtGui import QPainterPathStroker
 from workbench_plugin_software_structure.document import Module, ModuleDependency, SoftwareStructure
@@ -75,16 +76,29 @@ def test_layout_accepts_empty_directory():
     assert build_layout((), (), frozenset()) == LayeredLayout((), (), (), (), {})
 
 
-def test_splines_avoid_nodes_and_point_to_the_original_target():
-    """用跨层边、公共组逆向边和自环检查真实曲线及箭头的边界。"""
+@pytest.mark.parametrize("public", [frozenset(), frozenset({"d", "e"})], ids=["ungrouped", "grouped"])
+def test_vertical_splines_avoid_nodes_and_point_to_the_original_target(public):
+    """校验有无公共分组时都按纵轴分层，并检查跨层边、逆向边和自环。"""
     sizes = {name: QSizeF(130 + index * 8, 38 + index * 5) for index, name in enumerate("abcde")}
     edges = tuple(ModuleDependency(source, target) for source, target in (
         ("a", "b"), ("b", "c"), ("c", "d"), ("a", "d"), ("d", "b"), ("c", "c"), ("b", "e"),
     ))
-    geometry = build_geometry(sizes, edges, frozenset({"d", "e"}))
-    assert geometry.public_bounds.contains(geometry.boxes["d"])
-    assert geometry.public_bounds.contains(geometry.boxes["e"])
-    assert all(not geometry.public_bounds.intersects(geometry.boxes[name]) for name in "abc")
+    geometry = build_geometry(sizes, edges, public)
+    source, target = geometry.boxes["a"], geometry.boxes["b"]
+    assert source.bottom() < target.top()
+    curve, arrow = geometry.edges[edges[0]]
+    assert curve.pointAtPercent(0).y() == source.bottom()
+    assert arrow[0].y() == target.top()
+    assert arrow[1].y() < arrow[0].y()
+
+    bounds = geometry.public_bounds
+    if public:
+        assert bounds is not None
+        assert all(bounds.contains(geometry.boxes[name]) for name in public)
+        assert all(not bounds.intersects(box) for name, box in geometry.boxes.items() if name not in public)
+    else:
+        assert bounds is None
+
     stroker = QPainterPathStroker()
     stroker.setWidth(1)
     for edge, (curve, arrow) in geometry.edges.items():

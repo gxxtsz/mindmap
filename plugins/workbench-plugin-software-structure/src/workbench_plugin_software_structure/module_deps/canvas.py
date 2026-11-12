@@ -16,7 +16,7 @@ from .layout import find_cyclic_dependencies
 
 _MAX_ZOOM = 4.0
 _MODULE_ID_ROLE = 0
-_VIEW_STATE_VERSION = 4
+_VIEW_STATE_VERSION = 5
 
 
 class ModuleDependencyCanvas(QGraphicsView):
@@ -349,8 +349,8 @@ class ModuleDependencyCanvas(QGraphicsView):
     def restore_viewport(self, state: dict | None) -> None:
         """先恢复可见依赖，再按该图的几何恢复视口。
 
-        版本 1 到 3 使用旧布局的场景坐标，旧中心落在新图之外时适配整图。文档变动后，
-        已不在公共分组的模块自动回到默认折叠状态。
+        旧版状态可能保存了横向布局的场景坐标。若旧中心落在新图之外，则保留已恢复的
+        依赖显示方式并适配整图。文档变动后，已移出公共分组的模块按普通模块显示。
         """
         self._restored_viewport = None
         self._initial_view_pending = True

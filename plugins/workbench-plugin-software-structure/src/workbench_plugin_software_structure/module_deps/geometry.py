@@ -2,7 +2,6 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import pairwise
 
@@ -177,16 +176,13 @@ def _ports(
     return endpoints
 
 
-def _join_lanes(
-    path: QPainterPath, point: Callable[[float, float], QPointF],
-    start: tuple[float, float], end: tuple[float, float],
-) -> None:
-    """只在两层之间调整横向坐标，曲线控制点完全位于两层的净空内。"""
-    main_a, cross_a = start
-    main_b, cross_b = end
-    middle = (main_a + main_b) / 2
-    path.lineTo(point(main_a, cross_a))
-    path.cubicTo(point(middle, cross_a), point(middle, cross_b), point(main_b, cross_b))
+def _join_lanes(path: QPainterPath, start: tuple[float, float], end: tuple[float, float]) -> None:
+    """在两层的净空内调整横向坐标，曲线两端沿纵轴接入相邻走线。"""
+    start_x, start_y = start
+    end_x, end_y = end
+    middle_y = (start_y + end_y) / 2
+    path.lineTo(start_x, start_y)
+    path.cubicTo(start_x, middle_y, end_x, middle_y, end_x, end_y)
 
 
 def _arrowhead(tip: QPointF, direction: QPointF) -> QPolygonF:
@@ -201,21 +197,18 @@ def _arrowhead(tip: QPointF, direction: QPointF) -> QPolygonF:
 def build_geometry(
     sizes: dict[str, QSizeF], dependencies: tuple[ModuleDependency, ...], public: frozenset[str],
 ) -> GraphGeometry:
-    """将内部布局转换成画布几何。有公共分组时沿纵轴排版，其余情况沿横轴排版。"""
+    """按从上往下的层级顺序生成节点矩形、依赖连线和箭头。
+
+    用节点高度计算各层的纵向位置，用节点宽度计算同层的横向间距。
+    有公共分组时，在首个公共层的上方为组标题预留空间。
+    """
     if not sizes:
         return GraphGeometry({}, {})
     layout = build_layout(sizes, dependencies, public)
-    vertical = bool(public)
-
-    def point(main: float, cross: float) -> QPointF:
-        return QPointF(cross, main) if vertical else QPointF(main, cross)
-
     virtual_count = len(layout.previous) - len(layout.modules)
-    main_sizes = [sizes[module].height() if vertical else sizes[module].width() for module in layout.modules]
-    cross_sizes = [sizes[module].width() if vertical else sizes[module].height() for module in layout.modules]
-    main_half = [size / 2 for size in main_sizes] + [0.0] * virtual_count
-    cross_half = [size / 2 for size in cross_sizes] + [0.0] * virtual_count
-    across = _cross_positions(layout, cross_half)
+    half_heights = [sizes[module].height() / 2 for module in layout.modules] + [0.0] * virtual_count
+    half_widths = [sizes[module].width() / 2 for module in layout.modules] + [0.0] * virtual_count
+    across = _cross_positions(layout, half_widths)
     ranks = [0] * len(across)
     starts, ends, centers = [], [], []
     cursor = 0.0
@@ -226,7 +219,7 @@ def build_geometry(
             # 公共模块在连续的末尾层。为组标题单独留高，避免外框覆盖前一层节点。
             public_started = True
             cursor += _GROUP_HEADER
-        extent = max((main_half[vertex] for vertex in layer), default=0.0)
+        extent = max((half_heights[vertex] for vertex in layer), default=0.0)
         starts.append(cursor)
         centers.append(cursor + extent)
         ends.append(cursor + 2 * extent)
@@ -238,47 +231,47 @@ def build_geometry(
     public_bounds = QRectF()
     for vertex, module_id in enumerate(layout.modules):
         rect = QRectF(QPointF(), sizes[module_id])
-        rect.moveCenter(point(centers[ranks[vertex]], across[vertex]))
+        rect.moveCenter(QPointF(across[vertex], centers[ranks[vertex]]))
         boxes[module_id] = rect
         if module_id in public:
             public_bounds = public_bounds.united(rect)
 
-    endpoints = _ports(layout, across, cross_half)
-    outer_start = min(position - half for position, half in zip(across, cross_half)) - _NODE_GAP
-    outer_end = max(position + half for position, half in zip(across, cross_half)) + _NODE_GAP
+    endpoints = _ports(layout, across, half_widths)
+    left_corridor = min(position - half for position, half in zip(across, half_widths)) - _NODE_GAP
+    right_corridor = max(position + half for position, half in zip(across, half_widths)) + _NODE_GAP
     edges = {}
     for edge, route in layout.routes.items():
         start, end = route[0], route[-1]
         first_rank, last_rank = ranks[start], ranks[end]
-        start_main = centers[first_rank] + main_half[start]
-        cross_a, cross_b = endpoints[edge, False], endpoints[edge, True]
-        path = QPainterPath(point(start_main, cross_a))
+        start_y = centers[first_rank] + half_heights[start]
+        start_x, end_x = endpoints[edge, False], endpoints[edge, True]
+        path = QPainterPath(QPointF(start_x, start_y))
         if start == end:
-            # 自依赖使用节点前方的净空。控制点限制在节点的横向范围内。
-            first_control = point(start_main + 30, max(across[start] - cross_half[start], cross_a - 12))
-            last_control = point(start_main + 30, min(across[start] + cross_half[start], cross_b + 12))
-            tip = point(start_main, cross_b)
+            # 自依赖使用节点下方的净空。控制点限制在节点的横向范围内。
+            first_control = QPointF(max(across[start] - half_widths[start], start_x - 12), start_y + 30)
+            last_control = QPointF(min(across[start] + half_widths[start], end_x + 12), start_y + 30)
+            tip = QPointF(end_x, start_y)
             path.cubicTo(first_control, last_control, tip)
             edges[edge] = path, _arrowhead(tip, tip - last_control)
             continue
 
         if len(route) == 2 and last_rank - first_rank > 1:
             # 极密集的图将部分长边送入外侧共享通道。两端均从层间净空转弯。
-            corridor = outer_start if cross_a + cross_b < outer_start + outer_end else outer_end
-            _join_lanes(path, point, (ends[first_rank], cross_a), (starts[first_rank + 1], corridor))
-            _join_lanes(path, point, (ends[last_rank - 1], corridor), (starts[last_rank], cross_b))
+            corridor = left_corridor if start_x + end_x < left_corridor + right_corridor else right_corridor
+            _join_lanes(path, (start_x, ends[first_rank]), (corridor, starts[first_rank + 1]))
+            _join_lanes(path, (corridor, ends[last_rank - 1]), (end_x, starts[last_rank]))
         else:
             # 跨过一层时沿其虚拟顶点直行，在两层之间以相同切线方向接上三次贝塞尔曲线。
-            lanes = (cross_a, *(across[vertex] for vertex in route[1:-1]), cross_b)
+            lanes = (start_x, *(across[vertex] for vertex in route[1:-1]), end_x)
             for rank, (lane_a, lane_b) in enumerate(pairwise(lanes), start=first_rank):
-                _join_lanes(path, point, (ends[rank], lane_a), (starts[rank + 1], lane_b))
-        tip = point(centers[last_rank] - main_half[end], cross_b)
+                _join_lanes(path, (lane_a, ends[rank]), (lane_b, starts[rank + 1]))
+        tip = QPointF(end_x, centers[last_rank] - half_heights[end])
         path.lineTo(tip)
-        direction = point(1, 0)
+        direction = QPointF(0, 1)
         if edge.source != layout.modules[start]:
             # 布局时可能逆转环内或跨组的边。最终沿文档中的实际方向放置箭头。
             path = path.toReversed()
-            tip, direction = path.currentPosition(), point(-1, 0)
+            tip, direction = path.currentPosition(), QPointF(0, -1)
         edges[edge] = path, _arrowhead(tip, direction)
 
     bounds = (public_bounds.adjusted(-_GROUP_PADDING, -_GROUP_HEADER, _GROUP_PADDING, _GROUP_PADDING)

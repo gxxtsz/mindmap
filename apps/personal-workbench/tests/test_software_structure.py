@@ -439,10 +439,13 @@ def test_public_dependency_click_and_all_view_follow_the_active_tab(window, tmp_
     assert _dependency_arrow_count(first) == 9 and not show_all.isChecked()
     assert canvas.zoom_factor > 0.1
 
-    # 上一版由 Graphviz 生成坐标，升级后继续恢复用户选择的依赖显示方式。
-    first.restore_state({"version": 2, "show_all_dependencies": True, "zoom": 0.1, "center": [20000, -20000]})
-    assert _dependency_arrow_count(first) == 15 and show_all.isChecked()
-    assert canvas.zoom_factor > 0.1
+    # 升级后保留全量显示。旧横排坐标落在纵向图之外时，重新适配整图。
+    for version in (2, 4):
+        first.restore_state({
+            "version": version, "show_all_dependencies": True, "zoom": 0.1, "center": [20000, -20000],
+        })
+        assert _dependency_arrow_count(first) == 15 and show_all.isChecked()
+        assert canvas.zoom_factor > 0.1
 
 
 def test_public_dependency_sidebar_autosaves_and_refreshes_shared_views(window, threshold_graph_path, qtbot):
@@ -685,7 +688,7 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
     assert restored.documents.active.id == copied.id
     assert restored.documents.views[first.id].document is restored.documents.views[copied.id].document
     assert restored.state.recent_files == [str(graph_path)]
-    controls, _, restored_zoom = _status_controls(restored)
+    controls, restored_fit, restored_zoom = _status_controls(restored)
     assert controls.isVisible()
     for view_id, state in states.items():
         restored.documents.activate_view(view_id)
@@ -693,8 +696,15 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
         qtbot.waitUntil(lambda: view.widget.transform().m11() == pytest.approx(state["zoom"]))
         assert view.capture_state()["center"] == pytest.approx(state["center"], abs=2)
         assert restored_zoom.text() == f"{state['zoom']:.0%}"
+    # 重启后视口尺寸可能变化。无效的旧视口应回到当前窗口的全图视图。
+    restored.documents.activate_view(first.id)
+    view = restored.documents.active
     view.restore_state({"version": 1, "zoom": float("nan"), "center": [0, 0]})
-    assert view.capture_state()["zoom"] == pytest.approx(fitted["zoom"])
+    fallback = view.capture_state()
+    qtbot.mouseClick(restored_fit, Qt.MouseButton.LeftButton)
+    fitted_after_restart = view.capture_state()
+    assert fallback["zoom"] == pytest.approx(fitted_after_restart["zoom"])
+    assert fallback["center"] == pytest.approx(fitted_after_restart["center"], abs=2)
     assert restored.close()
     assert graph_path.read_bytes() == original_bytes
 
