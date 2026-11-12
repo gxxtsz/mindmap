@@ -15,7 +15,7 @@ def write_atomic(target: Path, content: bytes, *, expected: bytes | None = None)
     try:
         if output.write(content) != len(content):
             raise OSError(f"文件内容写入不完整（{output.errorString()}）")
-        # 尽量靠近原子替换时读取原文件，避免应用阈值时覆盖外部已提交的修改。
+        # 尽量靠近原子替换时读取原文件，避免保存筛选时覆盖外部已提交的修改。
         if expected is not None and target.read_bytes() != expected:
             raise OSError("文件已在外部修改，请关闭该文件的全部标签后重新打开")
     except OSError:

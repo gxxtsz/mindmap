@@ -74,57 +74,38 @@ def find_cyclic_dependencies(document: SoftwareStructure) -> frozenset[ModuleDep
 
 
 def _assign_ranks(
-    order: list[int], public: set[int], previous: list[list[int]], following: list[list[int]],
+    order: list[int], previous: list[list[int]], following: list[list[int]],
 ) -> list[int]:
     """用最长路径构造可行分层，再整体缩短边跨度，最后均衡同价的层。"""
     ranks = [0] * len(order)
-    public_start = 0
     for vertex in order:
-        first_rank = public_start if vertex in public else 0
-        ranks[vertex] = max(first_rank, max((ranks[parent] + 1 for parent in previous[vertex]), default=0))
-        if vertex not in public:
-            public_start = max(public_start, ranks[vertex] + 1)
+        ranks[vertex] = max((ranks[parent] + 1 for parent in previous[vertex]), default=0)
 
-    last_rank = max(ranks, default=0)
     for traversal in (order[::-1], order):
         for vertex in traversal:
-            if vertex in public:
-                first, last = public_start, last_rank
-            else:
-                first, last = 0, public_start - 1
-            # 入边较多时前移、出边较多时后移。移动不跨过相邻节点，也不跨过公共分组边界。
+            # 入边较多时前移、出边较多时后移，移动范围由相邻节点的层级约束。
             before, after = previous[vertex], following[vertex]
             if len(before) > len(after):
-                ranks[vertex] = max(first, max(ranks[parent] + 1 for parent in before))
+                ranks[vertex] = max(ranks[parent] + 1 for parent in before)
             elif len(after) > len(before):
-                ranks[vertex] = min(last, min(ranks[child] - 1 for child in after))
+                ranks[vertex] = min(ranks[child] - 1 for child in after)
 
     constraints = [
         SpanConstraint(vertex, child, 1, 1)
         for vertex in order for child in following[vertex]
     ]
-    if 0 < len(public) < len(order):
-        # 以一个零权重的分界点约束整个公共分组，避免逐对添加跨组约束。
-        boundary = len(ranks)
-        ranks.append(public_start)
-        for vertex in order:
-            if vertex in public:
-                constraints.append(SpanConstraint(boundary, vertex, 0))
-            else:
-                constraints.append(SpanConstraint(vertex, boundary, 1))
-    optimized = minimize_spans(ranks, constraints)[:len(order)]
+    optimized = minimize_spans(ranks, constraints)
     rank_index = {rank: index for index, rank in enumerate(sorted(set(optimized)))}
     ranks = [rank_index[rank] for rank in optimized]
-    _balance_ranks(order, public, previous, following, ranks)
+    _balance_ranks(order, previous, following, ranks)
     return ranks
 
 
 def _balance_ranks(
-    order: list[int], public: set[int], previous: list[list[int]], following: list[list[int]], ranks: list[int],
+    order: list[int], previous: list[list[int]], following: list[list[int]], ranks: list[int],
 ) -> None:
     """把入边和出边同样多的模块移到更空的可行层，跨度代价保持相同。"""
     last_rank = max(ranks, default=-1)
-    public_start = min((ranks[vertex] for vertex in public), default=last_rank + 1)
     occupancy = [0] * (last_rank + 1)
     for rank in ranks:
         occupancy[rank] += 1
@@ -132,9 +113,8 @@ def _balance_ranks(
         before, after = previous[vertex], following[vertex]
         if not before or len(before) != len(after):
             continue
-        first, last = (public_start, last_rank) if vertex in public else (0, public_start - 1)
-        lower = max(first, max(ranks[parent] + 1 for parent in before))
-        upper = min(last, min(ranks[child] - 1 for child in after))
+        lower = max(ranks[parent] + 1 for parent in before)
+        upper = min(ranks[child] - 1 for child in after)
         if lower < upper:
             current = ranks[vertex]
             rank = min(range(lower, upper + 1), key=lambda item: (occupancy[item], abs(item - current), item))
@@ -250,24 +230,22 @@ def _sweep_layers(
 
 
 def build_layout(
-    module_ids: Iterable[str], dependencies: tuple[ModuleDependency, ...], public: frozenset[str],
+    module_ids: Iterable[str], dependencies: tuple[ModuleDependency, ...],
 ) -> LayeredLayout:
-    """按当前可见边计算层级、层内顺序和走线路径，不依赖 Qt 或外部程序。
+    """根据全部模块和直接依赖计算层级、层内顺序和走线路径。
 
-    深度优先完成顺序为环内边提供布局方向。公共模块占据连续的末尾若干层，
-    跨组反向依赖也只在布局计算时转向。长边在每个中间层占一个走线位置。
+    深度优先完成顺序为环内边提供布局方向，各条依赖保留原始身份，供绘制箭头
+    和应用筛选。长边通常在每个中间层占一个走线位置。
     """
     modules = tuple(sorted(module_ids))
     index = {module_id: vertex for vertex, module_id in enumerate(modules)}
-    public_vertices = {index[module_id] for module_id in public}
     outgoing = {vertex: [] for vertex in range(len(modules))}
     edges = sorted(dependencies, key=lambda edge: (edge.source, edge.target))
     for edge in edges:
         source, target = index[edge.source], index[edge.target]
-        if source != target and (source in public_vertices) == (target in public_vertices):
+        if source != target:
             outgoing[source].append(target)
     order = list(reversed(_finish_order(outgoing)))
-    order.sort(key=public_vertices.__contains__)
     order_index = {vertex: offset for offset, vertex in enumerate(order)}
     previous: list[list[int]] = [[] for _ in modules]
     following: list[list[int]] = [[] for _ in modules]
@@ -279,7 +257,7 @@ def build_layout(
         if start != end:
             previous[end].append(start)
             following[start].append(end)
-    ranks = _assign_ranks(order, public_vertices, previous, following)
+    ranks = _assign_ranks(order, previous, following)
     layers: list[list[int]] = [[] for _ in range(max(ranks, default=-1) + 1)]
     for vertex, rank in enumerate(ranks):
         layers[rank].append(vertex)

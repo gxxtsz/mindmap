@@ -19,3 +19,4 @@ htmlcov/
 .artifacts/
 
 *.mindmap
+*.software-structure

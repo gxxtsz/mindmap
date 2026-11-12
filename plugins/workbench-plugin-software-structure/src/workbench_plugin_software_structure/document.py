@@ -1,13 +1,14 @@
-"""校验软件结构文档，在原 JSON 文本中读写公共依赖阈值。"""
+"""校验软件结构文档，并在原 JSON 文本中保存连线筛选设置。"""
 
 import json
 import re
 from codecs import BOM_UTF8
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-MAX_COMPONENT_SIZE = 2_147_483_647
-_THRESHOLDS_FIELD = "public_dependency_thresholds"
+_HIDDEN_EDGE_MODULE_IDS = "hidden_edge_module_ids"
+_LEGACY_PUBLIC_DEPENDENCY = "is_public_dependency"
 _JSON_SPACE = re.compile(r"[ \t\r\n]*")
 
 
@@ -33,29 +34,16 @@ class ModuleDependency:
 
 
 @dataclass(frozen=True, slots=True)
-class PublicDependencyThresholds:
-    """保存严格比较的阈值。模块数和直接依赖比例都要超过相应数值才归为公共依赖。"""
-
-    component_size: int = 10
-    direct_dependent_percent: int = 50
-
-    def __post_init__(self) -> None:
-        """对文件加载和侧栏输入使用同一组整数约束，错误包含完整字段名。"""
-        for name, value, maximum in (
-            ("component_size", self.component_size, MAX_COMPONENT_SIZE),
-            ("direct_dependent_percent", self.direct_dependent_percent, 100),
-        ):
-            if type(value) is not int or not 0 <= value <= maximum:
-                raise SoftwareStructureFormatError(f"{_THRESHOLDS_FIELD}.{name} 必须是 0 至 {maximum} 之间的整数")
-
-
-@dataclass(frozen=True, slots=True)
 class SoftwareStructure:
-    """已校验的文档快照，包含模块目录、直接依赖和该文件的公共依赖阈值。"""
+    """已校验的文档快照，模块和依赖按文件顺序排列。
+
+    hidden_edge_module_ids 记录勾选的模块。依赖任意一端在集合中时，筛选视图
+    隐藏该依赖的线条和箭头。集合中的标识均来自当前文档的模块目录。
+    """
 
     modules: tuple[Module, ...]
     module_dependencies: tuple[ModuleDependency, ...] = ()
-    public_dependency_thresholds: PublicDependencyThresholds = PublicDependencyThresholds()
+    hidden_edge_module_ids: frozenset[str] = frozenset()
 
 
 def _required_text(record: dict, key: str, location: str) -> str:
@@ -108,6 +96,35 @@ def _read_dependencies(records: object, module_ids: set[str]) -> tuple[ModuleDep
     return tuple(dependencies)
 
 
+def _read_hidden_edge_module_ids(records: object, module_ids: set[str]) -> frozenset[str]:
+    """校验筛选列表中的每个条目，报告无效或重复标识所在的数组下标。"""
+    if not isinstance(records, list):
+        raise SoftwareStructureFormatError(f"{_HIDDEN_EDGE_MODULE_IDS} 必须是数组")
+    hidden = set()
+    for index, module_id in enumerate(records):
+        location = f"{_HIDDEN_EDGE_MODULE_IDS}[{index}]"
+        if not isinstance(module_id, str) or not module_id.strip():
+            raise SoftwareStructureFormatError(f"{location} 必须是非空字符串")
+        if module_id not in module_ids:
+            raise SoftwareStructureFormatError(f"{location} 引用了未声明的模块 ID（{module_id!r}）")
+        if module_id in hidden:
+            raise SoftwareStructureFormatError(f"{location} 与前面的模块 ID 重复（{module_id!r}）")
+        hidden.add(module_id)
+    return frozenset(hidden)
+
+
+def _read_legacy_edge_filter(records: list[dict], modules: tuple[Module, ...]) -> frozenset[str]:
+    """新字段缺省时读取旧勾选，按已校验的模块顺序迁移为隐藏连线的标识集合。"""
+    hidden = set()
+    for index, (record, module) in enumerate(zip(records, modules, strict=True)):
+        marked = record.get(_LEGACY_PUBLIC_DEPENDENCY, False)
+        if type(marked) is not bool:
+            raise SoftwareStructureFormatError(f"modules[{index}].{_LEGACY_PUBLIC_DEPENDENCY} 必须是布尔值")
+        if marked:
+            hidden.add(module.id)
+    return frozenset(hidden)
+
+
 def _reject_json_constant(value: str) -> None:
     raise SoftwareStructureFormatError(f"JSON 语法错误，数值 {value} 无效")
 
@@ -120,7 +137,8 @@ def load_software_structure(path: str | Path) -> SoftwareStructure:
 def read_software_structure(path: str | Path) -> tuple[SoftwareStructure, bytes]:
     """同一次读取返回已校验内容和原始字节，供保存时定位字段和检查外部改动。
 
-    支持 UTF-8 BOM、扩展字段、自依赖和循环依赖。读取或校验失败时抛出带中文说明的
+    支持 UTF-8 BOM、扩展字段、自依赖和循环依赖。优先读取顶层筛选列表（包括空列表），
+    缺省时在内存中迁移旧的公共依赖勾选。读取或校验失败时抛出带中文说明的
     SoftwareStructureFormatError，错误消息包含可用的行列或字段位置。
     """
     try:
@@ -148,25 +166,30 @@ def read_software_structure(path: str | Path) -> tuple[SoftwareStructure, bytes]
     if version != 1:
         raise SoftwareStructureFormatError(f"暂不支持 schema_version 为 {version} 的软件结构文件")
 
-    modules = _read_modules(data.get("modules"))
-    dependencies = _read_dependencies(data.get("module_dependencies", []), {module.id for module in modules})
-    settings = data.get(_THRESHOLDS_FIELD, {})
-    if not isinstance(settings, dict):
-        raise SoftwareStructureFormatError(f"{_THRESHOLDS_FIELD} 必须是对象")
-    defaults = PublicDependencyThresholds()
-    thresholds = PublicDependencyThresholds(
-        settings.get("component_size", defaults.component_size),
-        settings.get("direct_dependent_percent", defaults.direct_dependent_percent),
-    )
-    return SoftwareStructure(modules, dependencies, thresholds), snapshot
+    records = data.get("modules")
+    modules = _read_modules(records)
+    module_ids = {module.id for module in modules}
+    dependencies = _read_dependencies(data.get("module_dependencies", []), module_ids)
+    hidden = (_read_hidden_edge_module_ids(data[_HIDDEN_EDGE_MODULE_IDS], module_ids)
+              if _HIDDEN_EDGE_MODULE_IDS in data else _read_legacy_edge_filter(records, modules))
+    return SoftwareStructure(modules, dependencies, hidden), snapshot
 
 
-def _json_object_members(content: str, start: int) -> tuple[dict[str, tuple[int, int]], int, str]:
-    """记录已校验对象的值范围、追加位置和首个字段的缩进。"""
+@dataclass(frozen=True, slots=True)
+class _JsonMember:
+    """已校验对象的直接成员。start 指向成员前的空白，end 紧跟字段值。"""
+
+    key: str
+    start: int
+    value_start: int
+    end: int
+
+
+def _json_object_members(content: str, start: int) -> tuple[list[_JsonMember], str]:
+    """按原文顺序定位对象的直接成员与首个成员的缩进，保留重复键的位置。"""
     decode = json.JSONDecoder().raw_decode
     position = _JSON_SPACE.match(content, start).end() + 1
-    end = position
-    members = {}
+    members = []
     spacing = " "
     while content[key_start := _JSON_SPACE.match(content, position).end()] != "}":
         if not members:
@@ -176,40 +199,61 @@ def _json_object_members(content: str, start: int) -> tuple[dict[str, tuple[int,
         value_start = _JSON_SPACE.match(content, colon + 1).end()
         # 用 JSON 解码器跨过整个值。字符串转义、嵌套对象和数组中的分隔符都按 JSON 语义处理。
         _, end = decode(content, value_start)
-        members[key] = (value_start, end)
+        members.append(_JsonMember(key, position, value_start, end))
         delimiter = _JSON_SPACE.match(content, end).end()
         if content[delimiter] == "}":
             break
         position = delimiter + 1
-    return members, end, spacing
+    return members, spacing
 
 
-def rewrite_public_dependency_thresholds(snapshot: bytes, thresholds: PublicDependencyThresholds) -> bytes:
-    """在读取器返回的原始快照上编辑两个阈值，保留其余 JSON 文本、换行与 BOM。"""
+def _legacy_mark_ranges(content: str, array_start: int, count: int) -> Iterator[tuple[int, int, str]]:
+    """定位旧标记及其分隔逗号。连续的旧键一起删除，嵌套扩展字段留在原文中。"""
+    position = array_start + 1
+    for _ in range(count):
+        members, _ = _json_object_members(content, position)
+        previous_end = position
+        removal_start = None
+        for member in members:
+            if member.key == _LEGACY_PUBLIC_DEPENDENCY:
+                if removal_start is None:
+                    removal_start = member.start
+            else:
+                if removal_start is not None:
+                    yield removal_start, member.start, ""
+                    removal_start = None
+                previous_end = member.end
+        tail = members[-1].end
+        if removal_start is not None:
+            yield previous_end, tail, ""
+        # 跨过模块对象的右花括号和数组分隔逗号，下一轮从下一个对象前的空白开始。
+        after_object = _JSON_SPACE.match(content, tail).end() + 1
+        position = _JSON_SPACE.match(content, after_object).end() + 1
+
+
+def rewrite_edge_filter(snapshot: bytes, document: SoftwareStructure) -> bytes:
+    """将筛选设置和旧字段迁移写入同一份候选文件，供调用方一次原子提交。
+
+    document 来自已校验的 snapshot，仅更新了 hidden_edge_module_ids。按模块顺序
+    写入标识数组，清除筛选时写入空数组。替换顶层字段的值或按原缩进追加该字段，
+    同时移除模块对象上的旧公共依赖标记。其余字段、换行与 UTF-8 BOM 均取自原文。
+    """
     content = snapshot.decode("utf-8-sig")
-    members, tail, spacing = _json_object_members(content, 0)
-    values = {"component_size": thresholds.component_size,
-              "direct_dependent_percent": thresholds.direct_dependent_percent}
-    if bounds := members.get(_THRESHOLDS_FIELD):
-        members, tail, spacing = _json_object_members(content, bounds[0])
-        fields = {key: str(value) for key, value in values.items()}
+    members, spacing = _json_object_members(content, 0)
+    fields = {member.key: member for member in members}
+    edits = list(_legacy_mark_ranges(content, fields["modules"].value_start, len(document.modules)))
+    value = json.dumps([module.id for module in document.modules if module.id in document.hidden_edge_module_ids])
+    if field := fields.get(_HIDDEN_EDGE_MODULE_IDS):
+        edits.append((field.value_start, field.end, value))
     else:
-        fields = {_THRESHOLDS_FIELD: json.dumps(values)}
+        tail = members[-1].end
+        edits.append((tail, tail, f',{spacing}"{_HIDDEN_EDGE_MODULE_IDS}": {value}'))
 
-    edits = []
-    new_members = []
-    for key, value in fields.items():
-        if key in members:
-            start, end = members[key]
-            edits.append((start, end, value))
-        else:
-            new_members.append(f'{json.dumps(key)}: {value}')
-    if new_members:
-        separator = "," + spacing
-        addition = (separator if members else "") + separator.join(new_members)
-        edits.append((tail, tail, addition))
-    # 从后往前应用修改，前面的字段范围可继续使用原文坐标。
-    for start, end, value in sorted(edits, reverse=True):
-        content = content[:start] + value + content[end:]
+    parts = []
+    position = 0
+    for start, end, replacement in sorted(edits):
+        parts.extend((content[position:start], replacement))
+        position = end
+    parts.append(content[position:])
     bom = BOM_UTF8 if snapshot.startswith(BOM_UTF8) else b""
-    return bom + content.encode("utf-8")
+    return bom + "".join(parts).encode("utf-8")

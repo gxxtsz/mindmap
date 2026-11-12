@@ -43,6 +43,10 @@
       "sha256": "46d7882893f27bc1f2cb031684be6d651368c2392c1b72f2beeef596d0c4cb44"
     },
     {
+      "path": "icons/filter.svg",
+      "sha256": "b19bb3b5e75115ebc09b0a3528a6291bd03d4c623d20f86c8c89f0d20e7bf206"
+    },
+    {
       "path": "icons/fit-view.svg",
       "sha256": "7390408aa15f74517b4d30355b899177e58acbddcee0e9932f2daecdf2a7e590"
     },
@@ -121,6 +125,10 @@
     {
       "path": "icons/save.svg",
       "sha256": "1c5d4f12fe86ef8d30c8d0392a31871551e93a3af00ded48d849fe38ee732301"
+    },
+    {
+      "path": "icons/select-all.svg",
+      "sha256": "9b43fd150ea50114c8560e2719e04883ae86bce4af51778988650023579a4e3d"
     },
     {
       "path": "icons/settings.svg",

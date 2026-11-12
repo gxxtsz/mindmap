@@ -1,4 +1,4 @@
-"""工作台状态栏右侧的依赖显示和缩放控件。"""
+"""工作台状态栏右侧的连线筛选预览和缩放控件。"""
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import QHBoxLayout, QToolButton, QWidget
@@ -10,7 +10,7 @@ from .viewer import SoftwareStructureView
 
 
 class SoftwareStructureStatusControls(QWidget):
-    """每个工作台窗口复用一组按钮，依赖模式和缩放取自活动画布。"""
+    """每个工作台窗口复用一组按钮，连线筛选与缩放状态取自活动画布。"""
 
     def __init__(self, ui: UiService):
         """创建可用 Tab 键访问的按钮，鼠标点击时保留画布焦点。"""
@@ -23,13 +23,12 @@ class SoftwareStructureStatusControls(QWidget):
         layout.setContentsMargins(2, 0, 2, 0)
         layout.setSpacing(2)
 
-        self._all_button = QToolButton(self)
-        self._all_button.setObjectName("status_show_all_dependencies")
-        self._all_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self._all_button.setText("全部依赖")
-        self._all_button.setAccessibleName("全部依赖")
-        self._all_button.setCheckable(True)
-        self._all_button.clicked.connect(self._set_show_all_dependencies)
+        self._filter_button = QToolButton(self)
+        self._filter_button.setObjectName("status_dependency_filter")
+        self._filter_button.setIconSize(QSize(16, 16))
+        self._filter_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._filter_button.setCheckable(True)
+        self._filter_button.clicked.connect(self._set_filter_active)
 
         self._fit_button = QToolButton(self)
         self._fit_button.setObjectName("status_fit")
@@ -45,7 +44,7 @@ class SoftwareStructureStatusControls(QWidget):
         self._zoom_button.setAccessibleName("恢复默认尺寸")
         self._zoom_button.clicked.connect(self._reset_zoom)
 
-        for button in (self._all_button, self._fit_button, self._zoom_button):
+        for button in (self._filter_button, self._fit_button, self._zoom_button):
             button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             button.setEnabled(False)
             layout.addWidget(button)
@@ -53,7 +52,7 @@ class SoftwareStructureStatusControls(QWidget):
         self._sync_dependency_view()
 
     def bind_view(self, view: EditorView | None) -> None:
-        """切换活动画布。空图禁用缩放，关闭或切换标签时断开旧画布的信号。"""
+        """跟随活动画布的缩放和筛选状态，切换标签时断开旧画布的信号。"""
         canvas = None
         if isinstance(view, SoftwareStructureView) and view.document.content.modules:
             canvas = view.widget
@@ -83,14 +82,14 @@ class SoftwareStructureStatusControls(QWidget):
             f"QToolButton:pressed, QToolButton:checked {{ background:{pressed}; }}"
             f"QToolButton:focus {{ border-color:{focus}; }}"
         )
+        self._filter_button.setIcon(self._ui.theme_icon("filter"))
         # 与思维导图状态栏读取同一个主题资源，兼容尚未提供该图标的宿主。
         fit_icon = self._ui.theme_icon("fit-view")
         self._fit_button.setIcon(self._ui.theme_icon("maximize") if fit_icon.isNull() else fit_icon)
         compact = self._ui.compact
         height = 18 if compact else 20
-        self._all_button.setFixedSize(self._all_button.fontMetrics().horizontalAdvance(self._all_button.text()) + 14,
-                                      height)
-        self._fit_button.setFixedSize(22 if compact else 24, height)
+        for button in (self._filter_button, self._fit_button):
+            button.setFixedSize(22 if compact else 24, height)
         # 预留最大交互倍率的文字宽度，缩放时按钮位置保持稳定。
         self._zoom_button.setFixedSize(self._zoom_button.fontMetrics().horizontalAdvance("400%") + 10, height)
 
@@ -108,20 +107,21 @@ class SoftwareStructureStatusControls(QWidget):
             self._zoom_button.setAccessibleDescription(description)
 
     def _sync_dependency_view(self) -> None:
-        """仅在活动图存在折叠入边时提供切换，并同步当前标签的选中状态。"""
-        available = self._canvas is not None and self._canvas.has_folded_dependencies
-        show_all = available and self._canvas.shows_all_dependencies
-        self._all_button.setVisible(available)
-        self._all_button.setEnabled(available)
-        self._all_button.setChecked(show_all)
-        description = "返回总览并收起公共依赖入边" if show_all else "显示全部依赖，展开公共依赖入边"
-        self._all_button.setToolTip(description)
-        self._all_button.setAccessibleDescription(description)
+        """存在可隐藏连线时显示图标，高亮表示正在应用文件筛选。"""
+        canvas = self._canvas
+        available = canvas is not None and canvas.has_hidden_dependencies
+        show_all = canvas is not None and canvas.shows_all_dependencies
+        self._filter_button.setVisible(available)
+        self._filter_button.setEnabled(available)
+        self._filter_button.setChecked(available and not show_all)
+        action = "恢复连线筛选" if show_all else "显示全部连线"
+        self._filter_button.setToolTip(action)
+        self._filter_button.setAccessibleName(action)
 
-    def _set_show_all_dependencies(self, show_all: bool) -> None:
-        """把状态栏操作转给活动标签，每个分屏各自保存显示方式。"""
+    def _set_filter_active(self, active: bool) -> None:
+        """把状态栏切换转给活动标签，取消按下状态时临时显示完整连线。"""
         if self._canvas is not None:
-            self._canvas.set_show_all_dependencies(show_all)
+            self._canvas.set_show_all_dependencies(not active)
 
     def _fit_to_view(self) -> None:
         if self._canvas is not None:

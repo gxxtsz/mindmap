@@ -15,19 +15,16 @@ from .layout import LayeredLayout, build_layout
 _RANK_GAP = 46.0
 _NODE_GAP = 22.0
 _LANE_GAP = 7.0
-_GROUP_PADDING = 18.0
-_GROUP_HEADER = 28.0
 _COORDINATE_SCALE = 2
 _SINGLE_MODULE_ALIGNMENT_WEIGHT = 64
 
 
 @dataclass(frozen=True, slots=True)
 class GraphGeometry:
-    """Qt 画布所需的节点矩形、依赖曲线与箭头，以及可选的公共依赖分组。"""
+    """Qt 画布所需的全部节点矩形、依赖曲线与箭头，依赖按原始方向索引。"""
 
     boxes: dict[str, QRectF]
     edges: dict[ModuleDependency, tuple[QPainterPath, QPolygonF]]
-    public_bounds: QRectF | None = None
 
 
 def _align_layer(
@@ -195,16 +192,16 @@ def _arrowhead(tip: QPointF, direction: QPointF) -> QPolygonF:
 
 
 def build_geometry(
-    sizes: dict[str, QSizeF], dependencies: tuple[ModuleDependency, ...], public: frozenset[str],
+    sizes: dict[str, QSizeF], dependencies: tuple[ModuleDependency, ...],
 ) -> GraphGeometry:
-    """按从上往下的层级顺序生成节点矩形、依赖连线和箭头。
+    """按从上往下的层级顺序生成完整的节点矩形、依赖连线和箭头。
 
     用节点高度计算各层的纵向位置，用节点宽度计算同层的横向间距。
-    有公共分组时，在首个公共层的上方为组标题预留空间。
+    调用方传入完整依赖，之后可按筛选设置单独控制图元的可见性。
     """
     if not sizes:
         return GraphGeometry({}, {})
-    layout = build_layout(sizes, dependencies, public)
+    layout = build_layout(sizes, dependencies)
     virtual_count = len(layout.previous) - len(layout.modules)
     half_heights = [sizes[module].height() / 2 for module in layout.modules] + [0.0] * virtual_count
     half_widths = [sizes[module].width() / 2 for module in layout.modules] + [0.0] * virtual_count
@@ -212,13 +209,7 @@ def build_geometry(
     ranks = [0] * len(across)
     starts, ends, centers = [], [], []
     cursor = 0.0
-    public_started = False
     for rank, layer in enumerate(layout.layers):
-        if not public_started and any(vertex < len(layout.modules) and layout.modules[vertex] in public
-                                      for vertex in layer):
-            # 公共模块在连续的末尾层。为组标题单独留高，避免外框覆盖前一层节点。
-            public_started = True
-            cursor += _GROUP_HEADER
         extent = max((half_heights[vertex] for vertex in layer), default=0.0)
         starts.append(cursor)
         centers.append(cursor + extent)
@@ -228,13 +219,10 @@ def build_geometry(
             ranks[vertex] = rank
 
     boxes = {}
-    public_bounds = QRectF()
     for vertex, module_id in enumerate(layout.modules):
         rect = QRectF(QPointF(), sizes[module_id])
         rect.moveCenter(QPointF(across[vertex], centers[ranks[vertex]]))
         boxes[module_id] = rect
-        if module_id in public:
-            public_bounds = public_bounds.united(rect)
 
     endpoints = _ports(layout, across, half_widths)
     left_corridor = min(position - half for position, half in zip(across, half_widths)) - _NODE_GAP
@@ -269,11 +257,9 @@ def build_geometry(
         path.lineTo(tip)
         direction = QPointF(0, 1)
         if edge.source != layout.modules[start]:
-            # 布局时可能逆转环内或跨组的边。最终沿文档中的实际方向放置箭头。
+            # 布局时可能逆转环内的边。最终沿文档中的实际方向放置箭头。
             path = path.toReversed()
             tip, direction = path.currentPosition(), QPointF(0, -1)
         edges[edge] = path, _arrowhead(tip, direction)
 
-    bounds = (public_bounds.adjusted(-_GROUP_PADDING, -_GROUP_HEADER, _GROUP_PADDING, _GROUP_PADDING)
-              if public else None)
-    return GraphGeometry(boxes, edges, bounds)
+    return GraphGeometry(boxes, edges)

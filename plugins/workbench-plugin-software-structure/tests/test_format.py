@@ -1,19 +1,18 @@
 """核对软件结构文档的版本、编码、字段和引用契约。"""
 
 import json
+from dataclasses import replace
 from importlib.resources import as_file, files
 
 import pytest
 from workbench_plugin_software_structure.document import (
-    MAX_COMPONENT_SIZE,
     Module,
     ModuleDependency,
-    PublicDependencyThresholds,
     SoftwareStructure,
     SoftwareStructureFormatError,
     load_software_structure,
     read_software_structure,
-    rewrite_public_dependency_thresholds,
+    rewrite_edge_filter,
 )
 
 
@@ -22,7 +21,8 @@ def test_reads_bom_case_sensitive_ids_and_extra_fields(tmp_path):
     data = {
         "schema_version": 1,
         "modules": [
-            {"id": "Core", "name": "核心", "description": "共享业务能力", "extensions": {}},
+            {"id": "Core", "name": "核心", "description": "共享业务能力",
+             "is_public_dependency": True, "extensions": {}},
             {"id": "core", "name": "适配"},
         ],
         "module_dependencies": [
@@ -37,6 +37,7 @@ def test_reads_bom_case_sensitive_ids_and_extra_fields(tmp_path):
     assert load_software_structure(path) == SoftwareStructure(
         (Module("Core", "核心", "共享业务能力"), Module("core", "适配")),
         (ModuleDependency("core", "Core"), ModuleDependency("Core", "core"), ModuleDependency("Core", "Core")),
+        frozenset({"Core"}),
     )
 
 
@@ -46,57 +47,59 @@ def test_empty_graph_and_omitted_dependencies(tmp_path):
     assert load_software_structure(path) == SoftwareStructure(())
 
 
-@pytest.mark.parametrize(("fields", "expected"), [
-    ({}, PublicDependencyThresholds()),
-    ({"component_size": 0}, PublicDependencyThresholds(0, 50)),
-    ({"direct_dependent_percent": 100}, PublicDependencyThresholds(10, 100)),
-    ({"component_size": MAX_COMPONENT_SIZE, "direct_dependent_percent": 0},
-     PublicDependencyThresholds(MAX_COMPONENT_SIZE, 0)),
-])
-def test_thresholds_default_each_omitted_field(tmp_path, fields, expected):
-    """两个可选阈值可分别缺省，允许输入控件支持的端点。"""
-    path = tmp_path / "阈值.software-structure"
-    path.write_text(json.dumps({"schema_version": 1, "modules": [], "public_dependency_thresholds": fields}),
-                    encoding="utf-8")
-    assert load_software_structure(path).public_dependency_thresholds == expected
+@pytest.mark.parametrize("hidden", [[], ["core"]])
+def test_saved_filter_takes_precedence_over_legacy_marks(tmp_path, hidden):
+    """新字段存在时以其为准，空列表也能覆盖旧勾选。"""
+    path = tmp_path / "筛选优先.software-structure"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": "Core", "name": "核心", "is_public_dependency": True}, {"id": "core", "name": "适配"}],
+        "hidden_edge_module_ids": hidden,
+    }), "utf-8")
+    assert load_software_structure(path).hidden_edge_module_ids == frozenset(hidden)
 
 
-def test_threshold_rewrite_preserves_bom_and_unrelated_json_text(tmp_path):
-    """保留 CRLF、制表符和扩展值的数字字面量，同时覆盖旧值并补入缺失项。"""
+def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_path):
+    """在一次重写中移除直接旧键，保留 CRLF、缩进、旧阈值和扩展字段。"""
     path = tmp_path / "保留原文.software-structure"
     original = (
         '\ufeff{\r\n'
         '\t"schema_version": 1,\r\n'
-        '\t"modules": [{"id": "core", "name": "核心 } \\"模块", "component_size": 4}],\r\n'
-        '\t"public_dependency_thresholds": {\r\n'
-        '\t\t"component_size": 4,\r\n'
-        '\t\t"扩展": {"direct_dependent_percent": 1.234567890123456789e400}\r\n'
-        '\t},\r\n'
-        '\t"其它": ["public_dependency_thresholds", "}"]\r\n'
+        '\t"modules": [\r\n'
+        '\t\t{"is_public_dependency": false, "id": "core", "name": "核心 } \\"模块", '
+        '"is_public_dependency": false},\r\n'
+        '\t\t{\r\n'
+        '\t\t\t"id": "Core",\r\n'
+        '\t\t\t"is_public_dependency": false,\r\n'
+        '\t\t\t"is_public_\\u0064ependency": true,\r\n'
+        '\t\t\t"name": "核心 } \\"模块",\r\n'
+        '\t\t\t"扩展": {"is_public_dependency": 1.234567890123456789e400}\r\n'
+        '\t\t}\r\n'
+        '\t],\r\n'
+        '\t"public_dependency_thresholds": {"component_size": 0, "direct_dependent_percent": 0},\r\n'
+        '\t"其它": ["is_public_dependency", "}"]\r\n'
         '}\r\n'
     ).encode("utf-8")
     path.write_bytes(original)
     document, snapshot = read_software_structure(path)
-    assert document.public_dependency_thresholds == PublicDependencyThresholds(4, 50)
-    assert snapshot == original
-    thresholds = PublicDependencyThresholds(0, 100)
-    updated = rewrite_public_dependency_thresholds(snapshot, thresholds)
-    assert updated == original.replace(b'\t\t"component_size": 4,', b'\t\t"component_size": 0,').replace(
-        b'e400}\r\n\t},', b'e400},\r\n\t\t"direct_dependent_percent": 100\r\n\t},',
+    assert document.hidden_edge_module_ids == {"Core"}
+    assert snapshot == original == path.read_bytes()
+    checked = replace(document, hidden_edge_module_ids=frozenset({"Core", "core"}))
+    updated = rewrite_edge_filter(snapshot, checked)
+    expected = (
+        original.replace(b'"is_public_dependency": false,', b'', 1)
+        .replace(b', "is_public_dependency": false}', b'}', 1)
+        .replace(b'\t\t\t"is_public_dependency": false,\r\n\t\t\t"is_public_\\u0064ependency": true,\r\n', b'')
+        .replace(b'\r\n}\r\n', b',\r\n\t"hidden_edge_module_ids": ["core", "Core"]\r\n}\r\n')
     )
+    assert updated == expected
     path.write_bytes(updated)
-    assert load_software_structure(path).public_dependency_thresholds == thresholds
-
-
-@pytest.mark.parametrize("members", [b"", b',"public_dependency_thresholds":{}',
-                                     b',"public_dependency_thresholds":{"component_size":1}'])
-def test_threshold_rewrite_adds_missing_fields(tmp_path, members):
-    """缺少设置对象、空对象或缺少单项时均可写入两个值。"""
-    path = tmp_path / "缺省阈值.software-structure"
-    snapshot = b'{"schema_version":1,"modules":[]' + members + b'}\n'
-    thresholds = PublicDependencyThresholds(10, 60)
-    path.write_bytes(rewrite_public_dependency_thresholds(snapshot, thresholds))
-    assert load_software_structure(path) == SoftwareStructure((), public_dependency_thresholds=thresholds)
+    assert load_software_structure(path) == checked
+    cleared = replace(document, hidden_edge_module_ids=frozenset())
+    unchecked = rewrite_edge_filter(updated, cleared)
+    assert unchecked == updated.replace(b'["core", "Core"]', b'[]')
+    path.write_bytes(unchecked)
+    assert load_software_structure(path) == cleared
 
 
 def test_bundled_template_is_a_valid_graph():
@@ -116,21 +119,22 @@ def test_bundled_template_is_a_valid_graph():
     ({"modules": [{"id": " ", "name": "应用"}]}, "modules[0].id 必须是非空字符串"),
     ({"modules": [{"id": "app", "name": 12}]}, "modules[0].name 必须是非空字符串"),
     ({"modules": [{"id": "app", "name": "应用", "description": None}]}, "modules[0].description 必须是字符串"),
+    ({"modules": [{"id": "app", "name": "应用", "is_public_dependency": None}]},
+     "modules[0].is_public_dependency 必须是布尔值"),
+    ({"modules": [{"id": "app", "name": "应用", "is_public_dependency": 1}]},
+     "modules[0].is_public_dependency 必须是布尔值"),
+    ({"modules": [{"id": "app", "name": "应用", "is_public_dependency": "true"}]},
+     "modules[0].is_public_dependency 必须是布尔值"),
     ({"modules": [{"id": "app", "name": "应用"}] * 2}, "modules[1].id 与前面的模块 ID 重复"),
     ({"module_dependencies": {}}, "module_dependencies 必须是数组"),
     ({"module_dependencies": [False]}, "module_dependencies[0] 必须是对象"),
     ({"module_dependencies": [{"target": "app"}]}, "module_dependencies[0].source 必须是非空字符串"),
     ({"module_dependencies": [{"source": "app", "target": "App"}]}, "module_dependencies[0].target 引用了未声明"),
     ({"module_dependencies": [{"source": "app", "target": "app"}] * 2}, "module_dependencies[1] 与前面的依赖重复"),
-    ({"public_dependency_thresholds": None}, "public_dependency_thresholds 必须是对象"),
-    ({"public_dependency_thresholds": {"component_size": True}}, "public_dependency_thresholds.component_size"),
-    ({"public_dependency_thresholds": {"component_size": -1}}, "public_dependency_thresholds.component_size"),
-    ({"public_dependency_thresholds": {"component_size": MAX_COMPONENT_SIZE + 1}},
-     "public_dependency_thresholds.component_size"),
-    ({"public_dependency_thresholds": {"direct_dependent_percent": 50.0}},
-     "public_dependency_thresholds.direct_dependent_percent"),
-    ({"public_dependency_thresholds": {"direct_dependent_percent": 101}},
-     "public_dependency_thresholds.direct_dependent_percent"),
+    ({"hidden_edge_module_ids": None}, "hidden_edge_module_ids 必须是数组"),
+    ({"hidden_edge_module_ids": [True]}, "hidden_edge_module_ids[0] 必须是非空字符串"),
+    ({"hidden_edge_module_ids": ["App"]}, "hidden_edge_module_ids[0] 引用了未声明"),
+    ({"hidden_edge_module_ids": ["app", "app"]}, "hidden_edge_module_ids[1] 与前面的模块 ID 重复"),
 ])
 def test_invalid_fields_include_their_location(tmp_path, overrides, message):
     path = tmp_path / "损坏.software-structure"

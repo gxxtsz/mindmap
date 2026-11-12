@@ -4,16 +4,16 @@ from workbench_api import Disposable, PluginContext, PluginManifest
 
 
 def activate(context: PluginContext) -> Disposable:
-    """通过宿主公开接口登记模板下载、文档提供者、状态栏和公共依赖侧栏。
+    """通过宿主公开接口登记模板下载、文档提供者、状态栏和连线筛选侧栏。
 
     下载命令由插件上下文托管，文件菜单和各软件结构视图共用该动作。
     状态栏按活动视图切换画布，返回的注销句柄在移除控件前断开订阅并释放画布引用。
     """
     from workbench_api.qt import CommandSpec, MenuLocation, StatusItemSpec
 
+    from .dependency_filter_panel import register_dependency_filter_panel
     from .status_controls import SoftwareStructureStatusControls
     from .template import DOWNLOAD_TEMPLATE_COMMAND_ID, download_template
-    from .threshold_panel import register_public_dependency_panel
     from .viewer import SoftwareStructureView, register_document_provider
 
     download = context.commands.register(CommandSpec(
@@ -28,7 +28,7 @@ def activate(context: PluginContext) -> Disposable:
     controls = SoftwareStructureStatusControls(context.ui)
     registrations = (
         provider,
-        register_public_dependency_panel(context),
+        register_dependency_filter_panel(context),
         context.ui.register_status(StatusItemSpec(
             "software-structure.view", controls,
             lambda: isinstance(context.documents.active, SoftwareStructureView),

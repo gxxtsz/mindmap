@@ -1,19 +1,15 @@
-"""接入工作台的软件结构文档、阈值自动保存、标签复制和会话恢复。"""
+"""接入工作台的软件结构文档、连线筛选保存、标签复制和会话恢复。"""
 
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QAction
 from workbench_api import Disposable, EditorProvider, OperationResult, PluginContext, SavePolicy
 
-from .document import (
-    PublicDependencyThresholds,
-    read_software_structure,
-    rewrite_public_dependency_thresholds,
-)
+from .document import read_software_structure, rewrite_edge_filter
 from .module_deps.canvas import ModuleDependencyCanvas
 from .storage import write_atomic
 from .template import DOWNLOAD_TEMPLATE_COMMAND_ID
@@ -22,12 +18,12 @@ _PROVIDER_ID = "software-structure.document"
 
 
 class SoftwareStructureDocument(QObject):
-    """同一路径的标签共享模块、依赖和最近一次保存成功的阈值。"""
+    """同一路径的标签共享模块、依赖和最近一次保存成功的连线筛选设置。"""
 
     save_policy = SavePolicy.READ_ONLY
     is_dirty = False
-    thresholds_changed = Signal(object)
-    threshold_save_failed = Signal()
+    # 每次文件提交成功后发送一次最新文档快照，供各个画布和侧栏统一回显。
+    edge_filter_changed = Signal(object)
 
     def __init__(self, context: PluginContext, path: Path):
         """绑定绝对路径，读取用于显示的文档和自动保存所需的磁盘快照。"""
@@ -36,11 +32,6 @@ class SoftwareStructureDocument(QObject):
         self._context = context
         self._path = path
         self.content, self._snapshot = read_software_structure(path)
-        self._pending_thresholds: PublicDependencyThresholds | None = None
-        self._threshold_timer = QTimer(self)
-        self._threshold_timer.setSingleShot(True)
-        self._threshold_timer.setInterval(250)
-        self._threshold_timer.timeout.connect(self.flush_public_dependency_thresholds)
 
     @property
     def path(self) -> Path:
@@ -53,39 +44,49 @@ class SoftwareStructureDocument(QObject):
         return self.path.as_uri()
 
     def save(self, *, save_as: bool = False, reason: str = "explicit") -> OperationResult:
-        """通过宿主的只读策略处理通用保存动作，阈值通过侧栏独立提交。"""
+        """通过宿主的只读策略处理通用保存动作，连线筛选由侧栏直接保存。"""
         return OperationResult.cancelled("软件结构的模块与连线为只读")
 
-    def queue_public_dependency_thresholds(self, thresholds: PublicDependencyThresholds) -> None:
-        """合并短时间内的连续输入，待保存值与当前文档绑定。"""
-        if thresholds == self.content.public_dependency_thresholds:
-            self._pending_thresholds = None
-            self._threshold_timer.stop()
-        else:
-            self._pending_thresholds = thresholds
-            self._threshold_timer.start()
+    def set_module_edges_hidden(self, module_id: str, hidden: bool) -> bool:
+        """保存指定模块的勾选，hidden 为 True 时筛掉与它相连的入边和出边。
 
-    def flush_public_dependency_thresholds(self) -> None:
-        """立即提交排队的阈值。成功后将新快照广播给同文件的各个标签。"""
-        self._threshold_timer.stop()
-        thresholds, self._pending_thresholds = self._pending_thresholds, None
-        if thresholds is None:
-            return
+        module_id 按文档中的原始标识匹配，未知标识抛出 ValueError。成功或勾选未变
+        时返回 True。保存失败时报告原因并返回 False，侧栏据最近成功的快照还原勾选。
+        """
+        if all(module.id != module_id for module in self.content.modules):
+            raise ValueError(f"未找到模块 ID（{module_id!r}）")
+        current = self.content.hidden_edge_module_ids
+        updated = current | {module_id} if hidden else current - {module_id}
+        return self._save_edge_filter(updated)
 
+    def set_all_module_edges_hidden(self, hidden: bool) -> bool:
+        """一次提交勾选全部模块（True）或清除全部勾选（False）的结果。
+
+        孤立模块也参与批量勾选。保存成功后通知本文件的所有标签，失败时保留最近
+        成功的快照并返回 False。勾选未变时直接返回 True。
+        """
+        updated = frozenset(module.id for module in self.content.modules) if hidden else frozenset()
+        return self._save_edge_filter(updated)
+
+    def _save_edge_filter(self, hidden_edge_module_ids: frozenset[str]) -> bool:
+        """用打开或上次保存的字节检查外部修改，提交后才替换快照并通知视图。"""
+        if hidden_edge_module_ids == self.content.hidden_edge_module_ids:
+            return True
+
+        content = replace(self.content, hidden_edge_module_ids=hidden_edge_module_ids)
         try:
-            snapshot = rewrite_public_dependency_thresholds(self._snapshot, thresholds)
+            snapshot = rewrite_edge_filter(self._snapshot, content)
             write_atomic(self.path, snapshot, expected=self._snapshot)
         except OSError as error:
-            # 文件提交失败时，侧栏从文档取回上一次成功值，画布继续使用该快照。
-            self.threshold_save_failed.emit()
-            message = f"保存公共依赖阈值失败：{error}"
+            message = f"保存连线筛选失败：{error}"
             self._context.log(message, level="error", source=self.path.name, source_path=str(self.path))
             self._context.ui.show_message(message)
-            return
+            return False
 
         self._snapshot = snapshot
-        self.content = replace(self.content, public_dependency_thresholds=thresholds)
-        self.thresholds_changed.emit(self.content)
+        self.content = content
+        self.edge_filter_changed.emit(content)
+        return True
 
 
 class SoftwareStructureView:
@@ -101,8 +102,7 @@ class SoftwareStructureView:
         self._apply_theme()
         self._theme_subscription: Disposable | None = context.ui.subscribe_theme(self._apply_theme)
         self.widget.viewport_changed.connect(self._view_state_changed)
-        self.widget.dependency_view_changed.connect(self._view_state_changed)
-        self.document.thresholds_changed.connect(self.widget.apply_public_dependency_thresholds)
+        self.document.edge_filter_changed.connect(self.widget.apply_edge_filter)
 
     @property
     def title(self) -> str:
@@ -121,22 +121,20 @@ class SoftwareStructureView:
         return (self._context.ui.action(DOWNLOAD_TEMPLATE_COMMAND_ID),)
 
     def prepare_input(self) -> bool:
-        """宿主切换或关闭标签前，立即保存该文档在侧栏中的有效输入。"""
-        self.document.flush_public_dependency_thresholds()
+        """勾选操作在当次事件中提交，标签切换或关闭时可直接放行。"""
         return True
 
     def capture_state(self) -> dict:
-        """捕获本标签的可序列化视口，供复制标签和工作台会话存储使用。"""
+        """捕获本标签的缩放和位置，供复制和会话恢复使用。临时预览只在当前标签生效。"""
         return self.widget.capture_viewport()
 
     def restore_state(self, state: dict | None) -> None:
-        """在画布具有实际尺寸后恢复视口，无效状态由画布回退为全图适配。"""
+        """应用文件筛选，在画布具有实际尺寸后恢复视口，无效状态回退为全图适配。"""
         self.widget.restore_viewport(state)
 
     def duplicate(self) -> OperationResult:
         """将同一文档的独立画布插在源标签之后，从源标签当前视口开始浏览。"""
         try:
-            self.document.flush_public_dependency_thresholds()
             return _register_view(self._context, self.document, state=self.capture_state(),
                                   after=self.id, remember=False)
         except Exception as error:
@@ -147,13 +145,12 @@ class SoftwareStructureView:
             return OperationResult.failed(error, reported=True)
 
     def dispose(self) -> None:
-        """幂等断开主题、视图状态和阈值通知，宿主负责已登记控件的销毁。"""
+        """幂等断开主题、视口和文件筛选通知，宿主负责已登记控件的销毁。"""
         if self._theme_subscription is not None:
             self._theme_subscription.dispose()
             self._theme_subscription = None
             self.widget.viewport_changed.disconnect(self._view_state_changed)
-            self.widget.dependency_view_changed.disconnect(self._view_state_changed)
-            self.document.thresholds_changed.disconnect(self.widget.apply_public_dependency_thresholds)
+            self.document.edge_filter_changed.disconnect(self.widget.apply_edge_filter)
 
     def _apply_theme(self, *_):
         self.widget.apply_theme(self._context.ui.theme_color)

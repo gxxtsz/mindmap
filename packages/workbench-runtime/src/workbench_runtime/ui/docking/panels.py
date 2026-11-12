@@ -196,8 +196,8 @@ class ToolPanel(QFrame):
                 'QToolButton[mindmap_header_icon="true"] { padding:0; }'
                 'QToolButton[mindmap_header_icon="true"]::menu-indicator { image:none; width:0; height:0; }'
             )
-        # 底层完整填色，四角由同一抗锯齿覆盖层绘制，避免双重圆角混色与子控件露角。
-        self.setStyleSheet(f"QFrame#{self.objectName()} {{ background:{theme.css('tool-window-bg')}; border:0; }}")
+        # 按控件类型填充底色，使标识含点号的插件面板也能着色。四角由抗锯齿覆盖层绘制。
+        self.setStyleSheet(f"ToolPanel {{ background:{theme.css('tool-window-bg')}; border:0; }}")
         self.title_button.setStyleSheet(f"QToolButton {{background:transparent; border:0; color:{theme.css('text-default')}; padding:0 2px;}} QToolButton:hover {{background:{theme.css('toolbar-bg-hovered')};border-radius:4px;}}")
         self.update_header()
         self._corners.refresh()
