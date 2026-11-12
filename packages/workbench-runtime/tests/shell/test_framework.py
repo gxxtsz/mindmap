@@ -39,7 +39,7 @@ def test_workbench_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path
 
 
 def test_navigation_slot_inserts_replaces_and_releases_owned_widgets(qtbot, tmp_path):
-    """导航始终位于菜单之后，替换或清空释放旧控件，右侧动作及窗口按钮不被重排。"""
+    """默认导航位于主菜单后，右侧导航紧邻窗控。替换和清空均释放旧控件。"""
     window = WorkbenchWindow(AppSpec("navigation-test", "导航验收", storage_dir=tmp_path))
     qtbot.addWidget(window)
     window.show()
@@ -52,8 +52,11 @@ def test_navigation_slot_inserts_replaces_and_releases_owned_widgets(qtbot, tmp_
     window.set_title_bar_navigation(first)
     assert isValid(first) and bar.navigation is first
     second = QLineEdit("替换导航")
-    window.set_title_bar_navigation(second)
+    window.set_title_bar_navigation(second, beside_window_controls=True)
     assert not first.isVisible() and bar.navigation is second
+    window.add_action(ActionSpec("business.late", "动态动作", lambda: None, toolbar=True))
+    # 新增业务动作也排在导航前，文件切换入口和窗口按钮组之间始终没有业务动作。
+    assert bar.box.indexOf(bar.action_buttons[-1]) < bar.box.indexOf(second) == bar.box.count() - 2
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert not isValid(first)
     window.set_title_bar_navigation(None)

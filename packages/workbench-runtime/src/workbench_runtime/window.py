@@ -115,7 +115,7 @@ class WorkbenchRuntimeWindow(WorkbenchWindow):
         self._register_actions()
         self.edit_commands = EditCommandRouter(self)
         self.recent_files_button = RecentFilesButton(self)
-        self.set_title_bar_navigation(self.recent_files_button)
+        self.set_title_bar_navigation(self.recent_files_button, beside_window_controls=True)
         self.documents.changed.connect(self.refresh_document)
         self.plugins = PluginManager(self._make_context, self.settings.scoped("plugins"), manifests)
         self.plugins.activate()

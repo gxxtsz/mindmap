@@ -237,10 +237,13 @@ class _TitleBar(QWidget):
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         button.setDefaultAction(action)
         self.action_buttons.append(button)
-        # 窗口按钮组始终是主布局的最后一项，动态业务动作稳定插入到该组之前。
-        # 初始构造阶段窗口按钮尚未创建，此时按声明顺序正常追加。
+        # 动态业务动作排在右侧导航前，保证导航始终紧邻窗控。构造期间尚未装入窗控，
+        # 此时直接按声明顺序追加，随后再由主布局放置窗口按钮组。
         if hasattr(self, "window_controls"):
-            self.box.insertWidget(self.box.count() - 1, button)
+            index = self.box.count() - 1
+            if self.navigation is not None and self.box.indexOf(self.navigation) == index - 1:
+                index -= 1
+            self.box.insertWidget(index, button)
         else:
             self.box.addWidget(button)
 
@@ -429,12 +432,12 @@ class WorkbenchWindow(QMainWindow):
         """取得业务或停靠系统的共享动作，用于启用状态、图标和快捷键设置。"""
         return self.manager.actions[action_id]
 
-    def set_title_bar_navigation(self, widget: QWidget | None) -> None:
-        """设置紧邻主菜单右侧的业务导航控件，传入 None 清空该插槽。
+    def set_title_bar_navigation(self, widget: QWidget | None, *, beside_window_controls: bool = False) -> None:
+        """设置顶栏业务导航，传入 None 清空插槽。
 
-        插槽接管控件的父子所有权，替换时隐藏并延迟销毁旧控件；重复设置同一
-        实例不做任何操作。调用方负责控件的尺寸及业务行为，外壳仅提供位置，
-        不读取文件、保存业务状态或改变右侧工具动作与窗口按钮的排列。
+        默认插在主菜单后。传入 beside_window_controls=True 时，插在伸缩留白和
+        业务动作之后、窗口按钮组之前。插槽接管控件所有权，替换时隐藏并延迟销毁
+        旧控件，重复设置同一实例为无操作。控件的尺寸和业务行为由调用方负责。
         """
         if widget is not None and not isinstance(widget, QWidget):
             raise TypeError("顶栏导航必须是 QWidget 或 None")
@@ -450,9 +453,9 @@ class WorkbenchWindow(QMainWindow):
             previous.deleteLater()
         bar.navigation = widget
         if widget is not None:
-            # 插入到主菜单与伸缩留白之间；不能使用末尾索引，否则会落入业务动作区。
             widget.setParent(bar)
-            bar.box.insertWidget(bar.box.indexOf(bar.menu_bar) + 1, widget)
+            index = bar.box.count() - 1 if beside_window_controls else bar.box.indexOf(bar.menu_bar) + 1
+            bar.box.insertWidget(index, widget)
             widget.show()
 
     @Slot()

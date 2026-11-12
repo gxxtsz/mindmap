@@ -281,6 +281,11 @@ def test_recent_dropdown_mouse_and_keyboard_activate_original_tab(history_window
         try:
             assert menu.isVisible()
             assert menu.actions()[0].isChecked() and not menu.actions()[1].isChecked()
+            # 双行控件的可见范围和 QAction 的命中区域一致，键盘和鼠标都选择同一整行。
+            for action in menu.actions()[:2]:
+                row = action.defaultWidget()
+                assert row.geometry() == menu.actionGeometry(action)
+                assert row.height() > menu.fontMetrics().height() * 2
             if source == "keyboard":
                 menu.setActiveAction(menu.actions()[0])
                 qtbot.keyClick(menu, Qt.Key.Key_Down)
@@ -315,13 +320,13 @@ def test_recent_button_elides_long_names_and_fits_minimum_window(history_window,
     assert [action.text() for action in bar.menu_bar.actions()] == ["文件", "编辑", "视图", "设置"]
     assert all(bar.menu_bar.rect().contains(bar.menu_bar.actionGeometry(action)) for action in bar.menu_bar.actions())
     assert bar.menu_bar.geometry().right() < button.x()
-    assert button.geometry().right() < bar.minimize.x()
+    assert bar.pin.x() - button.geometry().right() - 1 == bar.box.spacing()
     assert bar.rect().contains(button.geometry())
     assert button.height() == 32 and button.width() <= 280
     assert button.text() != session.files.path.stem and "…" in button.text()
     assert button.toolTip() == str(session.files.path)
-    assert button.icon().isNull()
-    assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextOnly
+    assert not button.icon().isNull()
+    assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonTextBesideIcon
     button.menu().aboutToShow.emit()
     assert button.menu().palette().color(button.menu().foregroundRole()) == window.manager.theme.color("text-default")
 
@@ -335,9 +340,10 @@ def test_recent_menu_disambiguates_names_and_offers_open_and_clear(history_windo
     menu = window.recent_files_button.menu()
     menu.aboutToShow.emit()
     first, second = menu.actions()[:2]
-    assert first.text() != second.text()
+    assert first.text().splitlines() == ["同名&&导图.mindmap", str(tmp_path / "个人")]
+    assert second.text().splitlines() == ["同名&&导图.mindmap", str(tmp_path / "工作")]
     assert first.toolTip() != second.toolTip() and first.data() != second.data()
-    assert "&&" in first.text() and first.isChecked()
+    assert first.isChecked() and not second.isChecked()
     called = []
     monkeypatch.setattr(window, "open_dialog", lambda: called.append(True))
     next(action for action in menu.actions() if action.text() == "打开文件…").trigger()

@@ -3,7 +3,8 @@
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QEnterEvent, QMouseEvent
-from PySide6.QtWidgets import QApplication, QLineEdit, QMenuBar
+from PySide6.QtWidgets import QApplication, QLineEdit, QMenuBar, QWidget
+from workbench_runtime import WorkbenchRuntimeWindow
 from workbench_runtime.ui.docking import DockPosition, ToolWindowSpec
 from workbench_runtime.ui.shell import AppSpec, WorkbenchWindow
 
@@ -41,7 +42,8 @@ def tool_button_window(button_window):
 
 def background_color(button, x, y=None):
     """读取完整窗口中的按钮像素，默认取图标左侧背景，避免透明截图丢失父级底色。"""
-    window = button.window()
+    # 标题栏会在同名属性保存宿主引用，直接调用 QWidget 的方法可统一得到顶层窗口。
+    window = QWidget.window(button)
     image = window.grab().toImage()
     point = button.mapTo(window, QPoint(x, button.height() // 2 if y is None else y))
     ratio = image.devicePixelRatio()
@@ -247,6 +249,49 @@ def test_menu_bar_colors_follow_hover_and_popup_state(button_window, qtbot, them
     if bar.hasFocus():
         qtbot.keyClick(bar, Qt.Key.Key_Escape)
     qtbot.waitUntil(lambda: item_background() == colors.color("main-window-titlebar-bg"))
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_recent_files_button_blends_into_title_bar(qtbot, tmp_path, theme):
+    """核验无框默认态、浅底展开态和键盘描边，防止焦点变化留下常驻边框。"""
+    window = WorkbenchRuntimeWindow(storage_dir=tmp_path, theme=theme, restore=False, manifests=[])
+    qtbot.addWidget(window)
+    window.resize(860, 540)
+    window.show()
+    window.activateWindow()
+    bar, button = window.title_bar, window.recent_files_button
+    colors = window.manager.theme
+    base = colors.color("main-window-titlebar-bg")
+    hover = colors.color("window-control-bg-hovered")
+    accent = colors.color("control-brand-border")
+    move_pointer(qtbot, bar, QPoint(4, 4))
+
+    def button_pixels():
+        """在标题栏截图中取按钮上缘和左内侧像素，分别验证描边与填充色。"""
+        rect = button.geometry()
+        return (background_color(bar, rect.center().x(), rect.top()),
+                background_color(bar, rect.left() + 4, rect.center().y()))
+
+    button.clearFocus()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    assert button.hasFocus() and button_pixels() == (accent, base)
+    for reason in (Qt.FocusReason.ActiveWindowFocusReason, Qt.FocusReason.MouseFocusReason):
+        button.clearFocus()
+        button.setFocus(reason)
+        assert button.hasFocus() and button_pixels() == (base, base)
+
+    move_pointer(qtbot, button, button.rect().center())
+    qtbot.waitUntil(lambda: button_pixels()[1] == hover)
+    move_pointer(qtbot, bar, QPoint(4, 4))
+    assert button_pixels() == (base, base)
+
+    # 展开状态独立于鼠标位置，按 Esc 收起后立即恢复透明。
+    menu = button.menu()
+    menu.popup(button.mapToGlobal(QPoint(0, button.height())))
+    qtbot.waitUntil(menu.isVisible)
+    assert button_pixels()[1] == hover
+    qtbot.keyClick(menu, Qt.Key.Key_Escape)
+    assert not menu.isVisible() and button_pixels() == (base, base)
 
 
 def move_pointer(qtbot, widget, point):

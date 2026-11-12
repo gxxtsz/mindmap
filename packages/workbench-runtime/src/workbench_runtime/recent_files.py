@@ -1,37 +1,44 @@
-"""紧邻主菜单的最近导图入口，复用工作台打开流程与外壳主题。"""
+"""窗控旁的最近文件入口，复用工作台打开流程与外壳主题。"""
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt
-from PySide6.QtWidgets import QMenu, QSizePolicy, QToolButton
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt
+from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import QMenu, QSizePolicy, QToolButton, QWidget, QWidgetAction
 from workbench_api import path_key
 
 
 class RecentFilesButton(QToolButton):
     """显示当前文件并展开历史；只负责呈现，不直接加载文件或写入会话配置。"""
 
-    # 只为左侧文字留白、右侧箭头和边框预留空间，不再计算文档图标的占位。
-    _TEXT_INSET = 36
+    # 文字之外的宽度包括边框、左右内边距、文档图标、图文间距和菜单箭头。
+    _TEXT_INSET = 56
+    _MIN_WIDTH = 80
+    _MAX_WIDTH = 280
+    _TEMPORARY_FOCUS_REASONS = (Qt.FocusReason.PopupFocusReason, Qt.FocusReason.ActiveWindowFocusReason)
 
     def __init__(self, window):
         super().__init__(window)
         self.window = window
         self._full_text = "最近文件"
         self.setObjectName("mindmap_recent_files")
-        self.setProperty("titleBarAction", True)
         self.setProperty("recentMenuOpen", False)
+        self.setProperty("recentKeyboardFocus", False)
         self.setFixedHeight(32)
-        self.setMinimumWidth(80)
-        self.setMaximumWidth(280)
+        self.setMinimumWidth(self._MIN_WIDTH)
+        self.setMaximumWidth(self._MAX_WIDTH)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.setIconSize(QSize(16, 16))
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        menu = QMenu(self)
+        menu = _RecentFilesMenu(self)
         menu.setToolTipsVisible(True)
+        menu.setAccessibleName("最近文件")
         menu.aboutToShow.connect(self._populate_menu)
-        menu.aboutToShow.connect(lambda: self._set_menu_open(True))
-        menu.aboutToHide.connect(lambda: self._set_menu_open(False))
+        # 菜单展开后接管鼠标，独立的展开状态让按钮继续显示浅底，关闭时恢复。
+        menu.aboutToShow.connect(lambda: self._set_style_flag("recentMenuOpen", True))
+        menu.aboutToHide.connect(lambda: self._set_style_flag("recentMenuOpen", False))
         self.setMenu(menu)
         self.refresh_theme()
         self.refresh_document()
@@ -39,21 +46,21 @@ class RecentFilesButton(QToolButton):
     def sizeHint(self):
         """按完整文件名估算宽度，避免省略后的短文字反过来使布局不断收缩。"""
         width = self.fontMetrics().horizontalAdvance(self._full_text) + self._TEXT_INSET
-        return QSize(min(280, max(80, width)), 32)
+        return QSize(min(self._MAX_WIDTH, max(self._MIN_WIDTH, width)), 32)
 
     def _update_text(self):
-        self.setText(self.fontMetrics().elidedText(self._full_text, Qt.TextElideMode.ElideMiddle,
-                                                 max(24, self.width() - self._TEXT_INSET)))
+        """只省略可见文字，悬停提示和辅助技术仍使用完整文件名或路径。"""
+        # 窗口尚未显示时，按钮可能仍保留构造尺寸。使用布局期望宽度，避免占位文字过早省略。
+        width = self.width() if self.isVisible() else self.sizeHint().width()
+        label = self.fontMetrics().elidedText(self._full_text, Qt.TextElideMode.ElideMiddle,
+                                             width - self._TEXT_INSET)
+        self.setText(label.replace("&", "&&"))
 
-    def _set_menu_open(self, opened: bool):
-        """菜单展开期间保持灰色底，即使鼠标已经移到菜单内也不撤销按钮反馈。
-
-        使用独立外观属性而非可勾选状态，不改变 QToolButton 原有的鼠标及键盘
-        触发行为；隐藏菜单后重新计算样式，由实际悬停状态决定是否继续显示灰底。
-        """
-        if self.property("recentMenuOpen") == opened:
+    def _set_style_flag(self, name: str, enabled: bool) -> None:
+        """仅在交互属性改变时重新应用本地样式，保留 Qt 原有的焦点与菜单行为。"""
+        if self.property(name) == enabled:
             return
-        self.setProperty("recentMenuOpen", opened)
+        self.setProperty(name, enabled)
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
@@ -76,14 +83,23 @@ class RecentFilesButton(QToolButton):
     def refresh_theme(self):
         """菜单独立同步主题，使弹出窗口在明暗切换和紧凑模式下继续使用正确色板。"""
         theme = self.window.manager.theme
-        # 文件切换器只绘制名称和箭头。悬停、按下及展开统一使用灰色反馈，覆盖
-        # 顶栏通用按钮的蓝色按下背景；颜色沿用窗口控制的主题令牌以适配深浅外观。
+        self.setIcon(theme.icon("document", 16))
+        # 默认与标题栏融为一体，交互时使用窗控的中性底色。透明边框为键盘焦点留出
+        # 一像素位置，焦点切换时图标、文件名和箭头都保持原位。
         self.setStyleSheet(f"""
-            QToolButton#mindmap_recent_files {{ padding:0 24px 0 8px; }}
+            QToolButton#mindmap_recent_files {{
+                background:transparent;
+                border:1px solid transparent;
+                border-radius:6px;
+                padding:0 24px 0 8px;
+            }}
             QToolButton#mindmap_recent_files:hover,
             QToolButton#mindmap_recent_files:pressed,
             QToolButton#mindmap_recent_files[recentMenuOpen="true"] {{
                 background:{theme.css('window-control-bg-hovered')};
+            }}
+            QToolButton#mindmap_recent_files[recentKeyboardFocus="true"]:focus {{
+                border-color:{theme.css('control-brand-border')};
             }}
             QToolButton#mindmap_recent_files::menu-indicator {{
                 subcontrol-position:right center; right:7px;
@@ -92,32 +108,54 @@ class RecentFilesButton(QToolButton):
         theme.apply(self.menu(), "QMenu { menu-scrollable:1; }")
         self._update_text()
 
+    def focusInEvent(self, event):
+        """为键盘导航显示焦点描边。关闭弹层或重新激活窗口时延续原来的焦点来源。"""
+        reason = event.reason()
+        if reason not in self._TEMPORARY_FOCUS_REASONS:
+            keyboard = reason in (Qt.FocusReason.TabFocusReason, Qt.FocusReason.BacktabFocusReason,
+                                  Qt.FocusReason.ShortcutFocusReason)
+            self._set_style_flag("recentKeyboardFocus", keyboard)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        """主动离开按钮时清理焦点来源，避免日后自动聚焦时恢复旧描边。"""
+        if event.reason() not in self._TEMPORARY_FOCUS_REASONS:
+            self._set_style_flag("recentKeyboardFocus", False)
+        super().focusOutEvent(event)
+
+    def mousePressEvent(self, event):
+        """按钮已获键盘焦点时，鼠标按下也能立即切回指针反馈。"""
+        self._set_style_flag("recentKeyboardFocus", False)
+        super().mousePressEvent(event)
+
     def _populate_menu(self):
-        """每次展开读取最新历史；完整路径放入数据和提示，显示文本限制在屏幕内。"""
+        """每次展开按最新历史生成双行文件项，完整路径继续用于打开文件和悬停提示。"""
         menu = self.menu()
         menu.clear()
-        active = self.window.documents.active.document.path if self.window.documents.active else None
-        current_key = path_key(active) if active else None
-        screen_width = self.screen().availableGeometry().width()
-        text_width = max(180, min(640, screen_width - 24) - 80)
-        for value in self.window.state.recent_files:
+        active = self.window.documents.active
+        current_key = path_key(active.document.path) if active and active.document.path else None
+        # 给弹层边框和内边距留出空间。行宽随内容增长，长路径在上限内单独省略。
+        width_limit = max(1, min(520, self.screen().availableGeometry().width() - 24))
+        recent = self.window.state.recent_files
+        for value in recent:
             path = Path(value)
-            label = f"{path.name}  —  {path.parent}"
-            label = menu.fontMetrics().elidedText(label, Qt.TextElideMode.ElideMiddle, text_width)
-            # 文件名中的 & 是普通字符，不能被 QMenu 误当成键盘助记符。
-            action = menu.addAction(label.replace("&", "&&"))
+            action = QWidgetAction(menu)
+            # 动作保留完整文本供辅助技术读取。可见行独立绘制，两处都将 & 作为普通字符。
+            action.setText(f"{path.name}\n{path.parent}".replace("&", "&&"))
             action.setData(value)
             action.setToolTip(value)
             action.setCheckable(True)
             action.setChecked(path_key(path) == current_key)
+            action.setDefaultWidget(_RecentFileRow(menu, action, path, width_limit))
             action.triggered.connect(lambda checked=False, selected=value:
                                      self.window.call(lambda: self.window.open_path(selected)))
-        if not self.window.state.recent_files:
+            menu.addAction(action)
+        if not recent:
             menu.addAction("暂无最近文件").setEnabled(False)
         menu.addSeparator()
         menu.addAction("打开文件…", lambda: self.window.call(self.window.open_dialog))
         clear = menu.addAction("清空最近记录", self.window.clear_recent_files)
-        clear.setEnabled(bool(self.window.state.recent_files))
+        clear.setEnabled(bool(recent))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -128,3 +166,96 @@ class RecentFilesButton(QToolButton):
         if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange) and hasattr(self, "_full_text"):
             self._update_text()
             self.updateGeometry()
+
+
+class _RecentFilesMenu(QMenu):
+    """使用 Qt 的菜单交互，按文档按钮的右边缘对齐弹层。"""
+
+    @property
+    def theme(self):
+        return self.parentWidget().window.manager.theme
+
+    def showEvent(self, event):
+        """Qt 决定垂直方向和可见高度，水平方向按按钮所在屏幕的工作区约束。"""
+        super().showEvent(event)
+        button = self.parentWidget()
+        bounds = button.screen().availableGeometry()
+        anchor_right = button.mapToGlobal(QPoint(button.width(), 0)).x()
+        left = max(bounds.left(), min(anchor_right, bounds.right() + 1) - self.width())
+        self.move(left, self.y())
+
+
+class _RecentFileRow(QWidget):
+    """绘制文件名、目录和当前文件标记，点击与键盘选择交由所属菜单。"""
+
+    _TEXT_LEFT = 34
+    _TEXT_RIGHT = 32
+
+    def __init__(self, menu: _RecentFilesMenu, action: QWidgetAction, path: Path, width_limit: int):
+        super().__init__()
+        self._menu = menu
+        self._action = action
+        self._file_name = path.name
+        self._directory = str(path.parent)
+        self._width_limit = width_limit
+        # 菜单通过 QAction 统一处理选中、方向键、回车、鼠标命中及悬停提示。
+        # 行控件只负责绘制，不抢占菜单的焦点，也不吞掉指针事件。
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAccessibleName(f"{self._file_name}，{self._directory}")
+
+    def _directory_font(self) -> QFont:
+        """目录沿用主字体，略缩字号。兼顾像素和点数两种主题字体配置。"""
+        font = self.font()
+        if font.pixelSize() > 0:
+            font.setPixelSize(max(1, font.pixelSize() - 1))
+        else:
+            font.setPointSizeF(max(1.0, font.pointSizeF() - 1))
+        return font
+
+    def sizeHint(self) -> QSize:
+        """两行分别按字体度量计算尺寸，屏幕缩放和紧凑模式下也保留完整行高。"""
+        name_metrics = self.fontMetrics()
+        directory_metrics = QFontMetrics(self._directory_font(), self)
+        text_width = max(name_metrics.horizontalAdvance(self._file_name),
+                         directory_metrics.horizontalAdvance(self._directory))
+        width = max(288, text_width + self._TEXT_LEFT + self._TEXT_RIGHT)
+        padding = 8 if self._menu.theme.compact else 12
+        return QSize(min(self._width_limit, width), name_metrics.height() + directory_metrics.height() + 1 + padding)
+
+    def paintEvent(self, event):
+        """当前文件的勾选和底色保持可见，鼠标或键盘定位使用独立反馈。"""
+        theme = self._menu.theme
+        checked = self._action.isChecked()
+        active = self._menu.activeAction() is self._action
+        rect = self.rect()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if checked or active:
+            painter.setPen(theme.color("control-brand-border") if checked and active else Qt.PenStyle.NoPen)
+            painter.setBrush(theme.color("toolbar-selected-bg-active" if checked else "toolbar-bg-hovered"))
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 5, 5)
+        theme.icon("document", 16).paint(painter, QRect(10, (rect.height() - 16) // 2, 16, 16))
+
+        # 分别省略文件名和目录，避免长文件名把目录或右侧勾选挤出菜单。
+        name_metrics = self.fontMetrics()
+        directory_font = self._directory_font()
+        directory_metrics = QFontMetrics(directory_font, self)
+        width = max(0, rect.width() - self._TEXT_LEFT - self._TEXT_RIGHT)
+        top = (rect.height() - name_metrics.height() - directory_metrics.height() - 1) // 2
+        name_rect = QRect(self._TEXT_LEFT, top, width, name_metrics.height())
+        directory_rect = QRect(self._TEXT_LEFT, name_rect.bottom() + 2, width, directory_metrics.height())
+        align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        painter.setPen(theme.color("text-default"))
+        painter.drawText(name_rect, align, name_metrics.elidedText(self._file_name, Qt.TextElideMode.ElideMiddle, width))
+        painter.setFont(directory_font)
+        painter.setPen(theme.color("text-muted"))
+        painter.drawText(directory_rect, align,
+                         directory_metrics.elidedText(self._directory, Qt.TextElideMode.ElideMiddle, width))
+
+        if checked:
+            # 使用矢量线段绘制勾选，避免主题字体缺少符号或在高 DPI 下缩放模糊。
+            x, y = rect.right() - 16, rect.center().y()
+            painter.setPen(QPen(theme.color("control-brand-border"), 1.6, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawPolyline(QPolygonF([QPointF(x - 5, y), QPointF(x - 1, y + 4), QPointF(x + 5, y - 3)]))
