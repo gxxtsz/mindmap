@@ -344,6 +344,76 @@ def test_graph_shows_modules_arrows_cycles_and_theme(window, graph_path):
             assert fit.x() < zoom.x() and not fit.icon().isNull()
 
 
+def test_public_dependency_click_and_all_view_follow_the_active_tab(window, tmp_path, qtbot):
+    """核对点选在鼠标事件之后换场景，并验证各标签独立保存依赖显示方式。"""
+    ordinary = [f"module-{index}" for index in range(10)]
+    pairs = list(zip(ordinary, ordinary[1:])) + [(module_id, "shared") for module_id in ordinary[:6]]
+    path = tmp_path / "公共依赖.software-structure"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": module_id, "name": module_id} for module_id in [*ordinary, "shared"]],
+        "module_dependencies": [{"source": source, "target": target} for source, target in pairs],
+    }), encoding="utf-8")
+    assert window.open_path(path)
+    first = window.documents.active
+    canvas = first.widget
+    qtbot.waitUntil(lambda: bool(first.capture_state()))
+    controls, _, _ = _status_controls(window)
+    show_all = controls.findChild(QToolButton, "status_show_all_dependencies")
+    assert show_all.isVisible() and not show_all.isChecked()
+
+    def arrow_count(view):
+        return sum(isinstance(item, QGraphicsPolygonItem) for item in view.widget.scene().items())
+
+    def click_shared():
+        scene = canvas.scene()
+        note = next(item for item in scene.items() if isinstance(item, QGraphicsSimpleTextItem)
+                    and item.text().endswith(("展开", "收起")))
+        position = canvas.mapFromScene(note.sceneBoundingRect().center())
+        qtbot.mouseMove(canvas.viewport(), pos=position)
+        qtbot.mouseClick(canvas.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        # 鼠标事件结束前，Qt 仍可能持有旧节点的悬停和光标引用。
+        assert canvas.scene() is scene
+        return scene
+
+    assert arrow_count(first) == 9
+    overview = click_shared()
+    assert arrow_count(first) == 9
+    qtbot.waitUntil(lambda: canvas.scene() is not overview)
+    assert arrow_count(first) == 15 and not show_all.isChecked()
+    assert first.capture_state()["expanded_public_module"] == "shared"
+    expanded = click_shared()
+    qtbot.waitUntil(lambda: canvas.scene() is not expanded)
+    assert arrow_count(first) == 9
+
+    # 全量按钮的同步操作取代本轮还未执行的展开请求。
+    click_shared()
+    show_all.click()
+    full_scene = canvas.scene()
+    QApplication.processEvents()
+    assert canvas.scene() is full_scene
+    assert arrow_count(first) == 15 and show_all.isChecked()
+    assert window.manager.duplicate_document(first.id)
+    second = window.documents.active
+    assert second.document is first.document and second.widget is not canvas
+    assert arrow_count(second) == 15 and show_all.isChecked()
+    qtbot.mouseClick(show_all, Qt.MouseButton.LeftButton)
+    assert arrow_count(second) == 9 and not show_all.isChecked()
+    assert arrow_count(first) == 15
+    window.documents.activate_view(first.id)
+    assert show_all.isChecked()
+
+    # 旧布局的场景中心可能落在新图之外。恢复该标签时显示总览并适配整个新图。
+    first.restore_state({"version": 1, "zoom": 0.1, "center": [20000, -20000]})
+    assert arrow_count(first) == 9 and not show_all.isChecked()
+    assert canvas.zoom_factor > 0.1
+
+    # 上一版由 Graphviz 生成坐标，升级后继续恢复用户选择的依赖显示方式。
+    first.restore_state({"version": 2, "show_all_dependencies": True, "zoom": 0.1, "center": [20000, -20000]})
+    assert arrow_count(first) == 15 and show_all.isChecked()
+    assert canvas.zoom_factor > 0.1
+
+
 def test_empty_graph_has_an_empty_message(window, tmp_path):
     path = tmp_path / "空.software-structure"
     path.write_text('{"schema_version":1,"modules":[]}', "utf-8")

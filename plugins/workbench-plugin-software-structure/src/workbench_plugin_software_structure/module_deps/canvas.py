@@ -1,102 +1,47 @@
 """以工作台主题绘制有向依赖图，并管理单个标签的缩放和平移。"""
 
 import math
-from collections import defaultdict
+from collections import Counter
 from collections.abc import Callable
 from html import escape
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QPolygonF, QTransform
-from PySide6.QtWidgets import QGraphicsScene, QGraphicsView
+from PySide6.QtCore import QPoint, QPointF, QSizeF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QTransform
+from PySide6.QtWidgets import QApplication, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView
 
-from ..document import ModuleDependency, SoftwareStructure
-from .layout import build_layout
+from ..document import SoftwareStructure
+from .folding import find_public_dependencies
+from .geometry import build_geometry
+from .layout import find_cyclic_dependencies
 
-_COLUMN_GAP = 132.0
-_ROW_GAP = 26.0
 _MAX_ZOOM = 4.0
-
-
-def _edge_endpoints(
-    boxes: dict[str, QRectF], dependencies: list[ModuleDependency], cycles: frozenset[ModuleDependency],
-) -> dict[tuple[ModuleDependency, bool], QPointF]:
-    """按相邻模块的位置分配节点边缘的连接点，错开汇入同侧的箭头。"""
-    sides = defaultdict(list)
-    for edge in dependencies:
-        source_y, target_y = boxes[edge.source].center().y(), boxes[edge.target].center().y()
-        source_side, target_side = 1, -1
-        if edge in cycles:
-            source_side = target_side = 1 if source_y <= target_y else -1
-        sides[edge.source, source_side].append((target_y, edge, False))
-        sides[edge.target, target_side].append((source_y, edge, True))
-
-    endpoints = {}
-    for (module_id, side), entries in sides.items():
-        box = boxes[module_id]
-        x = box.right() if side > 0 else box.left()
-        span = len(entries) - 1
-        step = min(12, (box.height() - 18) / max(1, span))
-        ordered = sorted(entries, key=lambda entry: (entry[0], entry[1].source, entry[1].target, entry[2]))
-        for index, (_, edge, is_target) in enumerate(ordered):
-            endpoints[edge, is_target] = QPointF(x, box.center().y() + (index - span / 2) * step)
-    return endpoints
-
-
-def _forward_path(start: QPointF, end: QPointF, overhead_lane: int | None) -> tuple[QPainterPath, QPointF]:
-    """相邻列在间隙内连线，跨列的边绕过中间节点，返回终点处的箭头方向。"""
-    path = QPainterPath(start)
-    if overhead_lane is None:
-        middle = (start.x() + end.x()) / 2
-        before_end = QPointF(middle, end.y())
-        path.cubicTo(QPointF(middle, start.y()), before_end, end)
-    else:
-        # 两段竖线处于列间，横向线段从节点上方通过。
-        overhead_y = -_ROW_GAP - overhead_lane * 12
-        gutter = _COLUMN_GAP / 4 + overhead_lane % 5 * 7
-        source_x = start.x() + gutter
-        target_x = end.x() - gutter
-        before_end = QPointF(target_x, end.y())
-        path.lineTo(source_x, start.y())
-        path.lineTo(source_x, overhead_y)
-        path.lineTo(target_x, overhead_y)
-        path.lineTo(before_end)
-        path.lineTo(end)
-    return path, end - before_end
-
-
-def _cycle_path(start: QPointF, end: QPointF, side: int, *, loop: bool) -> tuple[QPainterPath, QPointF]:
-    """沿同一列的两侧画环内依赖。互逆边分居两侧，自环使用同侧两个端点。"""
-    if loop:
-        after_start = start + QPointF(58, -30)
-        before_end = end + QPointF(58, 30)
-    else:
-        outside = QPointF(side * 52, 0)
-        after_start = start + outside
-        before_end = end + outside
-    path = QPainterPath(start)
-    path.cubicTo(after_start, before_end, end)
-    return path, end - before_end
-
-
-def _arrowhead(tip: QPointF, direction: QPointF) -> QPolygonF:
-    length = math.hypot(direction.x(), direction.y())
-    unit = direction / length
-    base = tip - unit * 10
-    side = QPointF(-unit.y(), unit.x()) * 4.5
-    return QPolygonF([tip, base + side, base - side])
+_MODULE_ID_ROLE = 0
+_VIEW_STATE_VERSION = 4
 
 
 class ModuleDependencyCanvas(QGraphicsView):
-    """软件结构文档中的只读画布。缩放和平移属于视图，图数据由文档共享。"""
+    """以项目内的分层布局浏览只读依赖图，每个标签独立保存视口和折叠状态。"""
 
     viewport_changed = Signal()
+    dependency_view_changed = Signal()
 
     def __init__(self, document: SoftwareStructure):
         """为已校验的文档建立场景，首次显示后再根据实际视口计算缩放。"""
         super().__init__()
-        self._graph_scene = QGraphicsScene(self)
-        self._nodes = []
+        self._document = document
+        self._cyclic_dependencies = find_cyclic_dependencies(document)
+        self._dependencies = tuple(sorted(document.module_dependencies, key=lambda edge: (edge.source, edge.target)))
+        self._public = find_public_dependencies(document, self._cyclic_dependencies)
+        self._folded_counts = Counter(edge.target for edge in self._public.folded)
+        self._show_all = False
+        self._expanded_module: str | None = None
+        self._pressed_public_module: str | None = None
+        self._pending_public_module: str | None = None
+        self._press_position = QPoint()
+        self._theme_color: Callable[[str], QColor] | None = None
+        self._nodes = {}
         self._edges = []
+        self._public_group = None
         self._empty_label = None
         self._has_modules = bool(document.modules)
         self._initial_view_pending = True
@@ -104,8 +49,10 @@ class ModuleDependencyCanvas(QGraphicsView):
         self._initial_view_timer = QTimer(self)
         self._initial_view_timer.setSingleShot(True)
         self._initial_view_timer.timeout.connect(self._apply_initial_view)
+        self._public_click_timer = QTimer(self)
+        self._public_click_timer.setSingleShot(True)
+        self._public_click_timer.timeout.connect(self._apply_public_click)
 
-        self.setScene(self._graph_scene)
         self.setFrameShape(QGraphicsView.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -114,91 +61,237 @@ class ModuleDependencyCanvas(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setAccessibleName("模块依赖图")
         if self._has_modules:
-            self.setAccessibleDescription("滚轮缩放，拖动画布平移。虚线表示循环依赖。")
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            self._draw_graph(document)
+            self._draw_graph()
         else:
-            self._empty_label = self._graph_scene.addSimpleText("文件中暂无模块", self.font())
+            scene = QGraphicsScene(self)
+            self._empty_label = scene.addSimpleText("文件中暂无模块", self.font())
+            self.setScene(scene)
             self.setAccessibleDescription(self._empty_label.text())
-        self._content_rect = self._graph_scene.itemsBoundingRect().adjusted(-24, -24, 24, 24)
-        self.setSceneRect(self._content_rect)
+            self._update_content_rect()
 
         for scrollbar in (self.horizontalScrollBar(), self.verticalScrollBar()):
             scrollbar.valueChanged.connect(self._notify_viewport_changed)
 
-    def _draw_graph(self, document: SoftwareStructure) -> None:
-        layout = build_layout(document)
-        modules = {module.id: module for module in document.modules}
-        labels = {module.id: " ".join(module.name.splitlines()) for module in document.modules}
+    def _draw_graph(self) -> None:
+        """按当前可见依赖重新排版，Qt 保留节点说明、主题和点击处理。"""
+        modules = {module.id: module for module in self._document.modules}
+        public = frozenset() if self._show_all else frozenset(self._public.dependent_counts)
+        dependencies = tuple(
+            edge for edge in self._dependencies
+            if self._show_all or edge not in self._public.folded or edge.target == self._expanded_module
+        )
+        hidden_count = len(self._dependencies) - len(dependencies)
+        labels = {module.id: " ".join(module.name.splitlines()) for module in modules.values()}
         font = self.font()
         metrics = QFontMetrics(font)
-        width = max(120, min(252, max(map(metrics.horizontalAdvance, labels.values())) + 30))
         height = max(38, metrics.height() + 18)
-        pitch = height + _ROW_GAP
-        max_rows = max(map(len, layout.layers))
-        boxes = {}
-        for column, layer in enumerate(layout.layers):
-            y_offset = (max_rows - len(layer)) * pitch / 2
-            for row, module_id in enumerate(layer):
-                module = modules[module_id]
-                rect = QRectF(column * (width + _COLUMN_GAP), y_offset + row * pitch, width, height)
-                boxes[module_id] = rect
-                outline = QPainterPath()
-                outline.addRoundedRect(rect, 8, 8)
-                node = self._graph_scene.addPath(outline)
-                label = self._graph_scene.addSimpleText(
-                    metrics.elidedText(labels[module_id], Qt.TextElideMode.ElideRight, width - 30), font)
-                label.setParentItem(node)
-                label.setPos(rect.left() + 15, rect.center().y() - label.boundingRect().height() / 2)
-                lines = [escape(module.name), f"ID：{escape(module.id)}", *map(escape, module.description.splitlines())]
-                node.setToolTip("<qt>" + "<br>".join(lines) + "</qt>")
-                self._nodes.append((node, label))
+        sizes = {}
+        notes = {}
+        for module_id in sorted(modules):
+            note = ""
+            if module_id in public:
+                note = f"{self._public.dependent_counts[module_id]} 个模块依赖"
+                if self._folded_counts[module_id]:
+                    note += " · 收起" if module_id == self._expanded_module else " · 展开"
+                notes[module_id] = note
+            width = max(120, min(252, max(metrics.horizontalAdvance(labels[module_id]),
+                                         metrics.horizontalAdvance(note)) + 28))
+            sizes[module_id] = QSizeF(width, height + metrics.height() + 2 if note else height)
 
-        dependencies = sorted(document.module_dependencies, key=lambda edge: (edge.source, edge.target))
-        endpoints = _edge_endpoints(boxes, dependencies, layout.cyclic_dependencies)
-        next_lane = 0
-        for dependency in dependencies:
-            source, target = boxes[dependency.source], boxes[dependency.target]
-            start, end = endpoints[dependency, False], endpoints[dependency, True]
-            cyclic = dependency in layout.cyclic_dependencies
-            if cyclic:
-                side = 1 if start.x() > source.center().x() else -1
-                path, direction = _cycle_path(start, end, side, loop=dependency.source == dependency.target)
-            else:
-                overhead_lane = None
-                if target.left() - source.right() > _COLUMN_GAP:
-                    overhead_lane = next_lane
-                    next_lane += 1
-                path, direction = _forward_path(start, end, overhead_lane)
-            line = self._graph_scene.addPath(path)
-            arrow = self._graph_scene.addPolygon(_arrowhead(path.currentPosition(), direction))
+        # 先折叠再排版，隐藏的入边不会占用画布的走线空间。
+        geometry = build_geometry(sizes, dependencies, public)
+
+        # 先构造新场景。旧场景仍由视图持有，Qt 可以安全处理原有的悬停项和鼠标光标。
+        scene = QGraphicsScene(self)
+        nodes = {}
+        edges = []
+        public_group = None
+        if geometry.public_bounds is not None:
+            group_outline = QPainterPath()
+            group_outline.addRoundedRect(geometry.public_bounds, 10, 10)
+            group = scene.addPath(group_outline)
+            group.setZValue(-3)
+            heading = f"公共依赖 · 折叠 {hidden_count} 条入边" if hidden_count else "公共依赖"
+            title = scene.addSimpleText(
+                metrics.elidedText(heading, Qt.TextElideMode.ElideRight, int(geometry.public_bounds.width()) - 24),
+                font,
+            )
+            title.setToolTip(heading)
+            title.setPos(geometry.public_bounds.topLeft() + QPointF(12, 4))
+            public_group = group, title
+        for module_id, rect in geometry.boxes.items():
+            module = modules[module_id]
+            outline = QPainterPath()
+            outline.addRoundedRect(rect, 8, 8)
+            node = scene.addPath(outline)
+            node.setData(_MODULE_ID_ROLE, module_id)
+            # 子文字直接以节点为父项创建，避免在场景和节点之间转移所有权。
+            label = QGraphicsSimpleTextItem(
+                metrics.elidedText(labels[module_id], Qt.TextElideMode.ElideRight, int(rect.width()) - 28), node)
+            label.setFont(font)
+            lines = [escape(module.name), f"ID：{escape(module_id)}"]
+            note_item = None
+            top = rect.center().y() - label.boundingRect().height() / 2
+            if module_id in public:
+                note_item = QGraphicsSimpleTextItem(
+                    metrics.elidedText(notes[module_id], Qt.TextElideMode.ElideRight, int(rect.width()) - 28), node)
+                note_item.setFont(font)
+                top -= (note_item.boundingRect().height() + 2) / 2
+                note_item.setPos(rect.left() + 14, top + label.boundingRect().height() + 2)
+                lines.append(f"公共依赖 · {self._public.dependent_counts[module_id]} 个模块直接依赖")
+                if folded := self._folded_counts[module_id]:
+                    action = "收起" if module_id == self._expanded_module else "展开"
+                    lines.append(f"点击{action} {folded} 条入边")
+                    node.setCursor(Qt.CursorShape.PointingHandCursor)
+            label.setPos(rect.left() + 14, top)
+            lines.extend(map(escape, module.description.splitlines()))
+            node.setToolTip("<qt>" + "<br>".join(lines) + "</qt>")
+            nodes[module_id] = node, label, note_item
+
+        for dependency, (path, polygon) in geometry.edges.items():
+            cyclic = dependency in self._cyclic_dependencies
+            expanded = dependency.target == self._expanded_module and dependency in self._public.folded
+            line = scene.addPath(path)
+            arrow = scene.addPolygon(polygon)
             arrow.setPen(QPen(Qt.PenStyle.NoPen))
-            line.setZValue(-2)
-            arrow.setZValue(-1)
+            line.setZValue(-1 if expanded else -2)
+            arrow.setZValue(-0.5 if expanded else -1)
             label = "循环依赖" if cyclic else "模块依赖"
             tip = f"<qt>{label}：{escape(dependency.source)} → {escape(dependency.target)}</qt>"
             line.setToolTip(tip)
             arrow.setToolTip(tip)
-            self._edges.append((line, arrow, cyclic))
+            edges.append((line, arrow, cyclic, expanded))
+
+        # 先脱离旧场景，再释放 Python 对旧图元的引用。交给 Qt 在事件循环中销毁整个旧场景，
+        # 避免 clear() 先删除图元、Shiboken 随后又在清理包装对象时访问旧图元。
+        previous_scene = self.scene()
+        self.setScene(scene)
+        self._nodes, self._edges, self._public_group = nodes, edges, public_group
+        if previous_scene is not None:
+            previous_scene.deleteLater()
+
+        description = "滚轮缩放，拖动画布平移。虚线表示循环依赖。"
+        if public and self.has_folded_dependencies:
+            description += f"已折叠 {hidden_count} 条公共依赖入边。点击公共模块展开或收起入边。"
+        self.setAccessibleDescription(description)
+        if self._theme_color is not None:
+            self.apply_theme(self._theme_color)
+        self._update_content_rect()
+
+    def _update_content_rect(self) -> None:
+        """以当前场景实际可见的图形确定适配边界，并为缩放和平移预留外边距。"""
+        self._content_rect = self.scene().itemsBoundingRect().adjusted(-24, -24, 24, 24)
+        self.setSceneRect(self._content_rect)
 
     def apply_theme(self, color: Callable[[str], QColor]) -> None:
         """使用宿主的主题颜色更新场景样式，保留图形位置、缩放和平移。"""
-        self.setBackgroundBrush(color("editor-bg"))
+        self._theme_color = color
+        background = color("editor-bg")
+        self.setBackgroundBrush(background)
         text, border, fill = color("text-default"), QPen(color("editor-border")), color("editor-header-bg")
-        for node, label in self._nodes:
-            node.setPen(border)
-            node.setBrush(fill)
+        edge_color, cycle_color, accent = color("text-muted"), color("warning"), color("control-brand-border")
+        selected_fill = color("toolbar-selected-bg-active")
+        if self._public_group is not None:
+            group, title = self._public_group
+            group.setPen(border)
+            group.setBrush(fill)
+            title.setBrush(text)
+        for module_id, (node, label, note) in self._nodes.items():
+            selected = module_id == self._expanded_module
+            node.setPen(QPen(accent, 1.5) if selected else border)
+            node.setBrush(selected_fill if selected else background if note is not None else fill)
             label.setBrush(text)
+            if note is not None:
+                note.setBrush(accent if self._folded_counts[module_id] else edge_color)
 
-        edge_color, cycle_color = color("text-muted"), color("warning")
         edge_pen, cycle_pen = QPen(edge_color, 1.4), QPen(cycle_color, 1.6, Qt.PenStyle.DashLine)
+        expanded_pen = QPen(accent, 1.6)
         edge_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         cycle_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        for line, arrow, cyclic in self._edges:
-            line.setPen(cycle_pen if cyclic else edge_pen)
-            arrow.setBrush(cycle_color if cyclic else edge_color)
+        for line, arrow, cyclic, expanded in self._edges:
+            pen = cycle_pen if cyclic else expanded_pen if expanded else edge_pen
+            line.setPen(pen)
+            arrow.setBrush(pen.color())
         if self._empty_label is not None:
             self._empty_label.setBrush(edge_color)
+
+    @property
+    def has_folded_dependencies(self) -> bool:
+        """报告总览是否有可展开的入边，供状态栏决定是否显示全量切换。"""
+        return bool(self._public.folded)
+
+    @property
+    def shows_all_dependencies(self) -> bool:
+        """读取本标签当前的全量开关，供分屏切换和会话恢复同步控件。"""
+        return self._show_all
+
+    def set_show_all_dependencies(self, show_all: bool) -> None:
+        """在默认总览与全量依赖之间切换，按新图的边界重新适配窗口。"""
+        if self.has_folded_dependencies and self._set_dependency_view(show_all, None):
+            self.fit_to_view()
+
+    def _set_dependency_view(self, show_all: bool, expanded: str | None) -> bool:
+        """替换本标签显示的边并重建场景，待新边界就绪后再保存视口。"""
+        # 全量切换或会话恢复会替换当前显示意图，同时取消尚未执行的画布点击。
+        self._public_click_timer.stop()
+        self._pending_public_module = None
+        if (show_all, expanded) == (self._show_all, self._expanded_module):
+            return False
+        self._show_all, self._expanded_module = show_all, expanded
+        self._initial_view_pending = True
+        self._draw_graph()
+        self.dependency_view_changed.emit()
+        return True
+
+    def _public_module_at(self, position: QPoint) -> str | None:
+        """从命中的节点、标题或计数文字向上查找可展开的公共模块。"""
+        if self._show_all:
+            return None
+        item = self.itemAt(position)
+        while item is not None:
+            module_id = item.data(_MODULE_ID_ROLE)
+            if module_id in self._folded_counts:
+                return module_id
+            item = item.parentItem()
+        return None
+
+    def mousePressEvent(self, event) -> None:
+        """记录可能的公共模块点击，继续交给原有画布处理平移。"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_position = event.position().toPoint()
+            self._pressed_public_module = self._public_module_at(self._press_position)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        """达到系统拖动阈值即取消点选，拖动经过公共模块时只平移画布。"""
+        if self._pressed_public_module is not None:
+            distance = (event.position().toPoint() - self._press_position).manhattanLength()
+            if distance >= QApplication.startDragDistance():
+                self._pressed_public_module = None
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        """确认是同一模块上的点击，在 Qt 完成当前鼠标事件后再切换场景。"""
+        module_id = self._pressed_public_module if event.button() == Qt.MouseButton.LeftButton else None
+        self._pressed_public_module = None
+        position = event.position().toPoint()
+        activate = (module_id is not None
+                    and (position - self._press_position).manhattanLength() < QApplication.startDragDistance()
+                    and module_id == self._public_module_at(position))
+        super().mouseReleaseEvent(event)
+        if activate:
+            self._pending_public_module = module_id
+            self._public_click_timer.start(0)
+
+    def _apply_public_click(self) -> None:
+        """在下一次事件循环展开或收起指定模块，此时原鼠标事件已返回。"""
+        module_id = self._pending_public_module
+        if module_id is None:
+            return
+        expanded = None if module_id == self._expanded_module else module_id
+        if self._set_dependency_view(False, expanded):
+            self.fit_to_view()
 
     @property
     def zoom_factor(self) -> float:
@@ -220,7 +313,7 @@ class ModuleDependencyCanvas(QGraphicsView):
         self._apply_initial_view()
 
     def capture_viewport(self) -> dict:
-        """返回宿主可序列化的缩放和场景中心，隐藏标签也可保留待恢复的位置。"""
+        """保存缩放、中心和可选折叠状态，复制标签时保留当前的依赖显示方式。"""
         if not self._has_modules:
             return {}
         if self._initial_view_pending:
@@ -229,14 +322,28 @@ class ModuleDependencyCanvas(QGraphicsView):
             zoom, center = self._restored_viewport
         else:
             zoom, center = self.zoom_factor, self._viewport_center()
-        return {"version": 1, "zoom": zoom, "center": [center.x(), center.y()]}
+        state = {"version": _VIEW_STATE_VERSION, "zoom": zoom, "center": [center.x(), center.y()]}
+        if self._show_all:
+            state["show_all_dependencies"] = True
+        if self._expanded_module is not None:
+            state["expanded_public_module"] = self._expanded_module
+        return state
 
     def restore_viewport(self, state: dict | None) -> None:
-        """恢复版本 1 的视口。缺失、无效或未知版本的状态回退到全图适配。"""
+        """先恢复可见依赖，再按该图的几何恢复视口。
+
+        版本 1 到 3 使用旧布局的场景坐标，旧中心落在新图之外时适配整图。文档变动后，
+        已不在公共分组的模块自动回到默认折叠状态。
+        """
         self._restored_viewport = None
         self._initial_view_pending = True
-        if (self._has_modules and isinstance(state, dict)
-                and type(state.get("version")) is int and state["version"] == 1):
+        version = state.get("version") if isinstance(state, dict) else None
+        if self._has_modules and type(version) is int and 1 <= version <= _VIEW_STATE_VERSION:
+            show_all = self.has_folded_dependencies and state.get("show_all_dependencies") is True
+            expanded = state.get("expanded_public_module")
+            if show_all or not isinstance(expanded, str) or expanded not in self._folded_counts:
+                expanded = None
+            self._set_dependency_view(show_all, expanded)
             zoom, center = state.get("zoom"), state.get("center")
             if (isinstance(center, list) and len(center) == 2
                     and all(type(value) in (int, float) for value in (zoom, *center))):
@@ -246,7 +353,11 @@ class ModuleDependencyCanvas(QGraphicsView):
                     pass
                 else:
                     if 0 < zoom <= _MAX_ZOOM and math.isfinite(x) and math.isfinite(y):
-                        self._restored_viewport = zoom, QPointF(x, y)
+                        center_point = QPointF(x, y)
+                        if version == _VIEW_STATE_VERSION or self._content_rect.contains(center_point):
+                            self._restored_viewport = zoom, center_point
+        elif self._has_modules:
+            self._set_dependency_view(False, None)
         self._apply_initial_view()
 
     def _viewport_center(self) -> QPointF:
