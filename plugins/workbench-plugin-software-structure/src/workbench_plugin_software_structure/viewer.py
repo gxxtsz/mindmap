@@ -41,7 +41,7 @@ class SoftwareStructureDocument:
 
 
 class SoftwareStructureView:
-    """每个标签持有独立画布和工具栏动作，共用同一个软件结构文档。"""
+    """每个标签持有独立画布，共用同一个软件结构文档。"""
 
     def __init__(self, context: PluginContext, document: SoftwareStructureDocument, view_id: str | None):
         """创建浏览控件。恢复时使用宿主保存的标签标识，普通打开时生成新标识。"""
@@ -50,9 +50,6 @@ class SoftwareStructureView:
         self._context = context
         self.widget = ModuleDependencyCanvas(document.content)
         self.edit_actions: dict[str, QAction] = {}
-        self._fit_action = QAction("适应窗口", self.widget)
-        self._fit_action.setEnabled(bool(document.content.modules))
-        self._fit_action.triggered.connect(self.widget.fit_to_view)
         self._apply_theme()
         self._theme_subscription: Disposable | None = context.ui.subscribe_theme(self._apply_theme)
         self.widget.viewport_changed.connect(self._view_state_changed)
@@ -67,11 +64,6 @@ class SoftwareStructureView:
         """为活动文档状态栏提供图规模和只读状态。"""
         content = self.document.content
         return f"{len(content.modules)} 个模块 · {len(content.module_dependencies)} 条依赖 · 只读"
-
-    @property
-    def toolbar_actions(self) -> tuple[QAction, ...]:
-        """将全图适配动作交给宿主展示，动作生命周期与本标签的画布一致。"""
-        return (self._fit_action,)
 
     def prepare_input(self) -> bool:
         """只读画布可直接参与标签切换和关闭检查。"""
@@ -106,7 +98,6 @@ class SoftwareStructureView:
 
     def _apply_theme(self, *_):
         self.widget.apply_theme(self._context.ui.theme_color)
-        self._fit_action.setIcon(self._context.ui.theme_icon("maximize"))
 
     def _view_state_changed(self) -> None:
         self._context.documents.view_state_changed(self.id)

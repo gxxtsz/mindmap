@@ -200,6 +200,19 @@ class ModuleDependencyCanvas(QGraphicsView):
         if self._empty_label is not None:
             self._empty_label.setBrush(edge_color)
 
+    @property
+    def zoom_factor(self) -> float:
+        """读取当前视口的实际倍率，1.0 表示 100%。状态栏配合视口变化信号刷新读数。"""
+        return self.transform().m11()
+
+    def reset_zoom(self) -> None:
+        """以当前查看位置为中心恢复 100%，并沿用画布的平移边界和状态通知。"""
+        if not self._has_modules or self._initial_view_pending or self.zoom_factor == 1.0:
+            return
+        # 取完整视口的浮点中心，避免极小倍率将像素取整误差放大成明显的场景偏移。
+        center = self.mapToScene(self.viewport().rect()).boundingRect().center()
+        self._set_viewport(1.0, center)
+
     def fit_to_view(self) -> None:
         """清除待恢复的视口，居中显示整张图，最多放大到原始大小。"""
         self._restored_viewport = None
@@ -215,7 +228,7 @@ class ModuleDependencyCanvas(QGraphicsView):
                 return {}
             zoom, center = self._restored_viewport
         else:
-            zoom, center = self.transform().m11(), self._viewport_center()
+            zoom, center = self.zoom_factor, self._viewport_center()
         return {"version": 1, "zoom": zoom, "center": [center.x(), center.y()]}
 
     def restore_viewport(self, state: dict | None) -> None:
@@ -245,7 +258,7 @@ class ModuleDependencyCanvas(QGraphicsView):
 
     def _update_scroll_area(self) -> None:
         # 预留半个视口，图形较小或处于适配比例时也能拖动。
-        zoom = self.transform().m11()
+        zoom = self.zoom_factor
         margin_x = self.viewport().width() / (2 * zoom)
         margin_y = self.viewport().height() / (2 * zoom)
         self.setSceneRect(self._content_rect.adjusted(-margin_x, -margin_y, margin_x, margin_y))
@@ -296,7 +309,7 @@ class ModuleDependencyCanvas(QGraphicsView):
         if not self._has_modules or self._initial_view_pending or not delta:
             event.ignore()
             return
-        previous = self.transform().m11()
+        previous = self.zoom_factor
         steps = max(-10, min(10, delta / 120))
         zoom = min(_MAX_ZOOM, max(min(0.1, self._fit_zoom()), previous * 1.2 ** steps))
         anchor = self.mapToScene(event.position().toPoint())

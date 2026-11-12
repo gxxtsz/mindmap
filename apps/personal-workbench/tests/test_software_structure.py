@@ -1,5 +1,6 @@
 """通过产品入口验收软件结构文档的浏览、恢复和只读行为。"""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ from PySide6.QtWidgets import (
     QGraphicsPathItem,
     QGraphicsPolygonItem,
     QGraphicsSimpleTextItem,
+    QToolButton,
+    QWidget,
 )
 from workbench_api import SavePolicy
 
@@ -35,6 +38,23 @@ def graph_path(tmp_path):
     return path
 
 
+def _status_controls(window):
+    """在窗口状态栏中定位软件结构插件的实际按钮。"""
+    controls = window.status.findChild(QWidget, "software_structure_status_controls")
+    assert controls is not None
+    fit = controls.findChild(QToolButton, "status_fit")
+    zoom = controls.findChild(QToolButton, "status_reset_zoom")
+    assert fit is not None and zoom is not None
+    return controls, fit, zoom
+
+
+def _visible_center(canvas):
+    """将视口的几何中心映射到场景坐标，避免低倍率下先对中心像素取整。"""
+    viewport = canvas.viewport()
+    point = QPointF(viewport.width() / 2, viewport.height() / 2)
+    return canvas.viewportTransform().inverted()[0].map(point)
+
+
 def test_open_dialog_recent_files_and_repeat_open(window, graph_path, monkeypatch):
     def choose_file(parent, title, directory, filters):
         supported, *formats = filters.split(";;")
@@ -42,7 +62,10 @@ def test_open_dialog_recent_files_and_repeat_open(window, graph_path, monkeypatc
         return str(graph_path), ""
 
     monkeypatch.setattr(QFileDialog, "getOpenFileName", choose_file)
+    controls, _, _ = _status_controls(window)
+    assert not controls.isVisible()
     assert window.open_dialog()
+    assert controls.isVisible()
     view = window.documents.active
     assert view.document.save_policy == SavePolicy.READ_ONLY
     assert view.document.path == graph_path
@@ -52,6 +75,7 @@ def test_open_dialog_recent_files_and_repeat_open(window, graph_path, monkeypatc
     assert window.state.recent_files == [str(graph_path)]
 
     assert window.manager.close_document(view.id)
+    assert not controls.isVisible()
     menu = window.recent_files_button.menu()
     menu.aboutToShow.emit()
     action = next(action for action in menu.actions() if action.data() == str(graph_path))
@@ -77,7 +101,8 @@ def test_invalid_file_reports_field_without_creating_a_tab(window, graph_path, t
 
 def test_graph_shows_modules_arrows_cycles_and_theme(window, graph_path):
     assert window.open_path(graph_path)
-    canvas = window.documents.active.widget
+    view = window.documents.active
+    canvas = view.widget
     items = canvas.scene().items()
     assert {item.text() for item in items if isinstance(item, QGraphicsSimpleTextItem)} == {
         "应用入口", "订单服务", "商品服务", "支付适配", "账本模块", "数据存储", "缓存模块", "巡检工具",
@@ -90,10 +115,22 @@ def test_graph_shows_modules_arrows_cycles_and_theme(window, graph_path):
     assert any("cache → cache" in item.toolTip() for item in cycles)
     assert any("ID：ledger" in item.toolTip() and "记录付款流水" in item.toolTip() for item in items)
 
+    group, _ = window.host.editor.find_token(view.id)
+    toolbar = group.cornerWidget(Qt.Corner.TopRightCorner)
+    assert toolbar.isHidden() and not toolbar.actions()
+    controls, fit, zoom = _status_controls(window)
     for theme in ("dark", "light"):
         window.manager.set_theme(theme)
         assert canvas.backgroundBrush().color() == window.manager.theme.color("editor-bg")
         assert all(item.pen().color() == window.manager.theme.color("warning") for item in cycles)
+        for compact in (True, False):
+            window.manager.set_option("compact", compact)
+            QApplication.processEvents()
+            assert window.status.height() == (24 if compact else 28)
+            assert window.status.rect().contains(controls.geometry())
+            assert controls.geometry().center().x() > window.status.rect().center().x()
+            assert all(button.isVisible() and controls.rect().contains(button.geometry()) for button in (fit, zoom))
+            assert fit.x() < zoom.x() and not fit.icon().isNull()
 
 
 def test_empty_graph_has_an_empty_message(window, tmp_path):
@@ -103,7 +140,10 @@ def test_empty_graph_has_an_empty_message(window, tmp_path):
     view = window.documents.active
     assert view.widget.accessibleDescription() == "文件中暂无模块"
     assert [item.text() for item in view.widget.scene().items()] == ["文件中暂无模块"]
-    assert not view.toolbar_actions[0].isEnabled()
+    controls, fit, zoom = _status_controls(window)
+    assert controls.isVisible()
+    assert not fit.isEnabled() and not zoom.isEnabled()
+    assert zoom.text() == "—"
 
 
 def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, tmp_path):
@@ -113,6 +153,9 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
     canvas = first.widget
     qtbot.waitUntil(lambda: bool(first.capture_state()))
     fitted = first.capture_state()
+    _, fit, zoom = _status_controls(window)
+    assert fit.isEnabled() and zoom.isEnabled()
+    assert zoom.text() == f"{fitted['zoom']:.0%}"
 
     viewport = canvas.viewport()
     anchor = viewport.rect().center() + QPoint(28, 18)
@@ -122,6 +165,7 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
     QApplication.sendEvent(viewport, event)
     zoomed = first.capture_state()
     assert zoomed["zoom"] > fitted["zoom"]
+    assert zoom.text() == f"{zoomed['zoom']:.0%}"
     assert QLineF(scene_anchor, canvas.mapToScene(anchor)).length() < 2
 
     start = QPoint(48, 64)
@@ -138,8 +182,18 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
     assert copied.document is first.document and copied.widget is not canvas
     qtbot.waitUntil(lambda: copied.widget.transform().m11() == pytest.approx(panned["zoom"]))
     assert copied.capture_state()["center"] == pytest.approx(panned["center"], abs=2)
-    copied.toolbar_actions[0].trigger()
+    assert zoom.text() == f"{panned['zoom']:.0%}"
+
+    center = _visible_center(copied.widget)
+    qtbot.mouseClick(zoom, Qt.MouseButton.LeftButton)
+    assert copied.capture_state()["zoom"] == 1.0 and zoom.text() == "100%"
+    assert QLineF(_visible_center(copied.widget), center).length() < 2
+
+    qtbot.mouseClick(fit, Qt.MouseButton.LeftButton)
     assert copied.capture_state()["zoom"] == pytest.approx(fitted["zoom"])
+    assert copied.capture_state()["center"] == pytest.approx(fitted["center"], abs=2)
+    assert zoom.text() == f"{fitted['zoom']:.0%}"
+    assert first.capture_state()["zoom"] == panned["zoom"]
     assert first.capture_state()["center"] == pytest.approx(panned["center"], abs=2)
     states = {item.id: item.capture_state() for item in (first, copied)}
     assert window.state.recent_files == [str(graph_path)]
@@ -151,15 +205,80 @@ def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, 
     assert restored.documents.active.id == copied.id
     assert restored.documents.views[first.id].document is restored.documents.views[copied.id].document
     assert restored.state.recent_files == [str(graph_path)]
+    controls, _, restored_zoom = _status_controls(restored)
+    assert controls.isVisible()
     for view_id, state in states.items():
         restored.documents.activate_view(view_id)
         view = restored.documents.active
         qtbot.waitUntil(lambda: view.widget.transform().m11() == pytest.approx(state["zoom"]))
         assert view.capture_state()["center"] == pytest.approx(state["center"], abs=2)
+        assert restored_zoom.text() == f"{state['zoom']:.0%}"
     view.restore_state({"version": 1, "zoom": float("nan"), "center": [0, 0]})
     assert view.capture_state()["zoom"] == pytest.approx(fitted["zoom"])
     assert restored.close()
     assert graph_path.read_bytes() == original_bytes
+
+
+def test_status_controls_follow_focused_split(window, graph_path, qtbot):
+    """两个分屏同时可见时，状态栏跟随键盘焦点，后台画布的倍率变化不会覆盖读数。"""
+    assert window.open_path(graph_path)
+    first = window.documents.active
+    assert window.manager.duplicate_document(first.id)
+    second = window.documents.active
+    window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
+    qtbot.waitUntil(lambda: first.widget.isVisible() and second.widget.isVisible())
+    _, fit, zoom = _status_controls(window)
+    window.activateWindow()
+    first.widget.setFocus()
+    qtbot.waitUntil(lambda: window.documents.active is first and first.widget.hasFocus())
+
+    first.restore_state({"version": 1, "zoom": 1.4, "center": [100, 50]})
+    second.restore_state({"version": 1, "zoom": 2.0, "center": [200, 70]})
+    assert zoom.text() == "140%"
+    qtbot.mouseClick(zoom, Qt.MouseButton.LeftButton)
+    assert first.widget.zoom_factor == 1.0 and second.widget.zoom_factor == 2.0
+    assert first.widget.hasFocus()
+
+    second.widget.setFocus()
+    qtbot.waitUntil(lambda: window.documents.active is second)
+    assert zoom.text() == "200%"
+    qtbot.mouseClick(fit, Qt.MouseButton.LeftButton)
+    assert second.widget.zoom_factor <= 1.0 and first.widget.zoom_factor == 1.0
+    assert zoom.text() == f"{second.widget.zoom_factor:.0%}"
+
+
+@pytest.mark.parametrize("isolated_modules", [0, 12])
+def test_status_zoom_below_one_percent(window, tmp_path, qtbot, isolated_modules):
+    """长依赖链适配后显示小于 1%，恢复原始尺寸时按可平移范围保留视口中心。"""
+    chain = [f"module-{index}" for index in range(800)]
+    identifiers = chain + [f"isolated-{index}" for index in range(isolated_modules)]
+    path = tmp_path / "长依赖链.software-structure"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "modules": [{"id": identifier, "name": identifier} for identifier in identifiers],
+        "module_dependencies": [
+            {"source": source, "target": target} for source, target in zip(chain, chain[1:])
+        ],
+    }), encoding="utf-8")
+    assert window.open_path(path)
+    view = window.documents.active
+    qtbot.waitUntil(lambda: bool(view.capture_state()))
+    _, _, zoom = _status_controls(window)
+    canvas = view.widget
+    assert 0 < canvas.zoom_factor < 0.01
+    assert zoom.text() == "<1%"
+    center = _visible_center(canvas)
+    qtbot.mouseClick(zoom, Qt.MouseButton.LeftButton)
+    assert canvas.zoom_factor == 1.0 and zoom.text() == "100%"
+
+    # 100% 下从可滚动区域扣除半屏余量，得到可达的视口中心范围。
+    width, height = canvas.viewport().size().toTuple()
+    bounds = canvas.sceneRect().adjusted(width / 2, height / 2, -width / 2, -height / 2)
+    expected = QPointF(
+        min(bounds.right(), max(bounds.left(), center.x())),
+        min(bounds.bottom(), max(bounds.top(), center.y())),
+    )
+    assert QLineF(_visible_center(canvas), expected).length() < 2
 
 
 def test_read_only_actions_and_mindmap_saving(window, graph_path, tmp_path, monkeypatch, qtbot):
@@ -176,6 +295,9 @@ def test_read_only_actions_and_mindmap_saving(window, graph_path, tmp_path, monk
     files.close()
     assert window.open_path(graph_path)
     graph = window.documents.active
+    controls, _, _ = _status_controls(window)
+    mindmap_controls = window.status.findChild(QWidget, "mindmap_status_controls")
+    assert controls.isVisible() and not mindmap_controls.isVisible()
     monkeypatch.setattr(graph.document, "save", lambda **kwargs: pytest.fail("只读文档不应进入宿主保存流程"))
     monkeypatch.setattr(window, "confirm_close", lambda view: pytest.fail("只读文档不应弹出保存对话框"))
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: pytest.fail("不应打开新建导图对话框"))
@@ -197,6 +319,7 @@ def test_read_only_actions_and_mindmap_saving(window, graph_path, tmp_path, monk
     target = tmp_path / "一起打开的导图.mindmap"
     assert window.new_document(target)
     mindmap = window.documents.active
+    assert mindmap_controls.isVisible() and not controls.isVisible()
     assert mindmap.document.path == target
     assert window.action("app.new").isEnabled()
     open_file_menu()
@@ -206,6 +329,7 @@ def test_read_only_actions_and_mindmap_saving(window, graph_path, tmp_path, monk
     mindmap.engine.update_node(mindmap.engine.root_id, text="批量保存的内容")
     mindmap.document.timer.stop()
     window.documents.activate_view(graph.id)
+    assert controls.isVisible() and not mindmap_controls.isVisible()
     assert not window.action("app.save").isEnabled()
     assert window.action("app.save_all").isEnabled()
     assert window.save_all()
