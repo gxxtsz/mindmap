@@ -71,7 +71,9 @@ class SoftwareStructureStatusControls(QWidget):
             f"QToolButton:pressed {{ background:{pressed}; }}"
             f"QToolButton:focus {{ border-color:{focus}; }}"
         )
-        self._fit_button.setIcon(self._ui.theme_icon("maximize"))
+        # 与思维导图状态栏读取同一个主题资源，兼容尚未提供该图标的宿主。
+        fit_icon = self._ui.theme_icon("fit-view")
+        self._fit_button.setIcon(self._ui.theme_icon("maximize") if fit_icon.isNull() else fit_icon)
         compact = self._ui.compact
         height = 18 if compact else 20
         self._fit_button.setFixedSize(22 if compact else 24, height)

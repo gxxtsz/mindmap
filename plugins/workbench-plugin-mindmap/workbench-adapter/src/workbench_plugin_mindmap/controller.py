@@ -222,7 +222,9 @@ class MindMapController(QObject):
             palette.setColor(QPalette.ColorRole.Window, panel_background)
             stack.setPalette(palette)
             stack.setAutoFillBackground(True)
-        self._status_controls.set_ui_colors(colors, compact=self.context.ui.compact)
+        self._status_controls.set_ui_colors(
+            colors, compact=self.context.ui.compact, fit_icon=self.context.ui.theme_icon("fit-view"),
+        )
         self._sync_depth_action()
 
     def dispose(self):

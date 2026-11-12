@@ -4,7 +4,7 @@ from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_editor.icons import toolbar_icon
 from mindmap_qt_editor.theme import UiColors
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QIcon, QKeySequence
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
 
 
@@ -22,6 +22,7 @@ class _StatusViewControls(QWidget):
         self._canvas = None
         self._bound_actions = []
         self._colors = None
+        self._fit_icon = QIcon()
         self.buttons = {}
         self._labels = {
             "fit": "适应窗口", "reset_zoom": "恢复默认尺寸", "center": "回到中心", "wheel_mode": "滚轮行为",
@@ -111,6 +112,9 @@ class _StatusViewControls(QWidget):
             button.setToolTip(description)
             button.setAccessibleName(label)
             button.setAccessibleDescription(description)
+        # 画布动作更新时 Qt 会重新复制它的图标。状态栏同步完动作后再应用宿主的共用图标。
+        if not self._fit_icon.isNull():
+            self.buttons["fit"].setIcon(self._fit_icon)
         self._sync_zoom()
 
     def _sync_zoom(self):
@@ -127,13 +131,17 @@ class _StatusViewControls(QWidget):
         if self._canvas is not None:
             self._canvas.set_wheel_mode("zoom" if self._canvas.wheel_mode == "scroll" else "scroll")
 
-    def set_ui_colors(self, colors: UiColors, *, compact: bool) -> None:
+    def set_ui_colors(self, colors: UiColors, *, compact: bool, fit_icon: QIcon) -> None:
         """使用外壳色板和逻辑像素尺寸，不撑高原有的普通／紧凑状态栏。
 
+        fit_icon 是工作台各文档共用的适应窗口图标。宿主未提供时沿用导图内置图标。
         滚轮模式仅通过图标区分，按钮始终不可勾选；悬停、按下和键盘焦点仍有
         短暂反馈。无文档时也提供主题一致的禁用图标，不创建临时画布。
         """
         self._colors = colors
+        self._fit_icon = (
+            toolbar_icon("fit", colors.text, colors.muted, colors.accent) if fit_icon.isNull() else fit_icon
+        )
         self.setStyleSheet(
             "QWidget#mindmap_status_controls { background:transparent; }"
             f"QLabel#mindmap_save_status {{ color:{colors.muted}; padding:0; }}"
@@ -147,7 +155,7 @@ class _StatusViewControls(QWidget):
             width = button.fontMetrics().horizontalAdvance("400%") + 10 if key == "reset_zoom" else (
                 22 if compact else 24)
             button.setFixedSize(width, 18 if compact else 20)
-            if self._canvas is None:
+            if self._canvas is None and key != "fit":
                 name = "wheel_scroll" if key == "wheel_mode" else key
                 button.setIcon(toolbar_icon(name, colors.text, colors.muted, colors.accent))
         self._sync_actions()

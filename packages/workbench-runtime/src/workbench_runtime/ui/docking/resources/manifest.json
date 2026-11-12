@@ -43,6 +43,10 @@
       "sha256": "46d7882893f27bc1f2cb031684be6d651368c2392c1b72f2beeef596d0c4cb44"
     },
     {
+      "path": "icons/fit-view.svg",
+      "sha256": "7390408aa15f74517b4d30355b899177e58acbddcee0e9932f2daecdf2a7e590"
+    },
+    {
       "path": "icons/folder.svg",
       "sha256": "f473b2c82c0a64f0ce542d888b8d6e3538afa4b1561c876687957e9de797eb13"
     },

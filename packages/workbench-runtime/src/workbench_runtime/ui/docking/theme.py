@@ -98,7 +98,9 @@ class Theme:
         """同时接受业务的 QIcon 和语义图标名，不要求引用组件包内部路径。"""
         if isinstance(name, QIcon):
             return QIcon(name)
-        return self.icons.get_icon(name, color=self.color("text-muted").name(), size=size)
+        # 状态栏的适应窗口图标沿用导图视图动作的正文前景色。
+        color_token = "text-default" if name == "fit-view" else "text-muted"
+        return self.icons.get_icon(name, color=self.color(color_token).name(), size=size)
 
     def palette(self):
         palette = QPalette()

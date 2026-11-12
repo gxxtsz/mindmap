@@ -7,7 +7,7 @@ import pytest
 from mindmap_core.formats import load_document
 from personal_workbench.app import build_window
 from PySide6.QtCore import QLineF, QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QIcon, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -144,6 +144,33 @@ def test_empty_graph_has_an_empty_message(window, tmp_path):
     assert controls.isVisible()
     assert not fit.isEnabled() and not zoom.isEnabled()
     assert zoom.text() == "—"
+
+
+def test_fit_status_icon_matches_mindmap_in_each_theme(window, graph_path, tmp_path):
+    """切换活动文档和主题后，两个状态栏按钮使用同一适应窗口图标。"""
+    assert window.new_document(tmp_path / "图标对照.mindmap")
+    mindmap = window.documents.active
+    mindmap_controls = window.status.findChild(QWidget, "mindmap_status_controls")
+    assert mindmap_controls is not None
+    mindmap_fit = mindmap_controls.findChild(QToolButton, "status_fit")
+    assert mindmap_fit is not None
+    assert window.open_path(graph_path)
+    graph = window.documents.active
+    _, fit, _ = _status_controls(window)
+
+    for theme in ("light", "dark"):
+        window.documents.activate_view(mindmap.id)
+        window.manager.set_theme(theme)
+        assert mindmap_fit.isVisible()
+        mindmap_icon = mindmap_fit.icon()
+        window.documents.activate_view(graph.id)
+        assert fit.isVisible() and fit.iconSize() == mindmap_fit.iconSize()
+        shared_icon = window.manager.theme.icon("fit-view")
+        assert not shared_icon.isNull()
+        for mode in (QIcon.Mode.Normal, QIcon.Mode.Disabled):
+            expected = shared_icon.pixmap(fit.iconSize(), mode).toImage()
+            assert mindmap_icon.pixmap(fit.iconSize(), mode).toImage() == expected
+            assert fit.icon().pixmap(fit.iconSize(), mode).toImage() == expected
 
 
 def test_viewport_interactions_duplicate_and_restart(window, graph_path, qtbot, tmp_path):
