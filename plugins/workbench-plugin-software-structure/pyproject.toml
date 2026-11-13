@@ -15,6 +15,10 @@ software-structure = "workbench_plugin_software_structure:manifest"
 requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+# 工作区忽略用户的 .software-structure 文件，随插件分发的模板需要显式纳入打包。
+artifacts = ["/src/workbench_plugin_software_structure/resources/软件结构模板.software-structure"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/workbench_plugin_software_structure"]
 

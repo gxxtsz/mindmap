@@ -13,6 +13,7 @@ from workbench_plugin_software_structure.document import (
     SoftwareStructure,
     SoftwareStructureFormatError,
     load_software_structure,
+    read_bundled_template,
     read_software_structure,
     rewrite_edge_filter,
 )
@@ -87,22 +88,26 @@ def test_reads_module_apis_and_class_members_in_file_order(tmp_path):
 
 @pytest.mark.parametrize("hidden", [[], ["core"]])
 def test_saved_filter_takes_precedence_over_legacy_marks(tmp_path, hidden):
-    """新字段存在时以其为准，空列表也能覆盖旧勾选。"""
+    """新筛选覆盖旧勾选，保存已有筛选字段时也补齐格式说明。"""
     path = tmp_path / "筛选优先.software-structure"
     path.write_text(json.dumps({
         "schema_version": 1,
         "modules": [{"id": "Core", "name": "核心", "is_public_dependency": True}, {"id": "core", "name": "适配"}],
         "hidden_edge_module_ids": hidden,
     }), "utf-8")
-    assert load_software_structure(path).hidden_edge_module_ids == frozenset(hidden)
+    document, snapshot = read_software_structure(path)
+    assert document.hidden_edge_module_ids == frozenset(hidden)
+    changed = replace(document, hidden_edge_module_ids=frozenset({"Core"}))
+    saved = json.loads(rewrite_edge_filter(snapshot, changed))
+    assert saved["hidden_edge_module_ids"] == ["Core"]
+    assert saved["format_description"] == json.loads(read_bundled_template())["format_description"]
 
 
 def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_path):
-    """在一次重写中移除直接旧键，保留 CRLF、缩进、接口清单和扩展字段。"""
+    """在末尾的版本号后补写说明和筛选，保留 CRLF、缩进、接口和扩展字段。"""
     path = tmp_path / "保留原文.software-structure"
     original = (
         '\ufeff{\r\n'
-        '\t"schema_version": 1,\r\n'
         '\t"modules": [\r\n'
         '\t\t{"is_public_dependency": false, "id": "core", "name": "核心 } \\"模块", '
         '"is_public_dependency": false},\r\n'
@@ -118,7 +123,8 @@ def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_pat
         '\t"module_apis": [{ "module_id": "Core", "apis": [\r\n'
         '\t\t{"name": "读取 {项目}", "description": "读取项目的 \\"当前版本\\"。"}\r\n'
         '\t]}],\r\n'
-        '\t"其它": ["is_public_dependency", "}"]\r\n'
+        '\t"其它": ["is_public_dependency", "}"],\r\n'
+        '\t"schema_version": 1\r\n'
         '}\r\n'
     ).encode("utf-8")
     path.write_bytes(original)
@@ -127,11 +133,14 @@ def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_pat
     assert snapshot == original == path.read_bytes()
     checked = replace(document, hidden_edge_module_ids=frozenset({"Core", "core"}))
     updated = rewrite_edge_filter(snapshot, checked)
+    description = json.loads(read_bundled_template())["format_description"]
+    description_text = json.dumps(description, ensure_ascii=False, indent="\t").replace("\n", "\r\n\t")
+    additions = f',\r\n\t"format_description": {description_text},\r\n\t"hidden_edge_module_ids": ["core", "Core"]'
     expected = (
         original.replace(b'"is_public_dependency": false,', b'', 1)
         .replace(b', "is_public_dependency": false}', b'}', 1)
         .replace(b'\t\t\t"is_public_dependency": false,\r\n\t\t\t"is_public_\\u0064ependency": true,\r\n', b'')
-        .replace(b'\r\n}\r\n', b',\r\n\t"hidden_edge_module_ids": ["core", "Core"]\r\n}\r\n')
+        .replace(b'\r\n}\r\n', additions.encode("utf-8") + b'\r\n}\r\n')
     )
     assert updated == expected
     path.write_bytes(updated)
@@ -144,11 +153,15 @@ def test_filter_rewrite_migrates_legacy_keys_and_preserves_original_text(tmp_pat
 
 
 def test_bundled_template_is_a_valid_graph():
-    """通过正式读取器验证插件资源内的示例图和接口数据。"""
+    """通过正式读取器验证示例图，并核对格式说明覆盖所有顶层字段。"""
     resource = files("workbench_plugin_software_structure").joinpath("resources", "软件结构模板.software-structure")
     with as_file(resource) as path:
         template = load_software_structure(path)
+        raw_template = json.loads(path.read_bytes())
     assert template.modules and template.module_dependencies and template.module_apis
+    description = raw_template["format_description"]
+    assert raw_template.keys() | {"file", "apis"} <= description.keys()
+    assert all(isinstance(text, str) and text.strip() for text in description.values())
 
 
 @pytest.mark.parametrize(("overrides", "message"), [

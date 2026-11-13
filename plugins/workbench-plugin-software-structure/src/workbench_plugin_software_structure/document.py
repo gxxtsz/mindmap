@@ -1,12 +1,17 @@
-"""校验软件结构文档，并在原 JSON 文本中保存连线筛选设置。"""
+"""校验软件结构文档，并在原 JSON 文本中保存连线筛选与格式说明。"""
 
 import json
 import re
 from codecs import BOM_UTF8
 from collections.abc import Iterator
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 
+SOFTWARE_STRUCTURE_SUFFIX = "software-structure"
+TEMPLATE_FILENAME = f"软件结构模板.{SOFTWARE_STRUCTURE_SUFFIX}"
+
+_FORMAT_DESCRIPTION = "format_description"
 _HIDDEN_EDGE_MODULE_IDS = "hidden_edge_module_ids"
 _LEGACY_PUBLIC_DEPENDENCY = "is_public_dependency"
 _JSON_SPACE = re.compile(r"[ \t\r\n]*")
@@ -196,6 +201,11 @@ def _reject_json_constant(value: str) -> None:
     raise SoftwareStructureFormatError(f"JSON 语法错误，数值 {value} 无效")
 
 
+def read_bundled_template() -> bytes:
+    """读取随插件分发的版本 1 模板原文，供下载和旧文件补写格式说明共用。"""
+    return files(__package__).joinpath("resources", TEMPLATE_FILENAME).read_bytes()
+
+
 def load_software_structure(path: str | Path) -> SoftwareStructure:
     """从磁盘加载并校验版本 1 的 UTF-8 JSON 软件结构文档。"""
     return read_software_structure(path)[0]
@@ -205,8 +215,9 @@ def read_software_structure(path: str | Path) -> tuple[SoftwareStructure, bytes]
     """同一次读取返回已校验内容和原始字节，供保存时定位字段和检查外部改动。
 
     支持 UTF-8 BOM、扩展字段、自依赖和循环依赖。接口清单是版本 1 的可选字段，
-    通过模块 ID 与模块目录关联。优先读取顶层筛选列表（包括空列表），缺省时在内存中
-    迁移旧的公共依赖勾选。读取或校验失败时抛出带中文说明的
+    通过模块 ID 与模块目录关联。兼容缺少格式说明的旧文件，保存筛选时再补齐。
+    优先读取顶层筛选列表（包括空列表），缺省时在内存中迁移旧的公共依赖勾选。
+    读取或校验失败时抛出带中文说明的
     SoftwareStructureFormatError，错误消息包含可用的行列或字段位置。
     """
     try:
@@ -301,16 +312,26 @@ def _legacy_mark_ranges(content: str, array_start: int, count: int) -> Iterator[
 
 
 def rewrite_edge_filter(snapshot: bytes, document: SoftwareStructure) -> bytes:
-    """将筛选设置和旧字段迁移写入同一份候选文件，供调用方一次原子提交。
+    """生成包含筛选设置和格式说明的候选文件，供调用方一次原子提交。
 
     document 来自已校验的 snapshot，仅更新了 hidden_edge_module_ids。按模块顺序
-    写入标识数组，清除筛选时写入空数组。替换顶层字段的值或按原缩进追加该字段，
-    同时移除模块对象上的旧公共依赖标记。其余字段、换行与 UTF-8 BOM 均取自原文。
+    写入标识数组，并移除模块对象上的旧公共依赖标记。缺少格式说明时从模板补写。
+    已有说明、其余字段、换行与 UTF-8 BOM 均取自原文。
     """
     content = snapshot.decode("utf-8-sig")
     members, spacing = _json_object_members(content, 0)
     fields = {member.key: member for member in members}
     edits = list(_legacy_mark_ranges(content, fields["modules"].value_start, len(document.modules)))
+
+    if _FORMAT_DESCRIPTION not in fields:
+        description = json.loads(read_bundled_template())[_FORMAT_DESCRIPTION]
+        # 在版本号后插入说明，沿用顶层缩进和换行，紧凑的单行文件也按原格式写入。
+        last_newline = max(spacing.rfind("\n"), spacing.rfind("\r"))
+        indent = spacing[last_newline + 1:] if last_newline >= 0 else None
+        description_text = json.dumps(description, ensure_ascii=False, indent=indent).replace("\n", spacing)
+        version_end = fields["schema_version"].end
+        edits.append((version_end, version_end, f',{spacing}"{_FORMAT_DESCRIPTION}": {description_text}'))
+
     value = json.dumps([module.id for module in document.modules if module.id in document.hidden_edge_module_ids])
     if field := fields.get(_HIDDEN_EDGE_MODULE_IDS):
         edits.append((field.value_start, field.end, value))
@@ -320,7 +341,8 @@ def rewrite_edge_filter(snapshot: bytes, document: SoftwareStructure) -> bytes:
 
     parts = []
     position = 0
-    for start, end, replacement in sorted(edits):
+    # 版本号位于末尾时，两项补写可能共用同一位置。按原添加顺序写入这两项。
+    for start, end, replacement in sorted(edits, key=lambda edit: edit[0]):
         parts.extend((content[position:start], replacement))
         position = end
     parts.append(content[position:])

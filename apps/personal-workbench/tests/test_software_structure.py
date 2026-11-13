@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from workbench_api import SavePolicy
+from workbench_plugin_software_structure.document import read_bundled_template
 from workbench_runtime.ui.docking import DockPosition, DockTarget
 
 _DOWNLOAD_ACTION_ID = "software-structure.download-template"
@@ -48,6 +49,12 @@ def graph_path(tmp_path):
     path = tmp_path / "软件结构示例.software-structure"
     path.write_bytes(fixture_path.read_bytes())
     return path
+
+
+@pytest.fixture
+def format_description():
+    """读取模板中的标准格式说明，供下载和旧文件保存的集成测试核对。"""
+    return json.loads(read_bundled_template())["format_description"]
 
 
 @pytest.fixture
@@ -219,9 +226,9 @@ def test_open_dialog_recent_files_and_repeat_open(window, graph_path, monkeypatc
     assert window.documents.active.document.path == graph_path
 
 
-def test_download_template_from_file_menu_and_open(window, tmp_path, monkeypatch, qtbot):
+def test_download_template_from_file_menu_and_open(window, tmp_path, monkeypatch, qtbot, format_description):
     """从无文档的工作台下载模板，再通过正常打开入口查看依赖、接口和类成员。"""
-    target = tmp_path / "生成用模板.software-structure"
+    target = tmp_path / "下载的模板.software-structure"
 
     def downloads(location):
         assert location == QStandardPaths.StandardLocation.DownloadLocation
@@ -248,10 +255,9 @@ def test_download_template_from_file_menu_and_open(window, tmp_path, monkeypatch
     menu.setActiveAction(download)
     qtbot.keyClick(menu, Qt.Key.Key_Return)
 
-    instructions = "\n".join(json.loads(target.read_text(encoding="utf-8"))["template_instructions"])
-    assert "source 是依赖方，target 是被依赖方" in instructions
-    assert "只输出原始 JSON 对象" in instructions
-    assert "给第一次了解项目的人看" in instructions and "module_apis" in instructions
+    template = json.loads(target.read_text(encoding="utf-8"))
+    assert "template_instructions" not in template
+    assert template["format_description"] == format_description
     assert str(target) in window.status.currentMessage()
     assert window.documents.active is None and not window.state.recent_files
 
@@ -326,6 +332,7 @@ def test_download_template_from_split_toolbar(window, graph_path, tmp_path, monk
     monkeypatch.setattr(QFileDialog, "exec", choose_file)
     button = second_toolbar.widgetForAction(download)
     qtbot.waitUntil(button.isVisible)
+    assert button.toolTip() == "下载软件结构模板（含文件格式说明）"
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
     assert target.is_file()
     assert window.documents.active is second
@@ -590,10 +597,11 @@ def test_module_selection_highlights_direct_dependencies_in_each_theme(window, g
     assert _highlighted_dependencies(canvas) == set()
 
 
-def test_module_api_panel_shares_right_side_and_wraps_long_descriptions(window, graph_path, qtbot):
+def test_module_api_panel_shares_right_side_and_wraps_long_descriptions(window, graph_path, qtbot, format_description):
     """两种侧栏可同时使用，接口在窄面板中换行并跟随选择和主题。"""
     description = "核对订单、商品和用户填写的信息，确认可以提交后生成订单号，并说明需要补充哪些信息。"
     graph = json.loads(graph_path.read_bytes())
+    assert graph["format_description"] == format_description
     next(module for module in graph["modules"] if module["id"] == "diagnostics").pop("description")
     graph["module_apis"] = [
         {"module_id": "orders", "apis": [
@@ -798,8 +806,10 @@ def test_edge_filter_hides_incident_lines_without_moving_cards(window, graph_pat
     }
 
 
-def test_dependency_filter_sidebar_migrates_marks_and_refreshes_splits(window, legacy_filter_graph_path, qtbot):
-    """从视图菜单打开侧栏，核对旧勾选、原子迁移和两个分屏的独立预览。"""
+def test_dependency_filter_sidebar_migrates_marks_and_refreshes_splits(
+    window, legacy_filter_graph_path, qtbot, format_description,
+):
+    """从视图菜单打开侧栏，核对旧勾选、格式说明补写和两个分屏的独立预览。"""
     path = legacy_filter_graph_path
     original = path.read_bytes()
     assert not window.manager.is_tool_available(_DEPENDENCY_FILTER_PANEL_ID)
@@ -837,6 +847,7 @@ def test_dependency_filter_sidebar_migrates_marks_and_refreshes_splits(window, l
         _click_dependency_filter_checkbox(qtbot, modules, shared_b)
     expected = json.loads(original)
     del expected["modules"][-2]["is_public_dependency"]
+    expected["format_description"] = format_description
     expected["hidden_edge_module_ids"] = ["shared-a", "shared-b"]
     assert json.loads(path.read_bytes()) == expected
     assert _dependency_arrow_count(first) == 21 and first.widget.shows_all_dependencies
@@ -902,12 +913,13 @@ def test_dependency_filter_sidebar_checkboxes_and_theme(window, legacy_filter_gr
 
 
 def test_dependency_filter_header_toggles_all_and_refreshes_shared_views(
-    window, legacy_filter_graph_path, qtbot, monkeypatch,
+    window, legacy_filter_graph_path, qtbot, monkeypatch, format_description,
 ):
     """经实际标题栏批量勾选，每次只提交一次并通知同文件的两个画布。"""
     path = legacy_filter_graph_path
     expected = json.loads(path.read_bytes())
     del expected["modules"][-2]["is_public_dependency"]
+    expected["format_description"] = format_description
     assert window.open_path(path)
     first = window.documents.active
     assert window.manager.duplicate_document(first.id)
@@ -1071,7 +1083,7 @@ def test_switching_document_types_preserves_panels_in_shared_slot(
 @pytest.mark.parametrize("external_edit", [False, True], ids=["short_write", "external_edit"])
 @pytest.mark.parametrize("bulk", [False, True], ids=["single", "bulk"])
 def test_dependency_filter_save_failure_restores_marks(
-    window, legacy_filter_graph_path, qtbot, monkeypatch, external_edit, bulk,
+    window, legacy_filter_graph_path, qtbot, monkeypatch, external_edit, bulk, format_description,
 ):
     """短写或提交前发现外部修改时保留文件与已显示的图，后续输入可重新提交。"""
     path = legacy_filter_graph_path
@@ -1123,6 +1135,7 @@ def test_dependency_filter_save_failure_restores_marks(
         change_marks()
     updated = json.loads(expected)
     del updated["modules"][-2]["is_public_dependency"]
+    updated["format_description"] = format_description
     if bulk:
         updated["hidden_edge_module_ids"] = [module["id"] for module in updated["modules"]]
         assert _dependency_arrow_count(view) == 0 and button.toolTip() == "清除筛选"

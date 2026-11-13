@@ -6,7 +6,7 @@ from workbench_api import Disposable, PluginContext, PluginManifest
 def activate(context: PluginContext) -> Disposable:
     """通过宿主公开接口登记模板下载、文档提供者、状态栏及两种侧栏。
 
-    下载命令由插件上下文托管，文件菜单和各软件结构视图共用该动作。
+    下载命令由插件上下文托管，文件菜单和各软件结构视图共用该动作及其提示。
     状态栏按活动视图切换画布，返回的注销句柄在移除控件前断开订阅并释放画布引用。
     """
     from workbench_api.qt import CommandSpec, MenuLocation, StatusItemSpec
@@ -24,7 +24,7 @@ def activate(context: PluginContext) -> Disposable:
         icon="export-text",
         menu=MenuLocation.FILE,
     ))
-    download.setToolTip("下载软件结构模板（含 AI 生成说明）")
+    download.setToolTip("下载软件结构模板（含文件格式说明）")
     provider = register_document_provider(context)
     controls = SoftwareStructureStatusControls(context.ui)
     registrations = (

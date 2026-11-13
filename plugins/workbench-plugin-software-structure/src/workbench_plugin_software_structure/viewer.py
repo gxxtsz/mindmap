@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QAction
 from workbench_api import Disposable, EditorProvider, OperationResult, PluginContext, SavePolicy
 
-from .document import read_software_structure, rewrite_edge_filter
+from .document import SOFTWARE_STRUCTURE_SUFFIX, read_software_structure, rewrite_edge_filter
 from .module_deps.canvas import ModuleDependencyCanvas
 from .storage import write_atomic
 from .template import DOWNLOAD_TEMPLATE_COMMAND_ID
@@ -70,7 +70,11 @@ class SoftwareStructureDocument(QObject):
         return self._save_edge_filter(updated)
 
     def _save_edge_filter(self, hidden_edge_module_ids: frozenset[str]) -> bool:
-        """用打开或上次保存的字节检查外部修改，提交后才替换快照并通知视图。"""
+        """一次提交筛选和旧文件缺少的格式说明，成功后才替换快照并通知视图。
+
+        提交前用打开或上次保存的字节检查外部修改。失败时保留最近成功的快照，
+        让各视图继续显示上次保存的筛选结果。
+        """
         if hidden_edge_module_ids == self.content.hidden_edge_module_ids:
             return True
 
@@ -214,7 +218,7 @@ def register_document_provider(context: PluginContext) -> Disposable:
     return context.editors.register(EditorProvider(
         id=_PROVIDER_ID,
         title="软件结构",
-        extensions=(".software-structure",),
+        extensions=(f".{SOFTWARE_STRUCTURE_SUFFIX}",),
         new_document=None,
         open_document=partial(_open_document, context),
         file_icon="software-structure",
