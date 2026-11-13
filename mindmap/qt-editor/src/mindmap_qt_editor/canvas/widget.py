@@ -1069,11 +1069,14 @@ class MindMapWidget(
 
     @document_interaction
     def delete_selected(self):
-        """一次删除选择的节点子树，节点和图片资源共用一条撤销记录。"""
+        """一次删除所选连线或节点；节点子树及关联资源共用一条撤销记录。"""
         self._ensure_editable()
         ids = self.selected_node_ids()
         if self.graph is not None:
-            if ids:
+            edge = self.view.graph_edge_edit.selected_edge
+            if edge is not None:
+                self._commit_graph_edge(None, original=edge)
+            elif ids:
                 self._delete_graph_nodes(ids)
             return
         if ids:

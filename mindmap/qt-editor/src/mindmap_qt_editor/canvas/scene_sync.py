@@ -600,3 +600,4 @@ class SceneSyncMixin:
             else:
                 self.branch_items[key].set_branch(branch)
             self.branch_items[key].setPos(0, 0)
+        self.view.graph_edge_edit.sync_visibility()

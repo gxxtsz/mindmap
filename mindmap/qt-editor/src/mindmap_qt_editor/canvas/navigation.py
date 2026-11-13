@@ -485,6 +485,7 @@ class PageNavigationMixin:
         if cache:
             self._cache_page_view()
         old_page = self.current_page_id
+        self.view.graph_edge_edit.clear_selection()
         self.view.cancel_interaction()
         self._cancel_branch_menu()
         self._view_reset_timer.stop()

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication, QGraphicsView
 from shiboken6 import isValid
 
 from .dragging import NodeDragController
+from .graph_edge_editing import GraphEdgeEditController
 from .image_resizing import ImageResizeController
 from .items import (
     FOLD_HIDE_DELAY,
@@ -59,6 +60,7 @@ class MindMapView(QGraphicsView):
         self._selection_click = None
         self.drag_origin = QPointF()
         self.node_drag = NodeDragController(self)
+        self.graph_edge_edit = GraphEdgeEditController(self)
         self.image_resize = ImageResizeController(self)
         self._selection_bounds = QRect()
         self._pending_selection_bounds = QRect()
@@ -97,7 +99,8 @@ class MindMapView(QGraphicsView):
         if (
             event.type() == QEvent.Type.ShortcutOverride
             and event.key() == Qt.Key.Key_Escape
-            and (self.press_node is not None or self.image_resize.active or self.node_drag.external_active)
+            and (self.press_node is not None or self.image_resize.active or self.node_drag.external_active
+                 or self.graph_edge_edit.active)
         ):
             event.accept()
             return True
@@ -231,6 +234,9 @@ class MindMapView(QGraphicsView):
         """原生滚动完成后按新逻辑视口同步图元，边缘自动滚动也复用此入口。"""
         super().scrollContentsBy(dx, dy)
         self.owner._viewport_changed()
+        if self.graph_edge_edit.active:
+            # 滚动条可以在鼠标未移动时改变落点，连线预览须从当前视口重新绘制。
+            self.viewport().update()
 
     def showEvent(self, event):
         """首次显示或隐藏标签重新可见时，唤醒画布尚未完成的初始定位请求。"""
@@ -347,6 +353,13 @@ class MindMapView(QGraphicsView):
         inside = position is not None and self.viewport().rect().contains(position)
         if inside:
             hit = self.itemAt(position)
+        edge_cursor = self.graph_edge_edit.update_hover(
+            position if inside else None, hit,
+            blocked=self._pan_button != Qt.MouseButton.NoButton or self.press_node is not None or dragging)
+        if edge_cursor is not None:
+            self._set_hovered_node(None, immediate=True)
+            self.viewport().setCursor(edge_cursor)
+            return
         hovered = hit.node_item if isinstance(hit, (FoldControlItem, PageControlItem)) else hit
         if inside:
             if not isinstance(hovered, (NodeItem, NodeEditor)) and not self.panning and not dragging:
@@ -394,6 +407,7 @@ class MindMapView(QGraphicsView):
         self._set_hovered_node(None, immediate=True)
         self._expire_fold_hovers(clear=True)
         self.node_drag.cancel()
+        self.graph_edge_edit.cancel()
         self.image_resize.cancel()
         grabber = self.scene().mouseGrabberItem()
         if isinstance(grabber, NodeItem):
@@ -422,6 +436,10 @@ class MindMapView(QGraphicsView):
         if self._pan_button != Qt.MouseButton.NoButton or event.buttons() != event.button():
             event.accept()
             return
+        if self.graph_edge_edit.owns_left_button:
+            # 失去捕获后可能收不到上一次释放，新的独立按下可直接接管视口。
+            self.graph_edge_edit.owns_left_button = False
+            self.graph_edge_edit.cancel()
         # 新操作先完成上次放下后的展示动画，随后按最终几何命中，避免拖到中间帧。
         self.node_drag._settle_reflow()
         self.press_node = None
@@ -437,7 +455,13 @@ class MindMapView(QGraphicsView):
             self.update_cursor(event.position().toPoint())
             event.accept()
             return
-        handle = self.image_resize.hit_test(event.position().toPoint())
+        position = event.position().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton and self.graph_edge_edit.press_left(position):
+            # 前景手柄和连线不属于场景图元。本次按下由视图接管，不能再交给框选或节点拖动。
+            self.update_cursor(position)
+            event.accept()
+            return
+        handle = self.image_resize.hit_test(position)
         if handle is not None and event.button() == Qt.MouseButton.LeftButton:
             self.owner.call(lambda: self.image_resize.begin(handle, event.position().toPoint()))
             self.update_cursor(event.position().toPoint())
@@ -495,6 +519,15 @@ class MindMapView(QGraphicsView):
         self.update_cursor(event.position().toPoint())
 
     def mouseMoveEvent(self, event):
+        if self.graph_edge_edit.owns_left_button:
+            position = event.position().toPoint()
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self.graph_edge_edit.move(position)
+                self.update_cursor(position)
+                event.accept()
+                return
+            self.graph_edge_edit.owns_left_button = False
+            self.graph_edge_edit.cancel()
         if self.image_resize.active:
             if event.buttons() & Qt.MouseButton.LeftButton:
                 self.image_resize.update(event.position().toPoint())
@@ -559,6 +592,13 @@ class MindMapView(QGraphicsView):
         self.update_cursor(event.position().toPoint())
 
     def mouseReleaseEvent(self, event):
+        if self.graph_edge_edit.owns_left_button:
+            if event.button() == Qt.MouseButton.LeftButton:
+                position = event.position().toPoint()
+                self.owner.call(lambda: self.graph_edge_edit.release(position))
+                self.update_cursor(position)
+            event.accept()
+            return
         if self.image_resize.active:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.owner.call(lambda: self.image_resize.finish(event.position().toPoint()))
@@ -607,6 +647,10 @@ class MindMapView(QGraphicsView):
 
     def mouseDoubleClickEvent(self, event):
         """按钮双击仍按独立点击处理，不把事件交给正文的双击编辑入口。"""
+        position = event.position().toPoint()
+        if event.button() == Qt.MouseButton.LeftButton and self.graph_edge_edit.handle_at(position):
+            self.mousePressEvent(event)
+            return
         if (event.button() == Qt.MouseButton.LeftButton and self.owner.current_page_kind == "inspiration"
                 and self.itemAt(event.position().toPoint()) is None and self.owner.editable):
             self.owner.call(self.owner.add_inspiration)
@@ -626,10 +670,18 @@ class MindMapView(QGraphicsView):
         """
         event.accept()
         if event.reason() != event.Reason.Mouse:
-            self.owner.context_menu(event.globalPos())
+            edge = self.graph_edge_edit.selected_edge
+            if edge is not None:
+                self.owner.call(lambda: self.owner._show_graph_edge_menu(edge, event.globalPos()))
+            else:
+                self.owner.context_menu(event.globalPos())
 
     def _show_context_menu(self, position, global_position):
         """仅在确定为点击后选择菜单目标，右键拖动始终保留原有选择。"""
+        handle = self.graph_edge_edit.handle_at(position)
+        if handle is not None and handle.original is not None:
+            self.owner.call(lambda: self.owner._show_graph_edge_menu(handle.original, global_position))
+            return
         item = self.itemAt(position)
         if isinstance(item, (FoldControlItem, PageControlItem)):
             item = item.node_item
@@ -639,11 +691,13 @@ class MindMapView(QGraphicsView):
             self.owner.context_menu(global_position)
         else:
             if not self.owner.call(lambda: self.owner.graph_edge_context_menu(position, global_position)):
+                self.graph_edge_edit.clear_selection()
                 self.owner.context_menu(global_position, on_canvas=True)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and (
-                self.press_node is not None or self.image_resize.active or self.node_drag.external_active):
+                self.press_node is not None or self.image_resize.active or self.node_drag.external_active
+                or self.graph_edge_edit.active):
             self.cancel_interaction()
             event.accept()
             return
@@ -725,3 +779,4 @@ class MindMapView(QGraphicsView):
         # 使随后的局部移动仍能完整擦除旧外框，而非使用缩放前的视口坐标。
         self._selection_bounds = QRect(self._selection_decoration.bounds)
         self.image_resize.paint(painter)
+        self.graph_edge_edit.paint(painter)

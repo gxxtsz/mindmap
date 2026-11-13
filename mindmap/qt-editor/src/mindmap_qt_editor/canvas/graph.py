@@ -112,8 +112,10 @@ class GraphCanvasMixin:
             return
         for key in _TREE_ACTIONS:
             actions[key].setEnabled(False)
-        for key in ("edit", "delete", "cut", "copy"):
+        for key in ("edit", "cut", "copy"):
             actions[key].setEnabled(bool(self.selection_count and not editing and (key == "copy" or self.editable)))
+        selected_edge = self.view.graph_edge_edit.selected_edge
+        actions["delete"].setEnabled(bool(can_edit and (self.selection_count or selected_edge)))
 
     def _graph_context_menu_groups(self, on_canvas):
         """节点和空白处共用新增及文本编辑入口，图页的视图操作沿用树页动作。"""
@@ -170,6 +172,43 @@ class GraphCanvasMixin:
         if self.engine.node_graph(actual[1]) is None:
             raise MindMapError("图已删除")
         self.engine.set_node_graph(actual[1], graph)
+
+    @document_interaction
+    def _commit_graph_edge(
+        self, replacement: GraphEdge | None, *, original: GraphEdge | None = None,
+        target: tuple[int, str] | None = None, expected: NodeGraph | None = None,
+    ) -> bool:
+        """新增、改接或删除一条有向边。original 为空表示新增，replacement 为空表示删除。
+
+        对话框和右键菜单用 target 核对图页身份；拖拽还传入按下时的 expected 快照，
+        避免在释放后覆盖其他视图的修改。校验完成后保留边的声明顺序、手动坐标和筛选，
+        通过一次引擎事务提交。无变化或拖拽快照失效返回 False，其他校验失败交给调用方提示。
+        """
+        self._ensure_editable()
+        if self.is_composing or not all(guard() for guard in tuple(self._navigation_guards)):
+            raise MindMapError("请先完成输入法候选，再编辑连线")
+        current = self._read_active_graph(target)
+        if expected is not None and current != expected:
+            return False
+        if original is not None and original not in current.edges:
+            raise MindMapError("这条连线已删除，请重新操作")
+        if replacement == original:
+            return False
+        if replacement is not None:
+            ids = {node.id for node in current.nodes}
+            if replacement.source not in ids or replacement.target not in ids:
+                raise MindMapError("起点或终点已删除，请重新操作")
+            if replacement in current.edges:
+                raise MindMapError("这条连线已存在")
+        edges = list(current.edges)
+        if original is None:
+            edges.append(replacement)
+        elif replacement is None:
+            edges.remove(original)
+        else:
+            edges[edges.index(original)] = replacement
+        self._write_active_graph(replace(current, edges=tuple(edges)), target)
+        return True
 
     @document_interaction
     def add_graph_node(self, *, connect_from_selection=False) -> str:
@@ -328,14 +367,8 @@ class GraphCanvasMixin:
 
         def submit():
             try:
-                current = self._read_active_graph(target)
                 edge = GraphEdge(source.currentData(), destination.currentData())
-                ids = {node.id for node in current.nodes}
-                if edge.source not in ids or edge.target not in ids:
-                    raise MindMapError("起点或终点已删除，请重新打开添加连线")
-                if edge in current.edges:
-                    raise MindMapError("这条连线已存在")
-                self._write_active_graph(replace(current, edges=(*current.edges, edge)), target)
+                self._commit_graph_edge(edge, target=target)
             except MindMapError as exc:
                 error.setText(str(exc))
                 error.show()
@@ -350,10 +383,10 @@ class GraphCanvasMixin:
         finally:
             dialog.deleteLater()
 
-    def graph_edge_context_menu(self, position, global_position) -> bool:
-        """右键命中可见连线时显示删除菜单，线宽命中容差随缩放换算。"""
+    def graph_edge_at(self, position) -> GraphEdge | None:
+        """按视口坐标查询最上层可见连线。箭头按原形状命中，线身保留固定屏幕容差。"""
         if self.graph is None or self.is_editing:
-            return False
+            return None
         point = self.view.mapToScene(position)
         tolerance = 5 / self.zoom_factor
         stroker = QPainterPathStroker()
@@ -365,20 +398,31 @@ class GraphCanvasMixin:
             hit_bounds = item.sceneBoundingRect().adjusted(-tolerance, -tolerance, tolerance, tolerance)
             if not hit_bounds.contains(point):
                 continue
-            if not (item.shape().contains(point) or stroker.createStroke(item.path()).contains(point)):
-                continue
-            target = self._graph_target()
-            menu = QMenu(self)
-            action = menu.addAction("删除连线")
-            action.setEnabled(self.editable)
-            try:
-                if menu.exec(global_position) is action:
-                    graph = self._read_active_graph(target)
-                    self._write_active_graph(replace(graph, edges=tuple(e for e in graph.edges if e != edge)), target)
-            finally:
-                menu.deleteLater()
-            return True
-        return False
+            local = item.mapFromScene(point)
+            if item.shape().contains(local) or stroker.createStroke(item.path()).contains(local):
+                return edge
+        return None
+
+    def _show_graph_edge_menu(self, edge: GraphEdge, global_position) -> None:
+        """显示已命中连线的操作菜单，菜单关闭后核对原连线仍在当前图中再删除。"""
+        target = self._graph_target()
+        menu = QMenu(self)
+        action = menu.addAction("删除连线")
+        action.setEnabled(self.editable)
+        try:
+            if menu.exec(global_position) is action:
+                self.call(lambda: self._commit_graph_edge(None, original=edge, target=target))
+        finally:
+            menu.deleteLater()
+
+    def graph_edge_context_menu(self, position, global_position) -> bool:
+        """右键在节点之外时复用选线命中；命中连线便由连线菜单独占本次点击。"""
+        edge = self.graph_edge_at(position)
+        if edge is None:
+            return False
+        self.view.graph_edge_edit.select_edge(edge)
+        self._show_graph_edge_menu(edge, global_position)
+        return True
 
     def confirm_remove_graph(self) -> None:
         """确认删除当前图，重新校验页面与数据，避免确认期间删除其他标签更新后的内容。"""

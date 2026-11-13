@@ -99,6 +99,7 @@ class NodeSelectionMixin:
         一次 selection_changed(list)，重复相同选择不重复通知。仅在 GUI 线程调用。
         """
         self.view.cancel_interaction()
+        self.view.graph_edge_edit.clear_selection()
         self._store_selection(self._filter_selection(node_ids))
         if self._virtualized:
             self._sync_viewport()
@@ -153,6 +154,8 @@ class NodeSelectionMixin:
         if self._refreshing or self._disposed:
             return
         ordered = self._selection_in_order()
+        if ordered:
+            self.view.graph_edge_edit.clear_selection()
         if ordered == self._notified_selection:
             return
         self._notified_selection = ordered
