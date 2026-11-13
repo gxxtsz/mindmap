@@ -6,7 +6,6 @@ from mindmap_core.layouts import create_default_layout_registry
 from mindmap_desktop_api import OperationResult
 from mindmap_desktop_api.qt import CommandSpec, MenuContribution, MenuLocation, PanelSpec, StatusItemSpec
 from mindmap_qt_editor.node_pages import NodePageRegistry
-from mindmap_qt_editor.panels.graph_settings import GraphSettingsPanel
 from mindmap_qt_editor.theme import UiColors
 from mindmap_qt_render import ensure_fonts
 from PySide6.QtCore import QObject, QSignalBlocker, QTimer
@@ -56,7 +55,6 @@ class MindMapController(QObject):
             stack = QStackedWidget(panel_staging)
             stack.addWidget(QLabel("没有打开的导图"))
             setattr(self, "_" + name + "_stack", stack)
-        self._graph_settings = GraphSettingsPanel(panel_staging)
         self._depth_action = QAction("显示层级", self)
         self._new_inspiration_action = QAction("新建想法", self)
         self._new_inspiration_action.triggered.connect(self._new_inspiration)
@@ -73,8 +71,6 @@ class MindMapController(QObject):
             ("recent_pages", "最近访问", self._recent_pages_stack, "recent-pages", "left_top", "Alt+7"),
             ("properties", "节点属性", self._properties_stack, "properties", "right_top", "Alt+2"),
             ("map_settings", "导图设置", self._settings_stack, "settings", "right_top", ""),
-            # 沿用原停靠标识，读取用户已保存的侧栏位置、尺寸和显隐。
-            ("graph_filter", "图页面设置", self._graph_settings, "settings", "right_top", ""),
         ):
             context.ui.register_panel(PanelSpec(identifier, title, lambda content=stack: content,
                                                 icon, position, shortcut, headers.get(identifier, ()),
@@ -193,7 +189,11 @@ class MindMapController(QObject):
             self.call(lambda: files.export_dialog(format_id))
 
     def populate_edit_menu(self, menu: QMenu) -> None:
-        """高频节点动作直接可见，结构、页面、灵感和图片动作分别归组。"""
+        """按活动页面填充编辑菜单，借用当前画布的动作及其启用状态。
+
+        树页按结构、页面、灵感和图片归组，图页提供节点、连线和附页操作。
+        专用详情页只提供返回入口。菜单构建不修改当前页面或文档。
+        """
         canvas = self.canvas
         if canvas is None:
             return
@@ -202,8 +202,7 @@ class MindMapController(QObject):
             menu.addAction("返回导图", self.active_session.pages.close_page)
             return
         if canvas.graph is not None:
-            keys = ("add_sibling", "edit", "delete", "graph_add_edge", "graph_text", "graph_auto_layout",
-                    "graph_remove")
+            keys = ("add_sibling", "edit", "delete", "graph_add_edge", "graph_text", "graph_remove")
             menu.addActions([canvas.action(key) for key in keys])
             pages = canvas.graph_node_page_actions()
             if pages:
@@ -256,7 +255,6 @@ class MindMapController(QObject):
         self._status_controls.set_ui_colors(
             colors, compact=self.context.ui.compact, fit_icon=self.context.ui.theme_icon("fit-view"),
         )
-        self._graph_settings.set_ui_colors(colors)
         self._sync_depth_action()
 
     def dispose(self):
@@ -265,7 +263,6 @@ class MindMapController(QObject):
         self.flush_recent_pages()
         self._disposed = True
         self._recent_pages_timer.stop()
-        self._graph_settings.bind_canvas(None)
         self.sessions.dispose()
         # 大图打开的嵌套事件循环可能尚未返回，候选会话的 QObject 父链须保留到
         # 主窗口销毁，避免回调清理候选时访问已销毁的定时器。所有订阅已由上下文释放。
@@ -446,16 +443,19 @@ class MindMapController(QObject):
 
 
     def _bind_session(self, session):
-        """仅切换堆叠页和动作，不重建业务面板，不改变其他会话的选择和滚动位置。"""
+        """切换活动会话的面板和状态栏，保留各会话的面板实例、选择和滚动位置。
+
+        图页与专用详情页暂停树节点属性及导图设置。传入 None 时显示占位页并暂停
+        依赖导图的面板，已有停靠偏好由宿主保留。
+        """
         self._outline_stack.setCurrentWidget(session.panels.outline) if session else self._outline_stack.setCurrentIndex(0)
         self._favorites_stack.setCurrentWidget(session.favorites) if session else self._favorites_stack.setCurrentIndex(0)
         self._inspiration_stack.setCurrentWidget(session.inspiration) if session else self._inspiration_stack.setCurrentIndex(0)
         self._recent_pages_stack.setCurrentWidget(session.recent_pages) if session else self._recent_pages_stack.setCurrentIndex(0)
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
         self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
-        graph_canvas = session.canvas if session and not session.pages.active and session.canvas.graph is not None else None
-        self._graph_settings.bind_canvas(graph_canvas)
-        self._status_controls.bind_canvas(session.canvas if session and not session.pages.active else None)
+        canvas = session.canvas if session and not session.pages.active else None
+        self._status_controls.bind_canvas(canvas)
         self._status_controls.set_canvas_controls_visible(session is None or not session.pages.active)
         self._sync_depth_action()
         self._sync_new_inspiration_action()
@@ -466,8 +466,7 @@ class MindMapController(QObject):
             self.context.ui.set_panels_suspended(("outline", "favorites", "inspiration", "recent_pages"),
                                                  session is None)
             self.context.ui.set_panels_suspended(("properties", "map_settings"),
-                                                 session is None or session.pages.active or graph_canvas is not None)
-            self.context.ui.set_panels_suspended(("graph_filter",), graph_canvas is None)
+                                                 canvas is None or canvas.graph is not None)
 
 
     def _set_read_only(self, checked):

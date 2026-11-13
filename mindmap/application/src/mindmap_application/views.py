@@ -192,7 +192,10 @@ class MindMapEditorView(QObject):
             self.owner.window.context.documents.sync(self)
 
     def _canvas_page_changed(self, *_):
-        """画布切到图或树后，状态按钮继续绑定画布，图页面设置跟随活动页。"""
+        """活动画布在树页和图页之间切换后，同步状态栏和依赖页面类型的侧栏。
+
+        后台或已释放的会话不更新窗口的共享控件。
+        """
         if not self.disposed and self.owner.active is self:
             self.owner.window._bind_session(self)
 

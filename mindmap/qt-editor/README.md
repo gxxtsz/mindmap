@@ -689,7 +689,7 @@ finally:
 
 `MindMapWidget.open_node_graph(node_id, create=False)` 打开节点图，允许创建时传入 `create=True`。树页使用文档节点 ID，图页使用当前图的局部 ID。图和树共用视口、场景、节点图元、选择和原地编辑器。图的分层几何以 `LayoutResult` 交给共用的场景同步逻辑。
 
-`GraphSettingsPanel.bind_canvas(canvas)` 将图页面设置绑定到活动图页，传入 `None` 时解绑。侧栏、编辑菜单和图页右键菜单共用 `graph_auto_layout` 动作。
+图页空白处和节点的右键菜单使用 `graph_auto_layout` 动作，调用 `MindMapWidget.auto_layout_graph()` 清除全图的手动坐标并让发起视图适应窗口。空图、只读和原地编辑时禁用该动作。
 
 `MindMapWidget.graph_edge_selection_count` 返回当前标签明确选中的连线数量。`graph_edge_selection_changed` 在选择发生变化时传出新数量，供宿主刷新状态栏。节点选择产生的关联边高亮只在视口绘制。
 

@@ -65,13 +65,6 @@ def _pointer_event(canvas, kind, position, button=Qt.MouseButton.NoButton, butto
     QApplication.sendEvent(viewport, event)
 
 
-def _show_graph_settings(window):
-    """打开当前图页的设置侧栏，返回复用画布动作的真实按钮。"""
-    assert window.manager.activate("graph_filter", focus=False)
-    QApplication.processEvents()
-    return window.application._graph_settings.layout_button
-
-
 def _outlet_point(canvas, key):
     """按节点实际边界寻找出线把手，途经节点与把手之间的空隙。"""
     view = canvas.view
@@ -176,17 +169,28 @@ def test_graph_breadcrumb_uses_tree_page_roots(window, qtbot, location):
     revision = engine.revision
     canvas.set_editable(False)
     bar = canvas.path_navigation
-    for index, (page_id, node_id, _, kind) in enumerate(expected):
+    for index, (page_id, node_id, title, kind) in enumerate(expected):
         canvas.open_node_graph(owner)
         QApplication.processEvents()
         assert [(item.page_id, item.node_id, item.text, bar.page_kinds[item.page_id])
                 for item in bar.entries] == expected
         assert bar.full_path == bar.toolTip() == bar.accessibleDescription() == " › ".join(
             title for _, _, title, _ in expected)
-        buttons = [bar.row.itemAt(i).widget() for i in range(bar.row.count())]
-        buttons = [button for button in buttons if isinstance(button, QToolButton) and button.property("page_kind")]
-        assert buttons[index].property("page_kind") == kind and not buttons[index].icon().isNull()
-        qtbot.mouseClick(buttons[index], Qt.MouseButton.LeftButton)
+        # 停靠栏宽度会影响路径省略。按显示顺序展开菜单，保留同名项各自的跳转位置。
+        controls = []
+        for i in range(1, bar.row.count()):
+            button = bar.row.itemAt(i).widget()
+            if isinstance(button, QToolButton):
+                controls.extend(button.menu().actions() if button.menu() else [button])
+        assert len(controls) == len(expected)
+        control = controls[index]
+        assert not control.icon().isNull()
+        if isinstance(control, QToolButton):
+            assert control.property("page_kind") == kind and control.toolTip() == title
+            qtbot.mouseClick(control, Qt.MouseButton.LeftButton)
+        else:
+            assert control.text() == title
+            control.trigger()
         assert canvas.current_page_id == page_id
         assert canvas.selected_node_ids() == ([] if kind == "graph" else [node_id])
     bar.back_button.click()
@@ -679,7 +683,6 @@ def test_edge_selection_outline_and_arrow_survive_theme_switch(window):
     view = canvas.view
     view.zoom(2 / canvas.zoom_factor)
     view.update_navigation_rect(center=QPointF())
-    crossing = view.mapFromScene(QPointF())
     viewport = view.viewport()
     horizontal, vertical = canvas.graph.edges
     controls = view.graph_edge_edit
@@ -691,6 +694,7 @@ def test_edge_selection_outline_and_arrow_survive_theme_switch(window):
         return image
 
     def near_crossing(image, y):
+        crossing = view.mapFromScene(QPointF())
         return image.pixelColor(crossing + QPoint(0, y))
 
     controls.select_edge(horizontal)
@@ -965,65 +969,82 @@ def test_drag_moves_nodes_and_reroutes_until_release_and_supports_cancel(window,
     assert not canvas.graph.positions and canvas.layout_result == before
 
 
-def test_dot_layout_action_follows_graph_and_edit_state(window):
-    """按钮和菜单共享图布局动作，直接调用也遵守图页和编辑状态。"""
+def test_dot_layout_action_is_only_in_graph_context_menus(window, qtbot):
+    """通过视口右键操作核对两个入口，空图、只读和编辑时沿用动作禁用规则。"""
     canvas = window.application.canvas
     action = canvas.action("graph_auto_layout")
-    assert not action.isVisible() and not window.manager.is_tool_available("graph_filter")
+    assert not action.isVisible() and "graph_filter" not in window.manager.specs
     with pytest.raises(MindMapError, match="当前页面没有图"):
         canvas.auto_layout_graph()
 
     _create_graph(window, None)
-    assert not window.manager.states["graph_filter"].visible
-    button = _show_graph_settings(window)
-    assert button.defaultAction() is action
-    assert action.isVisible() and button.isVisible() and not button.isEnabled()
-    assert not canvas.path_navigation.findChild(QToolButton, "mindmap_graph_auto_layout")
-    with pytest.raises(MindMapError, match="请先添加图节点"):
-        canvas.auto_layout_graph()
-    canvas.apply_graph_text(SAMPLE)
-    assert button.isEnabled()
-    edit_menu = QMenu(canvas)
-    window.application.populate_edit_menu(edit_menu)
-    assert action in edit_menu.actions()
-    edit_menu.deleteLater()
-    context_actions = []
+    viewport = canvas.view.viewport()
+    right = Qt.MouseButton.RightButton
+    background = QPoint(12, 12)
+    menu_entries = []
 
-    def capture_menu():
+    def choose_layout():
         menu = QApplication.activePopupWidget()
         if isinstance(menu, QMenu):
-            context_actions.append(menu.actions())
-            menu.close()
+            present = action in menu.actions()
+            menu_entries.append((present, present and action.isEnabled()))
+            if present and action.isEnabled():
+                menu.setActiveAction(action)
+                qtbot.keyClick(menu, Qt.Key.Key_Return)
+            else:
+                menu.close()
 
-    canvas.select_nodes(["a"])
-    QTimer.singleShot(0, capture_menu)
-    canvas.context_menu(QPoint())
-    QTimer.singleShot(0, capture_menu)
-    canvas.context_menu(QPoint(), on_canvas=True)
-    assert len(context_actions) == 2 and all(action in actions for actions in context_actions)
+    assert action.isVisible() and not action.isEnabled()
+    QTimer.singleShot(0, choose_layout)
+    qtbot.mouseClick(viewport, right, pos=background)
+    assert menu_entries == [(True, False)]
+    with pytest.raises(MindMapError, match="请先添加图节点"):
+        canvas.auto_layout_graph()
+
+    canvas.apply_graph_text(SAMPLE)
+    assert action.isEnabled()
+    assert action not in canvas.toolbar.actions()
+    assert not canvas.path_navigation.findChild(QToolButton, "mindmap_graph_auto_layout")
+    main_menu = window.main_menu()
+    edit_menu = next(entry.menu() for entry in main_menu.actions() if entry.text() == "编辑")
+    assert action not in edit_menu.actions()
+    view_menu = next(entry.menu() for entry in main_menu.actions() if entry.text() == "视图")
+    panels_menu = next(entry.menu() for entry in view_menu.actions() if entry.text() == "面板")
+    assert "图页面设置" not in {entry.text() for entry in panels_menu.actions()}
+    main_menu.deleteLater()
 
     revision = canvas.engine.revision
+    canvas.reset_zoom()
+    canvas.select_nodes(["b"])
+    QTimer.singleShot(0, choose_layout)
+    qtbot.mouseClick(viewport, right, pos=_node_point(canvas, "a"))
+    assert canvas.selected_node_ids() == ["a"] and canvas.zoom_factor > 1.0
+    canvas.reset_zoom()
+    QTimer.singleShot(0, choose_layout)
+    qtbot.mouseClick(viewport, right, pos=background)
+    assert menu_entries == [(True, False), (True, True), (True, True)]
+    assert canvas.zoom_factor > 1.0 and canvas.engine.revision == revision
+
     canvas.set_editable(False)
-    assert button.isVisible() and not action.isEnabled() and not button.isEnabled()
+    assert action.isVisible() and not action.isEnabled()
     with pytest.raises(MindMapError, match="只读"):
         canvas.auto_layout_graph()
     canvas.set_editable(True)
     canvas.begin_edit("a")
-    assert not action.isEnabled() and not button.isEnabled()
+    assert not action.isEnabled()
     with pytest.raises(MindMapError, match="请先完成编辑"):
         canvas.auto_layout_graph()
     assert canvas.is_editing and canvas.engine.revision == revision
     canvas.finish_edit(commit=False)
-    assert button.isEnabled()
+    assert action.isEnabled()
     canvas.return_to_parent_page()
-    assert not action.isVisible() and not button.isVisible()
+    assert not action.isVisible()
 
 
 def test_dot_layout_reflows_whole_graph_with_one_undo_and_syncs_split_views(window, qtbot):
-    """从侧栏恢复全图布局，分屏只同步内容，撤销恢复每个手动坐标。"""
+    """恢复全图布局会取消未提交的拖动，分屏同步内容，撤销恢复每个手动坐标。"""
     first = window.documents.active
     canvas = _create_graph(window, THREE_NODES + "\na -> b\nb -> c")
-    button = _show_graph_settings(window)
     automatic = canvas.layout_result
     canvas.fit_to_view()
     canvas.select_nodes(["a", "b"])
@@ -1051,8 +1072,7 @@ def test_dot_layout_reflows_whole_graph_with_one_undo_and_syncs_split_views(wind
     _pointer_event(other, QEvent.Type.MouseButtonPress, start, left, left)
     _pointer_event(other, QEvent.Type.MouseMove, end, buttons=left)
     assert other.view.node_drag.active and other.graph == manual
-    assert button.defaultAction() is other.action("graph_auto_layout")
-    button.click()
+    other.action("graph_auto_layout").trigger()
     assert not other.view.node_drag.active
     _pointer_event(other, QEvent.Type.MouseButtonRelease, end, left)
 
@@ -1079,7 +1099,6 @@ def test_dot_layout_persists_and_reflows_after_reopening(window, qtbot, tmp_path
     session = window.documents.active
     owner = session.engine.root_id
     canvas = _create_graph(window, THREE_NODES + "\na -> b")
-    button = _show_graph_settings(window)
     canvas.select_nodes(["b"])
     start = _node_point(canvas, "b")
     end = start + QPoint(95, 28)
@@ -1088,7 +1107,7 @@ def test_dot_layout_persists_and_reflows_after_reopening(window, qtbot, tmp_path
     _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
     _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left)
     assert set(canvas.graph.positions) == {"b"}
-    button.click()
+    canvas.action("graph_auto_layout").trigger()
     assert session.document.save()
     assert window.close()
 
@@ -1149,54 +1168,59 @@ def test_narrow_graph_breadcrumb_preserves_navigation(window, qtbot, monkeypatch
     assert canvas.current_page_id == ancestor_page and canvas.selected_node_ids() == [ancestor_root]
 
 
-def test_graph_settings_and_status_follow_split_tabs(window, qtbot):
+def test_graph_actions_and_status_follow_split_tabs(window):
+    """分屏切换时状态按钮绑定活动画布，图动作仍按所属标签的权限启用。"""
     first = window.documents.active
     canvas = _create_graph(window)
-    panel = window.application._graph_settings
     controls = window.application._status_controls
-    assert not window.manager.states["graph_filter"].visible
-    button = _show_graph_settings(window)
-    assert window.manager.specs["graph_filter"].title == "图页面设置"
-    assert panel.isVisible() and not canvas.isAncestorOf(panel)
     assert controls._canvas is canvas and all(button.isVisible() for button in controls.buttons.values())
     assert first.duplicate()
     second = window.documents.active
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     assert second.document is first.document and second.canvas.graph == canvas.graph
-    assert controls._canvas is second.canvas and button.defaultAction() is second.canvas.action("graph_auto_layout")
+    assert controls._canvas is second.canvas and second.canvas.action("graph_auto_layout").isEnabled()
     second.canvas.set_editable(False)
-    assert not button.isEnabled()
+    assert not second.canvas.action("graph_auto_layout").isEnabled()
     assert not second.canvas.action("graph_add_edge").isEnabled()
     assert second.canvas.action("graph_text").isEnabled()
     with pytest.raises(MindMapError, match="只读"):
         second.canvas.apply_graph_text("")
     window.documents.activate_view(first.id)
-    assert controls._canvas is canvas and button.defaultAction() is canvas.action("graph_auto_layout")
-    assert button.isEnabled() and second.canvas.action("graph_auto_layout") not in button.actions()
+    assert controls._canvas is canvas and canvas.action("graph_auto_layout").isEnabled()
     canvas.return_to_parent_page()
-    assert not panel.isVisible() and controls._canvas is canvas and button.defaultAction() is None
+    assert controls._canvas is canvas and not canvas.action("graph_auto_layout").isVisible()
     window.documents.activate_view(second.id)
-    qtbot.waitUntil(panel.isVisible)
-    assert button.defaultAction() is second.canvas.action("graph_auto_layout") and not button.isEnabled()
+    assert controls._canvas is second.canvas and not second.canvas.action("graph_auto_layout").isEnabled()
 
 
-def test_graph_settings_inherits_saved_panel_position_and_size(window):
-    """旧面板的停靠记录用于新设置，切出图页只暂停显示。"""
-    canvas = _create_graph(window)
+def test_removed_graph_panel_is_ignored_when_restoring_layout(window):
+    """旧快照中的可见图侧栏不会恢复，已注册的面板和两个分屏仍可用。"""
+    first = window.documents.active
+    _create_graph(window)
+    assert first.duplicate()
+    second = window.documents.active
+    editor = window.host.editor
+    editor.split_token(second.id, Qt.Orientation.Horizontal)
+    groups = {view.id: editor.find_token(view.id)[0].group_id for view in (first, second)}
+    assert len(set(groups.values())) == 2
+
     manager = window.manager
+    assert manager.activate("outline", focus=False)
     snapshot = manager.capture_layout()
-    legacy = next(tool for tool in snapshot["tools"] if tool["id"] == "graph_filter")
-    legacy.update(position="right_bottom", last_position="right_bottom", visible=True)
-    snapshot["hosts"]["main"]["region_sizes"]["dock"]["right"] = 310
+    legacy = next(tool for tool in snapshot["tools"] if tool["id"] == "outline").copy()
+    legacy.update(id="graph_filter", position="right_bottom", last_position="right_bottom", visible=True)
+    snapshot["tools"].append(legacy)
+    snapshot["active"] = "graph_filter"
     manager.restore_layout(snapshot)
     QApplication.processEvents()
-    assert window.application._graph_settings.isVisible()
-    assert manager.states["graph_filter"].position == "right_bottom"
-    assert window.host.region_sizes["dock"]["right"] == 310
-    canvas.return_to_parent_page()
-    assert manager.states["graph_filter"].visible and not window.application._graph_settings.isVisible()
-    canvas.open_node_graph()
-    assert window.application._graph_settings.isVisible()
+    assert "graph_filter" not in manager.states and "graph_filter" not in manager.panels
+    assert manager.active_id != "graph_filter" and editor.find_token("tool:graph_filter") is None
+    assert manager.states["outline"].visible and window.application.panels.outline.isVisible()
+    assert len(editor.groups) == 2
+    for view in (first, second):
+        group, index = editor.find_token(view.id)
+        assert group.group_id == groups[view.id] and group.widget(index) is view.widget
+        assert view.canvas.current_page_kind == "graph"
 
 
 def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_path, monkeypatch):

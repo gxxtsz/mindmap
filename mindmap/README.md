@@ -23,4 +23,4 @@ from mindmap_qt_editor.node_pages import NodePageHost, NodePageProvider, NodePag
 
 完整桌面应用使用 `mindmap_application` 必备组件，由产品入口显式装配。应用上下文和本机会话只有导图主体，外部能力只能作为节点页面接入。
 
-图的入口和文本语法见[节点图使用说明](../docs/节点图.md)。运行命令见[应用启动说明](../apps/mindmap-app/README.md#启动)。
+运行命令见[应用启动说明](../apps/mindmap-app/README.md#启动)。

@@ -21,4 +21,4 @@ uv run --locked --package mindmap-app mindmap
 
 `mindmap-state-v2.json` 保存窗口、标签、分屏、导航和最近访问，视图记录不携带业务类型字段。`mindmap-settings-v1.json` 保存窗口与导图偏好。文档正文和节点扩展数据统一保存到 `.mindmap`。
 
-历史窗口与导图配置由[迁移层](src/mindmap_app/migration.py)只读转换。图的使用方式见[节点图使用说明](../../docs/节点图.md)。
+历史窗口与导图配置由[迁移层](src/mindmap_app/migration.py)只读转换。

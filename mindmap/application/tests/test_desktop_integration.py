@@ -164,13 +164,11 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     qtbot.waitUntil(view_menu.isVisible)
     assert not menu.isVisible()
     panels = next(action.menu() for action in view_menu.actions() if action.text() == "面板")
-    # 图页面设置只在活动图页可用。
     assert "图页面设置" not in {action.text() for action in panels.actions()}
     qtbot.keyClick(view_menu, Qt.Key.Key_Escape)
     assert not view_menu.isVisible()
     assert set(window.manager.specs) == {
-        "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "graph_filter",
-        "operation_log",
+        "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "operation_log",
     }
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
