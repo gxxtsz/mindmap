@@ -223,7 +223,7 @@ class DesktopRuntimeWindow(DesktopWindow):
 
     def open_path(self, path):
         if not self.can_open_path(path):
-            raise ValueError(f"只能打开 .mindmap 导图：{path}；其他内容请在节点专用详情页中导入")
+            raise ValueError(f"只能打开 .mindmap 导图：{path}")
         existing = self.documents.find_path(path)
         if existing and not isinstance(existing, MissingView):
             self.documents.activate_view(existing.id)

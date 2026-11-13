@@ -10,7 +10,6 @@ members = [
     "mindmap-core",
     "mindmap-desktop-api",
     "mindmap-desktop-runtime",
-    "mindmap-extension-software-structure",
     "mindmap-qt-editor",
     "mindmap-qt-render",
 ]
@@ -61,7 +60,6 @@ source = { editable = "apps/mindmap-app" }
 dependencies = [
     { name = "mindmap-application" },
     { name = "mindmap-desktop-runtime" },
-    { name = "mindmap-extension-software-structure" },
     { name = "pyside6" },
 ]
 
@@ -69,7 +67,6 @@ dependencies = [
 requires-dist = [
     { name = "mindmap-application", editable = "mindmap/application" },
     { name = "mindmap-desktop-runtime", editable = "packages/mindmap-desktop-runtime" },
-    { name = "mindmap-extension-software-structure", editable = "extensions/software-structure" },
     { name = "pyside6", specifier = ">=6.12,<6.13" },
 ]
 
@@ -122,21 +119,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mindmap-desktop-api", editable = "packages/mindmap-desktop-api" },
-    { name = "pyside6", specifier = ">=6.12,<6.13" },
-]
-
-[[package]]
-name = "mindmap-extension-software-structure"
-version = "0.1.0"
-source = { editable = "extensions/software-structure" }
-dependencies = [
-    { name = "mindmap-qt-editor" },
-    { name = "pyside6" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mindmap-qt-editor", editable = "mindmap/qt-editor" },
     { name = "pyside6", specifier = ">=6.12,<6.13" },
 ]
 

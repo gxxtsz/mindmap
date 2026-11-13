@@ -1,4 +1,4 @@
-"""用最小费用流求解分层和坐标共用的加权跨度问题。"""
+"""用最小费用流求解图布局中分层和坐标共用的加权跨度问题。"""
 
 from dataclasses import dataclass
 from heapq import heappop, heappush

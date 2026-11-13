@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 
 from mindmap_core import MindMapError, PathEntry
-from mindmap_core.node_pages import extension_page_id, parse_extension_page_id
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE, extension_page_id, parse_extension_page_id
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -100,7 +100,7 @@ class NodePageRegistry:
         if (not isinstance(provider.title, str) or not provider.title.strip()
                 or not callable(provider.factory) or not callable(provider.create_data)):
             raise MindMapError("扩展页面的名称或工厂无效")
-        if provider.id in self._providers:
+        if provider.id in self._providers or provider.id == GRAPH_PAGE_TYPE:
             raise MindMapError(f"扩展页面类型重复：{provider.id}")
         self._providers[provider.id] = provider
 
@@ -205,14 +205,14 @@ class NodePageHost(QStackedWidget):
 
     def populate_menu(self, menu: QMenu) -> None:
         """按选中节点列出已安装类型及未安装但已有数据的类型。"""
-        if self.canvas.selection_count != 1:
+        if self.canvas.graph is not None or self.canvas.selection_count != 1:
             hint = menu.addAction("请先选择一个节点")
             hint.setEnabled(False)
             return
         node_id = self.canvas.selected_node_ids()[0]
         node = self.canvas.engine.get_node(node_id)
         types = {provider.id: provider.title for provider in self.registry.providers()}
-        types.update({key: types.get(key, key) for key in node.extension_pages})
+        types.update({key: types.get(key, key) for key in node.extension_pages if key != GRAPH_PAGE_TYPE})
         for type_id, title in types.items():
             existing = type_id in node.extension_pages
             action = menu.addAction(("打开" if existing else "添加") + title)
@@ -236,8 +236,9 @@ class NodePageHost(QStackedWidget):
     def open_node_pages(self, node_id: str) -> None:
         """点击节点图标时直接打开唯一扩展；多种扩展由类型菜单选择。"""
         node = self.canvas.engine.get_node(node_id)
-        if len(node.extension_pages) == 1:
-            self.open_page(node_id, next(iter(node.extension_pages)))
+        types = tuple(key for key in node.extension_pages if key != GRAPH_PAGE_TYPE)
+        if len(types) == 1:
+            self.open_page(node_id, types[0])
         else:
             self.canvas.select_nodes([node_id])
             self.show_menu()
@@ -389,7 +390,12 @@ class NodePageHost(QStackedWidget):
         self._sync_permissions()
 
     def _sync_permissions(self, *_):
-        self.menu_action.setEnabled(self.canvas.selection_count == 1)
+        single = self.canvas.graph is None and self.canvas.selection_count == 1
+        node = self.canvas.document_view.nodes.get(self.canvas.current_node_id()) if single else None
+        visible = bool(self.canvas.graph is None and (self.registry.providers() or (
+            node and any(key != GRAPH_PAGE_TYPE for key in node.extension_pages))))
+        self.menu_action.setVisible(visible)
+        self.menu_action.setEnabled(visible and single and not self.canvas.is_editing)
         self.remove_button.setEnabled(self.canvas.editable)
         if self._page is not None:
             self._page.set_editable(self.canvas.editable)

@@ -40,7 +40,7 @@ class BranchTransferMixin:
             if len(ids) != 1 or ids[0] not in self._book_document.inspiration.root_ids:
                 return None
         else:
-            if self.current_page_kind == "detail" or any(key not in self._document.nodes for key in ids):
+            if self.current_page_kind in ("detail", "graph") or any(key not in self._document.nodes for key in ids):
                 return None
             selected = set(ids)
             ids = []
@@ -133,7 +133,7 @@ class BranchTransferMixin:
         检查不复制或改写内容，可重复调用；GUI 线程调用，释放后返回 False。
         """
         data = self._branch_drag_data(mime)
-        if data is None or self.current_page_kind == "detail":
+        if data is None or self.current_page_kind in ("detail", "graph"):
             return False
         pages = {self.engine.node_page_id(key) for key in data.node_ids}
         if len(pages) != 1:

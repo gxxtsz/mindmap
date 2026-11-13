@@ -17,7 +17,7 @@ from .rendering import BranchItem, VisualFactory
 
 def export_document(
     document, path, *, layout_registry: LayoutRegistry, expand_all=False, scale=1.0,
-    detail_page_resolver=None,
+    detail_page_resolver=None, layout_provider=None,
 ):
     """导出 PNG/SVG/PDF。矢量输出使用画布尺寸，PDF 为完整导图单页。
 
@@ -26,11 +26,12 @@ def export_document(
     detail_page_resolver 是可选的只读共享详情解析函数，接收节点 ID 并返回
     （实际归属节点 ID，详情页 ID 或 None），供单页快照显示页外共享入口。
     省略时取节点自身引用；解析只影响图标与尺寸，不修改快照或保存文件内容。
+    layout_provider 可按本次测量的尺寸提供只读布局，图页用它复用箭头、坐标和持久筛选。
     """
     target = Path(path).absolute()
     if not document.nodes:
         raise MindMapError("暂无可导出的想法内容")
-    title = document.root.text
+    title = document.title if getattr(document, "kind", None) == "graph" else document.root.text
     extension = target.suffix.lower()
     if extension not in (".png", ".svg", ".pdf"):
         raise MindMapError("支持的图形导出格式为 PNG、SVG、PDF")
@@ -38,7 +39,8 @@ def export_document(
         raise MindMapError("导出缩放必须是正有限数值")
     factory = VisualFactory()
     visuals, sizes = factory.measure(document, detail_page_resolver=detail_page_resolver)
-    layout = layout_registry.layout(document, sizes, expand_all=expand_all)
+    layout = (layout_provider(sizes) if layout_provider is not None else
+              layout_registry.layout(document, sizes, expand_all=expand_all))
     scene = QGraphicsScene()
     scene.setBackgroundBrush(QColor(document.theme.background))
     for key, rect in layout.nodes.items():

@@ -6,6 +6,7 @@ from .engine import MindMapEngine, SaveSnapshot
 from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent
 from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point, Rect
+from .graph import GraphEdge, GraphNode, NodeGraph
 from .history import ChangeSet, NodeMove, NodePlacement
 from .loading import ValidatedDocument
 from .models import (
@@ -13,6 +14,7 @@ from .models import (
     InspirationArea,
     MindMapDocument,
     MindMapForestView,
+    MindMapGraphView,
     MindMapPage,
     MindMapPageView,
     Node,
@@ -46,6 +48,8 @@ __all__ = [
     "FormatInfo",
     "FormatRegistration",
     "FormatRegistry",
+    "GraphEdge",
+    "GraphNode",
     "LayoutAlgorithm",
     "LayoutConfig",
     "LayoutInfo",
@@ -53,11 +57,13 @@ __all__ = [
     "LayoutResult",
     "MindMapDocument",
     "MindMapEngine",
+    "MindMapGraphView",
     "MindMapPage",
     "MindMapPageView",
     "SaveSnapshot",
     "MindMapError",
     "Node",
+    "NodeGraph",
     "NodeMove",
     "NodePlacement",
     "OperationRejected",

@@ -164,12 +164,13 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     qtbot.waitUntil(view_menu.isVisible)
     assert not menu.isVisible()
     panels = next(action.menu() for action in view_menu.actions() if action.text() == "面板")
-    # 软件架构工具归属节点页面，不注册为导图桌面的独立面板。
-    assert {"公共依赖", "连线筛选", "模块接口"}.isdisjoint(action.text() for action in panels.actions())
+    # 图的连线筛选只在活动图页可用。
+    assert "连线筛选" not in {action.text() for action in panels.actions()}
     qtbot.keyClick(view_menu, Qt.Key.Key_Escape)
     assert not view_menu.isVisible()
     assert set(window.manager.specs) == {
-        "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "operation_log",
+        "outline", "favorites", "inspiration", "recent_pages", "properties", "map_settings", "graph_filter",
+        "operation_log",
     }
     main = window.main_menu()
     settings = next(action.menu() for action in main.actions() if action.text() == "设置")
@@ -191,7 +192,7 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     assert edit_actions[:6] == [window.action("app." + key)
                                for key in ("undo", "redo", "cut", "copy", "paste", "select_all")]
     assert [action.text() for action in edit_actions[6:]] == [
-        "添加子节点", "添加同级节点", "编辑文字", "节点属性", "节点结构", "页面", "灵感", "图片", "扩展详情",
+        "添加子节点", "添加同级节点", "编辑文字", "节点属性", "节点结构", "页面", "灵感", "图片", "添加图",
     ]
 
     view = next(action.menu() for action in main.actions() if action.text() == "视图")

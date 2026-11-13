@@ -10,18 +10,18 @@ from mindmap_core.node_pages import extension_page_id
 
 def test_extension_pages_share_history_and_do_not_borrow_input():
     engine = MindMapEngine()
-    data = {"modules": [{"id": "核心"}]}
-    engine.set_extension_page(engine.root_id, "software-structure", data)
-    data["modules"].clear()
-    assert engine.extension_page(engine.root_id, "software-structure")["data"]["modules"] == [{"id": "核心"}]
-    snapshot = engine.extension_page(engine.root_id, "software-structure")
+    data = {"列表": [{"标识": "示例"}]}
+    engine.set_extension_page(engine.root_id, "example", data)
+    data["列表"].clear()
+    assert engine.extension_page(engine.root_id, "example")["data"]["列表"] == [{"标识": "示例"}]
+    snapshot = engine.extension_page(engine.root_id, "example")
     snapshot["data"].clear()
     engine.undo()
-    assert engine.extension_page(engine.root_id, "software-structure") is None
+    assert engine.extension_page(engine.root_id, "example") is None
     engine.redo()
-    assert engine.extension_page(engine.root_id, "software-structure")["data"]["modules"]
+    assert engine.extension_page(engine.root_id, "example")["data"]["列表"]
     revision = engine.revision
-    engine.set_extension_page(engine.root_id, "software-structure", {"modules": [{"id": "核心"}]})
+    engine.set_extension_page(engine.root_id, "example", {"列表": [{"标识": "示例"}]})
     assert engine.revision == revision
 
 
@@ -77,7 +77,7 @@ def test_extension_coexists_with_detail_and_survives_submap_conversion():
     engine = MindMapEngine()
     owner = engine.add_child(engine.root_id, "入口")
     detail = engine.create_detail_page(owner)
-    engine.set_extension_page(owner, "software-structure", {})
+    engine.set_extension_page(owner, "example", {})
     engine.set_extension_page(engine.page_document(detail).root_id, "other", {})
     submap = engine.create_submap(owner)
     root = engine.page_document(submap).root_id

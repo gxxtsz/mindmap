@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mindmap_core import BranchPath, Curve, MindMapDocument, MindMapError, Node, Theme
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
@@ -385,7 +386,8 @@ class VisualFactory:
             bool(detail_page_id),
             bool(node.submap_id),
             bool(reference),
-            bool(node.extension_pages),
+            GRAPH_PAGE_TYPE in node.extension_pages,
+            any(key != GRAPH_PAGE_TYPE for key in node.extension_pages),
             is_root,
             repr(theme),
         )
@@ -484,7 +486,8 @@ class VisualFactory:
             bool(node.children),
             page_kinds=tuple(kind for kind, target in (
                 ("detail", detail_page_id), ("submap", node.submap_id), ("reference", reference),
-                ("extension", node.extension_pages),
+                ("graph", GRAPH_PAGE_TYPE in node.extension_pages),
+                ("extension", any(key != GRAPH_PAGE_TYPE for key in node.extension_pages)),
             ) if target),
             content_height=content_height,
             image_only=node.is_image_node,
@@ -522,11 +525,12 @@ class VisualFactory:
             and document.theme == previous_document.theme
             else None
         )
+        roots = () if getattr(document, "kind", None) == "graph" else document.root_ids
         visuals = {
             key: (
                 previous_visuals[key]
                 if changed is not None and key not in changed and key in previous_visuals
-                else self.visual(node, document.theme, document, is_root=key in document.root_ids,
+                else self.visual(node, document.theme, document, is_root=key in roots,
                                  detail_page_resolver=detail_page_resolver)
             )
             for key, node in document.nodes.items()
@@ -542,6 +546,7 @@ class VisualFactory:
         可选 detail_page_resolver 沿用 visual 的共享详情查询契约；node_ids 必须
         包含本次共享详情变化影响的页内别名。仅更新传入字典，不修改文档或历史。
         """
+        roots = () if getattr(document, "kind", None) == "graph" else document.root_ids
         for key in node_ids:
             node = document.nodes.get(key)
             if node is None:
@@ -549,7 +554,7 @@ class VisualFactory:
                 sizes.pop(key, None)
                 self._node_visuals.pop(key, None)
             else:
-                visual = self.visual(node, document.theme, document, is_root=key in document.root_ids,
+                visual = self.visual(node, document.theme, document, is_root=key in roots,
                                      detail_page_resolver=detail_page_resolver)
                 visuals[key] = visual
                 sizes[key] = visual.width, visual.height

@@ -30,9 +30,11 @@ from mindmap_core.layouts import (
     create_incremental_layout,
     supports_incremental_layout,
 )
+from mindmap_core.layouts.graph import build_graph_layout, graph_layout
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render.exporting import export_document
 from mindmap_qt_render.rendering import VisualFactory, decode_image
-from PySide6.QtCore import QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QDesktopServices, QKeySequence
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -61,6 +63,7 @@ from mindmap_qt_editor.icons import (
 from mindmap_qt_editor.theme import UiColors, apply_ui_palette, dialog_styles, ui_colors
 
 from .clipboard_actions import ClipboardActionsMixin
+from .graph import GraphCanvasMixin
 from .inline_editing import InlineEditingMixin
 from .inspiration import InspirationCanvasMixin
 from .interactions import document_interaction
@@ -77,6 +80,7 @@ class MindMapWidget(
     SceneSyncMixin,
     InlineEditingMixin,
     ClipboardActionsMixin,
+    GraphCanvasMixin,
     NodeSelectionMixin,
     InspirationCanvasMixin,
     PageNavigationMixin,
@@ -113,6 +117,8 @@ class MindMapWidget(
     inspirations_detached = Signal(list)
     # 节点上的扩展图标只发出导航意图，具体页面由所属导图标签的 NodePageHost 打开。
     extension_page_requested = Signal(str)
+    # 临时预览只更新当前图页及其停靠侧栏，内容变化继续由 document_changed 通知。
+    graph_preview_changed = Signal()
 
     def __init__(
         self,
@@ -151,6 +157,8 @@ class MindMapWidget(
         self.engine = engine or MindMapEngine()
         self.editable = editable
         self._properties_handler = None
+        self._graph_show_all = False
+        self._graph_layout_cache = None
         self._wheel_mode = "scroll"
         self._edraw_paste_options = ("append", True, True)
         self.factory = VisualFactory()
@@ -313,6 +321,8 @@ class MindMapWidget(
     def cancel_transient_ui(self) -> None:
         """关闭未提交的分支菜单及预览；标签切换前调用，不撤销已经提交的修改。"""
         self._cancel_branch_menu()
+        if self.graph is not None:
+            self.view.cancel_interaction()
 
     @document_interaction
     def reveal_nodes(self, node_ids: Sequence[str]) -> None:
@@ -477,7 +487,7 @@ class MindMapWidget(
             ("attach_inspirations", "加入导图…", None, lambda w: w.attach_selected_inspirations(), True),
             ("group_inspirations", "创建共同父主题", None, lambda w: w.group_selected_inspirations(), True),
             ("add_child", "添加子节点", "Tab", lambda w: w.add_child(), True),
-            ("add_sibling", "添加同级节点", "Return", lambda w: w.add_sibling(), True),
+            ("add_sibling", "添加同级节点", ["Return", "Enter"], lambda w: w.add_sibling(), True),
             ("insert_parent", "插入父节点", "Shift+Return", lambda w: w.insert_parent(), True),
             ("edit", "编辑文字", "F2", lambda w: w.edit_selected(), True),
             ("properties", "属性…", "Alt+Return", lambda w: w.edit_properties(), True),
@@ -544,6 +554,10 @@ class MindMapWidget(
             ("wheel_scroll", "滚轮上下滚动", None, lambda w: w.set_wheel_mode("scroll"), False),
             ("wheel_zoom", "滚轮缩放", None, lambda w: w.set_wheel_mode("zoom"), False),
             ("branch_style", "分支连接线样式", None, lambda w: None, True),
+            ("node_graph", "添加图", None, lambda w: w.open_node_graph(create=True), False),
+            ("graph_text", "编辑图文本…", None, lambda w: w.edit_graph_text(), False),
+            ("graph_add_edge", "添加连线…", None, lambda w: w.choose_graph_edge(), True),
+            ("graph_remove", "删除此图…", None, lambda w: w.confirm_remove_graph(), True),
         ]
         for key, label, shortcut, callback, mutating in definitions:
             self.register_action(key, label, callback, shortcut=shortcut, mutating=mutating)
@@ -612,6 +626,10 @@ class MindMapWidget(
         # 全选只改变当前页的节点选择，只读画布仍可用；编辑期间交回正文控件的
         # 原生 Ctrl+A，空页面则没有可选择的节点。
         self._actions["select_all"].setEnabled(not editing and bool(self._document.nodes))
+        self._update_graph_actions(editing)
+        if self.graph is not None:
+            self._sync_navigation()
+            return
         if self._properties_handler is not None:
             self._actions["properties"].setEnabled(True)
         self._actions["branch_style"].setEnabled(
@@ -816,6 +834,8 @@ class MindMapWidget(
 
     def _branch_kinds(self, node_ids, scope="subtree"):
         """画布和侧栏共用逻辑子树的样式摘要，折叠变化不再触发全图样式扫描。"""
+        if self.graph is not None:
+            return set()
         if self._incremental_layout is not None:
             return self._incremental_layout.style_kinds(node_ids, scope)
         ids = branch_style_targets(self._document, node_ids, scope=scope)
@@ -937,10 +957,13 @@ class MindMapWidget(
         center = self._view_restore_center
         reset_zoom = center is None
         if center is None:
-            root = self.node_items.get(self.focus_id or self._document.root_id)
-            if root is None or root.sceneBoundingRect().isEmpty():
-                return
-            center = root.sceneBoundingRect().center()
+            if self.graph is not None:
+                center = QPointF(*self.layout_result.bounds.center)
+            else:
+                root = self.node_items.get(self.focus_id or self._document.root_id)
+                if root is None or root.sceneBoundingRect().isEmpty():
+                    return
+                center = root.sceneBoundingRect().center()
         # 先消费请求再调整视图，避免变换引发的尺寸事件重复排程。普通初始化
         # 使用 100% 根中心，退出快照则保留已经设置的倍率并使用目标场景中心。
         self._view_reset_pending = False
@@ -973,8 +996,10 @@ class MindMapWidget(
 
     def center_root(self):
         """将当前页根节点或导航临时显示的中心节点置于视口中央，保持用户的缩放比例。"""
+        if self.graph is not None and self._view_reset_pending and self.view.isVisible():
+            self._apply_view_reset()
         key = self.focus_id or self._document.root_id
-        rect = (self.layout_result.bounds if self.current_page_kind == "inspiration"
+        rect = (self.layout_result.bounds if self.current_page_kind in ("inspiration", "graph")
                 else self.layout_result.nodes.get(key))
         if not self._disposed and rect is not None:
             self.view.update_navigation_rect(center=QRectF(rect.x, rect.y, rect.width, rect.height).center())
@@ -987,6 +1012,10 @@ class MindMapWidget(
         按钮和快捷键均复用此入口，与交互缩放共用同一最小倍率。
         """
         self.finish_edit(commit=True)
+        if self.graph is not None and self._view_reset_pending and self.view.isVisible():
+            self._apply_view_reset()
+        if self.graph is not None and not self.graph.nodes:
+            return
         rect = self.layout_result.bounds
         content = QRectF(rect.x, rect.y, rect.width, rect.height)
         self.view.fitInView(content, Qt.AspectRatioMode.KeepAspectRatio)
@@ -1007,6 +1036,8 @@ class MindMapWidget(
 
         只读时拒绝操作；节点属性及分支继承遵循引擎规则，正文通过独立编辑会话提交。
         """
+        if self.graph is not None:
+            return self.add_graph_node(connect_from_selection=True)
         self._ensure_editable()
         key = self.engine.add_child(self.current_node_id())
         self.begin_edit(key)
@@ -1018,6 +1049,8 @@ class MindMapWidget(
 
         同级顺序、方向继承及根节点限制统一由引擎校验，失败不保留部分结构修改。
         """
+        if self.graph is not None:
+            return self.add_graph_node()
         self._ensure_editable()
         key = self.engine.add_sibling(self.current_node_id())
         self.begin_edit(key)
@@ -1039,21 +1072,27 @@ class MindMapWidget(
         """一次删除选择的节点子树，节点和图片资源共用一条撤销记录。"""
         self._ensure_editable()
         ids = self.selected_node_ids()
+        if self.graph is not None:
+            if ids:
+                self._delete_graph_nodes(ids)
+            return
         if ids:
             nodes = {key for root in ids for key in self._book_document.owned_descendants(root)}
             submaps = sum(bool(self._book_document.nodes[key].submap_id) for key in nodes)
             details = sum(bool(self._book_document.nodes[key].detail_page_id) for key in nodes)
-            if submaps or details:
-                generation, revision = self.engine.document_generation, self.engine.revision
+            graphs = sum(GRAPH_PAGE_TYPE in self._book_document.nodes[key].extension_pages for key in nodes)
+            if submaps or details or graphs:
+                generation, revision = self.engine.document_generation, self._branch_content_revision
                 choice = QMessageBox.question(
                     self, "删除节点及附属页面",
-                    f"将删除 {len(nodes)} 个节点，以及其中的 {submaps} 张子导图、{details} 张详情页。\n删除后可以撤销。",
+                    f"将删除 {len(nodes)} 个节点，以及其中的 {submaps} 张子导图、{details} 张详情页、{graphs} 张图。\n"
+                    "删除后可以撤销。",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
                 if choice != QMessageBox.StandardButton.Yes:
                     return
                 self._ensure_editable()
                 if self._disposed or (generation, revision) != (
-                        self.engine.document_generation, self.engine.revision):
+                        self.engine.document_generation, self._branch_content_revision):
                     raise MindMapError("确认期间导图发生变化，请重新删除")
             self.engine.remove_nodes(ids)
 
@@ -1121,6 +1160,8 @@ class MindMapWidget(
 
         弹窗确认后先验证完整候选，再以正式事务提交；取消不修改文档和历史。
         """
+        if self.graph is not None:
+            return
         if self._properties_handler is not None:
             self._properties_handler()
             return
@@ -1240,9 +1281,18 @@ class MindMapWidget(
         """导出正式文档；允许宿主提交侧栏输入，不触碰画布原地编辑器中的临时文字。"""
         # 导出读取正式文档；宿主可在快照建立前提交侧栏内已完成的有效输入。
         self.edits_flush_requested.emit()
+        document = self.engine.page_document(self._current_page_id,
+                                             inspiration_root_id=self.current_inspiration_root_id)
+        if self.graph is not None:
+            def layout_provider(sizes):
+                automatic = build_graph_layout(sizes, document.graph.edges, color=document.theme.accent)
+                return graph_layout(document.graph, automatic)
+
+            export_document(document, path, layout_registry=self.layout_registry, scale=scale,
+                            layout_provider=layout_provider)
+            return
         export_document(
-            self.engine.page_document(self._current_page_id,
-                                      inspiration_root_id=self.current_inspiration_root_id),
+            document,
             path,
             layout_registry=self.layout_registry,
             expand_all=expand_all,
@@ -1344,6 +1394,8 @@ class MindMapWidget(
                 menu.deleteLater()
 
     def _context_menu_groups(self, on_canvas):
+        if self.graph is not None:
+            return self._graph_context_menu_groups(on_canvas)
         if on_canvas:
             groups = [
                 ("", ("fit", "center", "reset_zoom", "zoom_in", "zoom_out")),
@@ -1367,6 +1419,7 @@ class MindMapWidget(
                       "convert_submap_to_descendants", "favorite_submap", "delete_submap",
                       "create_detail_page", "enter_detail_page", "delete_detail_page",
                       "set_page_reference", "open_page_reference", "clear_page_reference")),
+            ("", ("node_graph",)),
             ("灵感", ("add_inspiration", "move_to_inspiration", "attach_inspirations", "group_inspirations")),
             ("图片和链接", ("image", "image_url", "remove_image", "hyperlink")),
             ("", ("undo", "redo")),

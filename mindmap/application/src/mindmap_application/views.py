@@ -93,6 +93,7 @@ class MindMapEditorView(QObject):
         self.canvas.editing_changed.connect(owner.window._sync_document)
         self.canvas.selection_changed.connect(self._view_state_changed)
         self.canvas.page_changed.connect(self._view_state_changed)
+        self.canvas.page_changed.connect(self._canvas_page_changed)
         self.canvas.viewport_changed.connect(self._view_state_changed)
         self.pages = NodePageHost(
             self.canvas, owner.window.page_registry, prepare_input=self.prepare_input,
@@ -127,7 +128,9 @@ class MindMapEditorView(QObject):
                 break
             value /= 1024
         display = "未知" if size is None else f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
-        return (f"{len(self.canvas.document_view.nodes)} 个节点 · {self.canvas.selection_count} 个选中 · "
+        graph = self.canvas.graph
+        edges = f"{len(graph.edges)} 条连线 · " if graph is not None else ""
+        return (f"{len(self.canvas.document_view.nodes)} 个节点 · {edges}{self.canvas.selection_count} 个选中 · "
                 f"文件大小：{display}")
 
     @property
@@ -181,6 +184,11 @@ class MindMapEditorView(QObject):
         if self.owner.active is self:
             self.owner.window._bind_session(self)
             self.owner.window.context.documents.sync(self)
+
+    def _canvas_page_changed(self, *_):
+        """画布切到图或树后，常驻状态按钮继续绑定同一画布，停靠筛选跟随活动页。"""
+        if not self.disposed and self.owner.active is self:
+            self.owner.window._bind_session(self)
 
     def current_page_key(self):
         """最近访问使用统一页面身份，扩展页没有灵感根参数。"""
@@ -300,8 +308,12 @@ class MindMapEditorView(QObject):
     def _sync_inspiration(self, *_):
         """更新本文件侧栏高亮与权限；附属页面仍高亮所属灵感根，不借用活动会话。"""
         root = self.canvas.current_inspiration_root_id
-        if self.canvas.current_page_kind in ("submap", "detail"):
-            path = self.engine.node_path(self.canvas.document_view.root_id)
+        if self.canvas.current_page_kind in ("submap", "detail", "graph"):
+            if self.canvas.graph is not None:
+                summary = self.engine.page_summary(self.canvas.current_page_id)
+                path = summary.path if summary is not None else ()
+            else:
+                path = self.engine.node_path(self.canvas.document_view.root_id)
             if path and path[0].page_id == self.engine.inspiration_id:
                 root = path[1].node_id
         self.inspiration.set_current_root_id(root)

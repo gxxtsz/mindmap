@@ -20,8 +20,10 @@ from mindmap_qt_editor.icons import toolbar_icon
 from mindmap_qt_editor.theme import UiColors, apply_ui_palette, outline_colors, scrollbar_styles
 
 _ENTRY_ROLE = Qt.ItemDataRole.UserRole + 1
-_KINDS = {"main": "主导图", "submap": "子导图", "detail": "详情页", "inspiration": "独立想法", "extension": "扩展详情"}
-_ICONS = {"main": "outline", "submap": "submap", "detail": "detail", "inspiration": "inspiration", "extension": "detail"}
+_KINDS = {"main": "主导图", "submap": "子导图", "detail": "详情页", "inspiration": "独立想法",
+          "extension": "扩展详情", "graph": "图"}
+_ICONS = {"main": "outline", "submap": "submap", "detail": "detail", "inspiration": "inspiration",
+          "extension": "detail", "graph": "graph"}
 
 
 def _text(value: str) -> str:

@@ -105,6 +105,9 @@ class MindMapView(QGraphicsView):
 
     def dragEnterEvent(self, event):
         """为有效原生拖入建立共用预览，空白处暂时接受进入以允许继续寻找落点。"""
+        if self.owner.graph is not None:
+            event.ignore()
+            return
         accepted = self.owner.call(lambda: self.node_drag.begin_external(
             event.mimeData(), event.position().toPoint()))
         if accepted:
@@ -335,7 +338,8 @@ class MindMapView(QGraphicsView):
             self._pointer_position = position
         position = self._pointer_position
         resize_cursor = self.image_resize.cursor_at(position)
-        if resize_cursor is not None and not self.panning and self.drag_ghost is None:
+        dragging = self.node_drag.active
+        if resize_cursor is not None and not self.panning and not dragging:
             self._set_hovered_node(None, immediate=True)
             self.viewport().setCursor(resize_cursor)
             return
@@ -345,17 +349,17 @@ class MindMapView(QGraphicsView):
             hit = self.itemAt(position)
         hovered = hit.node_item if isinstance(hit, (FoldControlItem, PageControlItem)) else hit
         if inside:
-            if not isinstance(hovered, (NodeItem, NodeEditor)) and not self.panning and self.drag_ghost is None:
+            if not isinstance(hovered, (NodeItem, NodeEditor)) and not self.panning and not dragging:
                 hovered = self._fold_hover_at(position)
         self._set_hovered_node(
-            hovered if isinstance(hovered, NodeItem) and not self.panning and self.drag_ghost is None else None,
-            immediate=self.panning or self.drag_ghost is not None,
+            hovered if isinstance(hovered, NodeItem) and not self.panning and not dragging else None,
+            immediate=self.panning or dragging,
         )
         # 冷启动悬停可能刚刚唤出指针下的按钮，同一帧即使用按钮光标。
         if isinstance(hovered, NodeItem) and hovered.fold_control is not None and position is not None:
             if hovered.fold_control.contains_button(self.mapToScene(position)):
                 hit = hovered.fold_control
-        if self.panning or self.drag_ghost is not None:
+        if self.panning or dragging:
             shape = Qt.CursorShape.ClosedHandCursor
         elif self._pan_button != Qt.MouseButton.NoButton:
             shape = Qt.CursorShape.OpenHandCursor
@@ -374,7 +378,7 @@ class MindMapView(QGraphicsView):
                 if item.can_activate() and item.contains_button(self.mapToScene(position)):
                     shape = Qt.CursorShape.PointingHandCursor
             elif isinstance(item, NodeItem) and self.owner.editable and self.owner.editor is None:
-                if (self.owner.current_page_kind == "inspiration"
+                if (self.owner.current_page_kind in ("inspiration", "graph")
                         or item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id)):
                     shape = Qt.CursorShape.OpenHandCursor
         self.viewport().setCursor(shape)
@@ -445,6 +449,7 @@ class MindMapView(QGraphicsView):
                 # 切页会释放当前图元，回调只捕获节点 ID，不能在被销毁的按钮实例上继续执行。
                 key = item.node_item.node.id
                 enter = {"extension": self.owner.extension_page_requested.emit,
+                         "graph": self.owner.open_node_graph,
                          "detail": self.owner.enter_detail_page, "submap": self.owner.enter_submap,
                          "reference": self.owner.open_page_reference}[item.kind]
                 self.owner.call(lambda: enter(key))
@@ -474,7 +479,7 @@ class MindMapView(QGraphicsView):
             if (
                 self.owner.editable
                 and self.owner.editor is None
-                and (self.owner.current_page_kind == "inspiration"
+                and (self.owner.current_page_kind in ("inspiration", "graph")
                      or item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id))
             ):
                 self.press_node = item.node.id
@@ -527,7 +532,7 @@ class MindMapView(QGraphicsView):
             return
         if self.press_node and event.buttons() & Qt.MouseButton.LeftButton:
             if (
-                self.drag_ghost is None
+                not self.node_drag.active
                 and (event.position().toPoint() - self.press_position).manhattanLength()
                 >= QApplication.startDragDistance()
             ):
@@ -536,8 +541,8 @@ class MindMapView(QGraphicsView):
                     self.press_node = None
                     event.accept()
                     return
-            if self.drag_ghost is not None:
-                if not self.viewport().rect().contains(event.position().toPoint()):
+            if self.node_drag.active:
+                if self.owner.graph is None and not self.viewport().rect().contains(event.position().toPoint()):
                     roots = tuple(self.node_drag._resolver.roots)
                     self.owner.call(lambda: self.owner.start_external_branch_drag(roots))
                     event.accept()
@@ -579,7 +584,7 @@ class MindMapView(QGraphicsView):
         if event.button() != Qt.MouseButton.LeftButton:
             event.accept()
             return
-        if self.drag_ghost is not None:
+        if self.node_drag.active:
             self._selection_click = None
             drop = self.node_drag.finish(event.position().toPoint())
             self.press_node = None
@@ -633,7 +638,8 @@ class MindMapView(QGraphicsView):
                 self.owner.select_nodes([item.node.id])
             self.owner.context_menu(global_position)
         else:
-            self.owner.context_menu(global_position, on_canvas=True)
+            if not self.owner.call(lambda: self.owner.graph_edge_context_menu(position, global_position)):
+                self.owner.context_menu(global_position, on_canvas=True)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and (
@@ -707,6 +713,13 @@ class MindMapView(QGraphicsView):
         """
         super().drawForeground(painter, rect)
         self._draw_inspiration_empty(painter)
+        if self.owner.graph is not None and not self.owner.document_view.nodes and self.owner.editable:
+            painter.save()
+            painter.resetTransform()
+            painter.setPen(QColor(self.owner.ui_colors.muted))
+            painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter,
+                             "按 Tab 添加节点，或右键选择“编辑图文本”")
+            painter.restore()
         paint_node_selection(self, painter)
         # 缩放及滚动可能只重绘视图而不发出 scene.changed；记住实际显示的位置，
         # 使随后的局部移动仍能完整擦除旧外框，而非使用缩放前的视口坐标。

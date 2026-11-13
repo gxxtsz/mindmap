@@ -400,6 +400,9 @@ class MindMapFileController(QObject):
         formats = {"png": "PNG 图片", "svg": "SVG 矢量图", "pdf": "PDF 文档", "txt": "TXT 文本"}
         if not isinstance(format_id, str) or format_id not in formats:
             raise MindMapError("支持的导出格式为 PNG、SVG、PDF、TXT")
+        is_graph = self.canvas.graph is not None
+        if is_graph and format_id == "txt":
+            raise MindMapError("可在“编辑图文本”中复制图的文本内容")
         label, extension = formats[format_id], "." + format_id
         self.panels.flush_pending_edits()
         self.canvas.finish_edit(commit=True)
@@ -426,6 +429,8 @@ class MindMapFileController(QObject):
         if text_page is not None:
             # TXT 菜单使用约定的内置文本编码器，复用通用文件入口的临时写入与原子替换。
             save_document(text_page, target, format_id="text", options={"tab_indent": True})
+        elif is_graph:
+            self.canvas.export(target)
         else:
             expand = QMessageBox.question(
                 self.dialog_parent,

@@ -2,6 +2,7 @@
 
 from mindmap_core import ChangeEvent, ChangeSet, LayoutResult, Rect
 from mindmap_core.layouts import create_incremental_layout, supports_incremental_layout
+from mindmap_core.node_pages import parse_graph_page_id
 from mindmap_qt_render.rendering import BranchItem
 from PySide6.QtCore import QRectF
 
@@ -27,6 +28,12 @@ class SceneSyncMixin:
             return
         external = self.is_external_event(event)
         changes = event.changes
+        if event.kind != "saved":
+            history_graph = (parse_graph_page_id(changes.page_id)
+                             if changes is not None and event.kind in ("undo", "redo") else None)
+            if self.graph is not None or (history_graph is not None and not external):
+                self._apply_graph_event(event)
+                return
         if event.kind != "saved" and changes is not None:
             inspiration_topology = "inspiration" in changes.settings
             if self.current_page_kind == "inspiration" and not inspiration_topology:
@@ -232,6 +239,110 @@ class SceneSyncMixin:
         self.history_changed.emit(self.engine.can_undo, self.engine.can_redo, self.engine.is_dirty)
         self.document_changed.emit(event)
 
+    def _apply_graph_event(self, event):
+        """按所属树节点更新图投影，树节点 ID 和图内局部 ID 始终分别解析。
+
+        本地撤销和重做可以进入受影响的图。其他标签只更新内容，不抢占视图；当前图
+        或其入口被删除时，优先返回仍存在的所属节点或祖先页。纯保存走原有通知路径。
+        """
+        self.view.node_drag.document_changed()
+        self.document_changing.emit(event)
+        self._cache_page_view()
+        page = self.current_page_id
+        owner = parse_graph_page_id(page)
+        previous = self.graph
+        before = self.selected_node_ids()
+        changes = event.changes
+        external = self.is_external_event(event)
+        was_empty = previous is not None and not previous.nodes
+        if changes is None:
+            self.finish_edit(commit=False)
+            self._book_document = self._read_engine_document()
+            self._page_states.clear()
+            self._selection_undo.clear()
+            self._selection_redo.clear()
+            self._switch_page(None, notify=False, cache=False)
+        else:
+            changes.apply(self._book_document, forward=event.forward)
+            destination = changes.page_id if event.kind in ("undo", "redo") and not external else page
+            destination_owner = parse_graph_page_id(destination)
+            return_owner = None
+            if not self._book_document.has_page(destination):
+                return_owner = destination_owner or owner
+                if return_owner in self._book_document.nodes:
+                    destination = self.engine.node_page_id(return_owner)
+                else:
+                    return_owner = None
+                    destination = next((item for item in reversed(self._page_chain)
+                                        if self._book_document.has_page(item)), None)
+            elif destination != page and owner in self._book_document.nodes:
+                if self.engine.node_page_id(owner) == destination:
+                    return_owner = owner
+            if destination == page and owner is not None:
+                updated = self._book_document.page_view(page)
+                self._refresh_graph_projection(updated, external)
+                if was_empty and updated.nodes:
+                    # 空图初次获得内容后只移动视口中心，保留用户已调整的缩放倍率。
+                    self.center_root()
+            else:
+                self.finish_edit(commit=False)
+                self._switch_page(destination, notify=False, cache=False,
+                                  inspiration_root_id=self._inspiration_root_for(return_owner))
+                if return_owner in self._document.nodes and not self.is_node_selected(return_owner):
+                    self._locate_page_node(return_owner)
+
+            after = self.selected_node_ids()
+            if event.kind == "change":
+                if (not external and self.current_page_id == page and previous is not None
+                        and self.graph is not None):
+                    old_ids = {node.id for node in previous.nodes}
+                    fresh = [node.id for node in self.graph.nodes if node.id not in old_ids]
+                    if fresh:
+                        after = fresh
+                        self.select_nodes(after)
+                self._selection_undo.append((before, after))
+                del self._selection_undo[:-self.engine.history_limit]
+                self._selection_redo.clear()
+            elif event.kind in ("undo", "redo"):
+                undoing = event.kind == "undo"
+                source, target = ((self._selection_undo, self._selection_redo) if undoing else
+                                  (self._selection_redo, self._selection_undo))
+                if source:
+                    snapshot = source.pop()
+                    target.append(snapshot)
+                    if not external and self.current_page_id == page and self.graph is not None:
+                        self.select_nodes(snapshot[0 if undoing else 1])
+        self._update_actions()
+        self.history_changed.emit(self.engine.can_undo, self.engine.can_redo, self.engine.is_dirty)
+        # 图的节点是页内投影，所属树节点的差量不能交给图的大纲当作图节点差量。
+        self.document_changed.emit(ChangeEvent(
+            event.operation, (), event.revision, event.kind, None, event.forward, event.source_id))
+
+    def _refresh_graph_projection(self, updated, external):
+        """在同一页回显最新提交，保留未被外部改写的原地草稿及原视口。"""
+        previous = self._document
+        if self.editor is not None:
+            key = self.editor.node_id
+            if key not in updated.nodes or (not external and previous.nodes.get(key) != updated.nodes[key]):
+                self.finish_edit(commit=False)
+        if previous.graph == updated.graph and previous.theme == updated.theme:
+            self._document.title = updated.title
+            return
+        self._document = updated
+        self._invalidate_selection_order()
+        if previous.theme != updated.theme:
+            self._measure_dirty = None
+        else:
+            self._measure_dirty = tuple(key for key in previous.nodes.keys() | updated.nodes.keys()
+                                        if previous.nodes.get(key) != updated.nodes.get(key))
+        if not updated.graph.hidden_node_ids or not updated.graph.edges:
+            self._graph_show_all = False
+        self.refresh()
+        if self.editor is not None:
+            self.editor.base_layout = self.layout_result
+            self._update_edit_preview(self.editor, force=True)
+        self._notify_selection()
+
     def _detail_measurement_changes(self, document, dirty):
         """把页外共享详情变化折算为当前页的测量差量，不改借用节点的归属字段。
 
@@ -278,17 +389,22 @@ class SceneSyncMixin:
         # 时再由视图限制到最近边界；不要为了容纳内容而自动修改用户的缩放比例。
         center = self.view.mapToScene(self.view.viewport().rect()).boundingRect().center()
         document = self._document
-        dirty = self._detail_measurement_changes(document, self._measure_dirty)
+        dirty = (self._measure_dirty if self.graph is not None
+                 else self._detail_measurement_changes(document, self._measure_dirty))
+        resolver = self.engine.resolve_detail_page if self.graph is None else None
         if dirty is None or self._visual_document is None:
-            visuals, sizes = self.factory.measure(document, detail_page_resolver=self.engine.resolve_detail_page)
+            visuals, sizes = self.factory.measure(document, detail_page_resolver=resolver)
         else:
             visuals, sizes = self._visuals, self._measurements
             self.factory.update_measurements(
-                document, dirty, visuals, sizes, detail_page_resolver=self.engine.resolve_detail_page)
+                document, dirty, visuals, sizes, detail_page_resolver=resolver)
         self._visual_document, self._visuals = document, visuals
         self._measure_dirty = ()
         self._measurements = sizes
-        if self._can_incremental():
+        if self.graph is not None:
+            self._incremental_layout = None
+            self.layout_result = self._calculate_graph_layout(sizes)
+        elif self._can_incremental():
             key = (id(self.layout_registry.get(document.layout.algorithm_id)),
                    document.root_id, repr(document.layout))
             if self._incremental_layout is None or key != self._incremental_key or dirty is None:
@@ -302,7 +418,8 @@ class SceneSyncMixin:
             self.layout_result = self.layout_registry.layout(document, sizes, focus_id=self.focus_id)
         # 完整布局只推导一次方向；增量路径直接复用几何索引，避免每个按钮遍历整图。
         self._fold_sides = (
-            document.branch_sides() if self._incremental_layout is None and document.layout.direction == "both"
+            document.branch_sides() if self.graph is None and self._incremental_layout is None
+            and document.layout.direction == "both"
             else {}
         )
         result = self.layout_result
@@ -334,7 +451,7 @@ class SceneSyncMixin:
 
     def _can_incremental(self):
         """由布局提供者判断优化能力；聚焦仍沿用完整布局，不绕过宿主注入入口。"""
-        return (self.focus_id is None
+        return (self.graph is None and self.focus_id is None
                 and self.current_page_kind != "inspiration"
                 and supports_incremental_layout(self.layout_registry, self._document.layout.algorithm_id))
 

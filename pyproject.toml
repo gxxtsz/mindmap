@@ -1,7 +1,7 @@
 [project]
 name = "mindmap"
 version = "0.1.0"
-description = "以思维导图及节点专用详情页为核心的桌面应用"
+description = "支持思维导图和节点图的桌面应用"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
@@ -10,7 +10,7 @@ dependencies = []
 package = false
 
 [tool.uv.workspace]
-# 导图是唯一业务主体，扩展只能通过节点专用详情页接入。
+# 图由所属导图保存，各成员共用根工作区及锁文件。
 # packages 保留桌面基础设施；所有成员共用根工作区与锁文件。
 members = [
     "packages/*",
@@ -18,7 +18,6 @@ members = [
     "mindmap/qt-render",
     "mindmap/qt-editor",
     "mindmap/application",
-    "extensions/software-structure",
     "apps/*",
 ]
 
@@ -29,14 +28,13 @@ mindmap-qt-editor = { workspace = true }
 mindmap-desktop-api = { workspace = true }
 mindmap-desktop-runtime = { workspace = true }
 mindmap-application = { workspace = true }
-mindmap-extension-software-structure = { workspace = true }
 mindmap-app = { workspace = true }
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.11,<1"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages", "mindmap", "extensions", "apps"]
+testpaths = ["packages", "mindmap", "apps"]
 addopts = "--import-mode=importlib"
 qt_api = "pyside6"
 

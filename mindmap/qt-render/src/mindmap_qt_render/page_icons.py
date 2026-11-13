@@ -10,6 +10,7 @@ _PAGE_ICON_BODIES = {
     "main": '<path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-8h6v8"/>',
     "detail": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
     "extension": '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 17h7m-3.5-3.5v7"/>',
+    "graph": '<circle cx="5" cy="12" r="2.5"/><circle cx="18" cy="5" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m7.3 10.7 8.4-4.4m-8.4 7 8.4 4.4M18 7.5v9"/>',
     "reference": (
         '<path d="M10 13a4 4 0 0 0 6 .4l4-4a4 4 0 0 0-5.7-5.7l-2 2"/>'
         '<path d="M14 11a4 4 0 0 0-6-.4l-4 4a4 4 0 0 0 5.7 5.7l2-2"/>'
@@ -26,7 +27,7 @@ _PAGE_ICON_BODIES = {
 def page_icon_body(kind: str) -> str:
     """取得页面图标的 SVG 图形体，供共享 UI 的多状态图标工厂复用。
 
-    kind 接受 main、detail、submap、reference、extension；返回值使用 24×24 坐标，调用方负责
+    kind 接受 main、detail、submap、reference、extension、graph；返回值使用 24×24 坐标，调用方负责
     SVG 外壳、颜色、两单位描边及圆角端点。未知类别显式抛出 ValueError，
     不把数据错误静默显示成另一种页面。本接口不创建 Qt 对象或读取文档。
     """

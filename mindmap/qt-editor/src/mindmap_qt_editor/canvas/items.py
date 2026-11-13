@@ -6,6 +6,7 @@ from dataclasses import replace
 from weakref import ref
 
 from mindmap_core.layouts import resolve_tree_spacing
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import (
@@ -196,6 +197,7 @@ class PageControlItem(QGraphicsObject):
         "submap": ("submap_id", "进入子导图"),
         "reference": ("page_reference_root_id", "打开引用页面"),
         "extension": ("extension_pages", "打开扩展详情"),
+        "graph": ("extension_pages", "打开图"),
     }
 
     def __init__(self, node_item, *, kind="submap"):
@@ -238,6 +240,8 @@ class PageControlItem(QGraphicsObject):
         if not (item and item.owner and not item.owner._disposed and not item.owner._applying_engine_event
                 and item.owner.editor is None and not item.owner.view.node_drag.active):
             return False
+        if self.kind == "graph":
+            return GRAPH_PAGE_TYPE in item.node.extension_pages
         target = (item.owner.engine.resolve_detail_page(item.node.id)[1] if self.kind == "detail"
                   else getattr(item.node, self.field_name))
         return bool(target)
@@ -292,8 +296,9 @@ class NodeItem(StaticNodeItem):
         self.submap_control = SubmapControlItem(self) if owner is not None else None
         self.reference_control = None
         self.extension_control = None
+        self.graph_control = None
         self._sync_reference_control()
-        self._sync_extension_control()
+        self._sync_optional_page_controls()
 
     def boundingRect(self):
         """返回交互图元的重绘边界，纯图片额外覆盖画布投影。
@@ -368,7 +373,7 @@ class NodeItem(StaticNodeItem):
         if self.detail_page_control is not None:
             self.detail_page_control.sync()
         self._sync_reference_control()
-        self._sync_extension_control()
+        self._sync_optional_page_controls()
 
     def _sync_reference_control(self):
         """只为有过引用的图元创建按钮；隐藏后复用，避免大图普通节点增加 Qt 对象。"""
@@ -377,12 +382,14 @@ class NodeItem(StaticNodeItem):
         elif self.owner is not None and "reference" in self.visual.page_kinds:
             self.reference_control = PageControlItem(self, kind="reference")
 
-    def _sync_extension_control(self):
-        """仅为实际拥有扩展内容的节点创建按钮，普通大图不额外分配 Qt 图元。"""
-        if self.extension_control is not None:
-            self.extension_control.sync()
-        elif self.owner is not None and "extension" in self.visual.page_kinds:
-            self.extension_control = PageControlItem(self, kind="extension")
+    def _sync_optional_page_controls(self):
+        """按实际挂载内容创建图或扩展入口。删除内容后隐藏按钮，供撤销时复用。"""
+        for kind, attr in (("extension", "extension_control"), ("graph", "graph_control")):
+            control = getattr(self, attr)
+            if control is not None:
+                control.sync()
+            elif self.owner is not None and kind in self.visual.page_kinds:
+                setattr(self, attr, PageControlItem(self, kind=kind))
 
     def itemChange(self, change, value):
         result = super().itemChange(change, value)

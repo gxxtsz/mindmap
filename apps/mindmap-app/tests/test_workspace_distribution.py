@@ -20,7 +20,7 @@ MINDMAP_DIRECTORIES = {
     "mindmap-application": "application",
 }
 EXPECTED = set(MINDMAP_DIRECTORIES) | {
-    "mindmap-app", "mindmap-desktop-api", "mindmap-desktop-runtime", "mindmap-extension-software-structure",
+    "mindmap-app", "mindmap-desktop-api", "mindmap-desktop-runtime",
 }
 DEPENDENCIES = {
     "mindmap-core": set(),
@@ -29,8 +29,7 @@ DEPENDENCIES = {
     "mindmap-desktop-api": {"pyside6"},
     "mindmap-desktop-runtime": {"mindmap-desktop-api", "pyside6"},
     "mindmap-application": {"mindmap-desktop-api", "mindmap-core", "mindmap-qt-editor", "mindmap-qt-render", "pyside6"},
-    "mindmap-extension-software-structure": {"mindmap-qt-editor", "pyside6"},
-    "mindmap-app": {"mindmap-desktop-runtime", "mindmap-application", "mindmap-extension-software-structure", "pyside6"},
+    "mindmap-app": {"mindmap-desktop-runtime", "mindmap-application", "pyside6"},
 }
 
 
@@ -82,15 +81,10 @@ def test_mindmap_components_form_the_product_core():
         assert not packages[name][0].is_relative_to(core_root), name
 
 
-def test_only_node_pages_have_discoverable_business_entry_points():
-    """新增包只能公开节点页面入口；产品固定构造主体，不得恢复同级业务发现。"""
+def test_workspace_has_no_discoverable_business_entry_points():
+    """图作为导图的一种页面内置，产品固定构造主体。"""
     for name, (_path, project) in members().items():
-        entries = project.get("entry-points", {})
-        if name == "mindmap-extension-software-structure":
-            assert entries == {"mindmap.node_pages": {
-                "software-structure": "mindmap_extension_software_structure:provider"}}
-        else:
-            assert entries == {}
+        assert not project.get("entry-points"), name
     assert members()["mindmap-app"][1]["gui-scripts"] == {"mindmap": "mindmap_app:main"}
 
 

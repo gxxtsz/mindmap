@@ -58,6 +58,7 @@ _SVG_BODIES = {
     "main": page_icon_body("main"),
     "detail": page_icon_body("detail"),
     "extension": page_icon_body("extension"),
+    "graph": page_icon_body("graph"),
     "submap": page_icon_body("submap"),
     "page_up": '<path d="M12 21V4m-6 6 6-6 6 6"/>',
     "favorite": '<path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L2.9 9.6l6.3-.9Z"/>',

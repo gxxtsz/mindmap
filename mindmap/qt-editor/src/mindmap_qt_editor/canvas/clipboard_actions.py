@@ -54,6 +54,8 @@ class ClipboardActionsMixin:
 
     def copy(self):
         """使用注入的 JSON 与 Markdown 格式导出片段，文件与剪贴板共享解析协议。"""
+        if self.graph is not None:
+            return self._copy_graph_nodes()
         fragment = self.engine.copy_fragment(self.selected_node_ids())
         mime = QMimeData()
         mime.setData(
@@ -82,6 +84,11 @@ class ClipboardActionsMixin:
         剪贴板编码失败时不会执行删除；正式删除使用引擎的历史与资源清理规则。
         """
         self._ensure_editable()
+        if self.graph is not None:
+            if self.selection_count:
+                self._copy_graph_nodes()
+                self._delete_graph_nodes(self.selected_node_ids())
+            return
         if self.current_page_kind != "inspiration" and self.is_node_selected(self._document.root_id):
             raise MindMapError("不能剪切根节点")
         self.copy()
@@ -109,6 +116,8 @@ class ClipboardActionsMixin:
         界面入口通过 call() 将异常交给统一错误信号，普通文本编辑仍由文本控件处理。
         """
         self._ensure_editable()
+        if self.graph is not None:
+            return self._paste_graph_nodes()
         mime = QApplication.clipboard().mimeData()
         if mime is None:
             return []
@@ -194,6 +203,8 @@ class ClipboardActionsMixin:
         返回 False，保留文本控件原行为；图像返回 True，失败通过 call() 发出错误信号，
         避免坏图或输入法候选被误当成文本。MIME 对象仅借用到本次调用结束，不缓存。
         """
+        if self.graph is not None:
+            return False
         mime = QApplication.clipboard().mimeData()
         if (mime is None or mime.hasFormat(CLIPBOARD_MIME) or mime.hasFormat(EDRAW_CLIPBOARD_MIME)
                 or not has_clipboard_image(mime)):

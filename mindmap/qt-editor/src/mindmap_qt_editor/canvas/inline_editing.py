@@ -46,7 +46,8 @@ class InlineEditingMixin:
         item = self.node_items[node_id]
         item.editing = True
         item.update()
-        self.editor = NodeEditor(self, self.engine.get_node(node_id), item.visual)
+        node = self._document.nodes[node_id] if self.graph is not None else self.engine.get_node(node_id)
+        self.editor = NodeEditor(self, node, item.visual)
         self.editor.setPos(item.pos() + item.visual.text_position)
         self.scene.addItem(self.editor)
         self.editor.sync_geometry()
@@ -69,7 +70,9 @@ class InlineEditingMixin:
         item.sync_fold_control()
         if force or previous_size != (visual.width, visual.height):
             sizes = ChainMap({editor.node_id: (visual.width, visual.height)}, self._measurements)
-            if self._incremental_layout is not None:
+            if self.graph is not None:
+                result = self._calculate_graph_layout(sizes)
+            elif self._incremental_layout is not None:
                 result = self._incremental_layout.preview_measurements(self._document, sizes, (editor.node_id,))
             else:
                 result = self.layout_registry.layout(self._document, sizes, focus_id=self.focus_id)
@@ -134,7 +137,10 @@ class InlineEditingMixin:
         if not self._disposed:
             self._show_edit_layout(editor.base_layout)
         if commit and self.editable:
-            self.call(lambda: self.engine.update_node(node_id, text=text))
+            if self.graph is not None:
+                self.call(lambda: self._rename_graph_node(node_id, text))
+            else:
+                self.call(lambda: self.engine.update_node(node_id, text=text))
         self._update_actions()
         if restore_view_focus:
             self.view.setFocus()

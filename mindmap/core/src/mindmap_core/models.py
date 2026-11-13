@@ -12,6 +12,8 @@ from uuid import uuid4
 from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError
+from .graph import NodeGraph
+from .node_pages import GRAPH_PAGE_TYPE, parse_graph_page_id
 
 _ATOMIC_TYPES = frozenset((str, int, float, bool, bytes, type(None)))
 
@@ -327,7 +329,7 @@ class MindMapDocument:
         return self.detail_pages[page_id]
 
     def page_kind(self, page_id: str | None = None) -> str:
-        """只读返回 main、submap、detail 或 inspiration，无效标识抛出 KeyError。"""
+        """返回主导图、附属树页、灵感区或节点图的类别，无效标识抛出 KeyError。"""
         if page_id is None:
             return "main"
         if page_id == self.inspiration.id:
@@ -336,12 +338,20 @@ class MindMapDocument:
             return "submap"
         if page_id in self.detail_pages:
             return "detail"
+        if self._graph_record(page_id) is not None:
+            return "graph"
         raise KeyError(page_id)
 
     def has_page(self, page_id: str | None) -> bool:
         """检查页面是否仍存在，供撤销删除后的导航回退使用。"""
         return (page_id is None or page_id == self.inspiration.id
-                or page_id in self.submaps or page_id in self.detail_pages)
+                or page_id in self.submaps or page_id in self.detail_pages or self._graph_record(page_id) is not None)
+
+    def _graph_record(self, page_id: str | None) -> dict | None:
+        """按图页键借用所属节点的挂载数据，无需把图内节点加入文档的树索引。"""
+        owner_id = parse_graph_page_id(page_id)
+        owner = self.nodes.get(owner_id) if owner_id is not None else None
+        return owner.extension_pages.get(GRAPH_PAGE_TYPE) if owner is not None else None
 
     def iter_pages(self):
         """依次借用两类附属页面；只用于完整装载、校验和显式全文件操作。"""
@@ -389,6 +399,13 @@ class MindMapDocument:
         根顺序、坐标及实体均不修改；省略时保持完整总览。无效根或用于其他页面
         时抛出 KeyError。该查询不产生历史，结果不能用于整份文件保存。
         """
+        owner_id = parse_graph_page_id(page_id)
+        if owner_id is not None:
+            record = self._graph_record(page_id)
+            if record is None or inspiration_root_id is not None:
+                raise KeyError(page_id)
+            return MindMapGraphView(NodeGraph.from_data(record["data"]), self.layout, self.theme,
+                                    f"{self.display_node(owner_id).text} · 图")
         page = self.page_record(page_id)
         if page_id == self.inspiration.id:
             if inspiration_root_id is not None:
@@ -438,6 +455,27 @@ class MindMapPageView(MindMapDocument):
         from .validation import validate_document
 
         validate_document(self, page_only=True)
+
+
+class MindMapGraphView(MindMapPageView):
+    """将图节点投影为画布已有的文字节点接口；有向边仍从图数据单独读取。"""
+
+    kind = "graph"
+
+    def __init__(self, graph: NodeGraph, layout: LayoutConfig, theme: Theme, title: str):
+        # 图没有中心根和父子关系，大纲按声明顺序显示为平级节点。
+        super().__init__("", {node.id: Node(node.title, id=node.id) for node in graph.nodes},
+                         layout=layout, theme=theme)
+        self.graph, self.title = graph, title
+
+    @property
+    def root_ids(self) -> tuple[str, ...]:
+        """给大纲提供平级节点列表，标识仅在当前图页内有效。"""
+        return tuple(self.nodes)
+
+    def validate(self) -> None:
+        """校验图的局部内容，空图和环都可通过。"""
+        NodeGraph.from_data(self.graph.to_data())
 
 
 class MindMapForestView(MindMapPageView):

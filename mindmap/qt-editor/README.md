@@ -685,10 +685,14 @@ finally:
 
 - 文件控制器仅要求 `PendingEdits.flush_pending_edits()`，无侧栏宿主可提供空实现。
 
-## 节点专用详情页容器
+## 节点图与专用详情页
+
+`MindMapWidget.open_node_graph(owner_id, create=False)` 打开节点图，创建入口传入 `create=True`。图和树共用视口、场景、节点图元、选择和原地编辑器。图的分层几何以 `LayoutResult` 交给共用的场景同步逻辑。图内标识的读写通过所属节点上的引擎事务完成。
+
+`GraphFilterPanel.bind_canvas(canvas)` 供宿主将连线筛选停靠侧栏绑定到活动图页。持久勾选通过画布提交，临时预览只更新该标签，窗口的缩放操作仍使用同一画布动作。
 
 `mindmap_qt_editor.node_pages` 提供 `NodePageProvider`、`NodePageWidget`、`NodePageContext`、`NodePageRegistry` 和 `NodePageHost`。容器包装已有 `MindMapWidget`，在同一标签内切换原导图与专用详情页。
 
 节点已有专用页面时显示扩展图标，点击通过 `extension_page_requested(node_id)` 发送导航意图。独立宿主可以订阅该信号，也可使用 `NodePageHost` 自动接入。扩展类型菜单同时列出已安装类型和文档中已有的未知类型；未知类型显示保留提示。
 
-页面创建和更新经引擎事务，视口经宿主会话恢复，返回时保留导图视图。具体协议及注册方式见[架构与节点扩展](../../docs/架构与节点扩展.md)。
+页面创建和更新经引擎事务，视口经宿主会话恢复，返回时保留导图视图。

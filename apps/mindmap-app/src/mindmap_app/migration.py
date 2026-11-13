@@ -31,7 +31,7 @@ def _source_directory(directory: Path) -> Path:
 def _convert_layout(layout, retired_ids: set[str]):
     """移除退役业务的标签和工具，保留导图分屏、尺寸、主题及窗口位置。"""
     def retired_tool(identifier):
-        # 历史停靠标识使用连字符，Qt 对象名使用下划线；两种遗留记录均不再恢复。
+        # 旧配置可能缺少插件清单，直接识别其停靠标识及 Qt 对象名，避免复活已移除的入口。
         return isinstance(identifier, str) and identifier.startswith(("software-structure.", "software_structure"))
 
     result = deepcopy(layout)
@@ -117,7 +117,7 @@ def migrate_legacy(directory) -> tuple[dict | None, dict]:
     """在新配置缺失时提供转换后的初始数据，不写回、移动或删除历史文件。
 
     状态和设置分别判断是否需要导入，避免其中一个新文件已存在时重复覆盖。
-    所有读取仅针对已知的本机配置名；架构来源文件由用户在目标节点中导入。
+    所有读取仅针对已知的本机配置名，旧会话的其他来源只保留路径记录。
     """
     directory = Path(directory)
     source = _source_directory(directory)

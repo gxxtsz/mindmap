@@ -1,4 +1,4 @@
-"""原生文档结构映射；专用详情页使用版本 7，普通文档沿用版本 5 或 6。"""
+"""原生文档结构映射；节点图和专用详情页使用版本 7。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
-    扩展详情使用版本 7，页面引用至少使用版本 6；空字段省略，普通文档沿用版本 5。
+    节点图及扩展详情使用版本 7，页面引用至少使用版本 6；空字段省略。
     """
     if isinstance(document, MindMapPageView):
         raise MindMapError("单页读模型不能保存为完整文件，请使用引擎的完整文档快照")
@@ -119,7 +119,7 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                 if version < 6 and name == "nodes" and "page_reference_root_id" in record:
                     raise MindMapError("页面引用需要版本 6 文档格式")
                 if version < 7 and name == "nodes" and "extension_pages" in record:
-                    raise MindMapError("扩展详情页需要版本 7 文档格式")
+                    raise MindMapError("节点附属数据需要版本 7 文档格式")
                 entity = factory(**record)
                 if entity.id in result:
                     raise MindMapError(f"重复标识：{entity.id}")

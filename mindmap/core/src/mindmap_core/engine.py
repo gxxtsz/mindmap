@@ -15,7 +15,7 @@ from .events import ChangeEvent, EventDispatcher
 from .history import HistoryManager
 from .loading import ValidatedDocument
 from .models import MindMapDocument, Node, PageSummary, PathEntry, Theme
-from .node_pages import NodePagesMixin, parse_extension_page_id
+from .node_pages import GRAPH_PAGE_TYPE, NodePagesMixin, parse_extension_page_id, parse_graph_page_id
 from .operations import DocumentEditor
 from .transactions import DocumentState, TransactionManager
 
@@ -148,6 +148,13 @@ class MindMapEngine(NodePagesMixin):
         document = self._state.document
         if page_id is not None and not isinstance(page_id, str):
             return None
+        owner_id = parse_graph_page_id(page_id)
+        if owner_id is not None:
+            owner = document.nodes.get(owner_id)
+            if inspiration_root_id is not None or owner is None or GRAPH_PAGE_TYPE not in owner.extension_pages:
+                return None
+            path = (*self.node_path(owner_id), PathEntry(page_id, owner_id, "图", True))
+            return PageSummary(page_id, None, "graph", f"{document.display_node(owner_id).text} · 图", path)
         target = parse_extension_page_id(page_id)
         if target is not None:
             node_id, type_id = target
@@ -522,7 +529,8 @@ class MindMapEngine(NodePagesMixin):
                 key = parameters.get("node_id") or parameters.get("parent_id") or parameters.get("target_id")
                 ids = parameters.get("node_ids")
                 key = key or (ids[0] if ids else None)
-                journal.page_id = self._state.page_id(key) if key is not None else parameters.get("page_id")
+                journal.page_id = parameters.get("page_id") if "page_id" in parameters else (
+                    self._state.page_id(key) if key is not None else None)
                 if key is None and name in ("add_inspiration", "set_inspiration_positions"):
                     journal.page_id = self.inspiration_id
                 journal.has_origin = True

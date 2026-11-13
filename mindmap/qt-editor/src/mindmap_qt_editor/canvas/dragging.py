@@ -16,8 +16,10 @@ from mindmap_core import (
     MindMapDocument,
     MindMapEngine,
     MindMapForestView,
+    NodeGraph,
     Rect,
 )
+from mindmap_core.layouts.graph import move_graph_nodes
 from mindmap_qt_render.rendering import branch_path
 from PySide6.QtCore import (
     QEasingCurve,
@@ -173,6 +175,16 @@ def _apply_move(engine: MindMapEngine, proposal: _DropProposal, document: MindMa
     return True
 
 
+@dataclass(frozen=True)
+class _GraphDrop:
+    """鼠标释放后等待提交的图节点坐标，绑定按下时的图页及内容版本。"""
+
+    page_id: str
+    content_version: int
+    graph: NodeGraph
+    positions: dict[str, tuple[float, float]]
+
+
 class NodeDragController(QObject):
     """内部鼠标及跨控件原生拖放共用的状态机，所有预览和定时器由视图拥有。"""
 
@@ -192,6 +204,7 @@ class NodeDragController(QObject):
         self._last_scene_point = None
         self._last_scale = None
         self._offset = QPointF()
+        self._graph_drag = None
         self._display_nodes = {}
         self._content_version = 0
         self._animation = QVariantAnimation(self)
@@ -209,7 +222,7 @@ class NodeDragController(QObject):
 
     @property
     def active(self):
-        return self.ghost is not None
+        return self.ghost is not None or self._graph_drag is not None
 
     @property
     def external_active(self):
@@ -225,6 +238,16 @@ class NodeDragController(QObject):
             return False
         # 下一次操作开始前收束上次放下动画，避免拿中间帧作为新的命中几何。
         self._settle_reflow()
+        if self.owner.graph is not None:
+            keys = self.owner.selected_node_ids()
+            if not keys:
+                return False
+            # 与树拖动共用阈值、捕获、边缘滚动和取消时机。图内只计算位置差量，
+            # 预览移动原图元并随手势重算相连边，无需创建另一套拖动影像。
+            self._graph_drag = (self.owner.current_page_id, self.owner.graph, self.owner.layout_result, keys)
+            self._origin = QPointF(origin)
+            self._offset = QPointF()
+            return True
         # 组件持有的正式展示文档本身就是引擎快照；正式内容改变时会先中止手势，
         # 因而可以只读复用它，保持未变化节点、视觉和图元之间的对象一致性。
         document = self.owner._document
@@ -469,6 +492,16 @@ class NodeDragController(QObject):
         """只更新稳定落点、影像和滚动；悬停不试算文档、不测量、不启动布局动画。"""
         if not self.active:
             return
+        if self._graph_drag is not None:
+            self._pointer = QPoint(position)
+            offset = self.view.mapToScene(position) - self._origin
+            if offset != self._offset:
+                self._offset = offset
+                _, graph, base, keys = self._graph_drag
+                result = move_graph_nodes(base, graph.edges, self._graph_positions(base, keys))
+                self.owner._show_edit_layout(result)
+            self._update_edge_scroll(self.view.viewport().rect().contains(position))
+            return
         if self.external_active and not self.owner.can_receive_branch_drag(self._external_mime):
             self.cancel_external()
             return
@@ -507,6 +540,10 @@ class NodeDragController(QObject):
         self._last_scene_point = self.view.mapToScene(position)
         self._last_scale = scale
         self.ghost.sync()
+        self._update_edge_scroll(inside)
+
+    def _update_edge_scroll(self, inside):
+        """图和树共用视口边缘滚动的计时器和速度计算。"""
         if inside and self._velocity() != QPointF():
             if not self._scroll_timer.isActive():
                 self._scroll_remainder = QPointF()
@@ -514,6 +551,10 @@ class NodeDragController(QObject):
                 self._scroll_timer.start()
         else:
             self._scroll_timer.stop()
+
+    def _graph_positions(self, layout, keys):
+        return {key: (layout.nodes[key].x + self._offset.x(), layout.nodes[key].y + self._offset.y())
+                for key in keys}
 
     def _start_reflow(self, start_nodes):
         """正式提交和选择恢复结束后播放一次动画，命中与文档均使用最终布局。
@@ -647,6 +688,12 @@ class NodeDragController(QObject):
     def finish(self, position):
         """按释放坐标再次判定并记录动画起点，配对释放鼠标捕获后才提交命令。"""
         self.update(position)
+        if self._graph_drag is not None:
+            page, graph, base, keys = self._graph_drag
+            drop = (_GraphDrop(page, self._content_version, graph, self._graph_positions(base, keys))
+                    if self._offset != QPointF() and self.view.viewport().rect().contains(position) else None)
+            self.cancel()
+            return drop
         drop = None
         proposal = self.target.proposal if self.target is not None else None
         if self.active and proposal is not None:
@@ -673,6 +720,16 @@ class NodeDragController(QObject):
         试算不挂真实引擎的操作钩子，也不展示候选文档。布局扩展拒绝结果时不会先
         污染正式文档。真实事务同步刷新画布并恢复选择，动画必须在这些回调后启动。
         """
+
+        if isinstance(drop, _GraphDrop):
+            if (self.owner._disposed or not self.owner.editable or self.owner.current_page_id != drop.page_id
+                    or self._content_version != drop.content_version):
+                return False
+            graph = self.owner._read_active_graph()
+            if graph != drop.graph:
+                return False
+            self.owner._write_active_graph(replace(graph, positions={**graph.positions, **drop.positions}))
+            return True
 
         def valid():
             return (
@@ -749,6 +806,12 @@ class NodeDragController(QObject):
         """幂等取消未提交手势；提交后动画只收束到终点，不回滚文档或折叠状态。"""
         self._settle_reflow()
         self._scroll_timer.stop()
+        if self._graph_drag is not None:
+            _, _, base, _ = self._graph_drag
+            self._graph_drag = None
+            if not self.owner._disposed:
+                self.owner._show_edit_layout(base)
+            return
         if not self.active:
             return
         layer, self.ghost = self.ghost, None

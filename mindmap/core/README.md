@@ -372,17 +372,21 @@ engine.undo()
 
 - 两项操作均禁止在活动事务内调用。
 
-## 节点专用详情页
+## 节点图和专用详情页
 
 `Node.extension_pages` 按扩展类型保存 `{ "version": 正整数, "data": JSON对象 }`。每节点每类型最多一页，可与普通详情页及子导图共存。普通详情页中的文字节点也可拥有专用页面，纯图片节点不能拥有页面。
 
+内置图通过 `node_graph`、`set_node_graph` 和 `remove_node_graph` 读写。`graph_page_id(owner_id)` 返回导航标识，可用于查询页面摘要或单页投影。图内标识只在一张图内有效，手动位置和筛选与图内容共同进入事务。
+
 ```python
-engine.set_extension_page(node_id, "software-structure", {"schema_version": 1, "modules": []}, version=1)
-page = engine.extension_page(node_id, "software-structure")
-engine.remove_extension_page(node_id, "software-structure")
+from mindmap_core.formats.graph import parse_graph_text
+
+engine.set_node_graph(node_id, parse_graph_text('节点 app "应用"'))
+graph = engine.node_graph(node_id)
+engine.remove_node_graph(node_id)
 engine.undo()
 ```
 
-查询返回独立快照。写入统一经过事务、前置钩子、撤销历史与变更通知。节点复制、删除和子导图转换保留页面所有权；显式省略附属页的粘贴操作会清除扩展页。核心只校验通用封装和 JSON 数据，不导入业务扩展，也不要求业务版本已安装。
+查询返回独立快照。写入统一经过事务、前置钩子、撤销历史与变更通知。节点复制和子导图转换保留页面所有权。图使用保留类型 `graph`，并在读写原生数据时校验节点、连线、坐标与筛选。外部专用详情页使用通用 JSON 封装。
 
 `extension_page_id(node_id, type_id)` 与 `parse_extension_page_id()` 位于 `mindmap_core.node_pages`，用于最近访问和会话恢复。扩展 ID 是导航身份，不是独立节点树；使用 `engine.page_summary()` 查询其摘要，使用 `extension_page()` 读取内容。

@@ -1,4 +1,4 @@
-"""按有向图的层级和层内顺序规划模块位置及跨层走线。"""
+"""按有向关系分层、减少交叉并为跨层连线保留走线位置。"""
 
 from bisect import bisect_left, bisect_right
 from collections import deque
@@ -6,23 +6,23 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import pairwise
 
-from ..document import ModuleDependency, SoftwareStructure
+from ...graph import GraphEdge
 from .constraints import SpanConstraint, minimize_spans
 
 
 @dataclass(frozen=True, slots=True)
 class LayeredLayout:
-    """层内顶点已经排序。模块占前若干编号，其余编号是供连线穿过的虚拟顶点。
+    """层内顶点已经排序。真实节点占前若干编号，其余编号供跨层连线使用。
 
     路径按层号从小到大记录。原始依赖仍作为键保存，因此可以在绘制时恢复箭头
     的方向。前后邻接表只含相邻两层之间的连接。
     """
 
-    modules: tuple[str, ...]
+    nodes: tuple[str, ...]
     layers: tuple[tuple[int, ...], ...]
     previous: tuple[tuple[int, ...], ...]
     following: tuple[tuple[int, ...], ...]
-    routes: dict[ModuleDependency, tuple[int, ...]]
+    routes: dict[GraphEdge, tuple[int, ...]]
 
 
 def _finish_order[T](outgoing: dict[T, list[T]]) -> list[T]:
@@ -35,42 +35,15 @@ def _finish_order[T](outgoing: dict[T, list[T]]) -> list[T]:
         visited.add(root)
         stack = [(root, iter(outgoing[root]))]
         while stack:
-            module, neighbors = stack[-1]
+            vertex, neighbors = stack[-1]
             neighbor = next(neighbors, None)
             if neighbor is None:
-                order.append(module)
+                order.append(vertex)
                 stack.pop()
             elif neighbor not in visited:
                 visited.add(neighbor)
                 stack.append((neighbor, iter(outgoing[neighbor])))
     return order
-
-
-def find_cyclic_dependencies(document: SoftwareStructure) -> frozenset[ModuleDependency]:
-    """在完整文档上计算强连通分量，标记所有环内依赖和自环。"""
-    outgoing = {module.id: [] for module in document.modules}
-    incoming = {module.id: [] for module in document.modules}
-    for dependency in document.module_dependencies:
-        outgoing[dependency.source].append(dependency.target)
-        incoming[dependency.target].append(dependency.source)
-
-    component_by_module = {}
-    for root in reversed(_finish_order(outgoing)):
-        if root in component_by_module:
-            continue
-        component = root
-        component_by_module[root] = component
-        pending = [root]
-        while pending:
-            for neighbor in incoming[pending.pop()]:
-                if neighbor not in component_by_module:
-                    component_by_module[neighbor] = component
-                    pending.append(neighbor)
-
-    return frozenset(
-        edge for edge in document.module_dependencies
-        if component_by_module[edge.source] == component_by_module[edge.target]
-    )
 
 
 def _assign_ranks(
@@ -230,25 +203,25 @@ def _sweep_layers(
 
 
 def build_layout(
-    module_ids: Iterable[str], dependencies: tuple[ModuleDependency, ...],
+    node_ids: Iterable[str], edges: tuple[GraphEdge, ...],
 ) -> LayeredLayout:
-    """根据全部模块和直接依赖计算层级、层内顺序和走线路径。
+    """根据全部节点和连线计算层级、层内顺序和走线路径。
 
-    深度优先完成顺序为环内边提供布局方向，各条依赖保留原始身份，供绘制箭头
+    深度优先完成顺序为环内边提供布局方向，各条连线保留原始方向，供绘制箭头
     和应用筛选。长边通常在每个中间层占一个走线位置。
     """
-    modules = tuple(sorted(module_ids))
-    index = {module_id: vertex for vertex, module_id in enumerate(modules)}
-    outgoing = {vertex: [] for vertex in range(len(modules))}
-    edges = sorted(dependencies, key=lambda edge: (edge.source, edge.target))
+    nodes = tuple(sorted(node_ids))
+    index = {node_id: vertex for vertex, node_id in enumerate(nodes)}
+    outgoing = {vertex: [] for vertex in range(len(nodes))}
+    edges = sorted(edges, key=lambda edge: (edge.source, edge.target))
     for edge in edges:
         source, target = index[edge.source], index[edge.target]
         if source != target:
             outgoing[source].append(target)
     order = list(reversed(_finish_order(outgoing)))
     order_index = {vertex: offset for offset, vertex in enumerate(order)}
-    previous: list[list[int]] = [[] for _ in modules]
-    following: list[list[int]] = [[] for _ in modules]
+    previous: list[list[int]] = [[] for _ in nodes]
+    following: list[list[int]] = [[] for _ in nodes]
     endpoints = {}
     for edge in edges:
         source, target = index[edge.source], index[edge.target]
@@ -264,9 +237,9 @@ def build_layout(
 
     # 先保留跨度短的走线位置。特别密集的图使用可复用的外侧通道容纳余下长边，
     # 将虚拟顶点的空间开销限制在与原图规模相同的量级。
-    budget = max(4096, len(modules) * 8, len(edges) * 6)
-    previous = [[] for _ in modules]
-    following = [[] for _ in modules]
+    budget = max(4096, len(nodes) * 8, len(edges) * 6)
+    previous = [[] for _ in nodes]
+    following = [[] for _ in nodes]
     routes = {}
     for edge, (start, end) in sorted(endpoints.items(), key=lambda item: ranks[item[1][1]] - ranks[item[1][0]]):
         if start == end:
@@ -290,4 +263,4 @@ def build_layout(
             following[first].append(second)
         routes[edge] = tuple(route)
     layers_in_order = _reduce_crossings(layers, previous, following)
-    return LayeredLayout(modules, layers_in_order, tuple(map(tuple, previous)), tuple(map(tuple, following)), routes)
+    return LayeredLayout(nodes, layers_in_order, tuple(map(tuple, previous)), tuple(map(tuple, following)), routes)

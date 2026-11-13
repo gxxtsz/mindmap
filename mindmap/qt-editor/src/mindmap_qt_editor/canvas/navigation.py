@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from math import isfinite
 
 from mindmap_core import ChangeEvent, MindMapError, Theme
+from mindmap_core.node_pages import parse_graph_page_id
 from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QToolButton, QWidget
@@ -307,7 +308,7 @@ class PageNavigationMixin:
     @property
     def current_page_kind(self):
         """查询活动页面类别，菜单可据此隐藏详情页内禁止使用的两类创建入口。"""
-        return self._book_document.page_kind(self._current_page_id)
+        return self._document.kind
 
     @property
     def current_inspiration_root_id(self) -> str | None:
@@ -458,7 +459,8 @@ class PageNavigationMixin:
         if self._view_reset_pending and self._view_restore_center is None:
             # 隐藏的新文件尚未获得真实视口，保存其目标根中心和 100%，不能把旧
             # 文件的变换或隐藏控件的占位中心带入正常退出记录。
-            rect = self.layout_result.nodes.get(self.focus_id or self._document.root_id)
+            rect = (self.layout_result.bounds if self.graph is not None
+                    else self.layout_result.nodes.get(self.focus_id or self._document.root_id))
             center = QPointF(rect.x + rect.width / 2, rect.y + rect.height / 2) if rect else QPointF()
             transform = QTransform()
         if center is None:
@@ -493,18 +495,25 @@ class PageNavigationMixin:
         # 先停用旧页的视口同步；refresh 会用新页的布局重新确定是否启用虚拟化并重建图元。
         self._virtualized = False
         self._current_page_id = page_id
-        self._detail_origin = detail_origin if self.current_page_kind == "detail" else None
+        kind = self._book_document.page_kind(page_id)
+        self._detail_origin = detail_origin if kind == "detail" else None
         self._reference_origin = reference_origin
+        if page_id != old_page:
+            self._graph_show_all = False
+            self._graph_layout_cache = None
         if page_id == self.engine.inspiration_id:
             self._inspiration_root_id = self._choose_inspiration_root(
                 inspiration_root_id or self._inspiration_root_id)
             if self._inspiration_root_id:
                 self._last_inspiration_root = self._inspiration_root_id
         self._document = self._book_document.page_view(
-            page_id, inspiration_root_id=self.current_inspiration_root_id)
-        self._page_chain = ([page_id] if self.current_page_kind == "inspiration" else
-                            [entry.page_id for entry in self.engine.node_path(self._document.root_id)
+            page_id, inspiration_root_id=self._inspiration_root_id if kind == "inspiration" else None)
+        owner = parse_graph_page_id(page_id)
+        self._page_chain = ([page_id] if kind == "inspiration" else
+                            [entry.page_id for entry in self.engine.node_path(owner or self._document.root_id)
                              if entry.page_root])
+        if owner is not None:
+            self._page_chain.append(page_id)
         self._node_parents = self._document.parents()
         self._invalidate_selection_order()
         self._incremental_layout = None
@@ -538,6 +547,13 @@ class PageNavigationMixin:
         导航不会自动适应窗口，也不新增手动进入或退出分支显示范围的菜单与快捷键。
         """
         self._prepare_page_navigation()
+        owner = parse_graph_page_id(page_id)
+        if owner is not None:
+            if node_id not in (None, owner):
+                raise MindMapError("路径节点与目标图页不一致")
+            if page_id != self.current_page_id:
+                self._enter_graph_page(owner)
+            return
         if node_id is not None and self.engine.node_page_id(node_id) != page_id:
             raise MindMapError("路径节点与目标页面不一致")
         if page_id == self.engine.inspiration_id:
@@ -822,6 +838,16 @@ class PageNavigationMixin:
 
     def return_to_parent_page(self):
         """优先返回有效引用来源，其次返回详情来源或实际所属页面。"""
+        owner = parse_graph_page_id(self.current_page_id)
+        if owner is not None:
+            self._prepare_page_navigation()
+            page = self.engine.node_page_id(owner)
+            self._switch_page(page, inspiration_root_id=self._inspiration_root_for(owner))
+            if not self.is_node_selected(owner):
+                self._locate_page_node(owner)
+            elif self.selection_count != 1:
+                self.select_nodes([owner])
+            return
         reference = self._reference_return_origin()
         if reference is not None:
             self._prepare_page_navigation()
@@ -935,6 +961,9 @@ class PageNavigationMixin:
         if (not hasattr(self, "_document") or self._disposed
                 or getattr(self, "_applying_engine_event", False)):
             return
+        if self.graph is not None:
+            self._sync_graph_navigation()
+            return
         # 引擎仍提供完整节点祖先路径，界面仅投影其中的页面根，避免普通分支撑长路径栏。
         # 必须保留原有页面、节点 ID：同名页面及由根节点连续下钻的页面不能按标题合并。
         pages = self._page_path_entries(self._document.root_id) if self._document.nodes else []
@@ -958,3 +987,20 @@ class PageNavigationMixin:
             visible=self.current_page_kind == "submap",
             checked=self.engine.is_submap_favorite(self._current_page_id),
             enabled=self.editable and not self.is_editing)
+
+    def _sync_graph_navigation(self):
+        """图页路径终止在所属节点下；即使图为空，返回入口和祖先路径仍可用。"""
+        summary = self.engine.page_summary(self.current_page_id)
+        if summary is None:
+            return
+        self._page_chain = list(dict.fromkeys(entry.page_id for entry in summary.path if entry.page_root))
+        path = [replace(entry, text=f"{entry.text} · 详情")
+                if entry.page_root and self._book_document.page_kind(entry.page_id) == "detail" else entry
+                for entry in summary.path]
+        self.path_navigation.set_path(
+            path, page_id=self.current_page_id, selection_count=self.selection_count,
+            page_kinds={entry.page_id: self._book_document.page_kind(entry.page_id) for entry in summary.path},
+        )
+        self.path_navigation.back_button.setToolTip("返回所属节点")
+        self.path_navigation.back_button.setAccessibleName("返回所属节点")
+        self.path_navigation.set_favorite_state(visible=False, checked=False, enabled=False)
