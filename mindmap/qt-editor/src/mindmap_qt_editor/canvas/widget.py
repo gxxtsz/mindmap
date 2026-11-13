@@ -117,8 +117,8 @@ class MindMapWidget(
     inspirations_detached = Signal(list)
     # 节点上的扩展图标只发出导航意图，具体页面由所属导图标签的 NodePageHost 打开。
     extension_page_requested = Signal(str)
-    # 临时预览只更新当前图页及其停靠侧栏，内容变化继续由 document_changed 通知。
-    graph_preview_changed = Signal()
+    # 选线仅影响本标签。数量供宿主更新状态栏，不触发文档保存。
+    graph_edge_selection_changed = Signal(int)
 
     def __init__(
         self,
@@ -157,7 +157,6 @@ class MindMapWidget(
         self.engine = engine or MindMapEngine()
         self.editable = editable
         self._properties_handler = None
-        self._graph_show_all = False
         self._graph_layout_cache = None
         self._wheel_mode = "scroll"
         self._edraw_paste_options = ("append", True, True)
@@ -557,11 +556,15 @@ class MindMapWidget(
             ("node_graph", "添加图", None, lambda w: w.open_node_graph(create=True), False),
             ("graph_text", "编辑图文本…", None, lambda w: w.edit_graph_text(), False),
             ("graph_add_edge", "添加连线…", None, lambda w: w.choose_graph_edge(), True),
+            ("graph_auto_layout", "DOT 自动布局", None, lambda w: w.auto_layout_graph(), True),
             ("graph_remove", "删除此图…", None, lambda w: w.confirm_remove_graph(), True),
         ]
         for key, label, shortcut, callback, mutating in definitions:
             self.register_action(key, label, callback, shortcut=shortcut, mutating=mutating)
         self._actions["reset_zoom"].setToolTip("恢复默认尺寸（100%）")
+        graph_layout_action = self._actions["graph_auto_layout"]
+        graph_layout_action.setToolTip("清除手动坐标，重排整张图并适应窗口")
+        graph_layout_action.setVisible(False)
         self._custom_actions.clear()
         # 默认工具栏只保留历史和视图操作；添加子节点、编辑文字、节点属性及分支样式
         # 仍注册为组件动作，供快捷键、右键菜单和宿主菜单复用。未加入工具栏的动作
@@ -785,15 +788,28 @@ class MindMapWidget(
         """
         if colors is not None and not isinstance(colors, UiColors):
             raise TypeError("界面色板必须为 UiColors 或 None")
+        previous_background = self.scene.backgroundBrush().color()
         self._ui_colors_override = colors
         self._apply_ui_theme()
+        if self.graph is not None:
+            if previous_background != self.scene.backgroundBrush().color():
+                self._set_branch_items(self.layout_result)
+            self.view.viewport().update()
+
+    def _canvas_background(self, colors: UiColors) -> str:
+        """解析屏幕画布的实际底色，供场景背景与图页连线配色同步使用。
+
+        嵌入画布跟随宿主的编辑区域，独立画布跟随当前页面的文档主题。返回值仅供
+        界面渲染，导出仍从文档读取背景。
+        """
+        return colors.field if self._embedded else self._document.theme.background
 
     def _apply_ui_theme(self):
         theme = self._ui_colors_override or self._document.theme
         colors = ui_colors(theme)
         # 嵌入模式只覆盖屏幕底色；导出重新从文档构建场景，仍使用文档背景。
         # 每次文档刷新也同步此处，避免打开文件或撤销后闪回旧的内部卡片背景。
-        background = colors.field if self._embedded else self._document.theme.background
+        background = self._canvas_background(colors)
         self.scene.setBackgroundBrush(QColor(background))
         self._view_card.set_background(background)
         if colors != self._ui_colors:
@@ -1069,13 +1085,17 @@ class MindMapWidget(
 
     @document_interaction
     def delete_selected(self):
-        """一次删除所选连线或节点；节点子树及关联资源共用一条撤销记录。"""
+        """一次删除明确选中的连线或节点，复用引擎的撤销和跨视图同步。
+
+        图页只删除当前实际选中的对象。选线时保留节点和未选中的线；选节点时
+        一同删除其相连的线。普通导图的节点子树及关联资源共用一条撤销记录。
+        """
         self._ensure_editable()
         ids = self.selected_node_ids()
         if self.graph is not None:
-            edge = self.view.graph_edge_edit.selected_edge
-            if edge is not None:
-                self._commit_graph_edge(None, original=edge)
+            edges = self.view.graph_edge_edit.selected_edges
+            if edges:
+                self._delete_graph_edges(edges)
             elif ids:
                 self._delete_graph_nodes(ids)
             return

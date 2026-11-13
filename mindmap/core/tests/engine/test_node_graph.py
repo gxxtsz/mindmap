@@ -11,7 +11,7 @@ from mindmap_core.node_pages import graph_page_id
 def test_graph_persists_with_owner_and_undo_uses_graph_page_identity(tmp_path):
     engine = MindMapEngine()
     owner = engine.add_child(engine.root_id, "图入口")
-    graph = NodeGraph((GraphNode("a", "甲"),), (GraphEdge("a", "a"),), {"a": (12, 35)}, frozenset({"a"}))
+    graph = NodeGraph((GraphNode("a", "甲"),), (GraphEdge("a", "a"),), {"a": (12, 35)})
     events = []
     engine.subscribe(events.append)
     engine.set_node_graph(owner, graph)
@@ -39,7 +39,6 @@ def test_graph_persists_with_owner_and_undo_uses_graph_page_identity(tmp_path):
     {"edges": (GraphEdge("a", "missing"),)},
     {"positions": {"a": (float("inf"), 0)}},
     {"positions": {"a": (1e300, 0)}},
-    {"hidden_node_ids": frozenset({"missing"})},
 ])
 def test_invalid_graph_aborts_outer_transaction(patch):
     engine = MindMapEngine()
@@ -55,10 +54,14 @@ def test_invalid_graph_aborts_outer_transaction(patch):
     assert engine.document == before and not engine.can_undo
 
 
-def test_native_reader_validates_graph_even_when_it_is_not_open():
+@pytest.mark.parametrize(("field", "value", "message"), [
+    ("edges", [["a", "b"]], "连线"),
+    ("hidden_node_ids", ["missing"], "筛选"),
+])
+def test_native_reader_validates_graph_even_when_it_is_not_open(field, value, message):
     engine = MindMapEngine()
     engine.set_node_graph(engine.root_id, NodeGraph())
     payload = to_dict(engine.document)
-    payload["nodes"][0]["extension_pages"]["graph"]["data"]["edges"] = [["a", "b"]]
-    with pytest.raises(MindMapError, match="连线"):
+    payload["nodes"][0]["extension_pages"]["graph"]["data"][field] = value
+    with pytest.raises(MindMapError, match=message):
         from_dict(payload)

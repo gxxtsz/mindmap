@@ -164,8 +164,8 @@ def test_top_left_menu_contains_shared_settings_and_existing_options(window, qtb
     qtbot.waitUntil(view_menu.isVisible)
     assert not menu.isVisible()
     panels = next(action.menu() for action in view_menu.actions() if action.text() == "面板")
-    # 图的连线筛选只在活动图页可用。
-    assert "连线筛选" not in {action.text() for action in panels.actions()}
+    # 图页面设置只在活动图页可用。
+    assert "图页面设置" not in {action.text() for action in panels.actions()}
     qtbot.keyClick(view_menu, Qt.Key.Key_Escape)
     assert not view_menu.isVisible()
     assert set(window.manager.specs) == {

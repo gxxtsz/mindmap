@@ -10,6 +10,7 @@ from mindmap_core import FormatRegistration, MindMapDocument, MindMapEngine, Min
 from mindmap_core.formats import load_document, load_validated_document, save_document, supports_owned_load
 from mindmap_core.formats.files import FileVersion, FileVersionConflict, check_file_version, file_version
 from mindmap_core.layouts import supports_incremental_layout
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render.rendering import VisualFactory
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QFileDialog, QMessageBox
@@ -45,11 +46,13 @@ class MindMapFileState:
     立即读取新路径。宿主负责统一保存调度和状态通知，不能把不同引擎绑定到同一
     实例。未显式传入时，每个控制器创建独立状态，保持原有单画布用法。
     version 由已打开或实际写入的文件建立，冲突持续到重新加载或成功写入为止。
+    graph_filter_cleanup_pending 表示磁盘文件仍有旧图筛选，供干净文档的显式保存使用。
     """
 
     path: Path | None = None
     version: FileVersion | None = field(default=None, init=False)
     conflict: bool = field(default=False, init=False)
+    graph_filter_cleanup_pending: bool = field(default=False, init=False)
 
 
 class MindMapFileController(QObject):
@@ -107,6 +110,7 @@ class MindMapFileController(QObject):
             self.state.path = value
             self.state.version = None
             self.state.conflict = False
+            self.state.graph_filter_cleanup_pending = False
 
     @property
     def is_dirty(self) -> bool:
@@ -260,6 +264,8 @@ class MindMapFileController(QObject):
             check_file_version(source, version)
         except (FileVersionConflict, OSError) as exc:
             raise MindMapError(f"读取文档失败：{exc}，请重试") from exc
+        cleanup_pending = any(record["data"]["hidden_node_ids"] for node in document.nodes.values()
+                              if (record := node.extension_pages.get(GRAPH_PAGE_TYPE)) is not None)
         if (owned and type(self.engine) is MindMapEngine
                 and getattr(self.engine.replace_document, "__func__", None) is _REPLACE_DOCUMENT):
             # 内置解码结果尚未发布，校验只读使用后直接交给引擎；扩展读取或引擎
@@ -271,7 +277,7 @@ class MindMapFileController(QObject):
                 self.engine.adopt_document(document)
         else:
             self.engine.replace_document(document)
-        self.accept_file_version(source, version)
+        self.accept_file_version(source, version, graph_filter_cleanup_pending=cleanup_pending)
         # 初始视图使用正常倍率；由画布等待实际显示后居中，避免大型导图被整图
         # 适应压缩到无法阅读，也避免在会话安装前使用隐藏视口的占位尺寸。
         self.canvas.reset_view()
@@ -319,17 +325,19 @@ class MindMapFileController(QObject):
             target = Path(filename)
         return self._write_snapshot(target)
 
-    def save_committed(self):
+    def save_committed(self, *, explicit: bool = False) -> bool:
         """只保存已提交快照，不弹出选择框、不结束原地编辑或提交侧栏草稿。
 
         自动保存调用此边界；保存通知仅更新历史的保存位置，不产生新的编辑记录。
         无绑定路径时报告错误并返回 False。即使快照没有修改，也检查路径、原生
         编解码器和磁盘版本，避免文件丢失或发生外部修改时被当作保存成功。
+        explicit 为真时，磁盘上仍有旧图筛选的干净文档也会写入一次，清空兼容字段。
         """
         if self.path is None:
             self.report_error("导图尚未选择保存位置")
             return False
-        return self._write_snapshot(self.path, only_if_dirty=True)
+        needs_cleanup = explicit and self.state.graph_filter_cleanup_pending
+        return self._write_snapshot(self.path, only_if_dirty=not needs_cleanup)
 
     def restore_missing(self) -> bool:
         """将已提交内容恢复到原路径。写入前再次要求该路径为空，防止覆盖重现的文件。"""
@@ -345,12 +353,16 @@ class MindMapFileController(QObject):
     def _is_bound_target(self, target: Path) -> bool:
         return self.path is not None and (target == self.path or target.resolve() == self.path.resolve())
 
-    def accept_file_version(self, target: Path, version: FileVersion | None) -> None:
+    def accept_file_version(
+        self, target: Path, version: FileVersion | None, *, graph_filter_cleanup_pending: bool = False,
+    ) -> None:
         """记录已打开或写入的版本，解除共享文件的冲突并发出状态变更通知。
 
+        只有加载了非空旧筛选的文件时传入 graph_filter_cleanup_pending=True。
         后台写入返回实际提交的版本，由宿主先更新引擎的保存快照再调用此方法。
         """
         self.state.path, self.state.version, self.state.conflict = target, version, False
+        self.state.graph_filter_cleanup_pending = graph_filter_cleanup_pending
         self.state_changed.emit()
 
     def _write_snapshot(self, target, *, only_if_dirty=False, restore_missing=False):

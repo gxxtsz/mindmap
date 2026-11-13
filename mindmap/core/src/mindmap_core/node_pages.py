@@ -113,7 +113,7 @@ class NodePagesMixin:
         self._execute("set_node_graph", action, node_id=node_id, graph=graph, page_id=page_id)
 
     def remove_node_graph(self, node_id: str) -> None:
-        """删除节点的图，保留所属节点；撤销时恢复图内容及持久筛选。"""
+        """删除节点的图，保留所属节点；撤销时恢复节点、连线及手动坐标。"""
         def action(node_id, page_id):
             if page_id is None:
                 raise MindMapError("图的所属节点标识无效")

@@ -33,6 +33,22 @@ class UiColors:
     error: str = "#d85858"
 
 
+def _is_dark_background(color: QColor) -> bool:
+    """用 RGB 加权亮度判断界面底色的明暗，供派生色板共用。"""
+    return color.redF() * 0.299 + color.greenF() * 0.587 + color.blueF() * 0.114 < 0.5
+
+
+def graph_edge_colors(background: QColor) -> tuple[str, str]:
+    """按实际画布底色返回普通连线和直接选中连线的颜色，依次为灰蓝色和琥珀色。
+
+    嵌入画布使用宿主提供的底色，独立画布使用文档背景。两种明暗下的色值供图页
+    的场景和前景共用；节点关联线仍使用界面强调色，文档主题和导出颜色由调用方保留。
+    """
+    if _is_dark_background(background):
+        return "#98a8bd", "#ffca70"
+    return "#65768d", "#ac5208"
+
+
 def ui_colors(theme: Theme | UiColors) -> UiColors:
     """依据背景明度选择中性外壳，并沿用文档文字色与强调色。
 
@@ -41,8 +57,7 @@ def ui_colors(theme: Theme | UiColors) -> UiColors:
     """
     if isinstance(theme, UiColors):
         return theme
-    background = QColor(theme.background)
-    dark = background.redF() * 0.299 + background.greenF() * 0.587 + background.blueF() * 0.114 < 0.5
+    dark = _is_dark_background(QColor(theme.background))
     surface = QColor("#2b2d30" if dark else "#ffffff")
     accent = QColor(theme.accent)
     selected = QColor(

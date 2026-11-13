@@ -36,37 +36,38 @@ class GraphEdge:
 class NodeGraph:
     """一张图的内容快照；节点和连线保留声明顺序，坐标使用逻辑像素左上角。
 
-    positions 只包含手动移动过的节点。hidden_node_ids 隐藏与任意命中节点相连的线。
+    positions 只包含手动移动过的节点；每条有向边都参与布局与绘制。
     引擎读写都复制位置字典，返回的快照可独立使用；界面读模型中的位置字典只读借用。
     """
 
     nodes: tuple[GraphNode, ...] = ()
     edges: tuple[GraphEdge, ...] = ()
     positions: dict[str, Point] = field(default_factory=dict)
-    hidden_node_ids: frozenset[str] = frozenset()
 
     def with_content(self, nodes: tuple[GraphNode, ...], edges: tuple[GraphEdge, ...]) -> "NodeGraph":
-        """替换节点和连线，按仍存在的局部标识保留手动位置和持久筛选。"""
+        """替换节点和连线，按仍存在的局部标识保留手动位置。"""
         ids = {node.id for node in nodes}
         return replace(self, nodes=nodes, edges=edges,
-                       positions={key: point for key, point in self.positions.items() if key in ids},
-                       hidden_node_ids=self.hidden_node_ids & ids)
+                       positions={key: point for key, point in self.positions.items() if key in ids})
 
     def to_data(self) -> dict:
-        """编码为原生节点页的数据对象，返回独立的 JSON 容器。"""
+        """编码为原生节点页的独立 JSON 对象，旧筛选字段写为空数组以兼容旧版。"""
         try:
             return {
                 "nodes": [{"id": node.id, "title": node.title} for node in self.nodes],
                 "edges": [[edge.source, edge.target] for edge in self.edges],
                 "positions": {key: list(point) for key, point in self.positions.items()},
-                "hidden_node_ids": sorted(self.hidden_node_ids),
+                "hidden_node_ids": [],
             }
         except (AttributeError, TypeError) as error:
             raise MindMapError("图的数据字段无效") from error
 
     @classmethod
     def from_data(cls, data: dict) -> "NodeGraph":
-        """读取原生节点页数据，校验全部标识、端点、坐标与筛选，失败时抛出中文错误。"""
+        """解码原生节点页，校验局部标识、端点及坐标，失败时抛出中文错误。
+
+        版本一的旧筛选字段仍按原结构读取和校验，解码后的图只包含节点、连线和手动坐标。
+        """
         from .validation import finite
 
         if (not isinstance(data, dict) or set(data) != {"nodes", "edges", "positions", "hidden_node_ids"}
@@ -102,7 +103,7 @@ class NodeGraph:
         hidden = data["hidden_node_ids"]
         if (not all(isinstance(key, str) and key in ids for key in hidden) or len(set(hidden)) != len(hidden)):
             raise MindMapError("图的筛选包含重复或未声明的节点")
-        return cls(tuple(nodes), tuple(edges), positions, frozenset(hidden))
+        return cls(tuple(nodes), tuple(edges), positions)
 
 
 def validate_graph_title(title: object) -> None:

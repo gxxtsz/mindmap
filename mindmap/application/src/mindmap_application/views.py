@@ -89,6 +89,7 @@ class MindMapEditorView(QObject):
         self.files.message.connect(self._file_message)
         self.document.attach(self)
         self.canvas.selection_changed.connect(lambda *_: owner.window._sync_document())
+        self.canvas.graph_edge_selection_changed.connect(owner.window._sync_document)
         self.canvas.editable_changed.connect(lambda *_: owner.window._sync_document())
         self.canvas.editing_changed.connect(owner.window._sync_document)
         self.canvas.selection_changed.connect(self._view_state_changed)
@@ -118,6 +119,7 @@ class MindMapEditorView(QObject):
 
     @property
     def status_text(self):
+        """生成当前标签的状态栏说明；图页分别显示节点和连线的选择数量。"""
         if self.pages.active:
             return "节点扩展详情 · 内容随当前导图保存"
         size = self.document._file_size_bytes
@@ -129,9 +131,13 @@ class MindMapEditorView(QObject):
             value /= 1024
         display = "未知" if size is None else f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
         graph = self.canvas.graph
-        edges = f"{len(graph.edges)} 条连线 · " if graph is not None else ""
-        return (f"{len(self.canvas.document_view.nodes)} 个节点 · {edges}{self.canvas.selection_count} 个选中 · "
-                f"文件大小：{display}")
+        nodes = len(self.canvas.document_view.nodes)
+        selected = self.canvas.selection_count
+        if graph is not None:
+            selected_edges = self.canvas.graph_edge_selection_count
+            return (f"{nodes} 个节点 · {len(graph.edges)} 条连线 · 已选 {selected} 个节点、{selected_edges} 条连线 · "
+                    f"文件大小：{display}")
+        return f"{nodes} 个节点 · {selected} 个选中 · 文件大小：{display}"
 
     @property
     def save_status(self) -> str:
@@ -186,7 +192,7 @@ class MindMapEditorView(QObject):
             self.owner.window.context.documents.sync(self)
 
     def _canvas_page_changed(self, *_):
-        """画布切到图或树后，常驻状态按钮继续绑定同一画布，停靠筛选跟随活动页。"""
+        """画布切到图或树后，状态按钮继续绑定画布，图页面设置跟随活动页。"""
         if not self.disposed and self.owner.active is self:
             self.owner.window._bind_session(self)
 

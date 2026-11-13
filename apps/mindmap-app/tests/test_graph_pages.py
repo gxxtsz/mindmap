@@ -1,13 +1,16 @@
 """从产品入口验证图与树共用画布、编辑命令和停靠侧栏。"""
 
+import json
+from zipfile import ZIP_DEFLATED, ZipFile
+
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core import GraphEdge, MindMapError
+from mindmap_core import GraphEdge, MindMapError, NodeGraph
 from mindmap_core.formats import load_document
 from mindmap_core.formats.graph import format_graph_text, parse_graph_text
 from mindmap_core.node_pages import graph_page_id
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QImage, QKeyEvent, QMouseEvent
+from PySide6.QtGui import QColor, QImage, QInputMethodEvent, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -16,10 +19,13 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QToolButton,
 )
 
 SAMPLE = '节点 a "入口"\n节点 b "服务"\na -> b'
 THREE_NODES = '节点 a "入口"\n节点 b "服务"\n节点 c "依赖"'
+FOUR_NODES = THREE_NODES + '\n节点 d "结果"'
+CHAIN = FOUR_NODES + '\na -> b\nb -> c\nc -> d'
 
 
 @pytest.fixture
@@ -50,12 +56,20 @@ def _edge_point(canvas, edge):
     return canvas.view.mapFromScene(path.pointAtPercent(0.5))
 
 
-def _pointer_event(canvas, kind, position, button=Qt.MouseButton.NoButton, buttons=Qt.MouseButton.NoButton):
+def _pointer_event(canvas, kind, position, button=Qt.MouseButton.NoButton, buttons=Qt.MouseButton.NoButton,
+                   *, modifiers=Qt.KeyboardModifier.NoModifier):
     """通过视口发送鼠标事件，显式指定按钮状态，避免依赖系统鼠标所在窗口。"""
     viewport = canvas.view.viewport()
     event = QMouseEvent(kind, QPointF(position), QPointF(viewport.mapToGlobal(position)),
-                        button, buttons, Qt.KeyboardModifier.NoModifier)
+                        button, buttons, modifiers)
     QApplication.sendEvent(viewport, event)
+
+
+def _show_graph_settings(window):
+    """打开当前图页的设置侧栏，返回复用画布动作的真实按钮。"""
+    assert window.manager.activate("graph_filter", focus=False)
+    QApplication.processEvents()
+    return window.application._graph_settings.layout_button
 
 
 def _outlet_point(canvas, key):
@@ -103,7 +117,7 @@ def test_graph_uses_same_scene_and_view_with_badge_and_recent_navigation(window,
     assert canvas.action("node_graph").text() == "添加图"
     _create_graph(window)
     assert canvas.view is viewport and canvas.scene is scene
-    assert canvas.path_navigation.full_path.endswith("依赖关系 › 图")
+    assert canvas.path_navigation.full_path.endswith(" › 依赖关系 · 图")
     assert window.documents.active.document.recent_pages.entries[0].kind == "graph"
     canvas.fit_to_view()
     graph_state = canvas.capture_page_view_state()
@@ -122,9 +136,148 @@ def test_graph_uses_same_scene_and_view_with_badge_and_recent_navigation(window,
     assert canvas.current_page_id == graph_page_id(owner) and canvas.view is viewport
 
 
+@pytest.mark.parametrize("location", ["主导图", "子导图", "详情页", "独立想法"])
+def test_graph_breadcrumb_uses_tree_page_roots(window, qtbot, location):
+    """空图也按页面层级导航。同名页根、详情和想法用各自的标识定位。"""
+    canvas = window.application.canvas
+    engine = canvas.engine
+    root = engine.root_id
+    engine.update_node(root, text="第二大脑")
+    expected = [(None, root, "第二大脑", "main")]
+    if location in ("子导图", "详情页"):
+        branch = engine.add_child(root, "上层普通节点")
+        entry = engine.add_child(branch, "开源软件研究")
+        page = engine.create_submap(entry)
+        root = engine.page_document(page).root_id
+        expected.append((page, root, "开源软件研究", "submap"))
+        if location == "子导图":
+            page = engine.create_submap(root)
+            root = engine.page_document(page).root_id
+            expected.append((page, root, "开源软件研究", "submap"))
+        else:
+            page = engine.create_detail_page(engine.add_child(root, "笔记"))
+            root = engine.page_document(page).root_id
+            expected.append((page, root, "笔记 · 详情", "detail"))
+    elif location == "独立想法":
+        root = engine.add_inspiration("未整理的研究", position=(0, 0))
+        expected = [(engine.inspiration_id, root, "未整理的研究", "inspiration")]
+    branch = engine.add_child(root, "普通分支")
+    owner = engine.add_child(branch, "Blender")
+    engine.set_node_graph(owner, NodeGraph())
+    graph_page = graph_page_id(owner)
+    expected.append((graph_page, owner, "Blender · 图", "graph"))
+    engine.mark_saved()
+    revision = engine.revision
+    canvas.set_editable(False)
+    bar = canvas.path_navigation
+    for index, (page_id, node_id, _, kind) in enumerate(expected):
+        canvas.open_node_graph(owner)
+        QApplication.processEvents()
+        assert [(item.page_id, item.node_id, item.text, bar.page_kinds[item.page_id])
+                for item in bar.entries] == expected
+        assert bar.full_path == bar.toolTip() == bar.accessibleDescription() == " › ".join(
+            title for _, _, title, _ in expected)
+        buttons = [bar.row.itemAt(i).widget() for i in range(bar.row.count())]
+        buttons = [button for button in buttons if isinstance(button, QToolButton) and button.property("page_kind")]
+        assert buttons[index].property("page_kind") == kind and not buttons[index].icon().isNull()
+        qtbot.mouseClick(buttons[index], Qt.MouseButton.LeftButton)
+        assert canvas.current_page_id == page_id
+        assert canvas.selected_node_ids() == ([] if kind == "graph" else [node_id])
+    bar.back_button.click()
+    assert canvas.current_page_id == expected[-2][0] and canvas.selected_node_ids() == [owner]
+    assert engine.revision == revision and not engine.is_dirty
+
+
+@pytest.mark.parametrize("selection", ["节点", "连线"])
+def test_current_graph_breadcrumb_centers_without_changing_selection_or_zoom(window, qtbot, selection):
+    """点击当前图页项回到内容中心，普通导航调用继续保留视口。"""
+    canvas = _create_graph(window)
+    if selection == "节点":
+        canvas.select_nodes(["a", "b"])
+    else:
+        canvas.view.graph_edge_edit.select_edge(GraphEdge("a", "b"))
+    canvas.view.zoom(1.65)
+    center = canvas.layout_result.bounds.center
+    canvas.view.update_navigation_rect(center=QPointF(*center) + QPointF(125, 75))
+    canvas.engine.mark_saved()
+    revision = canvas.engine.revision
+    before = canvas.capture_page_view_state()
+    edges = canvas.view.graph_edge_edit.selected_edges
+    assert before["center"] != pytest.approx(center, abs=3)
+    canvas.navigate_to(canvas.current_page_id)
+    assert canvas.capture_page_view_state() == before
+
+    button = next(button for button in canvas.path_navigation.findChildren(QToolButton)
+                  if button.isVisible() and button.property("page_kind") == "graph")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    after = canvas.capture_page_view_state()
+    assert after["center"] == pytest.approx(center, abs=2)
+    assert after["zoom"] == before["zoom"] and after["selection"] == before["selection"]
+    assert canvas.view.graph_edge_edit.selected_edges == edges
+    assert canvas.engine.revision == revision and not canvas.engine.is_dirty
+
+
+def test_graph_breadcrumb_follows_renamed_and_moved_owner(window):
+    """所属节点迁入子导图后更新路径，首次返回仍能显示屏外入口。"""
+    canvas = window.application.canvas
+    engine = canvas.engine
+    entry = engine.add_child(engine.root_id, "研究")
+    branch = entry
+    for _ in range(8):
+        branch = engine.add_child(branch, "较长的普通分支名称")
+    owner = engine.add_child(branch, "旧名")
+    canvas.select_nodes([owner])
+    _create_graph(window, text=None)
+    bar = canvas.path_navigation
+    engine.update_node(owner, text="新名")
+    assert bar.full_path == f"{engine.get_node(engine.root_id).text} › 新名 · 图"
+    page = engine.convert_descendants_to_submap(entry)
+    assert canvas.current_page_id == graph_page_id(owner)
+    assert [item.page_id for item in bar.entries] == [None, page, graph_page_id(owner)]
+    assert bar.full_path.endswith(" › 研究 › 新名 · 图")
+
+    bar.back_button.click()
+    QApplication.processEvents()
+    assert canvas.current_page_id == page and canvas.selected_node_ids() == [owner]
+    owner_center = canvas.node_items[owner].sceneBoundingRect().center()
+    assert canvas.view.viewport().rect().contains(canvas.view.mapFromScene(owner_center))
+    canvas.open_node_graph(owner)
+    engine.remove_nodes([owner])
+    assert canvas.current_page_id == page
+
+
+def test_graph_breadcrumb_checks_input_method_before_leaving(window, qtbot):
+    """祖先项和返回按钮沿用统一检查，候选结束后切页会提交正文草稿。"""
+    canvas = window.application.canvas
+    owner = canvas.engine.add_child(canvas.engine.root_id, "入口节点")
+    canvas.select_nodes([owner])
+    _create_graph(window)
+    canvas.begin_edit("a")
+    editor = canvas.editor
+    editor.setPlainText("已修改的标题")
+    canvas.scene.sendEvent(editor, QInputMethodEvent("候选", []))
+    bar = canvas.path_navigation
+    ancestor = next(button for button in bar.findChildren(QToolButton)
+                    if button.isVisible() and button.property("page_kind") == "main")
+    errors = []
+    canvas.error_occurred.connect(errors.append)
+    revision = canvas.engine.revision
+
+    qtbot.mouseClick(ancestor, Qt.MouseButton.LeftButton)
+    bar.back_button.click()
+    assert len(errors) == 2 and all("候选" in error for error in errors)
+    assert canvas.current_page_id == graph_page_id(owner) and canvas.is_composing
+    assert canvas.editor is editor and canvas.engine.revision == revision
+
+    canvas.scene.sendEvent(editor, QInputMethodEvent())
+    bar.back_button.click()
+    assert canvas.current_page_id is None and canvas.selected_node_ids() == [owner]
+    assert canvas.engine.node_graph(owner).nodes[0].title == "已修改的标题"
+    assert canvas.engine.revision == revision + 1
+
+
 def test_text_editor_reports_lines_and_keeps_draft_then_submits_once(window):
     canvas = _create_graph(window)
-    canvas.set_graph_hidden_nodes({"a"})
     revision = canvas.engine.revision
     failures = []
 
@@ -151,7 +304,6 @@ def test_text_editor_reports_lines_and_keeps_draft_then_submits_once(window):
     assert not failures, failures
     assert canvas.engine.revision == revision + 1
     assert [node.title for node in canvas.graph.nodes] == ["已修正"]
-    assert canvas.graph.hidden_node_ids == {"a"}
     assert canvas.graph.edges == (GraphEdge("a", "a"),)
     canvas.action("undo").trigger()
     assert canvas.graph.edges == (GraphEdge("a", "b"),)
@@ -348,7 +500,7 @@ def test_interrupted_edge_drag_cannot_commit_on_release(window, interruption):
         assert view.graph_edge_edit.handle_at(point) is None
 
 
-def test_manual_edges_sync_split_and_save_while_filter_remains_local(window, qtbot):
+def test_manual_edges_sync_split_and_save(window, qtbot):
     first = window.documents.active
     canvas = _create_graph(window, THREE_NODES + "\na -> b")
     edge = GraphEdge("a", "b")
@@ -361,7 +513,6 @@ def test_manual_edges_sync_split_and_save_while_filter_remains_local(window, qtb
     _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, button)
     manual_positions = canvas.graph.positions
     assert set(manual_positions) == {"a"}
-    canvas.set_graph_hidden_nodes({"a"})
     canvas.center_root()
     assert first.duplicate()
     second = window.documents.active
@@ -370,8 +521,7 @@ def test_manual_edges_sync_split_and_save_while_filter_remains_local(window, qtb
     # 分屏初建时控件仍是占位尺寸，先等布局完成再使用场景坐标模拟拖动。
     qtbot.waitUntil(lambda: other.view.viewport().height() > 200)
     other.fit_to_view()
-    other.set_graph_show_all_edges(True)
-    assert edge.key in other.branch_items and edge.key not in canvas.branch_items
+    assert edge.key in other.branch_items and edge.key in canvas.branch_items
     view = other.view
     viewport = view.viewport()
     qtbot.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=_edge_point(other, edge))
@@ -387,7 +537,7 @@ def test_manual_edges_sync_split_and_save_while_filter_remains_local(window, qtb
     _drag_edge(other, _endpoint_point(other, edge), _node_point(other, "c"))
     updated = GraphEdge("a", "c")
     assert canvas.graph.edges == other.graph.edges == (updated,)
-    assert not canvas.branch_items and updated.key in other.branch_items
+    assert updated.key in canvas.branch_items and updated.key in other.branch_items
     assert canvas.graph.positions == other.graph.positions == manual_positions
     assert first.engine.revision == revision + 1
 
@@ -398,13 +548,385 @@ def test_manual_edges_sync_split_and_save_while_filter_remains_local(window, qtb
     qtbot.keyClick(view, Qt.Key.Key_Delete)
     assert other.graph.edges == (updated,) and first.engine.revision == revision + 1
     other.set_editable(True)
-    other.set_graph_show_all_edges(False)
-    assert view.graph_edge_edit.selected_edge is None and not other.branch_items
 
     assert first.document.save()
     fresh = load_document(first.document.path).page_view(canvas.current_page_id).graph
-    assert fresh.edges == (updated,) and fresh.hidden_node_ids == {"a"}
+    assert fresh.edges == (updated,)
     assert fresh.positions == manual_positions
+
+
+@pytest.mark.parametrize("theme, normal_color, selected_color", [
+    ("light", "#65768d", "#ac5208"),
+    ("dark", "#98a8bd", "#ffca70"),
+])
+def test_node_selection_highlights_incoming_outgoing_and_self_loop(window, theme, normal_color, selected_color):
+    """验证两种主题下普通线、关联边和直接选线在真实视口中使用不同颜色。"""
+    canvas = _create_graph(window, CHAIN + "\nb -> b")
+    window.manager.set_theme(theme)
+    canvas.fit_to_view()
+    viewport = canvas.view.viewport()
+    viewport_rect = viewport.rect()
+    edges = canvas.graph.edges
+    points = {edge: _edge_point(canvas, edge) for edge in edges}
+
+    def colors_at_edges(radius=2):
+        image = QImage(viewport_rect.size(), QImage.Format.Format_RGB32)
+        viewport.render(image)
+        return {edge: [image.pixelColor(point + QPoint(dx, dy))
+                       for dx in range(-radius, radius + 1) for dy in range(-radius, radius + 1)]
+                for edge, point in points.items()}
+
+    canvas.select_nodes([])
+    revision = canvas.engine.revision
+    normal = colors_at_edges()
+    canvas.select_nodes(["b"])
+    related = colors_at_edges()
+    unrelated = GraphEdge("c", "d")
+    accent = QColor(canvas.ui_colors.accent)
+    for edge in edges:
+        if edge == unrelated:
+            assert related[edge] == normal[edge]
+        else:
+            assert accent in related[edge] and related[edge] != normal[edge]
+    assert canvas.graph_edge_selection_count == 0 and canvas.engine.revision == revision
+    assert "已选 1 个节点、0 条连线" in window.status_label.text()
+    canvas.select_nodes(["b", "d"])
+    assert all(accent in colors for colors in colors_at_edges().values())
+    canvas.select_nodes([])
+    assert colors_at_edges() == normal
+
+    # 400% 下原描边已宽于固定的选中线宽，叠加效果仍应清晰可辨。
+    incoming = GraphEdge("a", "b")
+    line_center = canvas.branch_items[incoming.key].path().pointAtPercent(0.5)
+    canvas.view.zoom(4 / canvas.zoom_factor)
+    canvas.view.update_navigation_rect(center=line_center)
+    points = {incoming: _edge_point(canvas, incoming)}
+    normal = colors_at_edges(7)[incoming]
+    canvas.select_nodes(["b"])
+    related = colors_at_edges(7)[incoming]
+    canvas.view.graph_edge_edit.select_edge(incoming)
+    explicit = colors_at_edges(7)[incoming]
+    normal_color, selected_color = QColor(normal_color), QColor(selected_color)
+    assert normal_color in normal and accent not in normal and selected_color not in normal
+    assert 0 < related.count(accent) < explicit.count(selected_color)
+    assert selected_color not in related and accent not in explicit
+    assert canvas.graph_edge_selection_count == 1 and canvas.engine.revision == revision
+
+
+@pytest.mark.parametrize("theme, dpr, selected_color", [
+    ("light", 1, "#ac5208"),
+    ("dark", 2, "#ffca70"),
+])
+def test_edge_highlight_reaches_both_node_borders(window, theme, dpr, selected_color):
+    """放大后检查连线起点和箭头尖端的颜色，并确认线身不会盖住卡片边框。"""
+    canvas = _create_graph(window)
+    window.manager.set_theme(theme)
+    view = canvas.view
+    view.zoom(4 / canvas.zoom_factor)
+    canvas.center_root()
+    edge = GraphEdge("a", "b")
+    branch = canvas.layout_result.branches[edge.key]
+    start, tip = (view.viewportTransform().map(QPointF(*point)) for point in (branch.start, branch.end))
+    viewport = view.viewport()
+
+    def snapshot():
+        image = QImage(viewport.size() * dpr, QImage.Format.Format_RGB32)
+        image.setDevicePixelRatio(dpr)
+        viewport.render(image)
+        return image
+
+    def pixel(image, point, offset):
+        return image.pixelColor(((point + QPointF(0, offset)) * dpr).toPoint())
+
+    canvas.select_nodes([])
+    normal = snapshot()
+    canvas.select_nodes(["b"])
+    related = snapshot()
+    accent = QColor(canvas.ui_colors.accent)
+    canvas.select_nodes(["a"])
+    related_at_tip = snapshot()
+    for offset in range(1, 9):
+        assert pixel(related, start, offset) == accent
+    for offset in range(-8, -3):
+        assert pixel(related_at_tip, tip, offset) == accent
+    assert pixel(related, start, -3) == pixel(normal, start, -3)
+    assert pixel(related_at_tip, tip, 3) == pixel(normal, tip, 3)
+
+    view.graph_edge_edit.select_edge(edge)
+    selected = snapshot()
+    assert pixel(selected, start, 7) == QColor(selected_color)
+    assert pixel(selected, tip, -7) == QColor(selected_color)
+
+
+def test_edge_selection_outline_and_arrow_survive_theme_switch(window):
+    """相交时选线与普通线有间隔，批量选中和换色后仍可追踪线身与箭头。"""
+    window.manager.set_theme("light")
+    canvas = _create_graph(window, FOUR_NODES + "\na -> b\nc -> d")
+    nodes = canvas.layout_result.nodes
+    positions = {
+        "a": (-140 - nodes["a"].width, -nodes["a"].height / 2),
+        "b": (140, -nodes["b"].height / 2),
+        "c": (-nodes["c"].width / 2, -75 - nodes["c"].height),
+        "d": (-nodes["d"].width / 2, 75),
+    }
+    canvas.engine.set_node_graph(canvas.engine.root_id, NodeGraph(canvas.graph.nodes, canvas.graph.edges, positions))
+    view = canvas.view
+    view.zoom(2 / canvas.zoom_factor)
+    view.update_navigation_rect(center=QPointF())
+    crossing = view.mapFromScene(QPointF())
+    viewport = view.viewport()
+    horizontal, vertical = canvas.graph.edges
+    controls = view.graph_edge_edit
+    revision = canvas.engine.revision
+
+    def snapshot():
+        image = QImage(viewport.size(), QImage.Format.Format_RGB32)
+        viewport.render(image)
+        return image
+
+    def near_crossing(image, y):
+        return image.pixelColor(crossing + QPoint(0, y))
+
+    controls.select_edge(horizontal)
+    image = snapshot()
+    normal = QColor("#65768d")
+    assert near_crossing(image, 0) == QColor("#ac5208")
+    assert near_crossing(image, 4).lightness() > normal.lightness()
+    assert near_crossing(image, 10) == normal
+
+    window.manager.set_theme("dark")
+    image = snapshot()
+    assert controls.selected_edges == {horizontal}
+    assert near_crossing(image, 0) == QColor("#ffca70")
+    normal = QColor("#98a8bd")
+    assert near_crossing(image, 4).lightness() < normal.lightness()
+    assert near_crossing(image, 10) == normal
+
+    controls.select_edge(vertical, toggle=True)
+    image = snapshot()
+    assert near_crossing(image, 4) == QColor("#ffca70")
+    assert not controls._handles()
+    for edge in (horizontal, vertical):
+        tip, wing, other_wing = (QPointF(*point) for point in canvas.layout_result.branches[edge.key].arrow)
+        inside_wing = view.mapFromScene(tip * 0.18 + wing * 0.75 + other_wing * 0.07)
+        assert image.rect().contains(inside_wing)
+        assert image.pixelColor(inside_wing) == QColor("#ffca70")
+    assert canvas.engine.revision == revision
+
+
+def test_click_and_box_ignore_blank_inside_bent_edge(window, qtbot):
+    """跨层连线绕过节点时，曲线和首尾之间的空白可以点击和框选。"""
+    canvas = _create_graph(window, CHAIN + "\na -> d")
+    canvas.center_root()
+    view = canvas.view
+    controls = view.graph_edge_edit
+    outer = GraphEdge("a", "d")
+    path = canvas.branch_items[outer.key].path()
+    leg = path.pointAtPercent(0.5)
+    start, end = path.pointAtPercent(0), path.currentPosition()
+    chord = start + (end - start) * ((leg.y() - start.y()) / (end.y() - start.y()))
+    blank = view.mapFromScene((leg + chord) / 2)
+    left = Qt.MouseButton.LeftButton
+    shift = Qt.KeyboardModifier.ShiftModifier
+
+    qtbot.mouseClick(view.viewport(), left, pos=view.mapFromScene(leg))
+    assert controls.selected_edges == {outer}
+    qtbot.mouseClick(view.viewport(), left, pos=blank)
+    assert not controls.selected_edges
+
+    corner = QPoint(6, 6)
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, blank - corner, left, left, modifiers=shift)
+    _pointer_event(canvas, QEvent.Type.MouseMove, blank + corner, buttons=left, modifiers=shift)
+    assert controls.active
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, blank + corner, left, modifiers=shift)
+    assert not controls.selected_edges
+
+
+def test_click_arrow_prefers_its_edge_over_neighbor_tolerance(window, qtbot):
+    """缩小后两个入边的点击容差重叠时，优先选择实际点中的箭头。"""
+    canvas = _create_graph(window, THREE_NODES + "\na -> c\nb -> c")
+    view = canvas.view
+    view.zoom(0.45 / canvas.zoom_factor)
+    canvas.center_root()
+    edge = GraphEdge("a", "c")
+    tip, wing_a, wing_b = (QPointF(*point) for point in canvas.layout_result.branches[edge.key].arrow)
+    arrow = view.mapFromScene((tip + wing_a + wing_b) / 3)
+
+    qtbot.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=arrow)
+    assert view.graph_edge_edit.selected_edges == {edge}
+
+
+def test_ctrl_selects_edges_and_delete_commits_one_change(window, qtbot):
+    """点选互斥、Ctrl 逐条增减、Delete 批量提交以及历史重放都经过画布入口。"""
+    canvas = _create_graph(window, CHAIN)
+    canvas.fit_to_view()
+    view = canvas.view
+    controls = view.graph_edge_edit
+    first, middle, last = canvas.graph.edges
+    left = Qt.MouseButton.LeftButton
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    initial = canvas.graph
+    revision = canvas.engine.revision
+    canvas.select_nodes(["b"])
+    qtbot.mouseClick(view.viewport(), left, pos=_edge_point(canvas, first))
+    assert controls.selected_edge == first and not canvas.selected_node_ids()
+    assert len(controls._handles()) == 2
+    qtbot.mouseClick(view.viewport(), left, ctrl, pos=_edge_point(canvas, last))
+    assert controls.selected_edges == {first, last} and not controls._handles()
+    qtbot.mouseClick(view.viewport(), left, ctrl, pos=_edge_point(canvas, first))
+    assert controls.selected_edge == last
+    qtbot.mouseClick(view.viewport(), left, ctrl, pos=_edge_point(canvas, last))
+    assert not controls.selected_edges and not canvas.action("delete").isEnabled()
+    qtbot.mouseClick(view.viewport(), left, pos=_edge_point(canvas, first))
+    qtbot.mouseClick(view.viewport(), left, ctrl, pos=_edge_point(canvas, last))
+    assert "已选 0 个节点、2 条连线" in window.status_label.text()
+    assert canvas.engine.revision == revision
+
+    canvas.set_editable(False)
+    qtbot.keyClick(view, Qt.Key.Key_Delete)
+    assert canvas.graph == initial and controls.selected_edges == {first, last}
+    canvas.set_editable(True)
+    qtbot.keyClick(view, Qt.Key.Key_Delete)
+    assert canvas.graph.edges == (middle,) and canvas.graph.nodes == initial.nodes
+    assert not controls.selected_edges and canvas.engine.revision == revision + 1
+    canvas.action("undo").trigger()
+    assert canvas.graph == initial
+    canvas.action("redo").trigger()
+    assert canvas.graph.edges == (middle,)
+
+
+def test_shift_edge_box_replaces_and_appends_without_changing_node_box(window, qtbot):
+    """从空白处框到线身可选线，取消和迟到的释放保留已完成的选择。"""
+    canvas = _create_graph(window, CHAIN)
+    canvas.fit_to_view()
+    view = canvas.view
+    controls = view.graph_edge_edit
+    first, middle, last = canvas.graph.edges
+    revision = canvas.engine.revision
+    left = Qt.MouseButton.LeftButton
+    shift = Qt.KeyboardModifier.ShiftModifier
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    offsets = QPoint(20, 9)
+
+    def box_edge(edge, modifiers, *, cancel=False):
+        center = _edge_point(canvas, edge)
+        start, end = center - offsets, center + offsets
+        assert canvas.graph_edge_at(start) is None and view.itemAt(start) is None
+        _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left, modifiers=modifiers)
+        _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left, modifiers=modifiers)
+        assert controls.active and controls._rubber_band.isVisible()
+        if cancel:
+            qtbot.keyClick(view, Qt.Key.Key_Escape)
+            assert not controls.active and not controls._rubber_band.isVisible()
+        _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left, modifiers=modifiers)
+        assert not controls.active and not controls._rubber_band.isVisible()
+
+    canvas.select_nodes(["a", "b"])
+    box_edge(first, shift)
+    assert controls.selected_edges == {first} and not canvas.selected_node_ids()
+    # 只把末端箭头外翼框入，线身的中心不在框里。
+    _, left_wing, right_wing = canvas.layout_result.branches[last.key].arrow
+    wing = max((left_wing, right_wing), key=lambda point: point[0])
+    wing = view.mapFromScene(QPointF(*wing))
+    start, end = wing + QPoint(17, -5), wing + QPoint(-2, 3)
+    assert canvas.graph_edge_at(start) is None and view.itemAt(start) is None
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left, modifiers=ctrl | shift)
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left, modifiers=ctrl | shift)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left, modifiers=ctrl | shift)
+    assert controls.selected_edges == {first, last}
+    box_edge(middle, shift, cancel=True)
+    assert controls.selected_edges == {first, last}
+    box_edge(middle, shift)
+    assert controls.selected_edges == {middle}
+
+    rect = view.mapFromScene(canvas.node_items["c"].sceneBoundingRect()).boundingRect().adjusted(-8, -8, 8, 8)
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, rect.topLeft(), left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, rect.bottomRight(), buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, rect.bottomRight(), left)
+    assert canvas.selected_node_ids() == ["c"] and not controls.selected_edges
+    assert canvas.engine.revision == revision
+
+
+def test_edge_menu_deletes_batch_and_other_views_keep_surviving_selection(window, qtbot):
+    """右键已选边保留整组，删除后其他标签只剔除失效的选线。"""
+    original = window.documents.active
+    canvas = _create_graph(window, CHAIN)
+    canvas.fit_to_view()
+    first, middle, last = canvas.graph.edges
+    left, right = Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    qtbot.mouseClick(canvas.view.viewport(), left, pos=_edge_point(canvas, first))
+    qtbot.mouseClick(canvas.view.viewport(), left, ctrl, pos=_edge_point(canvas, middle))
+    assert original.duplicate()
+    second = window.documents.active
+    window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
+    other = second.canvas
+    qtbot.waitUntil(lambda: other.view.viewport().height() > 200)
+    other.fit_to_view()
+    assert other.graph_edge_selection_count == 0
+    qtbot.mouseClick(other.view.viewport(), left, pos=_edge_point(other, first))
+    qtbot.mouseClick(other.view.viewport(), left, ctrl, pos=_edge_point(other, last))
+    assert other.view.graph_edge_edit.selected_edges == {first, last}
+    revision = original.engine.revision
+    menus = []
+
+    def choose_delete():
+        menu = QApplication.activePopupWidget()
+        if isinstance(menu, QMenu):
+            menus.append((menu.actions()[0].text(), other.view.graph_edge_edit.selected_edges))
+            qtbot.keyClick(menu, Qt.Key.Key_Down)
+            qtbot.keyClick(menu, Qt.Key.Key_Return)
+
+    QTimer.singleShot(0, choose_delete)
+    qtbot.mouseClick(other.view.viewport(), right, pos=_edge_point(other, first))
+    assert menus == [("删除所选 2 条连线", {first, last})]
+    assert canvas.graph == other.graph and other.graph.edges == (middle,)
+    assert canvas.view.graph_edge_edit.selected_edges == {middle}
+    assert not other.view.graph_edge_edit.selected_edges and original.engine.revision == revision + 1
+    other.action("undo").trigger()
+    assert canvas.graph.edges == other.graph.edges == (first, middle, last)
+    assert canvas.view.graph_edge_edit.selected_edges == {middle}
+
+    other.fit_to_view()
+    qtbot.mouseClick(other.view.viewport(), left, pos=_edge_point(other, first))
+    qtbot.mouseClick(other.view.viewport(), left, ctrl, pos=_edge_point(other, last))
+    menu = QMenu(other)
+    window.application.populate_edit_menu(menu)
+    delete = other.action("delete")
+    assert delete in menu.actions() and delete.isEnabled()
+    delete.trigger()
+    assert other.graph.edges == (middle,) and original.engine.revision == revision + 3
+    menu.deleteLater()
+
+
+def test_edge_menu_rejects_entire_batch_after_another_view_removes_an_edge(window, qtbot):
+    """菜单打开期间的跨标签修改使批量删除失效，其余待删边仍在原图。"""
+    original = window.documents.active
+    canvas = _create_graph(window, CHAIN)
+    assert original.duplicate()
+    other = window.documents.active.canvas
+    other.fit_to_view()
+    first, middle, last = other.graph.edges
+    left = Qt.MouseButton.LeftButton
+    qtbot.mouseClick(other.view.viewport(), left, pos=_edge_point(other, first))
+    qtbot.mouseClick(other.view.viewport(), left, Qt.KeyboardModifier.ControlModifier, pos=_edge_point(other, last))
+    errors = []
+    other.error_occurred.connect(errors.append)
+    revision = original.engine.revision
+
+    def remove_from_original_then_choose():
+        menu = QApplication.activePopupWidget()
+        if not isinstance(menu, QMenu):
+            return
+        canvas.apply_graph_text(CHAIN.replace("\na -> b", ""))
+        qtbot.keyClick(menu, Qt.Key.Key_Down)
+        qtbot.keyClick(menu, Qt.Key.Key_Return)
+
+    QTimer.singleShot(0, remove_from_original_then_choose)
+    qtbot.mouseClick(other.view.viewport(), Qt.MouseButton.RightButton, pos=_edge_point(other, first))
+    assert other.graph.edges == (middle, last)
+    assert other.view.graph_edge_edit.selected_edges == {last}
+    assert original.engine.revision == revision + 1 and errors == ["所选连线已变化，请重新选择"]
 
 
 def test_drag_moves_nodes_and_reroutes_until_release_and_supports_cancel(window, qtbot):
@@ -437,44 +959,238 @@ def test_drag_moves_nodes_and_reroutes_until_release_and_supports_cancel(window,
     assert not canvas.graph.positions and canvas.layout_result == before
 
 
-def test_filter_and_status_follow_split_tabs_and_respect_read_only(window, qtbot):
+def test_dot_layout_action_follows_graph_and_edit_state(window):
+    """按钮和菜单共享图布局动作，直接调用也遵守图页和编辑状态。"""
+    canvas = window.application.canvas
+    action = canvas.action("graph_auto_layout")
+    assert not action.isVisible() and not window.manager.is_tool_available("graph_filter")
+    with pytest.raises(MindMapError, match="当前页面没有图"):
+        canvas.auto_layout_graph()
+
+    _create_graph(window, None)
+    assert not window.manager.states["graph_filter"].visible
+    button = _show_graph_settings(window)
+    assert button.defaultAction() is action
+    assert action.isVisible() and button.isVisible() and not button.isEnabled()
+    assert not canvas.path_navigation.findChild(QToolButton, "mindmap_graph_auto_layout")
+    with pytest.raises(MindMapError, match="请先添加图节点"):
+        canvas.auto_layout_graph()
+    canvas.apply_graph_text(SAMPLE)
+    assert button.isEnabled()
+    edit_menu = QMenu(canvas)
+    window.application.populate_edit_menu(edit_menu)
+    assert action in edit_menu.actions()
+    edit_menu.deleteLater()
+    context_actions = []
+
+    def capture_menu():
+        menu = QApplication.activePopupWidget()
+        if isinstance(menu, QMenu):
+            context_actions.append(menu.actions())
+            menu.close()
+
+    canvas.select_nodes(["a"])
+    QTimer.singleShot(0, capture_menu)
+    canvas.context_menu(QPoint())
+    QTimer.singleShot(0, capture_menu)
+    canvas.context_menu(QPoint(), on_canvas=True)
+    assert len(context_actions) == 2 and all(action in actions for actions in context_actions)
+
+    revision = canvas.engine.revision
+    canvas.set_editable(False)
+    assert button.isVisible() and not action.isEnabled() and not button.isEnabled()
+    with pytest.raises(MindMapError, match="只读"):
+        canvas.auto_layout_graph()
+    canvas.set_editable(True)
+    canvas.begin_edit("a")
+    assert not action.isEnabled() and not button.isEnabled()
+    with pytest.raises(MindMapError, match="请先完成编辑"):
+        canvas.auto_layout_graph()
+    assert canvas.is_editing and canvas.engine.revision == revision
+    canvas.finish_edit(commit=False)
+    assert button.isEnabled()
+    canvas.return_to_parent_page()
+    assert not action.isVisible() and not button.isVisible()
+
+
+def test_dot_layout_reflows_whole_graph_with_one_undo_and_syncs_split_views(window, qtbot):
+    """从侧栏恢复全图布局，分屏只同步内容，撤销恢复每个手动坐标。"""
+    first = window.documents.active
+    canvas = _create_graph(window, THREE_NODES + "\na -> b\nb -> c")
+    button = _show_graph_settings(window)
+    automatic = canvas.layout_result
+    canvas.fit_to_view()
+    canvas.select_nodes(["a", "b"])
+    start = _node_point(canvas, "a")
+    end = start + QPoint(88, 44)
+    left = Qt.MouseButton.LeftButton
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left)
+    manual = canvas.graph
+    assert set(manual.positions) == {"a", "b"}
+    assert canvas.layout_result.nodes != automatic.nodes
+
+    assert first.duplicate()
+    second = window.documents.active
+    window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
+    other = second.canvas
+    qtbot.waitUntil(lambda: other.view.viewport().height() > 200)
+    other.select_nodes(["a", "b"])
+    canvas.reset_zoom()
+    other.reset_zoom()
+    revision = first.engine.revision
+    start = _node_point(other, "a")
+    end = start + QPoint(30, -25)
+    _pointer_event(other, QEvent.Type.MouseButtonPress, start, left, left)
+    _pointer_event(other, QEvent.Type.MouseMove, end, buttons=left)
+    assert other.view.node_drag.active and other.graph == manual
+    assert button.defaultAction() is other.action("graph_auto_layout")
+    button.click()
+    assert not other.view.node_drag.active
+    _pointer_event(other, QEvent.Type.MouseButtonRelease, end, left)
+
+    assert canvas.graph == other.graph and not other.graph.positions
+    assert other.graph.nodes == manual.nodes and other.graph.edges == manual.edges
+    assert canvas.layout_result == other.layout_result == automatic
+    assert other.selected_node_ids() == ["a", "b"]
+    assert first.engine.revision == revision + 1
+    assert canvas.zoom_factor == pytest.approx(1.0)
+    assert other.zoom_factor > 1.0
+    assert other.capture_page_view_state()["center"] == pytest.approx(automatic.bounds.center, abs=2)
+
+    other.reset_zoom()
+    other.action("graph_auto_layout").trigger()
+    assert other.zoom_factor > 1.0 and first.engine.revision == revision + 1
+    other.action("undo").trigger()
+    assert canvas.graph == other.graph == manual
+    other.action("redo").trigger()
+    assert canvas.graph == other.graph and not other.graph.positions
+
+
+def test_dot_layout_persists_and_reflows_after_reopening(window, qtbot, tmp_path):
+    """保存后重新加载空坐标状态，改连线继续分层，单个节点仍可重新手动定位。"""
+    session = window.documents.active
+    owner = session.engine.root_id
+    canvas = _create_graph(window, THREE_NODES + "\na -> b")
+    button = _show_graph_settings(window)
+    canvas.select_nodes(["b"])
+    start = _node_point(canvas, "b")
+    end = start + QPoint(95, 28)
+    left = Qt.MouseButton.LeftButton
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left)
+    assert set(canvas.graph.positions) == {"b"}
+    button.click()
+    assert session.document.save()
+    assert window.close()
+
+    reopened = build_window(storage_dir=tmp_path / "配置")
+    qtbot.addWidget(reopened, before_close_func=lambda item: item.dispose())
+    reopened.show()
+    canvas = reopened.application.canvas
+    assert canvas.current_page_id == graph_page_id(owner) and not canvas.graph.positions
+    before = canvas.layout_result.nodes["c"]
+    canvas.apply_graph_text(THREE_NODES + "\na -> b\nb -> c")
+    after = canvas.layout_result.nodes
+    assert not canvas.graph.positions and after["c"] != before and after["c"].y > after["b"].bottom
+
+    canvas.fit_to_view()
+    canvas.select_nodes(["b"])
+    start = _node_point(canvas, "b")
+    end = start + QPoint(50, 24)
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left)
+    assert set(canvas.graph.positions) == {"b"}
+
+
+@pytest.mark.parametrize("width", [180, 280])
+def test_narrow_graph_breadcrumb_preserves_navigation(window, qtbot, monkeypatch, width):
+    """窄分屏的菜单与复制功能共用完整页面路径，菜单项仍可定位页根。"""
+    canvas = window.application.canvas
+    engine = canvas.engine
+    ancestor_title = "名称很长的祖先页面" * 6
+    entry = engine.add_child(engine.root_id, ancestor_title)
+    ancestor_page = engine.create_submap(entry)
+    canvas.enter_submap(entry)
+    ancestor_root = canvas.document_view.root_id
+    owner = engine.add_child(ancestor_root, "名称很长的图入口" * 6)
+    canvas.select_nodes([owner])
+    _create_graph(window)
+    canvas.select_nodes(["a", "b"])
+    bar = canvas.path_navigation
+    bar.setFixedWidth(width)
+    qtbot.waitUntil(lambda: any(button.isVisible() and button.text() == "…"
+                                for button in bar.findChildren(QToolButton)))
+    QApplication.processEvents()
+    widgets = [bar.row.itemAt(index).widget() for index in range(bar.row.count())
+               if bar.row.itemAt(index).widget() is not None]
+    assert all(bar.rect().contains(widget.geometry()) for widget in widgets)
+    assert all(not left.geometry().intersects(right.geometry()) for left, right in zip(widgets, widgets[1:]))
+    overflow = next(widget for widget in widgets if isinstance(widget, QToolButton) and widget.text() == "…")
+    action = next(action for action in overflow.menu().actions() if action.text() == ancestor_title)
+    assert not action.icon().isNull()
+    menu = bar._menu()
+    with monkeypatch.context() as patch:
+        patch.setattr(bar, "_menu", lambda: menu)
+        patch.setattr(menu, "exec", lambda *_: menu.actions()[0].trigger())
+        bar.customContextMenuRequested.emit(QPoint())
+    expected = f"{engine.get_node(engine.root_id).text} › {ancestor_title} › {engine.get_node(owner).text} · 图"
+    assert QApplication.clipboard().text() == bar.full_path == expected
+    action.trigger()
+    assert canvas.current_page_id == ancestor_page and canvas.selected_node_ids() == [ancestor_root]
+
+
+def test_graph_settings_and_status_follow_split_tabs(window, qtbot):
     first = window.documents.active
     canvas = _create_graph(window)
-    panel = window.application._graph_filter
+    panel = window.application._graph_settings
     controls = window.application._status_controls
     assert not window.manager.states["graph_filter"].visible
-    assert window.manager.activate("graph_filter", focus=False)
+    button = _show_graph_settings(window)
+    assert window.manager.specs["graph_filter"].title == "图页面设置"
     assert panel.isVisible() and not canvas.isAncestorOf(panel)
     assert controls._canvas is canvas and all(button.isVisible() for button in controls.buttons.values())
-    panel.model.item(0).setCheckState(Qt.CheckState.Checked)
-    assert not canvas.branch_items
     assert first.duplicate()
     second = window.documents.active
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     assert second.document is first.document and second.canvas.graph == canvas.graph
-    assert panel._canvas is controls._canvas is second.canvas
-    revision = first.engine.revision
-    panel.preview.click()
-    assert second.canvas.branch_items and not canvas.branch_items
-    assert first.engine.revision == revision
+    assert controls._canvas is second.canvas and button.defaultAction() is second.canvas.action("graph_auto_layout")
     second.canvas.set_editable(False)
-    assert not panel.bulk.isEnabled() and panel.preview.isEnabled()
+    assert not button.isEnabled()
     assert not second.canvas.action("graph_add_edge").isEnabled()
     assert second.canvas.action("graph_text").isEnabled()
     with pytest.raises(MindMapError, match="只读"):
         second.canvas.apply_graph_text("")
     window.documents.activate_view(first.id)
-    assert panel._canvas is controls._canvas is canvas
-    assert not panel.preview.isChecked()
-    panel.bulk.click()
-    assert second.canvas.graph.hidden_node_ids == {"a", "b"}
-    panel.bulk.click()
-    assert canvas.branch_items and second.canvas.branch_items
+    assert controls._canvas is canvas and button.defaultAction() is canvas.action("graph_auto_layout")
+    assert button.isEnabled() and second.canvas.action("graph_auto_layout") not in button.actions()
     canvas.return_to_parent_page()
-    assert not panel.isVisible() and controls._canvas is canvas
+    assert not panel.isVisible() and controls._canvas is canvas and button.defaultAction() is None
     window.documents.activate_view(second.id)
     qtbot.waitUntil(panel.isVisible)
-    assert panel._canvas is second.canvas
+    assert button.defaultAction() is second.canvas.action("graph_auto_layout") and not button.isEnabled()
+
+
+def test_graph_settings_inherits_saved_panel_position_and_size(window):
+    """旧面板的停靠记录用于新设置，切出图页只暂停显示。"""
+    canvas = _create_graph(window)
+    manager = window.manager
+    snapshot = manager.capture_layout()
+    legacy = next(tool for tool in snapshot["tools"] if tool["id"] == "graph_filter")
+    legacy.update(position="right_bottom", last_position="right_bottom", visible=True)
+    snapshot["hosts"]["main"]["region_sizes"]["dock"]["right"] = 310
+    manager.restore_layout(snapshot)
+    QApplication.processEvents()
+    assert window.application._graph_settings.isVisible()
+    assert manager.states["graph_filter"].position == "right_bottom"
+    assert window.host.region_sizes["dock"]["right"] == 310
+    canvas.return_to_parent_page()
+    assert manager.states["graph_filter"].visible and not window.application._graph_settings.isVisible()
+    canvas.open_node_graph()
+    assert window.application._graph_settings.isVisible()
 
 
 def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_path, monkeypatch):
@@ -482,7 +1198,6 @@ def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_pa
     owner = view.engine.add_child(view.engine.root_id, "附图入口")
     view.canvas.select_nodes([owner])
     canvas = _create_graph(window)
-    canvas.set_graph_hidden_nodes({"a"})
     canvas.view.zoom(1.4)
     assert view.document.save()
     assert "graph" in load_document(view.document.path).nodes[owner].extension_pages
@@ -493,7 +1208,6 @@ def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_pa
     reopened.show()
     canvas = reopened.application.canvas
     assert canvas.current_page_id == graph_page_id(owner)
-    assert canvas.graph.hidden_node_ids == {"a"}
     assert canvas.capture_page_view_state()["zoom"] == state["zoom"]
     monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
     canvas.action("graph_remove").trigger()
@@ -503,7 +1217,7 @@ def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_pa
     assert canvas.current_page_kind == "main" and canvas.selected_node_ids() == [owner]
     canvas.action("undo").trigger()
     assert canvas.current_page_id == graph_page_id(owner)
-    assert canvas.graph.hidden_node_ids == {"a"}
+    assert canvas.graph.edges == (GraphEdge("a", "b"),)
     canvas.engine.remove_nodes([owner])
     assert canvas.current_page_kind == "main"
     assert canvas.engine.page_summary(graph_page_id(owner)) is None
@@ -511,13 +1225,46 @@ def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_pa
     assert canvas.engine.node_graph(owner).edges == (GraphEdge("a", "b"),)
 
 
-def test_graph_export_uses_committed_filter(window, tmp_path):
-    canvas = _create_graph(window)
-    canvas.set_graph_hidden_nodes({"a"})
-    canvas.set_graph_show_all_edges(True)
-    target = tmp_path / "图.svg"
+def test_legacy_graph_filter_is_ignored_and_cleared_on_clean_save(window, tmp_path):
+    """从旧版原生容器打开、导出并显式保存，全部边可见且仍使用原文件版本。"""
+    view = window.documents.active
+    owner = view.engine.root_id
+    _create_graph(window, THREE_NODES + "\na -> b\nb -> c\na -> a")
+    assert view.document.save()
+    with ZipFile(view.document.path) as archive:
+        payload = json.loads(archive.read("document.json"))
+    graph_data = payload["nodes"][0]["extension_pages"]["graph"]["data"]
+    graph_data["hidden_node_ids"] = ["a"]
+    graph_data["positions"] = {"a": [72, 24]}
+    legacy_path = tmp_path / "旧版图.mindmap"
+    with ZipFile(legacy_path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("document.json", json.dumps(payload, ensure_ascii=False))
+
+    assert window.open_path(legacy_path)
+    opened = window.documents.active
+    canvas = opened.canvas
+    canvas.open_node_graph(owner)
+    assert set(canvas.branch_items) == {"a->b", "b->c", "a->a"}
+    assert canvas.graph.positions == {"a": (72, 24)}
+    assert not opened.engine.is_dirty and not opened.engine.can_undo
+    target = tmp_path / "图.png"
     canvas.export(target)
-    hidden = target.read_text("utf-8")
-    canvas.set_graph_hidden_nodes(set())
+    baseline = QImage(str(target))
+    assert not baseline.isNull()
+    canvas.select_nodes(["a"])
     canvas.export(target)
-    assert target.read_text("utf-8") != hidden
+    assert QImage(str(target)) == baseline
+    canvas.view.graph_edge_edit.select_edge(GraphEdge("a", "b"))
+    canvas.export(target)
+    assert QImage(str(target)) == baseline
+
+    with ZipFile(legacy_path) as archive:
+        assert json.loads(archive.read("document.json")) == payload
+    assert window.documents.save(opened)
+    with ZipFile(legacy_path) as archive:
+        saved = json.loads(archive.read("document.json"))
+    saved_graph = saved["nodes"][0]["extension_pages"]["graph"]
+    assert saved["schema_version"] == 7 and saved_graph["version"] == 1
+    assert saved_graph["data"] == {**graph_data, "hidden_node_ids": []}
+    assert load_document(legacy_path).page_view(graph_page_id(owner)).graph == canvas.graph
+    assert not opened.engine.is_dirty and not opened.engine.can_undo

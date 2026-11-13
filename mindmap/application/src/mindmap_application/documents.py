@@ -101,7 +101,8 @@ class MindMapDocumentHandle(QObject):
     def save(self, *, save_as=False, reason="explicit"):
         """将既有导图保存结果转换为通用协议，保留输入法和后台快照保护。"""
         view = self.representative
-        result = view.files.save(save_as=True) if save_as else self.flush(view)
+        result = (view.files.save(save_as=True) if save_as
+                  else self.flush(view, explicit=reason in {"explicit", "batch"}))
         if result:
             if reason == "explicit":
                 self.owner.window.record_operation(f"{'另存为' if save_as else '保存导图'}：{self.path}", session=view)
@@ -182,12 +183,15 @@ class MindMapDocumentHandle(QObject):
             self._preparing = False
         return True
 
-    def flush(self, view) -> bool:
-        """提交本文件全部视图并保存一次；失败保留文档、所有标签及原路径。"""
+    def flush(self, view, *, explicit: bool = False) -> bool:
+        """提交本文件全部视图并保存一次；失败保留文档、所有标签及原路径。
+
+        explicit 为真时，文件控制器在显式保存及保存全部时处理尚未落盘的旧图筛选清理。
+        """
         if not self.prepare_inputs():
             return False
         self.timer.stop()
-        saved = view.files.save_committed()
+        saved = view.files.save_committed(explicit=explicit)
         if saved:
             self._saved()
         return saved

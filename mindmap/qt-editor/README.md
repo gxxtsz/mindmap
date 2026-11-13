@@ -179,11 +179,11 @@ finally:
 
 - 画布顶部提供固定路径栏，每个文件标签内可在主导图与多级子导图之间导航。
 
-- 路径栏仅显示主导图到当前子导图的页面根节点，省略普通祖先节点；无选择、单选和多选均保持同一页面链，多选另显示选中数量。
+- 路径栏按页面层级显示页根，省略普通祖先节点。图页在所属页面路径后显示「所属节点名 · 图」。选择只影响数量提示。
 
-- 页面项及“…”菜单均在文字左侧显示类型图标：主导图使用主页、子导图使用树形分支、详情页使用圆形信息图标；长标题省略时预留图标宽度。
+- 页面项及「…」菜单在文字左侧显示页面类型图标。长标题省略时预留图标宽度。
 
-- 同名页面按标识区分，点击后定位对应页根；悬停提示和复制功能均使用完整页面路径。
+- 同名页面按标识区分，点击祖先项定位对应页根。图页的返回按钮定位所属节点，点击当前图页项会将整图居中，保留倍率和选择。悬停提示和复制功能均使用完整页面路径。
 
 - 引擎 `node_path(node_id)` 仍返回完整节点祖先路径，页面筛选仅发生在画布导航层。
 
@@ -689,7 +689,9 @@ finally:
 
 `MindMapWidget.open_node_graph(owner_id, create=False)` 打开节点图，创建入口传入 `create=True`。图和树共用视口、场景、节点图元、选择和原地编辑器。图的分层几何以 `LayoutResult` 交给共用的场景同步逻辑。图内标识的读写通过所属节点上的引擎事务完成。
 
-`GraphFilterPanel.bind_canvas(canvas)` 供宿主将连线筛选停靠侧栏绑定到活动图页。持久勾选通过画布提交，临时预览只更新该标签，窗口的缩放操作仍使用同一画布动作。
+`GraphSettingsPanel.bind_canvas(canvas)` 将图页面设置绑定到活动图页，传入 `None` 时解绑。侧栏、编辑菜单和图页右键菜单共用 `graph_auto_layout` 动作。
+
+`MindMapWidget.graph_edge_selection_count` 返回当前标签明确选中的连线数量。`graph_edge_selection_changed` 在选择发生变化时传出新数量，供宿主刷新状态栏。节点选择产生的关联边高亮只在视口绘制。
 
 `mindmap_qt_editor.node_pages` 提供 `NodePageProvider`、`NodePageWidget`、`NodePageContext`、`NodePageRegistry` 和 `NodePageHost`。容器包装已有 `MindMapWidget`，在同一标签内切换原导图与专用详情页。
 

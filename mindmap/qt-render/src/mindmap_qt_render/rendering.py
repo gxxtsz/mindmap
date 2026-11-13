@@ -21,6 +21,7 @@ from PySide6.QtGui import (
     QImageReader,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPalette,
     QPen,
     QPixmap,
@@ -33,6 +34,7 @@ from .page_icons import paint_page_icon
 
 # 节点内容区上下各保留 8 个逻辑像素；正式测量、编辑草稿与导出共用此留白。
 _NODE_VERTICAL_PADDING = 8.0
+NODE_CARD_RADIUS = 7.0
 
 PAGE_CONTROL_SIZE = 32.0
 PAGE_CONTROL_GAP = 2.0
@@ -224,6 +226,32 @@ class NodeVisual:
             paint_page_icon(painter, kind, rect.adjusted(8, 8, -8, -8),
                             self.page_icon_color if self.page_icon_color is not None else self.text_color)
 
+    def card_rect(self) -> QRectF:
+        """返回节点局部坐标中的实际绘制矩形，普通卡片以此为圆角边框中心线。
+
+        纯图片的矩形等于图片绘制范围。返回值供正文绘制、外框和遮挡路径共用，
+        Qt 图元的重绘边界另行保留抗锯齿余量。
+        """
+        return QRectF(self.image_rect) if self.image_only else QRectF(1, 1, self.width - 2, self.height - 2)
+
+    def card_outline(self, *, pixel_size: float) -> QPainterPath:
+        """返回覆盖普通卡片填充和正式边框的圆角路径，纯图片使用绘制矩形。
+
+        路径使用节点局部坐标。pixel_size 是当前设备的一个物理像素折合的局部长度，
+        用于宽度为零的 Qt 发丝边框。调用方用同一画布变换映射到视口后裁剪前景。
+        返回独立路径，不修改视觉、命中范围或文档。
+        """
+        rect = self.card_rect()
+        path = QPainterPath()
+        if self.image_only:
+            path.addRect(rect)
+        else:
+            half = (self.border_width or pixel_size) / 2
+            rx = min(NODE_CARD_RADIUS, rect.width() / 2) + half
+            ry = min(NODE_CARD_RADIUS, rect.height() / 2) + half
+            path.addRoundedRect(rect.adjusted(-half, -half, half, half), rx, ry)
+        return path
+
     def paint(
         self, painter: QPainter, node: Node, *, selected=False, editing=False, controls=True,
         page_controls=True, accent="#3478d5", text_highlight=True
@@ -260,7 +288,7 @@ class NodeVisual:
                 QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
             )
             painter.setBrush(self.background)
-            painter.drawRoundedRect(QRectF(1, 1, self.width - 2, self.height - 2), 7, 7)
+            painter.drawRoundedRect(self.card_rect(), NODE_CARD_RADIUS, NODE_CARD_RADIUS)
             if self.image is not None:
                 painter.drawPixmap(self.image_rect, self.image, QRectF(self.image.rect()))
             if not editing:
@@ -633,6 +661,7 @@ class BranchItem(QGraphicsPathItem):
         super().__init__()
         self._arrow = QPainterPath()
         self._branch = None
+        self._hit_shape: QPainterPath | None = None
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setZValue(-1)
         self.set_branch(branch)
@@ -641,22 +670,39 @@ class BranchItem(QGraphicsPathItem):
         """先通知几何变化，再替换路径与箭头；已有图元可跨样式安全复用。"""
         if branch == self._branch:
             return
-        self._branch = branch
         self.prepareGeometryChange()
+        self._branch = branch
         self._arrow = branch_arrow_path(branch)
         self.setPath(branch_path(branch))
         self.setPen(branch_pen(branch))
+        self._hit_shape = None
         self.setBrush(Qt.BrushStyle.NoBrush)
         self.update()
 
     def boundingRect(self) -> QRectF:
-        bounds = super().boundingRect()
-        return bounds.united(self._arrow.boundingRect()) if not self._arrow.isEmpty() else bounds
+        """返回覆盖线身和箭头的外接矩形，供 Qt 索引和重绘，精确命中由 shape 负责。"""
+        if self._arrow.isEmpty():
+            return super().boundingRect()
+        # Qt 的默认边界会调用 shape。这里用路径的外接矩形留足斜接余量，避免只为
+        # 索引、绘制或导出就计算描边与箭头的并集。
+        pen = self.pen()
+        margin = pen.widthF() * pen.miterLimit()
+        bounds = self.path().boundingRect().adjusted(-margin, -margin, margin, margin)
+        return bounds.united(self._arrow.boundingRect())
 
     def shape(self) -> QPainterPath:
-        path = super().shape()
-        path.addPath(self._arrow)
-        return path
+        """有箭头时返回实际描边和箭头填充的并集，供点选及框选命中。
+
+        Qt 默认形状还包含原始路径，会将开放的曲线按首尾闭合来判断内部。这里单独
+        取线身的描边，再与箭头求并集，既排除弯线间的空白，也保留箭头与线身的交叠。
+        首次命中时计算并缓存，set_branch 更新图元时失效。返回独立路径供调用方使用。
+        """
+        if self._arrow.isEmpty():
+            return super().shape()
+        if self._hit_shape is None:
+            stroke = QPainterPathStroker(self.pen()).createStroke(self.path())
+            self._hit_shape = stroke.united(self._arrow)
+        return QPainterPath(self._hit_shape)
 
     def paint(self, painter, option, widget=None) -> None:
         super().paint(painter, option, widget)

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from math import isfinite
 
-from mindmap_core import ChangeEvent, MindMapError, Theme
+from mindmap_core import ChangeEvent, MindMapError, PathEntry, Theme
 from mindmap_core.node_pages import parse_graph_page_id
 from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QTransform
@@ -30,10 +30,10 @@ def _finite_number(value):
 
 
 class PathNavigation(QWidget):
-    """只提供返回上级与页面路径的固定高度导航栏。
+    """显示页面路径和当前页操作的固定高度导航栏。
 
-    返回和路径点击仅发送导航意图，不创建想法或直接操作文档；空间不足时收起
-    中间页面，每一级仍可直接跳转。当前子导图的收藏星标继续独立同步与复用。
+    返回和路径点击发送导航意图。空间不足时将祖先收起到菜单，每一级仍可跳转。
+    收藏按钮在路径重排中复用，文档操作交给所属画布。
     """
 
     navigate_requested = Signal(object, object)
@@ -84,7 +84,7 @@ class PathNavigation(QWidget):
                  page_kinds: Mapping[str | None, str] | None = None, reference_return=False):
         """同步页面根路径、类型图标和选择数量，不修改引擎路径对象。
 
-        page_kinds 将页面 ID 映射到 main、submap、detail、inspiration，由导航层从文档查询。
+        page_kinds 将页面 ID 映射到 main、submap、detail、inspiration 或 graph，由导航层从文档查询。
         省略时兼容旧调用：None 使用主导图图标，其余使用子导图图标。映射仅
         用于显示，不参与路径文字、复制内容或跳转依据；类型变化同样触发重建。
         主导图通常不能返回；reference_return 为真时仍可回到发起引用的节点。
@@ -163,13 +163,13 @@ class PathNavigation(QWidget):
         menu.deleteLater()
 
     def _rebuild(self):
-        """按图标加文字的实际宽度重排；长路径只收起中间页面，不丢失类型和跳转。"""
+        """按图标、文字及页内按钮宽度重排，空间不足时把路径项收进菜单。"""
         # 重排只改变本控件布局，不改变路径内容；清理旧控件可避免频繁选择造成堆积。
         while self.row.count() > 1:
-            item = self.row.takeAt(1)
-            if item.widget() and item.widget() is not self.favorite_button:
-                item.widget().hide()
-                item.widget().deleteLater()
+            widget = self.row.takeAt(1).widget()
+            if widget is not None and widget is not self.favorite_button:
+                widget.hide()
+                widget.deleteLater()
         self.favorite_button.setVisible(self._favorite_visible)
         self._sync_favorite_icon()
         if not self.entries:
@@ -179,27 +179,34 @@ class PathNavigation(QWidget):
         metrics = self.fontMetrics()
         # 预留 16 像素图标、4 像素间隔及原文字内边距；省略文字时同样扣除。
         icon_space = 20
+        menu_width, separator_space, min_page_width = 30, 14, 32
+        narrow_path_width = menu_width + separator_space + min_page_width
         widths = [min(180, metrics.horizontalAdvance(entry.text.replace("\n", " ")) + 14 + icon_space)
                   for entry in self.entries]
-        available = max(70, self.width() - self.back_button.width() - 25
-                        - (80 if self.selection_count > 1 else 0)
-                        - (32 if self._favorite_visible else 0))
+        available = self.width() - self.back_button.width() - 25 - (32 if self._favorite_visible else 0)
+        badge_text = f"已选 {self.selection_count} 项"
+        badge_width = metrics.horizontalAdvance(badge_text) + self.row.spacing()
+        show_badge = self.selection_count > 1 and available - badge_width >= narrow_path_width
+        if show_badge:
+            available -= badge_width
         indices = list(range(len(self.entries)))
         hidden = []
-        if len(indices) > 2 and sum(widths) + 14 * (len(indices) - 1) > available:
+        if len(indices) > 2 and sum(widths) + separator_space * (len(indices) - 1) > available:
             start, used = len(indices) - 1, widths[0] + widths[-1] + 55
-            while start > 1 and used + widths[start - 1] + 14 <= available:
+            while start > 1 and used + widths[start - 1] + separator_space <= available:
                 start -= 1
-                used += widths[start] + 14
+                used += widths[start] + separator_space
             hidden = list(range(1, start))
             indices = [0, None, *range(start, len(self.entries))]
-        # 两端加省略按钮也放不下时，将所有祖先放入菜单，仍保留当前页。
+        # 窄视图优先在菜单旁显示当前页，空间再缩小时将完整路径放入菜单。
         if len(indices) > 1 and available < 166:
-            hidden = list(range(len(self.entries) - 1))
-            indices = [None, len(self.entries) - 1]
+            last = len(self.entries) - 1
+            keep_last = available >= narrow_path_width
+            hidden = list(range(last if keep_last else last + 1))
+            indices = [None, last] if keep_last else [None]
         page_count = len(indices) - (1 if hidden else 0)
-        page_budget = available - 14 * (len(indices) - 1) - (30 if hidden else 0)
-        page_width = max(32, page_budget // max(1, page_count))
+        page_budget = available - separator_space * (len(indices) - 1) - (menu_width if hidden else 0)
+        page_width = max(min_page_width, page_budget // max(1, page_count))
         for offset, index in enumerate(indices):
             if offset:
                 separator = QLabel("›", self)
@@ -209,7 +216,8 @@ class PathNavigation(QWidget):
             button.setAutoRaise(True)
             if index is None:
                 button.setText("…")
-                button.setToolTip("查看中间的全部页面")
+                button.setAccessibleName("查看路径中的页面")
+                button.setToolTip(self.full_path if len(indices) == 1 else "查看路径中的其他页面")
                 menu = self._menu()
                 for hidden_index in hidden:
                     entry = self.entries[hidden_index]
@@ -220,7 +228,7 @@ class PathNavigation(QWidget):
                                              self.navigate_requested.emit(item.page_id, item.node_id))
                 button.setMenu(menu)
                 button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-                button.setFixedWidth(30)
+                button.setFixedWidth(menu_width)
             else:
                 entry = self.entries[index]
                 width = min(widths[index], page_width)
@@ -241,8 +249,8 @@ class PathNavigation(QWidget):
             self.row.addWidget(button)
             button.show()
         self.row.addStretch()
-        if self.selection_count > 1:
-            badge = QLabel(f"已选 {self.selection_count} 项", self)
+        if show_badge:
+            badge = QLabel(badge_text, self)
             self.row.addWidget(badge)
             badge.show()
         if self._favorite_visible:
@@ -500,7 +508,6 @@ class PageNavigationMixin:
         self._detail_origin = detail_origin if kind == "detail" else None
         self._reference_origin = reference_origin
         if page_id != old_page:
-            self._graph_show_all = False
             self._graph_layout_cache = None
         if page_id == self.engine.inspiration_id:
             self._inspiration_root_id = self._choose_inspiration_root(
@@ -541,11 +548,13 @@ class PageNavigationMixin:
         if page_id == self.engine.inspiration_id and (notify or old_page != page_id):
             self.inspiration_sidebar_requested.emit()
 
-    def navigate_to(self, page_id, node_id=None):
-        """先恢复目标页现场，再定位节点；被折叠隐藏的目标只临时显示，不改写文档。
+    def navigate_to(self, page_id: str | None, node_id: str | None = None) -> None:
+        """按页面和节点标识导航，先检查输入法候选并提交有效草稿。
 
-        focus_id 只为导航保留：先退出旧的临时范围，仍不可见时才以目标为显示中心。
-        导航不会自动适应窗口，也不新增手动进入或退出分支显示范围的菜单与快捷键。
+        树页恢复现场后定位指定节点。折叠目标通过临时显示范围定位，不改写折叠状态。
+        图页的 node_id 是所属树节点的标识，省略时只打开页面并恢复视图。点击当前
+        图页路径项会传入该标识，有内容时将整图居中，保留倍率、节点选择和连线选择。
+        只读也可导航。导航本身不生成内容历史，仅在画布所属 GUI 线程调用。
         """
         self._prepare_page_navigation()
         owner = parse_graph_page_id(page_id)
@@ -554,6 +563,8 @@ class PageNavigationMixin:
                 raise MindMapError("路径节点与目标图页不一致")
             if page_id != self.current_page_id:
                 self._enter_graph_page(owner)
+            elif node_id == owner and self.graph is not None and self.graph.nodes:
+                self.center_root()
             return
         if node_id is not None and self.engine.node_page_id(node_id) != page_id:
             raise MindMapError("路径节点与目标页面不一致")
@@ -581,6 +592,9 @@ class PageNavigationMixin:
         if node_id not in self.layout_result.nodes:
             self.focus_id = node_id
             self.refresh()
+        # 先完成目标页的初始定位，防止延迟回到页根覆盖本次滚动。
+        if self._view_reset_pending:
+            self._apply_view_reset()
         self.select_nodes([node_id])
         self.view.ensureVisible(self.node_items[node_id].sceneBoundingRect(), 35, 35)
 
@@ -837,17 +851,19 @@ class PageNavigationMixin:
         self._prepare_page_navigation()
         self.engine.remove_detail_page(key)
 
-    def return_to_parent_page(self):
-        """优先返回有效引用来源，其次返回详情来源或实际所属页面。"""
+    def return_to_parent_page(self) -> None:
+        """提交有效草稿并返回上一级，输入法候选未完成时保留当前页。
+
+        图页按所属节点的最新归属恢复对应树页，再选中并显示该节点。树页优先
+        返回有效引用或详情来源，否则返回实际所属页面。只读允许返回，切页
+        本身只改变当前画布的现场，不写入文档或撤销历史。
+        """
         owner = parse_graph_page_id(self.current_page_id)
         if owner is not None:
             self._prepare_page_navigation()
             page = self.engine.node_page_id(owner)
             self._switch_page(page, inspiration_root_id=self._inspiration_root_for(owner))
-            if not self.is_node_selected(owner):
-                self._locate_page_node(owner)
-            elif self.selection_count != 1:
-                self.select_nodes([owner])
+            self._locate_page_node(owner)
             return
         reference = self._reference_return_origin()
         if reference is not None:
@@ -900,8 +916,13 @@ class PageNavigationMixin:
         self._prepare_page_navigation()
         self.engine.remove_submap(key)
 
-    def _page_path_entries(self, node_id):
-        """投影页面路径；想法根代替内部区域项，附属页仍保留原有页面与节点标识。"""
+    def _page_path_entries(self, node_id: str) -> list[PathEntry]:
+        """从文档中有效节点的祖先链提取它所在的页面路径。
+
+        每级保留原有页面 ID 与页根节点 ID，普通祖先省略，独立想法使用游离根。
+        树页传当前页根，图页传所属树节点。返回新列表供调用方补充页面类型和标题，
+        不修改引擎的完整节点路径、文档或选择。
+        """
         path = self.engine.node_path(node_id)
         pages = [entry for entry in path if entry.page_root and entry.page_id != self.engine.inspiration_id]
         if path and path[0].page_id == self.engine.inspiration_id:
@@ -945,6 +966,8 @@ class PageNavigationMixin:
             return "返回引用节点"
         if self.current_page_id is None:
             return "已在主导图"
+        if self.current_page_kind == "graph":
+            return "返回所属节点"
         if self.current_page_kind == "inspiration":
             return "返回主导图"
         origin = self._detail_return_origin()
@@ -957,19 +980,23 @@ class PageNavigationMixin:
                 "submap": "返回所属子导图" if self.current_page_kind == "detail" else "返回上级导图",
                 "detail": "返回所属详情页"}[parent_kind]
 
-    def _sync_navigation(self):
-        """路径始终终止于当前页根节点，普通节点选择只影响数量提示。"""
+    def _sync_navigation(self) -> None:
+        """刷新树页和图页共用的路径项、回退链及按钮状态。
+
+        树页以当前页根结束，图页在所属页的路径后追加带标题的图页项。路径由
+        实际归属和稳定标识决定，同名项仍可分别跳转，选择只影响数量提示。
+        提交事件完成读模型更新后调用，保证改名或迁移后路径和回退目标一致。
+        """
         if (not hasattr(self, "_document") or self._disposed
                 or getattr(self, "_applying_engine_event", False)):
             return
-        if self.graph is not None:
-            self._sync_graph_navigation()
-            return
-        # 引擎仍提供完整节点祖先路径，界面仅投影其中的页面根，避免普通分支撑长路径栏。
-        # 必须保留原有页面、节点 ID：同名页面及由根节点连续下钻的页面不能按标题合并。
-        pages = self._page_path_entries(self._document.root_id) if self._document.nodes else []
+        owner = parse_graph_page_id(self.current_page_id)
+        node_id = owner if owner is not None else self._document.root_id
+        pages = self._page_path_entries(node_id) if node_id else []
         pages = [replace(entry, text=f"{entry.text} · 详情")
                  if self._book_document.page_kind(entry.page_id) == "detail" else entry for entry in pages]
+        if owner is not None:
+            pages.append(PathEntry(self.current_page_id, owner, self._document.title, page_root=True))
         # 上级子图转换后，本页可能仍存在而归属路径已经改变；刷新回退链，避免
         # 之后删除本页时继续返回已经失效的祖先页面。灵感区空态也保留有效回退点。
         self._page_chain = ([self.current_page_id] if self.current_page_kind == "inspiration"
@@ -984,24 +1011,8 @@ class PageNavigationMixin:
                                                   for entry in pages},
                                       reference_return=reference_return)
         self.path_navigation.set_ui_colors(ui_colors(self._ui_colors_override or self._document.theme))
+        is_submap = self.current_page_kind == "submap"
         self.path_navigation.set_favorite_state(
-            visible=self.current_page_kind == "submap",
-            checked=self.engine.is_submap_favorite(self._current_page_id),
-            enabled=self.editable and not self.is_editing)
-
-    def _sync_graph_navigation(self):
-        """图页路径终止在所属节点下；即使图为空，返回入口和祖先路径仍可用。"""
-        summary = self.engine.page_summary(self.current_page_id)
-        if summary is None:
-            return
-        self._page_chain = list(dict.fromkeys(entry.page_id for entry in summary.path if entry.page_root))
-        path = [replace(entry, text=f"{entry.text} · 详情")
-                if entry.page_root and self._book_document.page_kind(entry.page_id) == "detail" else entry
-                for entry in summary.path]
-        self.path_navigation.set_path(
-            path, page_id=self.current_page_id, selection_count=self.selection_count,
-            page_kinds={entry.page_id: self._book_document.page_kind(entry.page_id) for entry in summary.path},
-        )
-        self.path_navigation.back_button.setToolTip("返回所属节点")
-        self.path_navigation.back_button.setAccessibleName("返回所属节点")
-        self.path_navigation.set_favorite_state(visible=False, checked=False, enabled=False)
+            visible=is_submap,
+            checked=is_submap and self.engine.is_submap_favorite(self._current_page_id),
+            enabled=is_submap and self.editable and not self.is_editing)

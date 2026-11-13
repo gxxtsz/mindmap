@@ -456,7 +456,8 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         position = event.position().toPoint()
-        if event.button() == Qt.MouseButton.LeftButton and self.graph_edge_edit.press_left(position):
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self.graph_edge_edit.press_left(position, event.modifiers())):
             # 前景手柄和连线不属于场景图元。本次按下由视图接管，不能再交给框选或节点拖动。
             self.update_cursor(position)
             event.accept()
@@ -670,9 +671,8 @@ class MindMapView(QGraphicsView):
         """
         event.accept()
         if event.reason() != event.Reason.Mouse:
-            edge = self.graph_edge_edit.selected_edge
-            if edge is not None:
-                self.owner.call(lambda: self.owner._show_graph_edge_menu(edge, event.globalPos()))
+            if self.graph_edge_edit.selected_edges:
+                self.owner.call(lambda: self.owner._show_graph_edge_menu(event.globalPos()))
             else:
                 self.owner.context_menu(event.globalPos())
 
@@ -680,7 +680,7 @@ class MindMapView(QGraphicsView):
         """仅在确定为点击后选择菜单目标，右键拖动始终保留原有选择。"""
         handle = self.graph_edge_edit.handle_at(position)
         if handle is not None and handle.original is not None:
-            self.owner.call(lambda: self.owner._show_graph_edge_menu(handle.original, global_position))
+            self.owner.call(lambda: self.owner._show_graph_edge_menu(global_position))
             return
         item = self.itemAt(position)
         if isinstance(item, (FoldControlItem, PageControlItem)):

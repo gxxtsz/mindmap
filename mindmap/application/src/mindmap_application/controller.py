@@ -6,7 +6,7 @@ from mindmap_core.layouts import create_default_layout_registry
 from mindmap_desktop_api import OperationResult
 from mindmap_desktop_api.qt import CommandSpec, MenuContribution, MenuLocation, PanelSpec, StatusItemSpec
 from mindmap_qt_editor.node_pages import NodePageRegistry
-from mindmap_qt_editor.panels.graph_filter import GraphFilterPanel
+from mindmap_qt_editor.panels.graph_settings import GraphSettingsPanel
 from mindmap_qt_editor.theme import UiColors
 from mindmap_qt_render import ensure_fonts
 from PySide6.QtCore import QObject, QSignalBlocker, QTimer
@@ -56,7 +56,7 @@ class MindMapController(QObject):
             stack = QStackedWidget(panel_staging)
             stack.addWidget(QLabel("没有打开的导图"))
             setattr(self, "_" + name + "_stack", stack)
-        self._graph_filter = GraphFilterPanel(panel_staging)
+        self._graph_settings = GraphSettingsPanel(panel_staging)
         self._depth_action = QAction("显示层级", self)
         self._new_inspiration_action = QAction("新建想法", self)
         self._new_inspiration_action.triggered.connect(self._new_inspiration)
@@ -73,7 +73,8 @@ class MindMapController(QObject):
             ("recent_pages", "最近访问", self._recent_pages_stack, "recent-pages", "left_top", "Alt+7"),
             ("properties", "节点属性", self._properties_stack, "properties", "right_top", "Alt+2"),
             ("map_settings", "导图设置", self._settings_stack, "settings", "right_top", ""),
-            ("graph_filter", "连线筛选", self._graph_filter, "filter", "right_top", ""),
+            # 沿用原停靠标识，读取用户已保存的侧栏位置、尺寸和显隐。
+            ("graph_filter", "图页面设置", self._graph_settings, "settings", "right_top", ""),
         ):
             context.ui.register_panel(PanelSpec(identifier, title, lambda content=stack: content,
                                                 icon, position, shortcut, headers.get(identifier, ()),
@@ -201,8 +202,9 @@ class MindMapController(QObject):
             menu.addAction("返回导图", self.active_session.pages.close_page)
             return
         if canvas.graph is not None:
-            menu.addActions([canvas.action(key) for key in ("add_sibling", "edit", "delete",
-                                                            "graph_add_edge", "graph_text", "graph_remove")])
+            keys = ("add_sibling", "edit", "delete", "graph_add_edge", "graph_text", "graph_auto_layout",
+                    "graph_remove")
+            menu.addActions([canvas.action(key) for key in keys])
             menu.addAction("返回所属节点", lambda: canvas.call(canvas.return_to_parent_page))
             return
         menu.addActions([canvas.action(key) for key in ("add_child", "add_sibling", "edit", "properties")])
@@ -251,7 +253,7 @@ class MindMapController(QObject):
         self._status_controls.set_ui_colors(
             colors, compact=self.context.ui.compact, fit_icon=self.context.ui.theme_icon("fit-view"),
         )
-        self._graph_filter.set_ui_colors(colors)
+        self._graph_settings.set_ui_colors(colors)
         self._sync_depth_action()
 
     def dispose(self):
@@ -260,7 +262,7 @@ class MindMapController(QObject):
         self.flush_recent_pages()
         self._disposed = True
         self._recent_pages_timer.stop()
-        self._graph_filter.bind_canvas(None)
+        self._graph_settings.bind_canvas(None)
         self.sessions.dispose()
         # 大图打开的嵌套事件循环可能尚未返回，候选会话的 QObject 父链须保留到
         # 主窗口销毁，避免回调清理候选时访问已销毁的定时器。所有订阅已由上下文释放。
@@ -449,7 +451,7 @@ class MindMapController(QObject):
         self._properties_stack.setCurrentWidget(session.panels.properties) if session else self._properties_stack.setCurrentIndex(0)
         self._settings_stack.setCurrentWidget(session.panels.settings) if session else self._settings_stack.setCurrentIndex(0)
         graph_canvas = session.canvas if session and not session.pages.active and session.canvas.graph is not None else None
-        self._graph_filter.bind_canvas(graph_canvas)
+        self._graph_settings.bind_canvas(graph_canvas)
         self._status_controls.bind_canvas(session.canvas if session and not session.pages.active else None)
         self._status_controls.set_canvas_controls_visible(session is None or not session.pages.active)
         self._sync_depth_action()

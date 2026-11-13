@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from mindmap_qt_render.rendering import NODE_CARD_RADIUS
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QTransform
 
@@ -27,7 +28,7 @@ def _outline_paths(width, height, border, matrix, pixel_ratio, button):
     mapping = QTransform(*matrix, 0, 0)
     rect = mapping.mapRect(QRectF(1, 1, width - 2, height - 2))
     half_border = border * mapping.m11() / 2 if border > 0 else 0.5 / pixel_ratio
-    radius = min(7 * mapping.m11(), rect.width() / 2, rect.height() / 2) + half_border
+    radius = min(NODE_CARD_RADIUS * mapping.m11(), rect.width() / 2, rect.height() / 2) + half_border
     rect.adjust(-half_border, -half_border, half_border, half_border)
     body = _rounded_rect(rect, radius)
     gap = _rounded_rect(rect.adjusted(-SELECTION_GAP, -SELECTION_GAP, SELECTION_GAP, SELECTION_GAP),

@@ -1,11 +1,15 @@
 """将引擎的已提交变更同步到画布读模型、布局和视口图元。"""
 
+from dataclasses import replace
+
 from mindmap_core import ChangeEvent, ChangeSet, LayoutResult, Rect
 from mindmap_core.layouts import create_incremental_layout, supports_incremental_layout
 from mindmap_core.node_pages import parse_graph_page_id
 from mindmap_qt_render.rendering import BranchItem
 from PySide6.QtCore import QRectF
+from PySide6.QtGui import QColor
 
+from ..theme import graph_edge_colors
 from .items import NodeItem
 
 VIRTUALIZATION_NODE_LIMIT = 1000
@@ -335,8 +339,6 @@ class SceneSyncMixin:
         else:
             self._measure_dirty = tuple(key for key in previous.nodes.keys() | updated.nodes.keys()
                                         if previous.nodes.get(key) != updated.nodes.get(key))
-        if not updated.graph.hidden_node_ids or not updated.graph.edges:
-            self._graph_show_all = False
         self.refresh()
         if self.editor is not None:
             self.editor.base_layout = self.layout_result
@@ -589,11 +591,20 @@ class SceneSyncMixin:
         self.view._update_selection_decoration()
 
     def _set_branch_items(self, result) -> None:
-        """只更新分支图元，不触碰节点、编辑器或选择，预览与提交共用此入口。"""
+        """同步预览或提交后的分支图元，并给图页的普通连线应用适配背景的灰蓝色。
+
+        图页颜色属于屏幕图元。点击和框选按布局提供的线身与箭头几何命中，
+        图形导出从文档主题取色。
+        """
+        normal_color = None
+        if self.graph is not None:
+            normal_color, _ = graph_edge_colors(QColor(self._canvas_background(self.ui_colors)))
         for key in list(self.branch_items):
             if key not in result.branches:
                 self.scene.removeItem(self.branch_items.pop(key))
         for key, branch in result.branches.items():
+            if normal_color is not None and branch.color != normal_color:
+                branch = replace(branch, color=normal_color)
             if key not in self.branch_items:
                 self.branch_items[key] = BranchItem(branch)
                 self.scene.addItem(self.branch_items[key])

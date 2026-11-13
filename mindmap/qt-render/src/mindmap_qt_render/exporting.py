@@ -26,7 +26,7 @@ def export_document(
     detail_page_resolver 是可选的只读共享详情解析函数，接收节点 ID 并返回
     （实际归属节点 ID，详情页 ID 或 None），供单页快照显示页外共享入口。
     省略时取节点自身引用；解析只影响图标与尺寸，不修改快照或保存文件内容。
-    layout_provider 可按本次测量的尺寸提供只读布局，图页用它复用箭头、坐标和持久筛选。
+    layout_provider 可按本次测量的尺寸提供只读布局，图页用它复用箭头和手动坐标。
     """
     target = Path(path).absolute()
     if not document.nodes:

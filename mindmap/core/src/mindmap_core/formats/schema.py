@@ -20,6 +20,7 @@ from mindmap_core import (
     Theme,
     ValidatedDocument,
 )
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 
 SCHEMA_VERSION = 7
 _BASE_SCHEMA_VERSION = 5
@@ -55,6 +56,9 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
             record.pop("extension_pages")
         else:
             version = 7
+            # asdict 已复制嵌套数据。原样保留版本一的字段结构，只在写出时清空旧筛选。
+            if graph := record["extension_pages"].get(GRAPH_PAGE_TYPE):
+                graph["data"]["hidden_node_ids"] = []
         nodes.append(record)
     return {
         "format": "mindmap",
