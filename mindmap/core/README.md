@@ -1,0 +1,388 @@
+# 思维导图核心
+
+思维导图核心，包含模型、校验、编辑操作、事务、差异历史、事件、共享几何类型及布局和格式注册表。
+
+内置布局和文件读写分别通过 `mindmap_core.layouts` 和 `mindmap_core.formats` 导入。
+全包仅使用 Python 3.12+ 标准库。布局和格式子包基于核心公开协议实现。
+
+## 目录
+
+- [快速接入](#快速接入)
+- [文档读写](#文档读写)
+- [事务与事件](#事务与事件)
+- [精确移动事件](#精确移动事件)
+- [共享文档的事件来源](#共享文档的事件来源)
+- [独立子导图](#独立子导图)
+- [后代与子导图转换](#后代与子导图转换)
+- [子导图收藏接口](#子导图收藏接口)
+- [灵感区接口](#灵感区接口)
+- [详情页归属规则](#详情页归属规则)
+- [页面引用接口](#页面引用接口)
+- [布局与格式注册表](#布局与格式注册表)
+- [分支样式与几何类型](#分支样式与几何类型)
+- [受控试算与后台保存](#受控试算与后台保存)
+
+## 快速接入
+
+```python
+from mindmap_core import LayoutConfig, MindMapEngine
+
+engine = MindMapEngine()
+engine.add_child(engine.root_id, "任务")
+engine.set_layout(LayoutConfig(algorithm_id="自定义算法", options={"间距": 24}))
+engine.undo()
+```
+
+- 文档可以保存尚未安装的算法配置。
+
+- 核心只验证配置结构，算法的选项语义由实现校验。
+
+- 需要撤销与事件通知的编辑应通过引擎提交，`engine.document` 和 `engine.get_node(node_id)` 返回快照；直接修改这些快照不会写回引擎。
+
+- 嵌套操作失败会导致整组事务回滚。
+
+- **节点计数：** 仅统计节点数时使用 `engine.node_count`，它包括折叠节点且不建立文档副本。
+
+- **父级查询：** 查询单个父级使用 `engine.parent_id(node_id)`，根返回 `None`，无效标识报错；无需重建整图父级表。
+
+## 文档读写
+
+从 `mindmap_core.formats` 导入 `load_document` 和 `save_document`。用 `load_document(path)` 读取原生文件，用 `save_document(engine.document, path)` 保存完整快照。默认注册表根据 `.mindmap` 扩展名选择原生格式。
+
+原生文件是 ZIP 容器，`document.json` 记录文档结构与版本，图片资源位于 `assets/` 下。内置编解码器可读取结构版本 2 至 7。存在节点扩展页时写为版本 7；否则有有效页面引用时写为版本 6，其余写为版本 5。
+
+## 事务与事件
+
+### 事务与快照
+
+- 事务内部采用实体首次写入复制和变更日志，提交只校验受影响实体及结构关系。
+
+- 撤销、重做和失败回滚均维护父级与资源引用索引，不再为普通编辑复制整图。
+
+- 完整文档的输入、替换和输出仍执行完整校验；公共快照的隔离语义保持不变。
+
+- `capture_read_snapshot()` 为受信任的画布及面板建立稳定只读版本：顶层集合和文档配置独立，节点及页面记录共享已提交实体。后续引擎编辑通过写时复制保持旧版本稳定；读模型可用 `ChangeSet.apply()` 替换实体，但不能直接修改共享实体及其嵌套字段。需要可写副本时继续使用 `engine.document`。
+
+- `adopt_document(document)` 接管原生读取流程独占的新文档，成功后调用方放弃修改及复用来源；结构校验、操作钩子、干净历史及替换通知与 `replace_document()` 一致。普通外部输入继续使用默认深拷贝隔离的 `replace_document()`。上述捕获及替换均禁止在活动事务中调用。
+
+- `ValidatedDocument(document)` 完整校验独占的新文档，生成一次性加载凭据；`document` 属性仅供受信任代码只读预检。取得凭据后不得修改嵌套字段、发布可写引用或把它当作可变文档的长期校验缓存。
+
+- `adopt_document(document, validation=receipt)` 确认凭据对应同一对象后复用校验结果；钩子或事务拒绝不会消费凭据，成功接管后凭据失效。普通替换和不传凭据的接管仍完整校验，图片解码及布局有效性由宿主继续检查。
+
+- 已通过校验的完整快照可用 `document.detail_page_resolver()` 建立共享详情只读查询函数，避免为候选排版创建另一个编辑引擎；解析器借用快照，页面关系改变后必须重新创建。
+
+### 订阅与差量更新
+
+- `engine.subscribe(callback)` 返回幂等取消订阅函数。
+
+- 普通修改、撤销和重做事件包含 `event.changes`，读模型可调用 `event.changes.apply(model, forward=event.forward)` 合并变化；撤销方向为 `False`。
+
+- `reset` 事件重新装载文档，`saved` 事件只同步保存标记。
+
+- 每个订阅者获得独立的变化实体，修改事件不会污染引擎、历史或其他监听器。
+
+- 监听器中的再次编辑按修订号排队通知；不要为每次局部事件读取完整 `engine.document`。
+
+## 精确移动事件
+
+### 移动记录与位置
+
+- `ChangeEvent.changes.moves` 为默认空元组的移动记录，元素是不可变的 `NodeMove`：`node_id` 标识真正移动的分支根，`before`、`after` 分别保存事务前后的 `NodePlacement`。
+
+- 位置快照包括 `node_text`、`parent_id`、`parent_text`、`index` 和 `direction`，其中同级序号从1开始，方向为解析自动分配及父分支继承后的有效 `left`、`right` 或 `down`。
+
+### 记录范围与快照
+
+- 这些记录从事务中已登记的父引用变更生成，不根据兄弟节点最终顺序猜测移动对象。
+
+- 多选祖先及其后代时只记录真正移动的独立根，普通兄弟和随行后代不额外记录。
+
+- 被移动节点自身可能没有实体字段变化，因此不能用 `ChangeEvent.node_ids` 代替移动记录。
+
+- 节点及父节点名称在事务两端固定，后续改名和删除不会污染已提交记录；构造记录不复制整张导图，只读取受影响节点、父级子列表及所属页面的一级分支。
+
+### 通知方向
+
+- 修改和重做的 `forward=True`，起点为 `before`、终点为 `after`；撤销的 `forward=False`，起点改为 `after`、终点改为 `before`。
+
+- 通知中的快照顺序始终固定，读取者负责依据方向描述实际发生的操作；事件订阅者依旧获得各自隔离的差量，不影响其他订阅者及历史。
+
+### 历史与兼容
+
+- 位置没有净变化时不生成移动记录，试算和失败事务不发送成功事件。
+
+- `ChangeSet.empty` 及 `apply()` 忽略移动元数据，不能仅靠元数据产生历史或改写文档；`ChangeSet.between()` 无法从快照还原具体移动意图，继续返回空 `moves`。
+
+- 新增字段位于原有三个字段之后，兼容已有位置参数构造。
+
+- 移动信息只随内存撤销历史保存，不改变 `.mindmap` 文件格式。
+
+## 共享文档的事件来源
+
+- **来源作用域：** `engine.event_source(source_id)` 为同步作用域内创建的 `ChangeEvent` 设置可选 `source_id`，用于同文档多个视图区分交互来源。
+
+- **参数与嵌套：** 来源接受非空字符串或 None，非法值抛出 ValueError；嵌套及异常退出均恢复外层来源，重入排队事件保留创建时的标识。
+
+- **撤销与兼容：** 撤销、重做记录本次触发者，来源不写入历史、保存快照或 `.mindmap` 文件；旧调用及旧事件位置参数构造保持兼容。
+
+- **异步操作：** 异步操作应在实际提交时重新进入上下文，不跨异步等待持有它。
+
+## 独立子导图
+
+### 页面模型
+
+- `MindMapDocument.submaps` 使用扁平页面表，`Node.submap_id` 关联独立子导图；节点与图片资源保存在整份文档中，页面只保存入口、根节点及独立布局、主题。
+
+- **主导图标识：** 主导图保持既有接口，页面标识使用 `None` 表示主导图。
+
+### 图片节点接口
+
+- `engine.add_image_child(parent_id, data, media_type="image/png", *, width) -> str` 原子追加纯图片子节点，返回新节点 ID。
+
+- 父节点必须允许普通子节点，创建后自动展开；图片字节与有限正数显示宽度由调用方传入，图像解码及像素上限由 Qt 适配层校验。
+
+- 失败抛出 `MindMapError` 并回滚，成功只产生一条历史，复用资源去重、引用清理、撤销重做和保存机制。
+
+- 纯图片节点使用元数据 `image_only: true`，正文为空，`Node.is_image_node` 只读返回识别结果；不能拥有详情页或子导图，可以拥有普通子节点。
+
+- 缺少标记的旧图文节点保持原语义；`attach_image()` 继续为现有节点关联图片附件，不自动迁移旧节点。
+
+- 上述核心接口不依赖 GUI，在所属引擎线程同步使用；ID 可跨快照保存，可写实体归文档管理，外部不直接修改借用对象。
+
+### 创建与删除
+
+- `engine.create_submap(node_id)` 仅允许尚无普通子节点及子导图的叶子节点，返回页面 ID。
+
+- `engine.remove_submap(node_id)` 保留入口及其自身详情，删除子导图内部拥有的全部页面；两种操作均支持统一事务和整体撤销。
+
+- 入口与根节点名称由 `update_node` 在一个事务内沿别名链同步。
+
+- 入口不能再接普通子节点，新增、粘贴和移动统一校验；每页根节点均禁止删除或移动。
+
+### 查询与页面配置
+
+- `engine.page_document(page_id)` 返回隔离的单页布局读模型，`node_page_id(node_id)` 返回页内归属，`node_path(node_id)` 返回包含页面和节点 ID 的完整可点击路径。
+
+- `engine.page_summary(page_id, inspiration_root_id=None) -> PageSummary | None` 只读查询页面类型、当前标题和完整路径；主导图传 None，独立想法须同时指定灵感区 ID 和游离根 ID。目标删除、根已归并或参数不匹配时返回 None，灵感空态不生成摘要。
+
+- `PageSummary` 为不可变类型，包含 `page_id`、`inspiration_root_id`、`kind`、`title` 和不可变路径项元组 `path`，`key` 返回稳定的二元页面身份。查询仅访问页面索引与祖先链，不复制整份文档、不遍历普通后代、不改变事件或历史；旧摘要不会随后续编辑改变，展示更新时应重新查询。
+
+- `set_layout` 与 `set_theme` 接受可选关键字参数 `page_id`，省略时仍修改主导图。
+
+- `engine.document` 和保存快照始终包含全部页面，历史变化集的 `page_id` 表示操作所属页。
+
+- 普通分支遍历不跨页，完整复制与删除通过迭代的 `owned_descendants` 遍历所有附属页面。
+
+## 后代与子导图转换
+
+- `convert_descendants_to_submap(node_id) -> str` 把有效入口的普通后代原地迁入同名子导图，返回新页面 ID；要求有普通子节点、尚无子导图，且不是纯图片或详情页内节点。主图根、子图根和灵感区节点均支持。
+- 新页复制来源页布局及主题，默认未收藏；只新增包装根和页面，后代标识、子序、折叠状态及附属内容保持不变。
+- `convert_submap_to_descendants(node_id) -> None` 把入口拥有的当前一层子导图接回普通后代并展开入口；更深层页面及其收藏保留，空子导图转为普通叶子。
+- 重复包装根会移除；根自身有子导图或详情页，或备注、链接、标签、图标、样式、元数据、文字格式、方向存在不同于入口的非默认值时，保留根为普通子节点。根引用的图片或实际图片尺寸不同时也保留；标识、同步标题、子列表和展开状态不参与判定。
+- 两个接口均在引擎所属线程同步调用，不导航、不复制整份文档；非法目标抛出中文 `MindMapError`，失败完整回滚，成功只生成一条历史。删除的当前页面收藏在同一事务清理，撤销恢复原顺序。
+
+## 子导图收藏接口
+
+### 只读查询
+
+- `favorite_submaps(*, order="recent") -> tuple[PathEntry, ...]` 按最近收藏在前返回独立、不可变的页面根路径项，包含页面 ID、根节点 ID 和实时名称。
+
+- `order="document"` 改为按导图原有分支先序返回，祖先页在后代页之前，主导图分支先于灵感区；灵感区按游离根及分支的原有顺序排列。排序只沿收藏项的祖先链读取相关兄弟列表，不扫描无关后代、不建立全文件快照，也不改写收藏元数据；不支持的排序值抛出中文 `ValueError`。
+
+- 通过 `node_path(entry.node_id)` 的 `page_root` 项可以得到完整页面层级路径，查询不建立整份文档副本或修改文件。
+
+- `is_submap_favorite(page_id) -> bool` 查询当前提交状态，无效目标、主导图和详情页返回 False。
+
+### 修改与存储
+
+- `set_submap_favorite(page_id, favorite) -> None` 仅接受有效子导图 ID 和布尔状态，无效参数抛出中文 `MindMapError`，失败不修改文档。
+
+- 实际变化经引擎事务、前置钩子及统一历史提交，重复设置不改变排序或产生事件；GUI 的只读与草稿约束由宿主检查。
+
+- 收藏存入 `document.metadata["submap_favorites"]` 的有序页面 ID 列表，空列表省略字段。
+
+- 缺失字段视为空，只读查询忽略旧程序删除页面后遗留的失效引用及不认识的元数据值。
+
+### 删除与复制
+
+- 页面或祖先分支删除时，收藏清理合并到原删除事务，撤销同时恢复页面和收藏顺序。
+
+- 完整保存快照及另存为保留收藏；复制粘贴分支不会把原文件收藏关系传给新页面。
+
+- 收藏只引用稳定页面 ID，名称、路径和页面归属在查询时解析，不存储重复的标题副本。
+
+## 灵感区接口
+
+### 区域与读模型
+
+- `MindMapDocument.inspiration` 为独立的 `InspirationArea`，保存区域标识、根序、根坐标、布局和主题。
+
+- 它没有入口节点，不属于子导图表；所有实际节点、图片与附属页面仍保存在文档共享表中。
+
+- `engine.inspiration_id` 只读返回区域标识，导航及归属查询支持该标识。
+
+- `engine.page_document(engine.inspiration_id)` 返回隔离的 `MindMapForestView`，可为空，`root_ids` 按稳定顺序返回全部游离根，`ordered_nodes()` 返回多棵普通树的先序节点。
+
+- `root_id` 仅为旧调用提供首根或空字符串，新增调用应使用 `root_ids`；区域路径项的 `PathEntry.node_id` 可为 None。
+
+- 该读模型不能保存为完整文件，布局逐树通过注册表调度。
+
+### 修改接口
+
+- 以下修改只在引擎所属线程同步执行，全部经过事务、前置钩子、差量历史和通知。
+
+- 失败抛出中文 `MindMapError` 并完整回滚；传入坐标不会被借用，每次批量操作只记一条历史。
+
+| 接口 | 参数与结果 |
+| --- | --- |
+| `add_inspiration(text="新想法", *, position) -> str` | 创建游离根，返回节点标识；坐标是两个有限数值 |
+| `set_inspiration_positions(positions) -> None` | 字典键为游离根标识，值为新坐标；不能给普通后代写坐标，相同位置不产生历史 |
+| `move_to_inspiration(node_ids, *, positions) -> list[str]` | 将同页分支拆成游离树；坐标字典恰好覆盖去重后的最上层选中根，返回原树序根列表 |
+| `attach_inspirations(node_ids, parent_id) -> None` | 将游离分支追加到主导图或子导图父主题；禁止移入自身、后代和所属附属页面 |
+| `group_inspirations(node_ids, text="新主题", *, position) -> str` | 在新游离父主题下组合选中分支，返回父主题标识 |
+
+### 迁移与保存
+
+- 迁移只改父边、区域根表和坐标，不重新创建实体，完整保留页面、图片及收藏关系。
+
+- 主导图、子导图和详情页本身的根仍受保护；详情页内部不支持跨区移动。
+
+- 游离根可删除、剪切、接为子主题、添加同级和插入父主题；删除与恢复包含全部附属页面。
+
+- `NodePlacement` 补充页面标识和可选根坐标，游离根的父标识为空，日志与撤销按两端快照解释。
+
+- 保存快照独立复制区域记录，后续拖动及组合不会污染正在后台编码的版本。
+
+### 单想法投影
+
+- `page_view(page_id, inspiration_root_id=...)` 与 `engine.page_document(page_id, inspiration_root_id=...)` 可投影一棵有效游离树，仍返回 `kind="inspiration"` 的森林读模型，展示根坐标为原点，原文档坐标不变。
+
+- 省略参数保持完整总览；非灵感页面或非游离根拒绝该参数。
+
+- 前者借用实体，后者返回隔离快照，两者均不能作为完整文档保存。
+
+- `engine.inspiration_items()` 返回按根序排列的不可变摘要，每项包含根标识、原始标题及普通后代数量，不包含附属页面内部节点。
+
+## 详情页归属规则
+
+### 创建与归属
+
+- `Node.detail_page_id` 与 `MindMapDocument.detail_pages` 独立于既有子导图字段，页面记录共用 `MindMapPage`。
+
+- `create_detail_page(node_id) -> str` 允许主导图、子导图和灵感区的非纯图片节点创建详情。`remove_detail_page(node_id)` 删除详情内容，保留入口、普通分支与子导图。
+
+- 两类页面名称都沿 ID 关联双向同步，布局和主题分别维护，禁止直接通过 `update_node` 改写页面引用。
+
+### 共享与旧文档
+
+- `resolve_detail_page(node_id) -> tuple[str, str | None]` 只读返回实际归属节点与详情页 ID；没有详情时返回最外层入口与 None。
+
+- 入口及其子导图根共用详情，连续下钻的根沿相同关系解析，普通子主题不继承父节点详情。
+
+- 创建、删除均使用该解析结果，从子图根创建时归属最外层入口，初始文字、样式、布局和主题仍取发起位置。
+
+- 关联链已有详情时禁止重复创建。
+
+- 旧文件只有一张关联详情时双向复用；存在多张时，各节点自己的详情优先，其余位置使用从外到内的首张，不自动迁移或合并。
+
+- 共享详情由实际归属推导，不增加节点字段，也不单独要求提升文件版本。
+
+- 查询只沿运行时根索引和子导图引用访问，不枚举整份文档，不改变历史或修改标记；非法节点抛出中文 `MindMapError`，仅在引擎所属线程同步调用。
+
+### 页面查询与约束
+
+- `page_record(page_id)` 借用页面记录，`page_kind(page_id)` 返回 `main`、`submap`、`detail` 或 `inspiration`，`has_page(page_id)` 检查导航目标，`iter_pages()` 枚举子导图和详情页。借用记录仅供读取。
+
+- `page_document`、`page_view`、布局与主题接口接受两类页面标识，详情单页读模型也保留类别。
+
+- 详情中的任何节点均不能再拥有两类附属页；操作入口、差量校验及完整导入共同执行约束。
+
+### 复制与历史
+
+- `paste_fragment(parent_id, fragment, *, include_pages=True)` 默认完整复制两类页面并重建标识。
+
+- 向详情页粘贴带附页的片段默认拒绝；宿主确认省略后可显式传入 `include_pages=False`，仅复制普通分支及其属性、图片，并裁掉附属页面引用和无用资源。
+
+- 原片段与来源始终保持完整。
+
+- 详情页同样参与写时复制、事务回滚、差量历史、图片引用计数及后台保存快照。
+
+## 页面引用接口
+
+- `engine.set_page_reference(node_id, target_root_id)` 为普通文字节点设置引用，传入 `None` 解除。目标是同一文件内其他页面的根节点 ID，可指向主导图、子导图或详情页。根节点和纯图片节点不能设引用，无效参数抛出 `MindMapError`。
+- `engine.resolve_page_reference(node_id)` 返回目标根的不可变 `PathEntry`，无引用返回 `None`。主导图的 `page_id` 为 `None`，仍能通过 `node_id` 定位根。`page_reference_sources(target_root_id)` 返回已提交的来源节点标识，供视图按差量更新。
+- `get_node()` 和完整文档保留来源原文。`page_document()` 以及文档的 `page_view()` 投影目标根的正文和格式；普通后代、图片及附属页面仍属于来源节点。引用节点的正文和格式不能通过 `update_node()` 直接修改。
+- 引用独立于页面所有权。删除目标页、迁移使引用指向当前页或来源变成独立想法的根时，在同一事务中清理引用，撤销时一起恢复。
+
+## 布局与格式注册表
+
+`registries.py` 定义算法、编解码器的协议和实例级注册表，并由 `mindmap_core` 统一导出。节点专用详情页的数据契约位于 `node_pages.py`，两者按职责分开。
+
+- 新增布局算法或格式编解码器时，实现 `LayoutAlgorithm`、`DocumentImporter` 或 `DocumentExporter`，并由宿主显式注册。
+
+- `LayoutRegistry.register(algorithm, copy_inputs=True)` 默认复制文档和测量表以隔离扩展。
+
+- 受控且完全只读的实现可显式设置 `copy_inputs=False`；此时实现不得修改或保留可变输入，输入与输出的公共校验仍执行。
+
+## 分支样式与几何类型
+
+### 分支样式
+
+- `engine.set_branch_style(node_ids, kind, *, scope="subtree")` 支持 `BranchStyle` 的 11 种语义样式，`kind=None` 恢复原始曲线，`scope="level"` 仅修改选中节点。
+
+- 整次操作去重并只记录一次历史。
+
+- 配置描述节点发出的分支，不隐式向祖先继承；新增主题复制其实际父主题的分支设置。
+
+- `MindMapDocument.new()` 显式为根主题配置圆角正交，新建引擎不产生额外撤销记录或修改标记。
+
+- 读取旧文档时不回填该配置；没有分支配置的节点继续使用原始曲线。
+
+- 核心提供不可变的 `PathCommand`、`BranchPath`，布局结果同时兼容原有四点 `Curve`。
+
+### 只读几何映射
+
+- `LayoutResult.nodes` 和 `LayoutResult.branches` 的公共类型为只读 `Mapping`，同时兼容完整布局字典和增量布局的惰性映射。
+
+- 调用方只查询、遍历，不依赖 `.copy()` 或条目赋值；需要独立可修改的全量结果时使用 `dict(result.nodes)` 和 `dict(result.branches)`，转换会显式枚举全部几何。
+
+## 受控试算与后台保存
+
+### 候选试算
+
+- `preview_operation()` 为同步上下文接口，返回借用的候选文档和只读变化节点集合。
+
+- 只允许通过引擎方法执行候选操作，不得直接修改候选、保留引用或在作用域内处理事件循环。
+
+- 正常及异常退出都回滚；试算不调用前置钩子，不产生历史或事件。
+
+- 已有事务内禁止进入。
+
+- 正式提交必须重新执行操作和前置钩子，不能将试算视为已经提交。
+
+### 保存快照
+
+- `capture_save_snapshot() -> SaveSnapshot` 捕获稳定只读版本和不透明保存凭据；仅复制实体映射及配置，未变化实体依靠写时复制保持稳定，不执行全图实体深拷贝。
+
+- 冻结的凭据不等于递归冻结文档，编码器不得修改 `snapshot.document`；需要可修改副本时使用 `engine.document`。
+
+- 后台编码使用 `snapshot.document`。实际写入成功后，在引擎线程将原始凭据传给 `mark_saved_snapshot(snapshot)`。返回 `True` 表示标记该历史版本，后续编辑仍保持未保存。
+
+- 其他引擎或替换文档前的凭据返回 False，不发送保存事件；错误类型抛出 TypeError。
+
+- 两项操作均禁止在活动事务内调用。
+
+## 节点专用详情页
+
+`Node.extension_pages` 按扩展类型保存 `{ "version": 正整数, "data": JSON对象 }`。每节点每类型最多一页，可与普通详情页及子导图共存。普通详情页中的文字节点也可拥有专用页面，纯图片节点不能拥有页面。
+
+```python
+engine.set_extension_page(node_id, "software-structure", {"schema_version": 1, "modules": []}, version=1)
+page = engine.extension_page(node_id, "software-structure")
+engine.remove_extension_page(node_id, "software-structure")
+engine.undo()
+```
+
+查询返回独立快照。写入统一经过事务、前置钩子、撤销历史与变更通知。节点复制、删除和子导图转换保留页面所有权；显式省略附属页的粘贴操作会清除扩展页。核心只校验通用封装和 JSON 数据，不导入业务扩展，也不要求业务版本已安装。
+
+`extension_page_id(node_id, type_id)` 与 `parse_extension_page_id()` 位于 `mindmap_core.node_pages`，用于最近访问和会话恢复。扩展 ID 是导航身份，不是独立节点树；使用 `engine.page_summary()` 查询其摘要，使用 `extension_page()` 读取内容。

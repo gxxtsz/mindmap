@@ -1,7 +1,0 @@
-<!-- SPDX-License-Identifier: MIT; Copyright (c) 2026 mindmap contributors -->
-<!-- 左侧两块实心面板与右侧主编辑区组成工作台，颜色随主题切换。 -->
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <rect x="2" y="3" width="7" height="8" rx="1.75" fill="currentColor"/>
-  <rect x="2" y="13" width="7" height="8" rx="1.75" fill="currentColor"/>
-  <rect x="12" y="4" width="9" height="16" rx="1.75" fill="none" stroke="currentColor" stroke-width="2"/>
-</svg>

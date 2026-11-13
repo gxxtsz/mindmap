@@ -1,0 +1,298 @@
+"""工具窗面板与主窗口内覆盖容器，所有业务控件始终复用同一个实例。"""
+
+from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtGui import QMouseEvent, QPainter
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QMenu,
+    QSizePolicy,
+    QTabBar,
+    QTabWidget,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .controls import IconButton, MenuButton, _CardCorners
+
+
+class DraggableTitle(MenuButton):
+    """标题既可打开内容视图选择，也可启动工具窗拖动，按拖动阈值区分两者。"""
+
+    def __init__(self, panel):
+        super().__init__(panel.manager, parent=panel.header, dropdown=False)
+        self.panel = panel
+        self.press = QPoint()
+
+    def mousePressEvent(self, event):
+        self.press = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton and (event.position().toPoint() - self.press).manhattanLength() >= QApplication.startDragDistance():
+            self.setDown(False)
+            self.panel.manager.start_tool_drag(self.panel.tool_id, self, self.press)
+            return
+        super().mouseMoveEvent(event)
+
+
+class PanelHeader(QWidget):
+    """归工具面板所有的可拖动标题栏；事件处理和主题绘制均在 Qt 主线程执行。"""
+
+    def __init__(self, panel):
+        super().__init__(panel)
+        self.panel = panel
+        self.manager = panel.manager
+        self.press = QPoint()
+        self.setObjectName(f"header_{panel.tool_id}")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        theme = self.manager.theme
+        # 主题未定义标题颜色时继承自身边框色，避免深色界面回退成浅色横线。
+        color = theme.color("ToolWindow.Header.borderColor", theme.color("tool-window-border").name())
+        # 用填充矩形准确表示 1 个逻辑像素的线宽，两端各留 10；Qt 负责设备像素比缩放。
+        # 极窄标题将长度收至零，避免负尺寸或线段反向越过预留的边距。
+        painter.fillRect(10, self.height() - 1, max(0, self.width() - 20), 1, color)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.press = event.position().toPoint()
+            # 按下时只能更新活动标记；刷新布局会隐藏源控件并丢失鼠标抓取，
+            # 从而让“按住标题再拖动”在真正启动 QDrag 前就被中断。
+            self.manager.mark_active(self.panel.tool_id)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton and (event.position().toPoint() - self.press).manhattanLength() >= QApplication.startDragDistance():
+            self.manager.start_tool_drag(self.panel.tool_id, self, self.press)
+
+    def contextMenuEvent(self, event):
+        self.manager.tool_menu(self.panel.tool_id, self).exec(event.globalPos())
+
+
+class ToolPanel(QFrame):
+    """工具窗注册工厂在此处只调用一次；重停靠仅移动该面板，不销毁内容。"""
+
+    def __init__(self, manager, spec):
+        super().__init__()
+        try:
+            content = spec.factory()
+            if not isinstance(content, QWidget):
+                raise TypeError(f"{spec.id} 的 factory 必须返回 QWidget")
+        except Exception:
+            self.deleteLater()
+            raise
+        self.manager = manager
+        self.tool_id = spec.id
+        self.spec = spec
+        self.setObjectName(f"panel_{spec.id}")
+        self.setMinimumSize(120, 80)
+        self._hover = False
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+        self.header = PanelHeader(self)
+        self.header_layout = QHBoxLayout(self.header)
+        self.header_layout.setContentsMargins(10, 2, 5, 2)
+        self.header_layout.setSpacing(3)
+        self.title_button = DraggableTitle(self)
+        self.title_button.setText(spec.title)
+        self.title_button.setAutoRaise(True)
+        self.title_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        title_font = self.title_button.font()
+        title_font.setBold(True)
+        self.title_button.setFont(title_font)
+        self.title_button.clicked.connect(self.show_views)
+        self.header_layout.addWidget(self.title_button)
+        self.tabs = QTabBar(self.header)
+        self.tabs.setExpanding(False)
+        self.tabs.setDrawBase(False)
+        self.tabs.currentChanged.connect(self._change_content_tab)
+        self.header_layout.addWidget(self.tabs)
+        self.header_layout.addStretch(1)
+        # 业务动作与选项、隐藏按钮共用标题栏显隐规则；重停靠时复用按钮。
+        self.action_buttons = []
+        for action in spec.header_actions:
+            button = QToolButton(self.header)
+            button.setAutoRaise(True)
+            button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            button.setDefaultAction(action)
+            # 多会话外壳可能先创建空动作，再绑定活动导图的图标和菜单。
+            # QAction 自动同步内容，但不会重算按钮样式与弹出模式，需随动作变化更新。
+            action.changed.connect(lambda button=button: self._sync_header_action(button))
+            self._sync_header_action(button)
+            self.action_buttons.append(button)
+            self.header_layout.addWidget(button)
+        self.more = IconButton(manager, symbol="more", tooltip="选项", parent=self.header)
+        self.more.setObjectName(f"options_{spec.id}")
+        self.more.clicked.connect(lambda: manager.tool_menu(spec.id, self.more).exec(self.more.mapToGlobal(QPoint(0, self.more.height()))))
+        self.hide_button = IconButton(manager, symbol="minus", tooltip="隐藏", parent=self.header)
+        self.hide_button.clicked.connect(lambda: manager.hide(spec.id))
+        self.header_layout.addWidget(self.more)
+        self.header_layout.addWidget(self.hide_button)
+        self._layout.addWidget(self.header)
+        self.content = content
+        self.content.setParent(self)
+        self._layout.addWidget(self.content, 1)
+        # 可分组的内容视图页签位于工具窗标题内：将 QTabWidget 的标签镜像到标题，
+        # 不改变用户工厂提供的页面对象、所有权或 currentChanged 语义。
+        if isinstance(self.content, QTabWidget):
+            self.content.tabBar().hide()
+            for n in range(self.content.count()):
+                self.tabs.addTab(self.content.tabText(n))
+            self.content.currentChanged.connect(self.tabs.setCurrentIndex)
+        else:
+            self.tabs.hide()
+        self._corners = _CardCorners(self, manager)
+        self.refresh_theme()
+
+    def _sync_header_action(self, button):
+        """同步标题动作的呈现与交互，支持延迟绑定、切换会话和清空动作内容。"""
+        action = button.defaultAction()
+        icon_only = not action.icon().isNull()
+        button.setProperty("mindmap_header_icon", icon_only)
+        button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly if icon_only
+            else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        # 图标入口保持28像素命中区；回到文字动作时解除固定尺寸，避免文字被裁剪。
+        if icon_only:
+            button.setFixedSize(28, 28)
+        else:
+            button.setMinimumSize(0, 0)
+            button.setMaximumSize(16777215, 16777215)
+        button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup if action.menu() is not None
+            else QToolButton.ToolButtonPopupMode.DelayedPopup
+        )
+        button.setAccessibleName(action.toolTip() or action.text())
+        # 动态属性影响按钮留白与菜单箭头，必须重新匹配样式表才能隐藏原生箭头。
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.updateGeometry()
+        button.update()
+
+    def refresh_theme(self):
+        theme = self.manager.theme
+        self.header.setFixedHeight(theme.header_height)
+        title_font = self.title_button.font()
+        title_font.setPixelSize(12 if theme.compact else 13)
+        self.title_button.setFont(title_font)
+        for button in self.action_buttons:
+            button.setFont(title_font)
+            # 邻近菜单和收起符号的实际笔画约10像素；14像素图标画布加上 SVG 留白
+            # 后与它们保持相同视觉体量，按钮仍保留28像素命中区域，不缩小点击目标。
+            button.setIconSize(QSize(14, 14))
+            button.setStyleSheet(
+                f"QToolButton {{ background:transparent; border:0; padding:3px 6px; "
+                f"color:{theme.css('text-default')}; border-radius:4px; }}"
+                f"QToolButton:hover, QToolButton:pressed {{background:{theme.css('toolbar-bg-hovered')};}}"
+                f"QToolButton:focus {{border:1px solid {theme.css('control-brand-border')};}}"
+                f"QToolButton:disabled {{color:{theme.css('text-muted')};}}"
+                # 图标按钮不绘制原生角落箭头，避免占用图形位置或产生文字基线错位。
+                'QToolButton[mindmap_header_icon="true"] { padding:0; }'
+                'QToolButton[mindmap_header_icon="true"]::menu-indicator { image:none; width:0; height:0; }'
+            )
+        # 按控件类型填充底色，使标识含点号的应用面板也能着色。四角由抗锯齿覆盖层绘制。
+        self.setStyleSheet(f"ToolPanel {{ background:{theme.css('tool-window-bg')}; border:0; }}")
+        self.title_button.setStyleSheet(f"QToolButton {{background:transparent; border:0; color:{theme.css('text-default')}; padding:0 2px;}} QToolButton:hover {{background:{theme.css('toolbar-bg-hovered')};border-radius:4px;}}")
+        self.update_header()
+        self._corners.refresh()
+        self.update()
+
+    def update_header(self):
+        grouped = self.manager.states[self.tool_id].grouped_tabs
+        self.tabs.setVisible(isinstance(self.content, QTabWidget) and not grouped)
+        self.title_button.dropdown = grouped and isinstance(self.content, QTabWidget)
+        self.title_button.setText(self.spec.title)
+        self.title_button.updateGeometry()
+        self.title_button.update()
+        visible = self._hover or self.manager.active_id == self.tool_id or self.manager.settings.always_header_icons
+        for button in self.action_buttons:
+            button.setVisible(visible and button.defaultAction().isVisible())
+        self.more.setVisible(visible)
+        self.hide_button.setVisible(visible)
+
+    def _change_content_tab(self, index):
+        if isinstance(getattr(self, "content", None), QTabWidget) and index >= 0:
+            self.content.setCurrentIndex(index)
+
+    def cycle_view(self, direction):
+        if isinstance(self.content, QTabWidget) and self.content.count():
+            self.content.setCurrentIndex((self.content.currentIndex() + direction) % self.content.count())
+
+    def show_views(self):
+        if not isinstance(self.content, QTabWidget):
+            return
+        menu = QMenu(self)
+        for index in range(self.content.count()):
+            action = menu.addAction(self.content.tabText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.content.currentIndex())
+            action.triggered.connect(lambda checked=False, n=index: self.content.setCurrentIndex(n))
+        menu.exec(self.title_button.mapToGlobal(QPoint(0, self.title_button.height())))
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update_header()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update_header()
+        super().leaveEvent(event)
+
+    def contextMenuEvent(self, event):
+        self.manager.tool_menu(self.tool_id, self).exec(event.globalPos())
+
+class OverlayContainer(QFrame):
+    """Undock 覆盖容器；边缘命中区位于内容外，避免吞掉编辑器/终端鼠标事件。"""
+
+    def __init__(self, host, tool_id):
+        super().__init__(host)
+        self.host = host
+        self.tool_id = tool_id
+        self.manager = host.manager
+        self.drag_origin = None
+        self.setMouseTracking(True)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(1, 1, 6, 6)
+        self._layout.setSpacing(0)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def _edge(self, point):
+        position = self.manager.states[self.tool_id].position
+        if position.startswith("bottom"):
+            return "top" if point.y() <= 6 else ""
+        if position.startswith("right"):
+            return "left" if point.x() <= 6 else ""
+        return "right" if point.x() >= self.width() - 7 else ""
+
+    def mousePressEvent(self, event: QMouseEvent):
+        edge = self._edge(event.position().toPoint())
+        if edge and event.button() == Qt.MouseButton.LeftButton:
+            # 从当前实际几何开始调整；窗口曾被临时压缩时，不跳回未限幅的目标尺寸。
+            extent = self.height() if edge == "top" else self.width()
+            self.drag_origin = (event.globalPosition().toPoint(), extent, edge)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drag_origin:
+            origin, extent, edge = self.drag_origin
+            delta = event.globalPosition().toPoint() - origin
+            change = -delta.y() if edge == "top" else (-delta.x() if edge == "left" else delta.x())
+            self.host._set_region_extent(self.manager.states[self.tool_id].position,
+                                         extent + change, overlay=True)
+        else:
+            edge = self._edge(event.position().toPoint())
+            self.setCursor(Qt.CursorShape.SizeVerCursor if edge == "top" else Qt.CursorShape.SizeHorCursor if edge else Qt.CursorShape.ArrowCursor)
+
+    def mouseReleaseEvent(self, event):
+        self.drag_origin = None
+        self.manager.schedule_save()
+        super().mouseReleaseEvent(event)

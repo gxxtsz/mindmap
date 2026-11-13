@@ -1,0 +1,142 @@
+{
+  "license": "MIT",
+  "origin": "主题和未单独标注来源的图标由本工程绘制",
+  "files": [
+    {
+      "path": "dark.json",
+      "sha256": "adeb1f7c5fdeff167faccd342cb5dbb139630eb9f0a411341ecdf6d5001b990a"
+    },
+    {
+      "path": "icons/chevron-down.svg",
+      "sha256": "0940487221e5f295ac5efd5cf101ec320b56b15dce1045606c36865bd8acb561"
+    },
+    {
+      "path": "icons/clear.svg",
+      "sha256": "442e3e040abbfed1d3e9a7c17f16370be2838a19c96337e78966c81b3f101d53"
+    },
+    {
+      "path": "icons/close.svg",
+      "sha256": "e0f59c8995db3a346fd7a99d6eb514bfb97bd24ee39ac02db9df5101d627e02a"
+    },
+    {
+      "path": "icons/copy.svg",
+      "sha256": "5e519f0c9d26e3da00efdbe6f55d303048cc3624f33dd907dc1ac97b7c0a7430"
+    },
+    {
+      "path": "icons/document.svg",
+      "sha256": "1926a465519c88c5327fa3900bb5a20e19d02d35251c1b825f144cf8ec189850"
+    },
+    {
+      "path": "icons/exit.svg",
+      "sha256": "6a65d1d1b358ef329314e7340b528821d8ca49a1b29a0c5e6d5f0b9a14bfecad"
+    },
+    {
+      "path": "icons/export-image.svg",
+      "sha256": "6fc2e79d2a7746af1e0896e578183811d3b808bf2b4babbcea111c7a4128fc8a"
+    },
+    {
+      "path": "icons/export-text.svg",
+      "sha256": "50dcf34c2e8a6c40a2774554a9c26d7c1a747a09b397957a776d0dfbb23b6f9d"
+    },
+    {
+      "path": "icons/favorites.svg",
+      "sha256": "46d7882893f27bc1f2cb031684be6d651368c2392c1b72f2beeef596d0c4cb44"
+    },
+    {
+      "path": "icons/filter.svg",
+      "sha256": "b19bb3b5e75115ebc09b0a3528a6291bd03d4c623d20f86c8c89f0d20e7bf206"
+    },
+    {
+      "path": "icons/fit-view.svg",
+      "sha256": "7390408aa15f74517b4d30355b899177e58acbddcee0e9932f2daecdf2a7e590"
+    },
+    {
+      "path": "icons/folder.svg",
+      "sha256": "f473b2c82c0a64f0ce542d888b8d6e3538afa4b1561c876687957e9de797eb13"
+    },
+    {
+      "path": "icons/inspiration.svg",
+      "sha256": "8550764a5201421dedf6b6d8fbef0728e1f4ffc5329d63f6321fb9e6e55b1589"
+    },
+    {
+      "path": "icons/log.svg",
+      "sha256": "bccf2d60804d8ca34c0563b42e3d9a8ae51982a1cc662fd28f07e047eaddd657"
+    },
+    {
+      "path": "icons/maximize.svg",
+      "sha256": "1712eb48c8bac4c31275bcd5d0be63a439fc4b4614cf232d349b04926dbaf8e7"
+    },
+    {
+      "path": "icons/menu.svg",
+      "sha256": "59b5fffdcef57f05441cd8c491663b317a7751fdd6cc759eff0ddd4574ec629f"
+    },
+    {
+      "path": "icons/mindmap.svg",
+      "sha256": "28aacb7688c8f4895e2ad539390c1aa38ea7b253cfb58802e89efef98e99b99c"
+    },
+    {
+      "path": "icons/minus.svg",
+      "sha256": "29b224888c06882dd0527e6ff9ace752a0e602590bf5c344fab5243330c6ceb3"
+    },
+    {
+      "path": "icons/more.svg",
+      "sha256": "010ffa26380e7a65fb056cbc7d8b68ddba92920380e892499e4df1d3417de138"
+    },
+    {
+      "path": "icons/new-document.svg",
+      "sha256": "123d54c99d0a56bdcbe6fafc4cd4c905fecf3232940203623494311285604243"
+    },
+    {
+      "path": "icons/open-directory.svg",
+      "sha256": "9e9b726270009c9bd757903f2563059f6f1cf60e1b86e56468ffd61915862fcc"
+    },
+    {
+      "path": "icons/outline.svg",
+      "sha256": "40ff9a2c0a5d750ea30af4e790635605d89cbb5bdc8a05622d5a130350622b93"
+    },
+    {
+      "path": "icons/panel.svg",
+      "sha256": "0fbb80edc45c2345ec00dd2446375b7ff03b5861157d6d636d2890356d4c071d"
+    },
+    {
+      "path": "icons/pin.svg",
+      "sha256": "349d5bee8d3d47868ef7f31135e85ab24a65e8e1c61706c6ccde3c7aa762c875"
+    },
+    {
+      "path": "icons/properties.svg",
+      "sha256": "d7f340b04af7e057bc6c8e801ede3621313df1f0598b35663b871aea015e19c7"
+    },
+    {
+      "path": "icons/recent-pages.svg",
+      "sha256": "8ffee3639a1cbb17190e66572b9b9cc7643e055f898aa590177e9e1d656d0147"
+    },
+    {
+      "path": "icons/restore.svg",
+      "sha256": "eb28474a33929c2d08da7ba651a1f723738401b18c83549b842b3d8240edbd05"
+    },
+    {
+      "path": "icons/save-all.svg",
+      "sha256": "fcfb3c05be5a3909d70e3d4679a9926586a9ff5d9172e406f9bf80302a02adf8"
+    },
+    {
+      "path": "icons/save-as.svg",
+      "sha256": "34a8bf30ab0ba0a67af26251974dba7b9136ad6246e7d5d99c1168df49409775"
+    },
+    {
+      "path": "icons/save.svg",
+      "sha256": "1c5d4f12fe86ef8d30c8d0392a31871551e93a3af00ded48d849fe38ee732301"
+    },
+    {
+      "path": "icons/select-all.svg",
+      "sha256": "9b43fd150ea50114c8560e2719e04883ae86bce4af51778988650023579a4e3d"
+    },
+    {
+      "path": "icons/settings.svg",
+      "sha256": "c4d5e39eb21377d196045203a88c02faf8183cf7e71c9c77e92e007ef9c39a62"
+    },
+    {
+      "path": "light.json",
+      "sha256": "44e1ac2dadba6a45bac517d0d2b44eac77362183038ea028c9e7136c5f94b370"
+    }
+  ]
+}

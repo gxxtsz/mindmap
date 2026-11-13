@@ -1,0 +1,166 @@
+"""状态栏右侧的画布操作：复用活动文档动作，不持有导图内容或文件状态。"""
+
+from mindmap_qt_editor.canvas import MindMapWidget
+from mindmap_qt_editor.icons import toolbar_icon
+from mindmap_qt_editor.theme import UiColors
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QIcon, QKeySequence
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QToolButton, QWidget
+
+
+class _StatusViewControls(QWidget):
+    """由主窗口持有的一组常驻按钮，切换文档时只替换动作及状态订阅。
+
+    适应窗口、恢复默认尺寸和回到中心直接借用画布动作，快捷键仍由原画布注册；滚轮按钮
+    独立调用公开偏好接口，避免借用带菜单的动作后出现下拉箭头或弹出入口。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("mindmap_status_controls")
+        self.setAccessibleName("画布视图操作")
+        self._canvas = None
+        self._bound_actions = []
+        self._colors = None
+        self._fit_icon = QIcon()
+        self.buttons = {}
+        self._labels = {
+            "fit": "适应窗口", "reset_zoom": "恢复默认尺寸", "center": "回到中心", "wheel_mode": "滚轮行为",
+        }
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 0, 2, 0)
+        layout.setSpacing(2)
+        self.save_label = QLabel(self)
+        self.save_label.setObjectName("mindmap_save_status")
+        self.save_label.setAccessibleName("导图保存状态")
+        layout.addWidget(self.save_label)
+        layout.addSpacing(6)
+        for key in self._labels:
+            button = QToolButton(self)
+            button.setObjectName("status_" + key)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            # 鼠标点击不移走画布或正文编辑器焦点；键盘仍可通过 Tab 到达按钮。
+            button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            button.setFixedSize(24, 20)
+            button.setIconSize(QSize(16, 16))
+            layout.addWidget(button)
+            self.buttons[key] = button
+        self.buttons["reset_zoom"].setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.buttons["wheel_mode"].clicked.connect(self._toggle_wheel_mode)
+        self._sync_actions()
+
+    def bind_canvas(self, canvas: MindMapWidget | None) -> None:
+        """绑定当前活动画布；传入 None 禁用入口，并解除对旧会话的全部引用。
+
+        原动作属于会话，可能在关闭标签后被延迟销毁。必须先断开信号、移除
+        按钮关联动作，再接入新画布，防止后台标签刷新或销毁后访问旧 Qt 对象。
+        重复绑定同一画布不追加订阅，也不改写任何偏好或文档状态。
+        """
+        if canvas is self._canvas:
+            return
+        if self._canvas is not None:
+            self._canvas.viewport_changed.disconnect(self._sync_zoom)
+        for action in self._bound_actions:
+            action.changed.disconnect(self._sync_actions)
+        self._bound_actions.clear()
+        for key in ("fit", "reset_zoom", "center"):
+            button = self.buttons[key]
+            previous = button.defaultAction()
+            if previous is not None:
+                button.setDefaultAction(None)
+                button.removeAction(previous)
+        self._canvas = canvas
+        if canvas is not None:
+            canvas.viewport_changed.connect(self._sync_zoom)
+            for key, button in self.buttons.items():
+                action = canvas.action(key)
+                if key != "wheel_mode":
+                    button.setDefaultAction(action)
+                # 滚轮动作在模式和主题变化时都会发出 changed，统一同步图标和提示；
+                # 视图动作还借此同步编辑期间的禁用状态及自定义快捷键说明。
+                action.changed.connect(self._sync_actions)
+                self._bound_actions.append(action)
+        self._sync_actions()
+
+    def set_save_status(self, text: str, detail: str = "") -> None:
+        """显示当前导图的保存状态。常驻标签与窗口的临时提示独立，悬停可查看失败原因。"""
+        self.save_label.setText(text)
+        self.save_label.setToolTip(detail or text)
+        self.save_label.setAccessibleDescription(detail or text)
+
+    def set_canvas_controls_visible(self, visible: bool) -> None:
+        """专用详情页展示自己的视图工具，主状态栏只保留共享导图的保存状态。"""
+        for button in self.buttons.values():
+            button.setVisible(visible)
+
+    def _sync_actions(self):
+        """只刷新展示状态，不反向触发动作；没有导图时保持按钮位置及无障碍名称。"""
+        for key, button in self.buttons.items():
+            label = self._labels[key]
+            if self._canvas is None:
+                button.setEnabled(False)
+                description = f"{label}（没有打开的导图）"
+            else:
+                action = self._canvas.action(key)
+                button.setEnabled(action.isEnabled())
+                if key == "wheel_mode":
+                    mode = self._canvas.wheel_mode
+                    current, following = ("上下滚动", "缩放") if mode == "scroll" else ("缩放", "上下滚动")
+                    label = f"滚轮行为：{current}"
+                    description = f"{label}；点击切换为{following}，Ctrl＋滚轮始终缩放"
+                    button.setIcon(action.icon())
+                else:
+                    shortcuts = " / ".join(
+                        key.toString(QKeySequence.SequenceFormat.NativeText) for key in action.shortcuts()
+                    )
+                    description = f"{action.toolTip()}（{shortcuts}）" if shortcuts else action.toolTip()
+            button.setToolTip(description)
+            button.setAccessibleName(label)
+            button.setAccessibleDescription(description)
+        # 画布动作更新时 Qt 会重新复制它的图标。状态栏同步完动作后再应用宿主的共用图标。
+        if not self._fit_icon.isNull():
+            self.buttons["fit"].setIcon(self._fit_icon)
+        self._sync_zoom()
+
+    def _sync_zoom(self):
+        button = self.buttons["reset_zoom"]
+        text = f"{self._canvas.zoom_factor:.0%}" if self._canvas is not None else "—"
+        button.setText(text)
+        if self._canvas is not None:
+            description = f"当前缩放 {text}，点击恢复默认尺寸（100%）"
+            button.setToolTip(description)
+            button.setAccessibleDescription(description)
+
+    def _toggle_wheel_mode(self):
+        """每次点击只在两种模式间切换；持久化和跨标签同步交给宿主现有信号链。"""
+        if self._canvas is not None:
+            self._canvas.set_wheel_mode("zoom" if self._canvas.wheel_mode == "scroll" else "scroll")
+
+    def set_ui_colors(self, colors: UiColors, *, compact: bool, fit_icon: QIcon) -> None:
+        """使用外壳色板和逻辑像素尺寸，不撑高原有的普通／紧凑状态栏。
+
+        fit_icon 是导图桌面各文档共用的适应窗口图标。宿主未提供时沿用导图内置图标。
+        滚轮模式仅通过图标区分，按钮始终不可勾选；悬停、按下和键盘焦点仍有
+        短暂反馈。无文档时也提供主题一致的禁用图标，不创建临时画布。
+        """
+        self._colors = colors
+        self._fit_icon = (
+            toolbar_icon("fit", colors.text, colors.muted, colors.accent) if fit_icon.isNull() else fit_icon
+        )
+        self.setStyleSheet(
+            "QWidget#mindmap_status_controls { background:transparent; }"
+            f"QLabel#mindmap_save_status {{ color:{colors.muted}; padding:0; }}"
+            "QWidget#mindmap_status_controls QToolButton { background:transparent; padding:0; "
+            "border:1px solid transparent; border-radius:4px; }"
+            f"QWidget#mindmap_status_controls QToolButton:hover {{ background:{colors.hover}; }}"
+            f"QWidget#mindmap_status_controls QToolButton:pressed {{ background:{colors.selected}; }}"
+            f"QWidget#mindmap_status_controls QToolButton:focus {{ border-color:{colors.accent}; }}"
+        )
+        for key, button in self.buttons.items():
+            width = button.fontMetrics().horizontalAdvance("400%") + 10 if key == "reset_zoom" else (
+                22 if compact else 24)
+            button.setFixedSize(width, 18 if compact else 20)
+            if self._canvas is None and key != "fit":
+                name = "wheel_scroll" if key == "wheel_mode" else key
+                button.setIcon(toolbar_icon(name, colors.text, colors.muted, colors.accent))
+        self._sync_actions()

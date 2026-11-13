@@ -4,15 +4,15 @@ requires-python = ">=3.12, <3.14"
 
 [manifest]
 members = [
+    "mindmap",
+    "mindmap-app",
+    "mindmap-application",
     "mindmap-core",
+    "mindmap-desktop-api",
+    "mindmap-desktop-runtime",
+    "mindmap-extension-software-structure",
     "mindmap-qt-editor",
     "mindmap-qt-render",
-    "personal-workbench",
-    "personal-workbench-workspace",
-    "workbench-api",
-    "workbench-plugin-mindmap",
-    "workbench-plugin-software-structure",
-    "workbench-runtime",
 ]
 
 [[package]]
@@ -34,72 +34,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mindmap-core"
-version = "0.1.0"
-source = { editable = "plugins/workbench-plugin-mindmap/core" }
-
-[[package]]
-name = "mindmap-qt-editor"
-version = "0.1.0"
-source = { editable = "plugins/workbench-plugin-mindmap/qt-editor" }
-dependencies = [
-    { name = "mindmap-core" },
-    { name = "mindmap-qt-render" },
-    { name = "pyside6" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mindmap-core", editable = "plugins/workbench-plugin-mindmap/core" },
-    { name = "mindmap-qt-render", editable = "plugins/workbench-plugin-mindmap/qt-render" },
-    { name = "pyside6", specifier = ">=6.9,<7" },
-]
-
-[[package]]
-name = "mindmap-qt-render"
-version = "0.1.0"
-source = { editable = "plugins/workbench-plugin-mindmap/qt-render" }
-dependencies = [
-    { name = "mindmap-core" },
-    { name = "pyside6" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mindmap-core", editable = "plugins/workbench-plugin-mindmap/core" },
-    { name = "pyside6", specifier = ">=6.9,<7" },
-]
-
-[[package]]
-name = "packaging"
-version = "26.3"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
-]
-
-[[package]]
-name = "personal-workbench"
-version = "0.1.0"
-source = { editable = "apps/personal-workbench" }
-dependencies = [
-    { name = "pyside6" },
-    { name = "workbench-plugin-mindmap" },
-    { name = "workbench-plugin-software-structure" },
-    { name = "workbench-runtime" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-plugin-mindmap", editable = "plugins/workbench-plugin-mindmap/workbench-adapter" },
-    { name = "workbench-plugin-software-structure", editable = "plugins/workbench-plugin-software-structure" },
-    { name = "workbench-runtime", editable = "packages/workbench-runtime" },
-]
-
-[[package]]
-name = "personal-workbench-workspace"
+name = "mindmap"
 version = "0.1.0"
 source = { virtual = "." }
 
@@ -117,6 +52,133 @@ dev = [
     { name = "pytest", specifier = ">=8,<10" },
     { name = "pytest-qt", specifier = ">=4.4,<5" },
     { name = "ruff", specifier = ">=0.11,<1" },
+]
+
+[[package]]
+name = "mindmap-app"
+version = "0.1.0"
+source = { editable = "apps/mindmap-app" }
+dependencies = [
+    { name = "mindmap-application" },
+    { name = "mindmap-desktop-runtime" },
+    { name = "mindmap-extension-software-structure" },
+    { name = "pyside6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mindmap-application", editable = "mindmap/application" },
+    { name = "mindmap-desktop-runtime", editable = "packages/mindmap-desktop-runtime" },
+    { name = "mindmap-extension-software-structure", editable = "extensions/software-structure" },
+    { name = "pyside6", specifier = ">=6.12,<6.13" },
+]
+
+[[package]]
+name = "mindmap-application"
+version = "0.1.0"
+source = { editable = "mindmap/application" }
+dependencies = [
+    { name = "mindmap-core" },
+    { name = "mindmap-desktop-api" },
+    { name = "mindmap-qt-editor" },
+    { name = "mindmap-qt-render" },
+    { name = "pyside6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mindmap-core", editable = "mindmap/core" },
+    { name = "mindmap-desktop-api", editable = "packages/mindmap-desktop-api" },
+    { name = "mindmap-qt-editor", editable = "mindmap/qt-editor" },
+    { name = "mindmap-qt-render", editable = "mindmap/qt-render" },
+    { name = "pyside6", specifier = ">=6.12,<6.13" },
+]
+
+[[package]]
+name = "mindmap-core"
+version = "0.1.0"
+source = { editable = "mindmap/core" }
+
+[[package]]
+name = "mindmap-desktop-api"
+version = "0.1.0"
+source = { editable = "packages/mindmap-desktop-api" }
+dependencies = [
+    { name = "pyside6" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pyside6", specifier = ">=6.12,<6.13" }]
+
+[[package]]
+name = "mindmap-desktop-runtime"
+version = "0.1.0"
+source = { editable = "packages/mindmap-desktop-runtime" }
+dependencies = [
+    { name = "mindmap-desktop-api" },
+    { name = "pyside6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mindmap-desktop-api", editable = "packages/mindmap-desktop-api" },
+    { name = "pyside6", specifier = ">=6.12,<6.13" },
+]
+
+[[package]]
+name = "mindmap-extension-software-structure"
+version = "0.1.0"
+source = { editable = "extensions/software-structure" }
+dependencies = [
+    { name = "mindmap-qt-editor" },
+    { name = "pyside6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mindmap-qt-editor", editable = "mindmap/qt-editor" },
+    { name = "pyside6", specifier = ">=6.12,<6.13" },
+]
+
+[[package]]
+name = "mindmap-qt-editor"
+version = "0.1.0"
+source = { editable = "mindmap/qt-editor" }
+dependencies = [
+    { name = "mindmap-core" },
+    { name = "mindmap-qt-render" },
+    { name = "pyside6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mindmap-core", editable = "mindmap/core" },
+    { name = "mindmap-qt-render", editable = "mindmap/qt-render" },
+    { name = "pyside6", specifier = ">=6.9,<7" },
+]
+
+[[package]]
+name = "mindmap-qt-render"
+version = "0.1.0"
+source = { editable = "mindmap/qt-render" }
+dependencies = [
+    { name = "mindmap-core" },
+    { name = "pyside6" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "mindmap-core", editable = "mindmap/core" },
+    { name = "pyside6", specifier = ">=6.9,<7" },
+]
+
+[[package]]
+name = "packaging"
+version = "26.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
 ]
 
 [[package]]
@@ -289,66 +351,4 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3306cebfbda2c520f545d36b5be2c7255cc528bb45d6/typing_extensions-4.16.0.tar.gz", hash = "sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5", size = 113555, upload-time = "2026-07-02T08:40:05.92Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
-]
-
-[[package]]
-name = "workbench-api"
-version = "0.1.0"
-source = { editable = "packages/workbench-api" }
-dependencies = [
-    { name = "pyside6" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "pyside6", specifier = ">=6.12,<6.13" }]
-
-[[package]]
-name = "workbench-plugin-mindmap"
-version = "0.1.0"
-source = { editable = "plugins/workbench-plugin-mindmap/workbench-adapter" }
-dependencies = [
-    { name = "mindmap-core" },
-    { name = "mindmap-qt-editor" },
-    { name = "mindmap-qt-render" },
-    { name = "pyside6" },
-    { name = "workbench-api" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mindmap-core", editable = "plugins/workbench-plugin-mindmap/core" },
-    { name = "mindmap-qt-editor", editable = "plugins/workbench-plugin-mindmap/qt-editor" },
-    { name = "mindmap-qt-render", editable = "plugins/workbench-plugin-mindmap/qt-render" },
-    { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-api", editable = "packages/workbench-api" },
-]
-
-[[package]]
-name = "workbench-plugin-software-structure"
-version = "0.1.0"
-source = { editable = "plugins/workbench-plugin-software-structure" }
-dependencies = [
-    { name = "pyside6" },
-    { name = "workbench-api" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-api", editable = "packages/workbench-api" },
-]
-
-[[package]]
-name = "workbench-runtime"
-version = "0.1.0"
-source = { editable = "packages/workbench-runtime" }
-dependencies = [
-    { name = "pyside6" },
-    { name = "workbench-api" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pyside6", specifier = ">=6.12,<6.13" },
-    { name = "workbench-api", editable = "packages/workbench-api" },
 ]

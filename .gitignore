@@ -20,3 +20,5 @@ htmlcov/
 
 *.mindmap
 *.software-structure
+!extensions/software-structure/src/mindmap_extension_software_structure/resources/*.software-structure
+!apps/mindmap-app/tests/data/*.software-structure

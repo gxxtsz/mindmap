@@ -1,0 +1,65 @@
+"""按真实能力归属迁移的组件与行为回归。"""
+
+
+
+
+
+from mindmap_desktop_runtime.ui.shell import ActionSpec, AppSpec, DesktopWindow
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtWidgets import QLineEdit, QToolButton
+from shiboken6 import isValid
+
+
+def test_desktop_keeps_brand_and_shared_business_actions(qapp, qtbot, tmp_path):
+    calls = []
+    window = DesktopWindow(AppSpec("custom-app", "定制业务软件", storage_dir=tmp_path,
+                                    actions=(ActionSpec("business.add", "新增", lambda: calls.append(1),
+                                                        icon="document", toolbar=True),)))
+    qtbot.addWidget(window)
+    window.show()
+    assert window.spec.title == "定制业务软件"
+    late = window.add_action(ActionSpec("business.late", "稍后加入", lambda: calls.append(2),
+                                        menu="业务", toolbar=True))
+    assert any(item.text() == "稍后加入" for item in window.title_bar.action_buttons)
+    # 动态业务动作仍在窗口控制按钮之前，且复用菜单中的同一 QAction。
+    bar = window.title_bar
+    assert bar.box.itemAt(bar.box.count() - 1).layout() is bar.window_controls
+    assert all(bar.box.indexOf(button) < bar.box.count() - 1 for button in bar.action_buttons)
+    assert [action.text() for action in bar.menu_bar.actions()] == ["文件", "业务", "外观与布局"]
+    entry = bar.menu_bar.actions()[1]
+    qtbot.mouseClick(bar.menu_bar, Qt.MouseButton.LeftButton, pos=bar.menu_bar.actionGeometry(entry).center())
+    menu = entry.menu()
+    qtbot.waitUntil(menu.isVisible)
+    assert menu.actions() == [late]
+    qtbot.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(late).center())
+    window.action("business.add").trigger()
+    assert calls == [2, 1]
+    window.manager.shutdown()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_navigation_slot_inserts_replaces_and_releases_owned_widgets(qtbot, tmp_path):
+    """默认导航位于主菜单后，右侧导航紧邻窗控。替换和清空均释放旧控件。"""
+    window = DesktopWindow(AppSpec("navigation-test", "导航验收", storage_dir=tmp_path))
+    qtbot.addWidget(window)
+    window.show()
+    first = QToolButton()
+    first.setText("业务导航")
+    window.set_title_bar_navigation(first)
+    bar = window.title_bar
+    assert first.parentWidget() is bar and first.isVisible()
+    assert bar.box.indexOf(first) == bar.box.indexOf(bar.menu_bar) + 1
+    window.set_title_bar_navigation(first)
+    assert isValid(first) and bar.navigation is first
+    second = QLineEdit("替换导航")
+    window.set_title_bar_navigation(second, beside_window_controls=True)
+    assert not first.isVisible() and bar.navigation is second
+    window.add_action(ActionSpec("business.late", "动态动作", lambda: None, toolbar=True))
+    # 新增业务动作也排在导航前，文件切换入口和窗口按钮组之间始终没有业务动作。
+    assert bar.box.indexOf(bar.action_buttons[-1]) < bar.box.indexOf(second) == bar.box.count() - 2
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(first)
+    window.set_title_bar_navigation(None)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(second) and bar.navigation is None
+    assert bar.box.itemAt(bar.box.count() - 1).layout() is bar.window_controls

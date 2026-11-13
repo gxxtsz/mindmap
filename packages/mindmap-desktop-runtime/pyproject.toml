@@ -1,0 +1,16 @@
+[project]
+name = "mindmap-desktop-runtime"
+version = "0.1.0"
+readme = "README.md"
+license = "MIT AND ISC"
+license-files = ["LICENSE"]
+description = "导图桌面窗口、文档协调、分屏布局与会话恢复"
+requires-python = ">=3.12,<3.14"
+dependencies = ['mindmap-desktop-api>=0.1.0,<0.2', 'PySide6>=6.12,<6.13']
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mindmap_desktop_runtime"]

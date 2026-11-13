@@ -1,7 +1,7 @@
 [project]
-name = "personal-workbench-workspace"
+name = "mindmap"
 version = "0.1.0"
-description = "使用 uv workspace 管理的插件化个人工作台"
+description = "以思维导图及节点专用详情页为核心的桌面应用"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
@@ -10,15 +10,15 @@ dependencies = []
 package = false
 
 [tool.uv.workspace]
-# packages 仅承载通用基础设施，导图引擎和 Qt 组件归属导图插件目录。
-# 导图分组目录不放 pyproject.toml。四个分发成员共用根工作区和锁文件。
+# 导图是唯一业务主体，扩展只能通过节点专用详情页接入。
+# packages 保留桌面基础设施；所有成员共用根工作区与锁文件。
 members = [
     "packages/*",
-    "plugins/workbench-plugin-mindmap/core",
-    "plugins/workbench-plugin-mindmap/qt-render",
-    "plugins/workbench-plugin-mindmap/qt-editor",
-    "plugins/workbench-plugin-mindmap/workbench-adapter",
-    "plugins/workbench-plugin-software-structure",
+    "mindmap/core",
+    "mindmap/qt-render",
+    "mindmap/qt-editor",
+    "mindmap/application",
+    "extensions/software-structure",
     "apps/*",
 ]
 
@@ -26,17 +26,17 @@ members = [
 mindmap-core = { workspace = true }
 mindmap-qt-render = { workspace = true }
 mindmap-qt-editor = { workspace = true }
-workbench-api = { workspace = true }
-workbench-runtime = { workspace = true }
-workbench-plugin-mindmap = { workspace = true }
-workbench-plugin-software-structure = { workspace = true }
-personal-workbench = { workspace = true }
+mindmap-desktop-api = { workspace = true }
+mindmap-desktop-runtime = { workspace = true }
+mindmap-application = { workspace = true }
+mindmap-extension-software-structure = { workspace = true }
+mindmap-app = { workspace = true }
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.11,<1"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages", "plugins", "apps"]
+testpaths = ["packages", "mindmap", "extensions", "apps"]
 addopts = "--import-mode=importlib"
 qt_api = "pyside6"
 

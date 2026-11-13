@@ -1,0 +1,26 @@
+[project]
+name = "mindmap-extension-software-structure"
+version = "0.1.0"
+description = "思维导图节点的软件架构详情页、模块依赖图与接口说明"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<3.14"
+dependencies = ["mindmap-qt-editor>=0.1.0,<0.2", "PySide6>=6.12,<6.13"]
+
+[project.entry-points."mindmap.node_pages"]
+software-structure = "mindmap_extension_software_structure:provider"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+# 工作区忽略用户的 .software-structure 文件，随节点扩展分发的模板需要显式纳入打包。
+artifacts = ["/src/mindmap_extension_software_structure/resources/软件结构模板.software-structure"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mindmap_extension_software_structure"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/README.md", "/LICENSE", "/pyproject.toml"]

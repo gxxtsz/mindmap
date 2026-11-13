@@ -1,0 +1,28 @@
+[project]
+name = "mindmap-app"
+version = "0.1.0"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+description = "思维导图产品入口、必备主体装配与历史配置迁移"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "mindmap-desktop-runtime>=0.1.0,<0.2",
+    "mindmap-application>=0.1.0,<0.2",
+    "mindmap-extension-software-structure>=0.1.0,<0.2",
+    "PySide6>=6.12,<6.13",
+]
+
+[project.gui-scripts]
+mindmap = "mindmap_app:main"
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mindmap_app"]
+
+[tool.hatch.build.targets.sdist]
+# 用户架构来源默认被工作区忽略，源码包中的回归样例须显式纳入。
+artifacts = ["/tests/data/示例.software-structure"]
