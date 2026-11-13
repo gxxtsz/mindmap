@@ -50,7 +50,7 @@ finally:
 
 - 组件提供节点、图片和 11 种父子分支的绘制及 PNG/SVG/PDF 导出。
 
-- 专用剪贴板与原生文件共用 JSON 结构校验，兼容版本 2 至 7。片段内引用指向复制出的页面；片段外引用仅在同一打开文档中恢复。
+- 专用剪贴板与原生文件共用 JSON 结构校验，兼容版本 2 至 8。片段内引用指向复制出的页面，片段外引用仅在同一打开文档中恢复。
 
 - `choose_page_reference()` 为单选普通节点设置或更换引用，`clear_page_reference()` 解除引用。`open_page_reference(node_id=None)` 在当前画布跳转，路径栏可返回来源。只读画布保留跳转能力，临时返回位置不写入会话。
 
@@ -687,11 +687,13 @@ finally:
 
 ## 节点图与专用详情页
 
-`MindMapWidget.open_node_graph(owner_id, create=False)` 打开节点图，创建入口传入 `create=True`。图和树共用视口、场景、节点图元、选择和原地编辑器。图的分层几何以 `LayoutResult` 交给共用的场景同步逻辑。图内标识的读写通过所属节点上的引擎事务完成。
+`MindMapWidget.open_node_graph(node_id, create=False)` 打开节点图，允许创建时传入 `create=True`。树页使用文档节点 ID，图页使用当前图的局部 ID。图和树共用视口、场景、节点图元、选择和原地编辑器。图的分层几何以 `LayoutResult` 交给共用的场景同步逻辑。
 
 `GraphSettingsPanel.bind_canvas(canvas)` 将图页面设置绑定到活动图页，传入 `None` 时解绑。侧栏、编辑菜单和图页右键菜单共用 `graph_auto_layout` 动作。
 
 `MindMapWidget.graph_edge_selection_count` 返回当前标签明确选中的连线数量。`graph_edge_selection_changed` 在选择发生变化时传出新数量，供宿主刷新状态栏。节点选择产生的关联边高亮只在视口绘制。
+
+图页单选节点时，`graph_node_page_actions()` 提供详情页、子导图和下级图的可见动作，供宿主编辑菜单与节点右键菜单共用。图内动作使用局部节点 ID，页面路径、最近访问和会话恢复使用独立的页面 ID。
 
 `mindmap_qt_editor.node_pages` 提供 `NodePageProvider`、`NodePageWidget`、`NodePageContext`、`NodePageRegistry` 和 `NodePageHost`。容器包装已有 `MindMapWidget`，在同一标签内切换原导图与专用详情页。
 

@@ -52,7 +52,7 @@ def parse_graph_text(text: str) -> NodeGraph:
 
 
 def format_graph_text(graph: NodeGraph) -> str:
-    """按声明顺序生成规范文本；手动坐标和筛选属于导图内容。"""
+    """按声明顺序生成节点标题与连线文本，附页绑定和手动坐标由原生文档保存。"""
     # 文本控件会将特殊空格或分隔符转换为普通空格或换行。只转义这些字符，
     # 中文标题仍直接显示，生成的文本在编辑器和剪贴板中可以无损往返。
     lines = [f"节点 {node.id} {json.dumps(node.title, ensure_ascii=False).translate(_QT_TEXT_ESCAPES)}"

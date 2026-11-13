@@ -1,4 +1,4 @@
-"""原生文档结构映射；节点图和专用详情页使用版本 7。"""
+"""原生文档结构映射；图节点绑定使用版本 8，旧图和专用详情页沿用版本 7。"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from mindmap_core import (
 )
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _BASE_SCHEMA_VERSION = 5
 
 
@@ -31,7 +31,8 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
-    节点图及扩展详情使用版本 7，页面引用至少使用版本 6；空字段省略。
+    图节点绑定使用版本 8，普通节点图及扩展详情至少使用版本 7，
+    页面引用至少使用版本 6；空字段省略。
     """
     if isinstance(document, MindMapPageView):
         raise MindMapError("单页读模型不能保存为完整文件，请使用引擎的完整文档快照")
@@ -55,10 +56,12 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
         if not node.extension_pages:
             record.pop("extension_pages")
         else:
-            version = 7
-            # asdict 已复制嵌套数据。原样保留版本一的字段结构，只在写出时清空旧筛选。
+            version = max(version, 7)
+            # asdict 已复制嵌套数据，清理旧筛选不会修改文档快照。
             if graph := record["extension_pages"].get(GRAPH_PAGE_TYPE):
                 graph["data"]["hidden_node_ids"] = []
+                if graph["version"] == 2:
+                    version = 8
         nodes.append(record)
     return {
         "format": "mindmap",
@@ -76,7 +79,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
 
 def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindMapDocument:
-    """读取版本 2 至 7，校验全部页面关系及资源后返回独立文档。"""
+    """读取版本 2 至 8，校验全部页面关系及资源后返回独立文档。"""
     return _from_dict(data, resources=resources, copy_input=True)
 
 
@@ -125,6 +128,10 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                 if version < 7 and name == "nodes" and "extension_pages" in record:
                     raise MindMapError("节点附属数据需要版本 7 文档格式")
                 entity = factory(**record)
+                if version < 8 and name == "nodes" and isinstance(entity.extension_pages, dict):
+                    graph = entity.extension_pages.get(GRAPH_PAGE_TYPE)
+                    if isinstance(graph, dict) and graph.get("version") == 2:
+                        raise MindMapError("图节点附页需要版本 8 文档格式")
                 if entity.id in result:
                     raise MindMapError(f"重复标识：{entity.id}")
                 result[entity.id] = entity

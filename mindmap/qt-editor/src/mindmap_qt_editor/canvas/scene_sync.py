@@ -35,7 +35,15 @@ class SceneSyncMixin:
         if event.kind != "saved":
             history_graph = (parse_graph_page_id(changes.page_id)
                              if changes is not None and event.kind in ("undo", "redo") else None)
-            if self.graph is not None or (history_graph is not None and not external):
+            removed_graph_descendant = False
+            if changes is not None and self.current_page_kind in ("submap", "detail"):
+                table = "submaps" if self.current_page_kind == "submap" else "detail_pages"
+                pair = changes.collections.get(table, {}).get(self.current_page_id)
+                removed_graph_descendant = (pair is not None and pair[1 if event.forward else 0] is None
+                                            and any(parse_graph_page_id(key) is not None
+                                                    for key in self._page_chain))
+            if self.graph is not None or (history_graph is not None and not external) or removed_graph_descendant:
+                # 删除跨越图的所有权链时，通用树页同步无法定位图内入口。
                 self._apply_graph_event(event)
                 return
         if event.kind != "saved" and changes is not None:
@@ -244,7 +252,7 @@ class SceneSyncMixin:
         self.document_changed.emit(event)
 
     def _apply_graph_event(self, event):
-        """按所属树节点更新图投影，树节点 ID 和图内局部 ID 始终分别解析。
+        """刷新图投影，并处理图与附页间的历史重放及级联删除后的回退。
 
         本地撤销和重做可以进入受影响的图。其他标签只更新内容，不抢占视图；当前图
         或其入口被删除时，优先返回仍存在的所属节点或祖先页。纯保存走原有通知路径。
@@ -254,6 +262,8 @@ class SceneSyncMixin:
         self._cache_page_view()
         page = self.current_page_id
         owner = parse_graph_page_id(page)
+        previous_owner = self._attached_page_owner(page)
+        return_path = self.path_navigation.entries
         previous = self.graph
         before = self.selected_node_ids()
         changes = event.changes
@@ -272,16 +282,16 @@ class SceneSyncMixin:
             destination_owner = parse_graph_page_id(destination)
             return_owner = None
             if not self._book_document.has_page(destination):
-                return_owner = destination_owner or owner
+                return_owner = destination_owner or previous_owner
                 if return_owner in self._book_document.nodes:
                     destination = self.engine.node_page_id(return_owner)
                 else:
                     return_owner = None
                     destination = next((item for item in reversed(self._page_chain)
                                         if self._book_document.has_page(item)), None)
-            elif destination != page and owner in self._book_document.nodes:
-                if self.engine.node_page_id(owner) == destination:
-                    return_owner = owner
+            elif destination != page and previous_owner in self._book_document.nodes:
+                if self.engine.node_page_id(previous_owner) == destination:
+                    return_owner = previous_owner
             if destination == page and owner is not None:
                 updated = self._book_document.page_view(page)
                 self._refresh_graph_projection(updated, external)
@@ -290,10 +300,15 @@ class SceneSyncMixin:
                     self.center_root()
             else:
                 self.finish_edit(commit=False)
+                inspiration_root = self._inspiration_root_for(return_owner)
+                if destination == self.engine.inspiration_id and inspiration_root is None:
+                    inspiration_root = next((entry.node_id for entry in return_path
+                                             if entry.page_id == destination), None)
                 self._switch_page(destination, notify=False, cache=False,
-                                  inspiration_root_id=self._inspiration_root_for(return_owner))
-                if return_owner in self._document.nodes and not self.is_node_selected(return_owner):
-                    self._locate_page_node(return_owner)
+                                  inspiration_root_id=inspiration_root)
+                if return_owner is not None and (key := self._local_page_owner(return_owner)) is not None:
+                    if not self.is_node_selected(key):
+                        self._locate_page_node(key)
 
             after = self.selected_node_ids()
             if event.kind == "change":
@@ -329,7 +344,7 @@ class SceneSyncMixin:
             key = self.editor.node_id
             if key not in updated.nodes or (not external and previous.nodes.get(key) != updated.nodes[key]):
                 self.finish_edit(commit=False)
-        if previous.graph == updated.graph and previous.theme == updated.theme:
+        if previous.graph == updated.graph and previous.theme == updated.theme and previous.nodes == updated.nodes:
             self._document.title = updated.title
             return
         self._document = updated
@@ -342,7 +357,8 @@ class SceneSyncMixin:
         self.refresh()
         if self.editor is not None:
             self.editor.base_layout = self.layout_result
-            self._update_edit_preview(self.editor, force=True)
+            if not self.editor.refresh_page_controls(self._visuals[self.editor.node_id]):
+                self._update_edit_preview(self.editor, force=True)
         self._notify_selection()
 
     def _detail_measurement_changes(self, document, dirty):

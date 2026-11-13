@@ -4,11 +4,12 @@ from collections.abc import Iterable
 from dataclasses import replace
 
 from mindmap_core import GraphEdge, GraphNode, MindMapError, NodeGraph
+from mindmap_core.formats import decode_document, encode_document
 from mindmap_core.formats.graph import format_graph_text, parse_graph_text
 from mindmap_core.layouts.graph import build_graph_layout, graph_layout
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE, graph_page_id, parse_graph_page_id
-from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QPainterPathStroker
+from PySide6.QtCore import QMimeData, QPoint, QRect, Qt
+from PySide6.QtGui import QAction, QPainterPathStroker
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -22,17 +23,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .clipboard import GRAPH_CLIPBOARD_MIME
 from .interactions import document_interaction
 
 _TREE_ACTIONS = (
     "properties", "branch_style", "insert_parent", "move_up", "move_down", "fold", "expand_all",
     "collapse_all", "image", "image_url", "remove_image", "hyperlink", "add_inspiration",
     "move_to_inspiration", "attach_inspirations", "group_inspirations", "create_submap",
-    "convert_descendants_to_submap", "convert_submap_to_descendants", "enter_submap",
-    "favorite_submap", "delete_submap", "create_detail_page", "enter_detail_page",
-    "delete_detail_page", "set_page_reference", "open_page_reference", "clear_page_reference",
+    "convert_descendants_to_submap", "convert_submap_to_descendants",
+    "set_page_reference", "open_page_reference", "clear_page_reference",
 )
 _GRAPH_ACTIONS = ("graph_text", "graph_add_edge", "graph_auto_layout", "graph_remove")
+_GRAPH_NODE_PAGE_ACTIONS = (
+    "create_detail_page", "enter_detail_page", "delete_detail_page",
+    "create_submap", "enter_submap", "favorite_submap", "delete_submap", "node_graph",
+)
 
 
 def _unused_node_ids(nodes, count):
@@ -108,15 +113,18 @@ class GraphCanvasMixin:
                 key == "graph_text" or can_edit and (key == "graph_remove" or bool(graph.nodes))))
         action = actions["node_graph"]
         node = self._document.nodes.get(self.current_node_id())
-        eligible = not in_graph and self.selection_count == 1 and node is not None and not node.is_image_node
+        eligible = self.selection_count == 1 and node is not None and not node.is_image_node
+        allowed = self.engine.can_create_node_pages(self.current_page_id)
         existing = eligible and GRAPH_PAGE_TYPE in node.extension_pages
         action.setText("打开图" if existing else "添加图")
-        action.setVisible(not in_graph and not (node and node.is_image_node))
-        action.setEnabled(bool(eligible and not editing and (existing or self.editable)))
+        action.setVisible(bool(existing or (allowed and not (node and node.is_image_node) and (not in_graph or eligible))))
+        action.setEnabled(bool(eligible and not editing and (existing or (allowed and self.editable))))
         if not in_graph:
             return
         for key in _TREE_ACTIONS:
             actions[key].setEnabled(False)
+        self._update_node_page_actions(node if eligible else None, editing, creation_allowed=allowed,
+                                       show_creation=eligible, detail_page=node.detail_page_id if eligible else None)
         for key in ("edit", "cut", "copy"):
             actions[key].setEnabled(bool(self.selection_count and not editing and (key == "copy" or self.editable)))
         actions["delete"].setEnabled(bool(can_edit and (self.selection_count or self.graph_edge_selection_count)))
@@ -127,30 +135,65 @@ class GraphCanvasMixin:
         groups = [("", (add_node, "graph_add_edge", "graph_text", "graph_auto_layout"))]
         if not on_canvas:
             groups.append(("", ("edit", "cut", "copy", "paste", "delete")))
+            if self.selection_count == 1:
+                groups.append(("页面", _GRAPH_NODE_PAGE_ACTIONS))
         else:
             groups.append(("", ("paste", "fit", "center", "reset_zoom", "zoom_in", "zoom_out")))
         return [*groups, ("", ("undo", "redo", "graph_remove"))]
 
+    def graph_node_page_actions(self) -> tuple[QAction, ...]:
+        """借用当前图节点可见的附页动作，树页和无有效选择时返回空元组。
+
+        动作由画布持有，供宿主在 GUI 线程组装编辑菜单。启用状态随只读、编辑及
+        附页变化同步；宿主无需重新注册回调。
+        """
+        if self.graph is None:
+            return ()
+        return tuple(self._actions[key] for key in _GRAPH_NODE_PAGE_ACTIONS if self._actions[key].isVisible())
+
     @document_interaction
     def open_node_graph(self, node_id: str | None = None, *, create=False) -> None:
-        """通过所属节点打开图页；显式创建时检查文字节点、只读权限及输入法状态。"""
-        if self.graph is not None and node_id is None:
-            return
+        """打开文字节点拥有的图；create 为真时允许在节点尚无图时创建并进入。
+
+        当前图中的 node_id 使用局部标识，树页中的显式参数使用文档标识。
+        详情页只可打开已有旧图，只读及输入法规则沿用普通页面导航。
+        """
         if node_id is None and self.selection_count != 1:
             raise MindMapError("请先选择一个文字节点")
-        owner = self.current_node_id() if node_id is None else node_id
-        self._prepare_page_navigation()
-        if not self._book_document.has_page(graph_page_id(owner)):
+        key = self.current_node_id() if node_id is None else node_id
+        target = self._graph_target() if self.graph is not None else None
+        if target is not None:
+            owner = self.engine.graph_node_document_id(target[1], key)
+        else:
+            owner = key
+        existing = owner is not None and self._book_document.has_page(graph_page_id(owner))
+        if not existing:
             if not create:
                 raise MindMapError("该节点没有图")
             self._ensure_editable()
-            self.engine.set_node_graph(owner, NodeGraph())
+            source_page = graph_page_id(target[1]) if target is not None else self.engine.node_page_id(owner)
+            if not self.engine.can_create_node_pages(source_page):
+                raise MindMapError("详情页内及其中的旧图不能创建图")
+        self._prepare_page_navigation()
+        if target is not None:
+            self._read_active_graph(target)
+            owner = self.engine.graph_node_document_id(target[1], key)
+        if owner is None or not self._book_document.has_page(graph_page_id(owner)):
+            self._ensure_editable()
+            if not create:
+                raise MindMapError("该节点没有图")
+            if target is not None:
+                page = self.engine.create_graph_node_page(target[1], key, kind="graph")
+                owner = parse_graph_page_id(page)
+            else:
+                self.engine.set_node_graph(owner, NodeGraph())
         self._enter_graph_page(owner)
 
     def _enter_graph_page(self, owner: str) -> None:
-        """输入检查已完成后切换图页，源树的视口和入口选择由共用导航记录。"""
-        if owner in self._document.nodes and self.graph is None:
-            self.select_nodes([owner])
+        """输入检查后切到图页，记录当前树页或父图的入口选择和视图。"""
+        key = self._local_page_owner(owner)
+        if key is not None:
+            self.select_nodes([key])
         self._switch_page(graph_page_id(owner))
 
     def _graph_target(self) -> tuple[int, str]:
@@ -277,45 +320,122 @@ class GraphCanvasMixin:
         nodes = tuple(replace(node, title=text) if node.id == node_id else node for node in graph.nodes)
         self._write_active_graph(replace(graph, nodes=nodes))
 
-    def _delete_graph_nodes(self, ids):
-        """一次移除所选节点、相连的入边和出边以及失效的坐标。"""
-        graph = self._read_active_graph()
+    def _delete_graph_nodes(self, ids, *, copied=False):
+        """一次删除节点、连线及附页。剪切已将完整内容放入剪贴板，无需删除确认。"""
+        target = self._graph_target()
+        graph = self._read_active_graph(target)
         ids = set(ids)
         nodes = tuple(node for node in graph.nodes if node.id not in ids)
         edges = tuple(edge for edge in graph.edges if edge.source not in ids and edge.target not in ids)
-        self._write_active_graph(graph.with_content(nodes, edges))
+        if copied or self._confirm_graph_node_removal(graph, ids):
+            self._write_active_graph(graph.with_content(nodes, edges), target)
+
+    def _graph_owned_page_counts(self, graph: NodeGraph, ids) -> tuple[int, int, int]:
+        """统计指定局部节点及其后代拥有的详情、子导图、图数量，用于删除确认。"""
+        book = self._book_document
+        detail = submap = child_graph = 0
+        for entry in graph.nodes:
+            if entry.id not in ids or entry.document_node_id is None:
+                continue
+            for key in book.owned_descendants(entry.document_node_id):
+                node = book.nodes[key]
+                detail += bool(node.detail_page_id)
+                submap += bool(node.submap_id)
+                child_graph += GRAPH_PAGE_TYPE in node.extension_pages
+        return detail, submap, child_graph
+
+    def _confirm_graph_node_removal(self, graph: NodeGraph, ids) -> bool:
+        """移除带附页节点前确认范围，确认后核对图身份、权限及期间的内容变化。
+
+        取消返回 False，普通节点无需弹窗。只读、切页或其他标签修改后不提交删除。
+        """
+        details, submaps, graphs = self._graph_owned_page_counts(graph, ids)
+        if not (details or submaps or graphs):
+            return True
+        return self._confirm_page_deletion(
+            "删除图节点及附属页面",
+            f"将删除 {len(ids)} 个图节点及其关联连线，以及 {details} 张详情页、"
+            f"{submaps} 张子导图、{graphs} 张图。\n删除后可以撤销。",
+        )
 
     def _copy_graph_nodes(self):
-        ids = set(self.selected_node_ids())
-        graph = self.graph
+        """写入携带附页的专用图剪贴板，并提供现有图文本供其他程序使用。"""
+        ids = self.selected_node_ids()
         if ids:
-            fragment = NodeGraph(tuple(node for node in graph.nodes if node.id in ids),
-                                 tuple(edge for edge in graph.edges if edge.source in ids and edge.target in ids))
-            QApplication.clipboard().setText(format_graph_text(fragment))
+            fragment = self.engine.copy_graph_fragment(self._graph_target()[1], ids)
+            record = fragment.root.extension_pages[GRAPH_PAGE_TYPE]
+            graph = NodeGraph.from_data(record["data"], version=record["version"])
+            mime = QMimeData()
+            mime.setData(GRAPH_CLIPBOARD_MIME, encode_document(fragment, registry=self.format_registry,
+                                                              format_id="json"))
+            mime.setText(format_graph_text(graph))
+            QApplication.clipboard().setMimeData(mime)
 
     def _paste_graph_nodes(self) -> list[str]:
+        """优先还原专用剪贴板的附页，纯文本继续按图文本规则粘贴。"""
         self._ensure_editable()
-        fragment = parse_graph_text(QApplication.clipboard().text())
+        mime = QApplication.clipboard().mimeData()
+        if mime is None:
+            return []
+        target = self._graph_target()
+        if mime.hasFormat(GRAPH_CLIPBOARD_MIME):
+            payload = bytes(mime.data(GRAPH_CLIPBOARD_MIME))
+            document = decode_document(payload, registry=self.format_registry, format_id="json")
+            record = document.root.extension_pages.get(GRAPH_PAGE_TYPE)
+            if record is None or document.root.children or document.root.submap_id or document.root.detail_page_id:
+                raise MindMapError("图剪贴板片段无效")
+            source = NodeGraph.from_data(record["data"], version=record["version"])
+            if self.engine.can_create_node_pages(self.current_page_id) or not any(
+                    node.document_node_id for node in source.nodes):
+                self._prepare_page_navigation()
+                self._ensure_editable()
+                self._read_active_graph(target)
+                keys = self.engine.paste_graph_fragment(target[1], document)
+                if keys:
+                    self.reveal_nodes(keys)
+                return keys
+            revision = self._branch_content_revision
+            if QMessageBox.question(
+                    self, "粘贴到详情页中的图", "是否仅粘贴图节点和连线？附页仍保留在剪贴板。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return []
+            self._ensure_editable()
+            self._read_active_graph(target)
+            if revision != self._branch_content_revision:
+                raise MindMapError("确认期间图内容发生变化，请重新粘贴")
+            fragment = NodeGraph(tuple(GraphNode(node.id, node.title) for node in source.nodes), source.edges)
+        else:
+            fragment = parse_graph_text(mime.text())
         if not fragment.nodes:
             return []
         self._prepare_page_navigation()
-        graph = self._read_active_graph()
+        graph = self._read_active_graph(target)
         keys = _unused_node_ids((*graph.nodes, *fragment.nodes), len(fragment.nodes))
         remap = {node.id: key for node, key in zip(fragment.nodes, keys, strict=True)}
         nodes = (*graph.nodes, *(GraphNode(remap[node.id], node.title) for node in fragment.nodes))
         edges = (*graph.edges, *(GraphEdge(remap[edge.source], remap[edge.target]) for edge in fragment.edges))
-        self._write_active_graph(graph.with_content(nodes, edges))
+        self._write_active_graph(graph.with_content(nodes, edges), target)
         self.reveal_nodes(keys)
         return keys
 
     @document_interaction
-    def apply_graph_text(self, text: str) -> None:
-        """整体替换图文本定义，先解析全文再提交，已有标识沿用手动坐标。"""
+    def apply_graph_text(self, text: str) -> bool:
+        """替换图的节点标题和连线，保留同一局部 ID 的附页与手动坐标。
+
+        输入解析后按当前图和权限校验，删除带附页节点时先确认范围。取消返回 False；
+        成功或内容相同返回 True。只读、输入法候选或目标变化时抛出 MindMapError。
+        """
         self._ensure_editable()
         parsed = parse_graph_text(text)
         self._prepare_page_navigation()
-        graph = self._read_active_graph()
-        self._write_active_graph(graph.with_content(parsed.nodes, parsed.edges))
+        target = self._graph_target()
+        graph = self._read_active_graph(target)
+        removed = {node.id for node in graph.nodes} - {node.id for node in parsed.nodes}
+        if not self._confirm_graph_node_removal(graph, removed):
+            return False
+        self._write_active_graph(graph.with_content(parsed.nodes, parsed.edges), target)
+        return True
 
     def edit_graph_text(self) -> None:
         """打开本图的文本草稿。解析、权限或并发检查失败时在对话框内保留原文。"""
@@ -326,7 +446,8 @@ class GraphCanvasMixin:
         dialog.setWindowTitle("编辑图文本" if self.editable else "查看图文本")
         dialog.resize(640, 440)
         layout = QVBoxLayout(dialog)
-        hint = QLabel('用 节点 app "应用" 声明节点，用 app -> core 连接两个已声明的节点。', dialog)
+        hint = QLabel('用 节点 app "应用" 声明节点，用 app -> core 连接两个已声明的节点。'
+                      '保留节点标识可保留附页。', dialog)
         hint.setWordWrap(True)
         layout.addWidget(hint)
         editor = _GraphTextEditor(dialog)
@@ -357,7 +478,8 @@ class GraphCanvasMixin:
                     graph = self._read_active_graph(target)
                     if (graph.nodes, graph.edges) != (original.nodes, original.edges):
                         raise MindMapError("图内容已在其他视图更新，请复制草稿后重新打开")
-                    self.apply_graph_text(editor.source_text())
+                    if not self.apply_graph_text(editor.source_text()):
+                        return
                 except (MindMapError, OSError) as exc:
                     error.setText(str(exc))
                     error.show()
@@ -504,12 +626,10 @@ class GraphCanvasMixin:
         self._prepare_page_navigation()
         target = self._graph_target()
         graph = self._read_active_graph(target)
-        answer = QMessageBox.question(
-            self, "删除此图", "删除此图？删除后可以撤销。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._ensure_editable()
-            if self._read_active_graph(target) != graph:
-                raise MindMapError("确认期间图内容发生变化，请重新删除")
+        details, submaps, graphs = self._graph_owned_page_counts(graph, {node.id for node in graph.nodes})
+        if self._confirm_page_deletion(
+            "删除此图",
+            f"将删除此图的 {len(graph.nodes)} 个节点及其连线，以及 {details} 张详情页、"
+            f"{submaps} 张子导图、{graphs} 张下级图。\n删除后可以撤销。",
+        ):
             self.engine.remove_node_graph(target[1])

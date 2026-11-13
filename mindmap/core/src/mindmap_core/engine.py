@@ -15,7 +15,13 @@ from .events import ChangeEvent, EventDispatcher
 from .history import HistoryManager
 from .loading import ValidatedDocument
 from .models import MindMapDocument, Node, PageSummary, PathEntry, Theme
-from .node_pages import GRAPH_PAGE_TYPE, NodePagesMixin, parse_extension_page_id, parse_graph_page_id
+from .node_pages import (
+    GRAPH_PAGE_TYPE,
+    NodePagesMixin,
+    graph_page_id,
+    parse_extension_page_id,
+    parse_graph_page_id,
+)
 from .operations import DocumentEditor
 from .transactions import DocumentState, TransactionManager
 
@@ -111,7 +117,8 @@ class MindMapEngine(NodePagesMixin):
     def node_page_id(self, node_id: str) -> str | None:
         """查询节点所在区域或页面，主导图返回 None，灵感区返回 inspiration_id。
 
-        仅沿普通父链读取运行时索引，不跨附属页面入口，不复制或修改文档。
+        图节点须传已绑定的文档 ID，返回它所属图的页面 ID。树节点只沿普通父链
+        读取索引。查询不跨附页入口，不复制或修改文档。
         无效节点抛出中文 MindMapError；同步调用，返回标识可跨快照使用。
         """
         self._editor.node(node_id)
@@ -153,8 +160,12 @@ class MindMapEngine(NodePagesMixin):
             owner = document.nodes.get(owner_id)
             if inspiration_root_id is not None or owner is None or GRAPH_PAGE_TYPE not in owner.extension_pages:
                 return None
-            path = (*self.node_path(owner_id), PathEntry(page_id, owner_id, "图", True))
-            return PageSummary(page_id, None, "graph", f"{document.display_node(owner_id).text} · 图", path)
+            entry = self._graph_path_entry(owner_id)
+            path = self.node_path(owner_id)
+            if owner_id in self._state.graph_nodes:
+                path.pop()
+            path.append(entry)
+            return PageSummary(page_id, None, "graph", entry.text, tuple(path))
         target = parse_extension_page_id(page_id)
         if target is not None:
             node_id, type_id = target
@@ -182,12 +193,26 @@ class MindMapEngine(NodePagesMixin):
 
         空页面的根也可能拥有子导图，此时相邻页面根虽然同名，仍分别保留，
         避免深层根节点链失去返回入口。所有关联均使用 ID，不能按标题去重。
+        图节点附页的路径包含图页项；图页项用文档 ID 标识入口，局部 ID 只在
+        画布定位时通过 graph_node_location 解析。
         """
         self._editor.node(node_id)
         result = []
         key = node_id
         while True:
             page_id = self._state.page_id(key)
+            if (graph_owner := parse_graph_page_id(page_id)) is not None:
+                entry = self._graph_path_entry(graph_owner)
+                if not result:
+                    result.append(PathEntry(page_id, key, self._state.document.display_node(key).text))
+                result.insert(0, entry)
+                key = graph_owner
+                if key in self._state.graph_nodes:
+                    continue
+                # 图页项已经表达入口。仍保留入口所在的树页根和其他祖先。
+                if key not in self._state.root_pages:
+                    key = self._state.parents[key]
+                continue
             page = self._state.document.page_record(page_id)
             if page_id == self.inspiration_id:
                 local = []
@@ -208,10 +233,18 @@ class MindMapEngine(NodePagesMixin):
             if page_id is None:
                 break
             owner = page.owner_id
+            if owner in self._state.graph_nodes:
+                key = owner
+                continue
             parent_page = self._state.page(owner)
             key = (owner if self._state.page_id(owner) == self.inspiration_id
                    or owner == parent_page.root_id else self._state.parents[owner])
         return result
+
+    def _graph_path_entry(self, owner_id: str) -> PathEntry:
+        """用文档入口 ID 构造可点击图页项，标题取当前显示文字。"""
+        return PathEntry(graph_page_id(owner_id), owner_id,
+                         f"{self._state.document.display_node(owner_id).text} · 图", True)
 
     @property
     def inspiration_id(self) -> str:
@@ -364,6 +397,15 @@ class MindMapEngine(NodePagesMixin):
                     # 连续根节点子导图，也使祖先页面的路径严格成为后代的前缀。
                     steps.append(-1)
                     key = document.submaps[region].owner_id
+                    while (location := self._state.graph_nodes.get(key)) is not None:
+                        graph_owner, local_id = location
+                        cache_key = graph_page_id(graph_owner), "graph"
+                        if cache_key not in sibling_rows:
+                            sibling_rows[cache_key] = {
+                                entry.id: row for row, entry in enumerate(self.node_graph(graph_owner).nodes)
+                            }
+                        steps.extend((sibling_rows[cache_key][local_id], -2))
+                        key = graph_owner
 
             favorites = sorted(favorites, key=document_key)
         return tuple(PathEntry(key, document.submaps[key].root_id,

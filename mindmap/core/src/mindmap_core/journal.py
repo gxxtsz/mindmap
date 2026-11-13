@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from .errors import MindMapError
 from .history import ChangeSet, NodeMove, NodePlacement
 from .models import MindMapDocument, new_id
+from .node_pages import GRAPH_PAGE_TYPE, graph_members, graph_page_id, parse_graph_page_id
 
 
 @dataclass
@@ -30,9 +31,11 @@ class DocumentState:
         # 引用反查表只记录已提交关系；回滚无需修补。复制片段的来源令牌随打开的
         # 文档实例重建，防止另存的文件或重新打开的文件因恰好同 ID 而继承引用。
         self.reference_sources: dict[str, set[str]] = {}
+        self.graph_nodes: dict[str, tuple[str, str]] = {}
         self.clipboard_token = new_id()
         self.asset_counts = Counter()
         for key, node in document.nodes.items():
+            self._index_graph(key, node.extension_pages.get(GRAPH_PAGE_TYPE), add=True)
             if node.image_id:
                 self.asset_counts[node.image_id] += 1
             if node.page_reference_root_id:
@@ -52,12 +55,14 @@ class DocumentState:
         """登记新增实体，调用方传入由编辑器独立拥有的节点。"""
         self.journal.nodes.setdefault(node.id, self.document.nodes.get(node.id))
         self.document.nodes[node.id] = node
+        self._index_graph(node.id, node.extension_pages.get(GRAPH_PAGE_TYPE), add=True)
         for child in node.children:
             self.set_parent(child, node.id)
 
     def delete_node(self, key):
         """登记删除前值及父索引，祖先/后代由上层结构操作统一处理。"""
         self.journal.nodes.setdefault(key, self.document.nodes[key])
+        self._index_graph(key, self.document.nodes[key].extension_pages.get(GRAPH_PAGE_TYPE), add=False)
         del self.document.nodes[key]
         self.set_parent(key, None)
 
@@ -83,7 +88,9 @@ class DocumentState:
         setattr(self.document, name, deepcopy(value))
 
     def page_id(self, node_id):
-        """只沿当前节点的页内父链查询归属，不扫描其他页面或建立整图快照。"""
+        """先查图节点归属，再沿普通父链定位树页，无需扫描其他页面。"""
+        if node_id in self.graph_nodes:
+            return graph_page_id(self.graph_nodes[node_id][0])
         while node_id in self.parents:
             node_id = self.parents[node_id]
         if node_id not in self.root_pages:
@@ -91,9 +98,49 @@ class DocumentState:
         return self.root_pages[node_id]
 
     def page(self, node_id):
-        """返回节点所属页面的内部配置，调用方只能通过日志接口修改。"""
-        page_id = self.page_id(node_id)
-        return self.document.page_record(page_id)
+        """返回节点所在页的内部配置。图页使用主文档配置，写入仍须通过事务。"""
+        if node_id in self.graph_nodes:
+            return self.document
+        return self.document.page_record(self.page_id(node_id))
+
+    def can_create_node_pages(self, page_id: str | None) -> bool:
+        """沿实际归属检查页面是否允许新增三类附页；详情页和失效目标返回 False。"""
+        while True:
+            try:
+                kind = self.document.page_kind(page_id)
+            except KeyError:
+                return False
+            if kind != "graph":
+                return kind != "detail"
+            page_id = self.page_id(parse_graph_page_id(page_id))
+
+    def _index_graph(self, owner_id, record, *, add):
+        """增删一张图的绑定索引。删除时只移除该图自己的绑定，供回滚失败写入。"""
+        for key, local_id in graph_members(record).items():
+            current = self.graph_nodes.get(key)
+            if add:
+                if current is not None and current != (owner_id, local_id):
+                    raise MindMapError("图节点不能同时属于多个图")
+                self.graph_nodes[key] = owner_id, local_id
+            elif current == (owner_id, local_id):
+                del self.graph_nodes[key]
+
+    def set_graph(self, owner_id: str, record: dict | None) -> None:
+        """登记已校验的图记录并即时同步绑定索引，供同一事务内的附页操作读取。
+
+        None 移除图记录。调用者负责删除失去归属的节点和页面；记录所有权移交给
+        当前文档。索引在失败、撤销和重做时随节点前后值恢复。
+        """
+        old = self.document.nodes[owner_id].extension_pages.get(GRAPH_PAGE_TYPE)
+        if old == record:
+            return
+        owner = self.edit_node(owner_id)
+        self._index_graph(owner_id, old, add=False)
+        if record is None:
+            owner.extension_pages.pop(GRAPH_PAGE_TYPE, None)
+        else:
+            owner.extension_pages[GRAPH_PAGE_TYPE] = record
+            self._index_graph(owner_id, record, add=True)
 
     def set_page(self, key, page, *, kind=None):
         """以写时复制方式替换页面记录，同时即时维护根索引供嵌套事务查询。"""
@@ -130,6 +177,12 @@ class DocumentState:
                     self.root_pages.pop(root)
             self.root_pages.update(dict.fromkeys(new.root_ids, new.id))
         nodes = changes.collections.get("nodes", {})
+        # 先移除旧归属，再恢复新归属。普通提交已经在写入时同步该索引。
+        if parents:
+            for add, column in ((False, 1 - index), (True, index)):
+                for key, pair in nodes.items():
+                    if (node := pair[column]) is not None:
+                        self._index_graph(key, node.extension_pages.get(GRAPH_PAGE_TYPE), add=add)
         pages = {**changes.collections.get("submaps", {}), **changes.collections.get("detail_pages", {})}
         for pair in pages.values():
             old = pair[1 - index]
@@ -313,6 +366,10 @@ class TransactionJournal:
     def rollback(self):
         """原实体未被修改，直接恢复实体及父索引，无需再次深拷贝整图。"""
         document = self.state.document
+        for add, source in ((False, document.nodes), (True, self.nodes)):
+            for key in self.nodes:
+                if (node := source.get(key)) is not None:
+                    self.state._index_graph(key, node.extension_pages.get(GRAPH_PAGE_TYPE), add=add)
         for name in ("submaps", "detail_pages"):
             for key, old in getattr(self, name).items():
                 current = getattr(document, name).get(key)

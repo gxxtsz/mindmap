@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import fields
+from dataclasses import fields, replace
 
 from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
+from .graph import NodeGraph, validate_graph_title
 from .inspiration import InspirationEditorMixin
 from .models import Asset, MindMapDocument, MindMapPage, Node, _resolve_detail_page, new_id
+from .node_pages import GRAPH_PAGE_TYPE, graph_members
 from .transactions import DocumentState
 from .validation import validate_page_reference
 
@@ -160,23 +162,67 @@ class DocumentEditor(InspirationEditorMixin):
         for key, value in patch.items():
             setattr(node, key, deepcopy(value))
         if "text" in patch:
-            # 根节点与入口构成名称别名链；仅沿相关边传播，不扫描全部页面。
-            pending, seen = [node_id], {node_id}
-            while pending:
-                current = self.node(pending.pop())
-                linked = []
-                if current.submap_id:
-                    linked.append(self.document.submaps[current.submap_id].root_id)
-                if current.detail_page_id:
-                    linked.append(self.document.detail_pages[current.detail_page_id].root_id)
-                page_id = self._state.root_pages.get(current.id)
-                if page_id is not None and page_id != self.document.inspiration.id:
-                    linked.append(self.document.page_record(page_id).owner_id)
-                for key in linked:
-                    if key not in seen:
-                        seen.add(key)
-                        self.edit(key).text = patch["text"]
-                        pending.append(key)
+            for owner_id, titles in self._sync_page_titles(node_id, patch["text"]).items():
+                record = self.node(owner_id).extension_pages[GRAPH_PAGE_TYPE]
+                graph = NodeGraph.from_data(record["data"], version=record["version"])
+                updated = replace(graph, nodes=tuple(
+                    replace(entry, title=titles[entry.id]) if entry.id in titles else entry
+                    for entry in graph.nodes))
+                self._state.set_graph(owner_id, updated.to_record())
+
+    def _sync_page_titles(self, node_id, text):
+        """沿子导图与详情页别名链同步标题，返回需要更新的图及局部标题。
+
+        批量改图文本时由调用者一次写回整张图，避免每个节点重复复制整图；
+        从树页改名时由 update_node 写回受影响的图。所属图与下级图的节点不是别名。
+        """
+        graphs = {}
+        pending, seen = [node_id], set()
+        while pending:
+            key = pending.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            current = self.edit(key)
+            current.text = text
+            if key in self._state.graph_nodes:
+                validate_graph_title(text)
+                owner_id, local_id = self._state.graph_nodes[key]
+                graphs.setdefault(owner_id, {})[local_id] = text
+            if current.submap_id:
+                pending.append(self.document.submaps[current.submap_id].root_id)
+            if current.detail_page_id:
+                pending.append(self.document.detail_pages[current.detail_page_id].root_id)
+            page_id = self._state.root_pages.get(key)
+            if page_id is not None and page_id != self.document.inspiration.id:
+                pending.append(self.document.page_record(page_id).owner_id)
+        return graphs
+
+    def replace_node_graph(self, owner_id: str, previous: NodeGraph, graph: NodeGraph | None) -> None:
+        """用同一事务写入图、同步标题并级联删除移除的图节点所拥有的内容。
+
+        保留相同局部 ID 的绑定，拒绝通过公共替换接口注入其他节点的文档 ID。
+        graph 为 None 表示删除整张图。调用方已检查所属节点的创建权限。
+        """
+        old = {node.id: node for node in previous.nodes if node.document_node_id is not None}
+        if graph is not None:
+            record = graph.to_record()
+            graph = NodeGraph.from_data(record["data"], version=record["version"])
+            nodes = []
+            for entry in graph.nodes:
+                before = old.pop(entry.id, None)
+                document_id = before.document_node_id if before is not None else None
+                if entry.document_node_id not in (None, document_id):
+                    raise MindMapError("请通过附页操作建立图节点绑定")
+                if before is not None and before.title != entry.title:
+                    self._sync_page_titles(document_id, entry.title)
+                nodes.append(replace(entry, document_node_id=document_id))
+            record = replace(graph, nodes=tuple(nodes)).to_record()
+        else:
+            record = None
+        for entry in old.values():
+            self._remove_owned_nodes(self.document.owned_descendants(entry.document_node_id))
+        self._state.set_graph(owner_id, record)
 
     def set_page_reference(self, node_id, target_root_id):
         """验证并登记独立的导航引用，保留原文和两类附属页的所有权。"""
@@ -212,9 +258,10 @@ class DocumentEditor(InspirationEditorMixin):
                     or roots[target] == self._state.page_id(key)):
                 self.edit(key).page_reference_root_id = None
 
-    @staticmethod
-    def require_plain_parent(node):
+    def require_plain_parent(self, node):
         """所有产生普通父子关系的入口共用此约束，不能借粘贴或拖动绕过。"""
+        if node.id in self._state.graph_nodes:
+            raise MindMapError("图节点请使用连线关联，或在附页中添加子节点")
         if node.submap_id:
             raise MindMapError("此节点已有子导图，请进入子导图添加内容")
 
@@ -274,6 +321,8 @@ class DocumentEditor(InspirationEditorMixin):
     def convert_submap_to_descendants(self, node_id):
         """移除当前一层页面，将完整分支接回入口，独立根内容以普通子节点保留。"""
         owner = self.node(node_id)
+        if node_id in self._state.graph_nodes:
+            raise MindMapError("图节点的子导图不能转为普通子节点")
         if not owner.submap_id:
             raise MindMapError("此节点没有子导图")
         destination = self._state.page_id(node_id)
@@ -303,8 +352,8 @@ class DocumentEditor(InspirationEditorMixin):
         """
         if self.node(node_id).is_image_node:
             raise MindMapError("纯图片节点不能拥有详情页或子导图")
-        if self.document.page_kind(self._state.page_id(node_id)) == "detail":
-            raise MindMapError("详情页内不能拥有详情页或子导图")
+        if not self._state.can_create_node_pages(self._state.page_id(node_id)):
+            raise MindMapError("详情页内及其中的旧图不能创建详情页、子导图或图")
 
     def favorite_submap_ids(self):
         """借助文档元数据查询有效收藏，保留首次出现的顺序，不枚举全文件页面。
@@ -409,6 +458,8 @@ class DocumentEditor(InspirationEditorMixin):
         node_ids = list(node_ids)
 
         roots = self.roots(node_ids)
+        if any(key in self._state.graph_nodes for key in roots):
+            raise MindMapError("请在图页删除图节点")
         if any(key in self._state.root_pages and key not in self.document.inspiration.root_ids for key in roots):
             raise MindMapError("根节点不能删除")
         self._unlink_branches(roots)
@@ -423,6 +474,8 @@ class DocumentEditor(InspirationEditorMixin):
         roots = self.roots(node_ids)
         if not roots:
             return
+        if target_id in self._state.graph_nodes or any(key in self._state.graph_nodes for key in roots):
+            raise MindMapError("图节点不能作为普通树分支移动")
         self.node(target_id)
         if any(key in self._state.root_pages and key not in self.document.inspiration.root_ids for key in roots):
             raise MindMapError("根节点不能移动")
@@ -491,16 +544,24 @@ class DocumentEditor(InspirationEditorMixin):
         roots = self.roots(node_ids)
         if not roots:
             raise MindMapError("请选择需要复制的节点")
+        if any(key in self._state.graph_nodes for key in roots):
+            raise MindMapError("请使用图节点复制接口")
         if len({self._state.page_id(key) for key in roots}) != 1:
             raise MindMapError("不能同时复制不同页面的节点")
         selected = {x for root in roots for x in self.document.owned_descendants(root)}
         fragment = MindMapDocument.new("剪贴板")
         fragment.root.children = roots.copy()
-        fragment.nodes.update({x: deepcopy(self.node(x)) for x in selected})
+        source = self._state.page(roots[0])
+        self._copy_owned_contents(fragment, selected, source)
         # 根级自动分配方向会因复制范围改变；记录原分支方向，保持复制后的节点朝向。
         for root in roots:
             side = self.side(root)
             fragment.nodes[root].direction = side if side in ("left", "right") else None
+        return fragment
+
+    def _copy_owned_contents(self, fragment, selected, source):
+        """把所有权闭包复制到已有的剪贴板根，复用页面、引用和资源的复制规则。"""
+        fragment.nodes.update({key: deepcopy(self.node(key)) for key in selected})
         fragment.submaps = {page.id: deepcopy(page) for key in selected
                             if (page_id := self.node(key).submap_id)
                             for page in [self.document.submaps[page_id]]}
@@ -525,10 +586,95 @@ class DocumentEditor(InspirationEditorMixin):
             for node in fragment.nodes.values()
             if node.image_id
         }
-        source = self._state.page(roots[0])
         fragment.layout, fragment.theme = deepcopy(source.layout), deepcopy(source.theme)
         fragment.validate()
+
+    def copy_graph_fragment(self, graph: NodeGraph, node_ids) -> MindMapDocument:
+        """生成包含图节点、内部连线和全部附页的独立剪贴板文档。
+
+        选中节点按原声明顺序复制，片段根只负责挂载图。跨片段引用保留来源令牌，
+        由粘贴接口按普通导图的规则恢复。手动坐标由粘贴目标重新布局。
+        """
+        wanted = set(node_ids)
+        nodes = tuple(node for node in graph.nodes if node.id in wanted)
+        if not nodes or len(nodes) != len(wanted):
+            raise MindMapError("请选择有效的图节点")
+        edges = tuple(edge for edge in graph.edges if edge.source in wanted and edge.target in wanted)
+        selected = {key for node in nodes if node.document_node_id
+                    for key in self.document.owned_descendants(node.document_node_id)}
+        fragment = MindMapDocument.new("图剪贴板")
+        fragment.root.extension_pages[GRAPH_PAGE_TYPE] = NodeGraph(nodes, edges).to_record()
+        self._copy_owned_contents(fragment, selected, self.document)
         return fragment
+
+    def _copy_fragment_entities(self, fragment, selected):
+        """分配新文档 ID 并登记选中的实体，返回新旧节点 ID 映射。
+
+        合成根由调用方决定如何附着，普通树与图粘贴都复用同一套重映射。图的局部
+        ID 在内部嵌套页保持不变，所有跨实体引用按新的全局 ID 改写。
+        """
+        mapping = {node_id: new_id() for node_id in fragment.nodes if node_id in selected}
+        pages = [page for page in fragment.iter_pages() if page.owner_id in mapping]
+        page_mapping = {page.id: new_id() for page in pages}
+        root_mapping = {page.root_id: mapping[page.root_id] for page in pages}
+        image_ids = set()
+        for node_id, new in mapping.items():
+            node = deepcopy(fragment.nodes[node_id])
+            node.id, node.children = new, [mapping[x] for x in node.children]
+            node.submap_id = page_mapping.get(node.submap_id)
+            node.detail_page_id = page_mapping.get(node.detail_page_id)
+            node.page_reference_root_id = root_mapping.get(node.page_reference_root_id)
+            record = node.extension_pages.get(GRAPH_PAGE_TYPE)
+            if graph_members(record):
+                for entry in record["data"]["nodes"]:
+                    if "document_node_id" in entry:
+                        entry["document_node_id"] = mapping[entry["document_node_id"]]
+            self._state.put_node(node)
+            if node.image_id:
+                image_ids.add(node.image_id)
+        for page in pages:
+            key = page_mapping[page.id]
+            self._state.set_page(key, MindMapPage(
+                key, mapping[page.root_id], mapping[page.owner_id], page.layout, page.theme),
+                kind=fragment.page_kind(page.id))
+        for key in image_ids:
+            self._state.set_asset(key, fragment.assets[key])
+        return mapping
+
+    def _restore_fragment_references(self, fragment, mapping):
+        """在片段已完整附着后恢复同一实例内仍然有效的片段外引用。"""
+        references = fragment.metadata.get(_CLIPBOARD_REFERENCES)
+        if isinstance(references, dict) and references.get("source") == self._state.clipboard_token:
+            targets = references.get("targets")
+            if isinstance(targets, dict):
+                self._restore_clipboard_references(targets, mapping)
+
+    def paste_graph_fragment(self, owner_id, current, fragment, source) -> list[str]:
+        """将已校验图剪贴板片段追加到目标图，重建局部和文档标识，返回新增局部 ID。
+
+        详情页中的旧图只能粘贴没有绑定的普通图内容。所有节点、页面、引用和资源
+        同属外层事务，任一步失败均由引擎回滚。
+        """
+        if any(entry.document_node_id for entry in source.nodes):
+            self.require_page_owner(owner_id)
+        mapping = self._copy_fragment_entities(fragment, fragment.nodes.keys() - {fragment.root_id})
+        used = {entry.id for entry in current.nodes}
+        local_mapping = {}
+        index = 1
+        for entry in source.nodes:
+            while f"n{index}" in used:
+                index += 1
+            local_mapping[entry.id] = f"n{index}"
+            index += 1
+        nodes = tuple(replace(entry, id=local_mapping[entry.id],
+                              document_node_id=mapping.get(entry.document_node_id))
+                      for entry in source.nodes)
+        edges = tuple(replace(edge, source=local_mapping[edge.source], target=local_mapping[edge.target])
+                      for edge in source.edges)
+        updated = replace(current, nodes=(*current.nodes, *nodes), edges=(*current.edges, *edges))
+        self._state.set_graph(owner_id, updated.to_record())
+        self._restore_fragment_references(fragment, mapping)
+        return list(local_mapping.values())
 
     def paste_fragment(self, parent_id: str, fragment: MindMapDocument, *, include_pages: bool = True) -> list[str]:
         """插入独立片段；include_pages=False 仅复制普通树，不改写来源或剪贴板。
@@ -553,26 +699,14 @@ class DocumentEditor(InspirationEditorMixin):
             fragment.detail_pages.clear()
             images = {node.image_id for node in fragment.nodes.values() if node.image_id}
             fragment.assets = {key: asset for key, asset in fragment.assets.items() if key in images}
-        if fragment.submaps or fragment.detail_pages:
+        selected = {key for root in fragment.root.children for key in fragment.owned_descendants(root)}
+        if any(node.submap_id or node.detail_page_id or GRAPH_PAGE_TYPE in node.extension_pages
+               for node in (fragment.nodes[key] for key in selected)):
             self.require_page_owner(parent_id)
         parent = self.edit(parent_id)
         if fragment.root.children:
             self.require_plain_parent(parent)
-        mapping = {node_id: new_id() for node_id in fragment.nodes if node_id != fragment.root_id}
-        page_mapping = {page.id: new_id() for page in fragment.iter_pages()}
-        root_mapping = {page.root_id: mapping[page.root_id] for page in fragment.iter_pages()}
-        for node_id, new in mapping.items():
-            node = deepcopy(fragment.nodes[node_id])
-            node.id, node.children = new, [mapping[x] for x in node.children]
-            node.submap_id = page_mapping.get(node.submap_id)
-            node.detail_page_id = page_mapping.get(node.detail_page_id)
-            node.page_reference_root_id = root_mapping.get(node.page_reference_root_id)
-            self._state.put_node(node)
-        for page in fragment.iter_pages():
-            key = page_mapping[page.id]
-            self._state.set_page(key, MindMapPage(
-                key, mapping[page.root_id], mapping[page.owner_id], page.layout, page.theme),
-                kind=fragment.page_kind(page.id))
+        mapping = self._copy_fragment_entities(fragment, selected)
         roots = [mapping[x] for x in fragment.root.children]
         parent.children.extend(roots)
         parent.expanded = True
@@ -580,13 +714,7 @@ class DocumentEditor(InspirationEditorMixin):
             self._state.set_parent(key, parent_id)
         # 页根和父边都就绪后再判断粘贴位置，避免把跨页引用变成指向本页的引用。
         # 元数据可来自外部剪贴板，形状不匹配时忽略它；绝不把它带进正式文档。
-        references = fragment.metadata.get(_CLIPBOARD_REFERENCES)
-        if isinstance(references, dict) and references.get("source") == self._state.clipboard_token:
-            targets = references.get("targets")
-            if isinstance(targets, dict):
-                self._restore_clipboard_references(targets, mapping)
-        for key, asset in fragment.assets.items():
-            self._state.set_asset(key, asset)
+        self._restore_fragment_references(fragment, mapping)
         return roots
 
     def _restore_clipboard_references(self, targets, mapping):

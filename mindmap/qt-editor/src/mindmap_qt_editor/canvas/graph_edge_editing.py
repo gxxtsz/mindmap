@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QApplication, QRubberBand
 
 from ..theme import graph_edge_colors
-from .items import NodeItem
+from .items import NodeItem, PageControlItem
 
 # 使用视口逻辑像素。命中区略大于圆点，节点和把手之间留连续的悬停通道。
 _RADIUS = 5.0
@@ -199,6 +199,9 @@ class GraphEdgeEditController:
         self.owns_left_button = False
         if self.owner.graph is None or self.owner.is_editing:
             return False
+        item = self.view.itemAt(position)
+        if isinstance(item, PageControlItem):
+            return False
         toggle = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
         box = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         handle = None if toggle or box else self.handle_at(position)
@@ -211,7 +214,6 @@ class GraphEdgeEditController:
                 self._pointer = QPoint(position)
                 self._moved = False
         else:
-            item = self.view.itemAt(position)
             edge = None if isinstance(item, NodeItem) else self.owner.graph_edge_at(position)
             if edge is None:
                 if not box or isinstance(item, NodeItem) or self.handle_at(position) is not None:
@@ -250,6 +252,9 @@ class GraphEdgeEditController:
         if not self._moved or not self.view.viewport().rect().contains(position):
             return None
         item = self.view.itemAt(position)
+        # 入口图标属于卡片。拖线已经认领手势，松手时将图标区域也视为目标节点。
+        if isinstance(item, PageControlItem):
+            item = item.node_item
         if not isinstance(item, NodeItem):
             return None
         key = item.node.id

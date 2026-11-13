@@ -7,6 +7,7 @@ from weakref import ref
 
 from mindmap_core.layouts import resolve_tree_spacing
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
+from mindmap_qt_render import NodeVisual
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import (
@@ -242,6 +243,8 @@ class PageControlItem(QGraphicsObject):
             return False
         if self.kind == "graph":
             return GRAPH_PAGE_TYPE in item.node.extension_pages
+        if item.owner.graph is not None:
+            return bool(getattr(item.node, self.field_name))
         target = (item.owner.engine.resolve_detail_page(item.node.id)[1] if self.kind == "detail"
                   else getattr(item.node, self.field_name))
         return bool(target)
@@ -476,6 +479,20 @@ class NodeEditor(QGraphicsTextItem):
             super().paint(painter, text_option, widget)
         finally:
             painter.restore()
+
+    def refresh_page_controls(self, visual: NodeVisual) -> bool:
+        """用最新正式视觉更新草稿的附页按钮，保留原输入、选区和候选状态。
+
+        由同一 GUI 线程在正式布局刷新后调用。visual 取自当前编辑节点，按需重算
+        草稿尺寸。发生变化返回 True；附页变化只影响展示，等用户确认文字后才提交正文。
+        """
+        if (self._base_visual.page_kinds, self._base_visual.page_icon_color) == (
+                visual.page_kinds, visual.page_icon_color):
+            return False
+        self._base_visual = replace(self._base_visual, page_kinds=visual.page_kinds,
+                                    page_icon_color=visual.page_icon_color)
+        self.sync_geometry(force=True)
+        return True
 
     def sync_geometry(self, *_args, force=False):
         """按当前正文及候选实时换行、调整节点，不复制或修改引擎中的文档。

@@ -9,6 +9,7 @@ from PySide6.QtCore import QBuffer, QIODevice, QMimeData
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
 CLIPBOARD_MIME = "application/x-python-mindmap+json"
+GRAPH_CLIPBOARD_MIME = "application/x-python-mindmap-graph+json"
 EDRAW_CLIPBOARD_MIME = "application/edraw-mind-xml"
 
 

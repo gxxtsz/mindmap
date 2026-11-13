@@ -13,7 +13,7 @@ from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError
 from .graph import NodeGraph
-from .node_pages import GRAPH_PAGE_TYPE, parse_graph_page_id
+from .node_pages import GRAPH_PAGE_TYPE, graph_members, parse_graph_page_id
 
 _ATOMIC_TYPES = frozenset((str, int, float, bool, bytes, type(None)))
 
@@ -348,7 +348,7 @@ class MindMapDocument:
                 or page_id in self.submaps or page_id in self.detail_pages or self._graph_record(page_id) is not None)
 
     def _graph_record(self, page_id: str | None) -> dict | None:
-        """按图页键借用所属节点的挂载数据，无需把图内节点加入文档的树索引。"""
+        """按图页键借用所属节点的挂载数据，入口可以是树节点或已绑定的图节点。"""
         owner_id = parse_graph_page_id(page_id)
         owner = self.nodes.get(owner_id) if owner_id is not None else None
         return owner.extension_pages.get(GRAPH_PAGE_TYPE) if owner is not None else None
@@ -404,8 +404,9 @@ class MindMapDocument:
             record = self._graph_record(page_id)
             if record is None or inspiration_root_id is not None:
                 raise KeyError(page_id)
-            return MindMapGraphView(NodeGraph.from_data(record["data"]), self.layout, self.theme,
-                                    f"{self.display_node(owner_id).text} · 图")
+            graph = NodeGraph.from_data(record["data"], version=record["version"])
+            return MindMapGraphView(graph, self.layout, self.theme,
+                                    f"{self.display_node(owner_id).text} · 图", self.nodes)
         page = self.page_record(page_id)
         if page_id == self.inspiration.id:
             if inspiration_root_id is not None:
@@ -426,7 +427,11 @@ class MindMapDocument:
         return view
 
     def owned_descendants(self, node_id: str) -> list[str]:
-        """迭代取得普通分支及其拥有的两类页面节点，用于删除和完整复制。"""
+        """迭代取得分支拥有的全部节点，包括图内绑定节点及其附页。
+
+        输入为文档节点 ID。只沿所有权遍历，图的连线和跨页引用不参与；调用方
+        可按返回的先序清单一次复制或删除实体和资源。
+        """
         result, stack = [], [node_id]
         while stack:
             key = stack.pop()
@@ -437,6 +442,7 @@ class MindMapDocument:
                 stack.append(self.submaps[node.submap_id].root_id)
             if node.detail_page_id:
                 stack.append(self.detail_pages[node.detail_page_id].root_id)
+            stack.extend(reversed(graph_members(node.extension_pages.get(GRAPH_PAGE_TYPE))))
         return result
 
     def validate(self) -> None:
@@ -462,10 +468,29 @@ class MindMapGraphView(MindMapPageView):
 
     kind = "graph"
 
-    def __init__(self, graph: NodeGraph, layout: LayoutConfig, theme: Theme, title: str):
+    def __init__(
+        self, graph: NodeGraph, layout: LayoutConfig, theme: Theme, title: str,
+        document_nodes: dict[str, Node] | None = None,
+    ):
+        """以局部 ID 构造扁平画布，附页入口从文档实体投影，节点和连线仍属于当前图。
+
+        有绑定时 document_nodes 须提供对应文档节点。投影保留当前节点的附页入口，
+        调用者应通过引擎修改归属。无绑定的图可省略文档节点表。
+        """
         # 图没有中心根和父子关系，大纲按声明顺序显示为平级节点。
-        super().__init__("", {node.id: Node(node.title, id=node.id) for node in graph.nodes},
-                         layout=layout, theme=theme)
+        nodes = {}
+        for entry in graph.nodes:
+            node = Node(entry.title, id=entry.id)
+            if entry.document_node_id is not None:
+                if document_nodes is None:
+                    raise MindMapError("图节点投影缺少附页实体")
+                source = document_nodes[entry.document_node_id]
+                node.detail_page_id, node.submap_id = source.detail_page_id, source.submap_id
+                if GRAPH_PAGE_TYPE in source.extension_pages:
+                    # 图标只依赖页面是否存在。子图内容不进入父图布局或测量差量。
+                    node.extension_pages = {GRAPH_PAGE_TYPE: source.extension_pages[GRAPH_PAGE_TYPE]}
+            nodes[entry.id] = node
+        super().__init__("", nodes, layout=layout, theme=theme)
         self.graph, self.title = graph, title
 
     @property

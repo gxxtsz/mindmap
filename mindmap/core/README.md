@@ -49,7 +49,7 @@ engine.undo()
 
 从 `mindmap_core.formats` 导入 `load_document` 和 `save_document`。用 `load_document(path)` 读取原生文件，用 `save_document(engine.document, path)` 保存完整快照。默认注册表根据 `.mindmap` 扩展名选择原生格式。
 
-原生文件是 ZIP 容器，`document.json` 记录文档结构与版本，图片资源位于 `assets/` 下。内置编解码器可读取结构版本 2 至 7。存在节点扩展页时写为版本 7；否则有有效页面引用时写为版本 6，其余写为版本 5。
+原生文件是 ZIP 容器，`document.json` 记录文档结构与版本，图片资源位于 `assets/` 下。内置编解码器可读取结构版本 2 至 8。含图节点文档绑定时写为版本 8，其他节点扩展页写为版本 7，只有页面引用时写为版本 6，其余写为版本 5。
 
 ## 事务与事件
 
@@ -377,6 +377,10 @@ engine.undo()
 `Node.extension_pages` 按扩展类型保存 `{ "version": 正整数, "data": JSON对象 }`。每节点每类型最多一页，可与普通详情页及子导图共存。普通详情页中的文字节点也可拥有专用页面，纯图片节点不能拥有页面。
 
 内置图通过 `node_graph`、`set_node_graph` 和 `remove_node_graph` 读写。`graph_page_id(owner_id)` 返回导航标识，可用于查询页面摘要或单页投影。图内标识只在一张图内有效，手动位置与图内容共同进入事务。
+
+`create_graph_node_page(owner_id, local_id, kind=...)` 接受 `detail`、`submap` 或 `graph`，返回新页面 ID。首次创建为图节点分配文档节点 ID，写入图数据版本二的 `document_node_id`。文档节点表保存附页入口，原生页面表及资源表保存页面内容。通过 `graph_node_document_id` 查到文档节点后，可复用既有附页查询和删除接口。删除图节点会在同一事务移除其附页。旧详情页中的图保持版本一，可更新既有图内容。
+
+`copy_graph_fragment` 返回由合成根承载图的独立文档，`paste_graph_fragment` 把它附加到已有图并返回新局部 ID。普通树和图节点的片段复制均重建文档节点、页面及片段内部引用。
 
 ```python
 from mindmap_core.formats.graph import parse_graph_text

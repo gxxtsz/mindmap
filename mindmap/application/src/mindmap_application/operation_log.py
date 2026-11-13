@@ -33,7 +33,7 @@ _OPERATION_NAMES = {
     "set_submap_favorite": "修改子导图收藏",
     "set_page_reference": "设置页面引用",
     "set_extension_page": "更新扩展详情页", "remove_extension_page": "删除扩展详情页",
-    "set_node_graph": "更新节点图", "remove_node_graph": "删除节点图",
+    "set_node_graph": "更新节点图", "remove_node_graph": "删除节点图", "paste_graph_fragment": "粘贴图节点",
 }
 _LEVEL_NAMES = {"info": "信息", "warning": "警告", "error": "错误"}
 

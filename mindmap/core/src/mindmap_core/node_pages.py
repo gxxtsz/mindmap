@@ -2,13 +2,30 @@
 
 import json
 import re
+from collections.abc import Iterable
 from copy import deepcopy
+from dataclasses import replace
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote, unquote
 
 from .errors import MindMapError
 from .graph import NodeGraph
 
+if TYPE_CHECKING:
+    from .models import MindMapDocument
+
 GRAPH_PAGE_TYPE = "graph"
+
+
+def graph_members(record: dict | None) -> dict[str, str]:
+    """从已校验的图记录提取文档节点 ID 到局部 ID 的映射。
+
+    缺少图或版本一返回空字典。调用方可以修改返回值，原生记录仍归文档所有。
+    """
+    if record is None or record["version"] == 1:
+        return {}
+    return {node["document_node_id"]: node["id"] for node in record["data"]["nodes"]
+            if "document_node_id" in node}
 
 
 def graph_page_id(node_id: str) -> str:
@@ -62,9 +79,7 @@ def validate_extension_pages(pages: object, *, json_data: bool = True) -> None:
         if not isinstance(record["data"], dict):
             raise MindMapError("扩展页面数据必须为对象")
         if type_id == GRAPH_PAGE_TYPE:
-            if record["version"] != 1:
-                raise MindMapError("不支持的图数据版本")
-            NodeGraph.from_data(record["data"])
+            NodeGraph.from_data(record["data"], version=record["version"])
     if json_data and pages:
         try:
             # 编码先检测循环和不支持的值，再迭代检查键，避免递归循环或隐式键转换。
@@ -94,33 +109,159 @@ class NodePagesMixin:
     def node_graph(self, node_id: str) -> NodeGraph | None:
         """读取所属节点的一张图，返回独立快照；未挂载时返回 None，节点无效时报错。"""
         record = self._editor.node(node_id).extension_pages.get(GRAPH_PAGE_TYPE)
-        return NodeGraph.from_data(record["data"]) if record is not None else None
+        return NodeGraph.from_data(record["data"], version=record["version"]) if record is not None else None
+
+    def graph_node_location(self, document_node_id: str | None) -> tuple[str, str] | None:
+        """按文档节点 ID 查询图内位置，返回（图所属节点 ID，局部 ID）。
+
+        普通树节点、已删除节点和未绑定的图节点没有索引项，返回 None。查询只读
+        运行时索引，不遍历图或改变历史。
+        """
+        return self._state.graph_nodes.get(document_node_id)
+
+    def can_create_node_pages(self, page_id: str | None) -> bool:
+        """查询页面类型是否允许创建详情、子导图和图。
+
+        沿图的所属节点逐层查到树页，详情及其旧图返回 False。无效页面也返回
+        False；只读、节点选择等界面状态由调用方校验。
+        """
+        return self._state.can_create_node_pages(page_id)
+
+    def graph_node_document_id(self, owner_id: str, local_id: str) -> str | None:
+        """按图所属节点和局部 ID 查询附页实体；存在但未绑定时返回 None。
+
+        图或节点不存在时抛出 MindMapError。不同图可使用相同局部 ID，调用者必须
+        同时提供所属节点；查询不创建实体，也不读取其他图。
+        """
+        graph = self.node_graph(owner_id)
+        node = next((entry for entry in graph.nodes if entry.id == local_id), None) if graph else None
+        if node is None:
+            raise MindMapError("图节点不存在")
+        return node.document_node_id
+
+    def create_graph_node_page(
+        self, owner_id: str, local_id: str, *, kind: Literal["detail", "submap", "graph"],
+    ) -> str:
+        """为指定图节点创建详情页、子导图或下级图，返回可跨视图使用的页面 ID。
+
+        首次创建时在同一事务内分配文档节点 ID；后续创建复用该实体。目标须存在，
+        同类页面只能创建一次，详情页中的旧图禁止创建。失败回滚节点、页面及索引，
+        成功只记录一次历史。由宿主决定是否切页。
+        """
+        def action(owner_id, local_id, kind, page_id):
+            if page_id is None:
+                raise MindMapError("图的所属节点标识无效")
+            if kind not in ("detail", "submap", "graph"):
+                raise MindMapError("图节点的附页类型无效")
+            self._editor.require_page_owner(owner_id)
+            graph = self.node_graph(owner_id)
+            entry = next((entry for entry in graph.nodes if entry.id == local_id), None) if graph else None
+            if entry is None:
+                raise MindMapError("图节点不存在")
+            document_id = entry.document_node_id
+            if document_id is None:
+                from .models import Node
+
+                node = Node(entry.title)
+                self._state.put_node(node)
+                document_id = node.id
+                graph = replace(graph, nodes=tuple(
+                    replace(entry, document_node_id=document_id) if entry.id == local_id else entry
+                    for entry in graph.nodes))
+                self._state.set_graph(owner_id, graph.to_record())
+            if kind == "detail":
+                return self._editor.create_detail_page(document_id)
+            if kind == "submap":
+                return self._editor.create_submap(document_id)
+            if self.node_graph(document_id) is not None:
+                raise MindMapError("此节点已有图")
+            self._state.set_graph(document_id, NodeGraph().to_record())
+            return graph_page_id(document_id)
+
+        operation = ("create_detail_page" if kind == "detail" else
+                     "create_submap" if kind == "submap" else "set_node_graph")
+        return self._execute(operation, action, owner_id=owner_id, local_id=local_id, kind=kind,
+                             page_id=graph_page_id(owner_id) if isinstance(owner_id, str) and owner_id else None)
 
     def set_node_graph(self, node_id: str, graph: NodeGraph) -> None:
         """创建或完整替换节点图；校验失败回滚事务，成功一次进入导图撤销历史。
 
-        图节点标识只在这张图内解析。业务数据挂载在所属文字节点上，复制、移动、
-        删除所属节点及保存导图时，由现有节点页机制统一处理。
+        同一局部 ID 保留既有附页；标题变化同步到关联的树页根。删掉图节点会同时
+        删除其附页。新绑定由创建附页或粘贴操作建立，调用方不能直接指定归属。
+        详情页内只允许更新已存在的旧图。成功后历史包含图及全部受影响的文档实体。
         """
         def action(node_id, graph, page_id):
             if page_id is None:
                 raise MindMapError("图的所属节点标识无效")
             if not isinstance(graph, NodeGraph):
                 raise MindMapError("节点图必须是 NodeGraph")
-            self._write_node_page(node_id, GRAPH_PAGE_TYPE, {"version": 1, "data": graph.to_data()})
+            owner = self._editor.node(node_id)
+            if owner.is_image_node:
+                raise MindMapError("纯图片节点不能拥有图")
+            previous = self.node_graph(node_id)
+            if previous is None:
+                self._editor.require_page_owner(node_id)
+            self._editor.replace_node_graph(node_id, previous or NodeGraph(), graph)
 
         page_id = graph_page_id(node_id) if isinstance(node_id, str) and node_id else None
         self._execute("set_node_graph", action, node_id=node_id, graph=graph, page_id=page_id)
 
     def remove_node_graph(self, node_id: str) -> None:
-        """删除节点的图，保留所属节点；撤销时恢复节点、连线及手动坐标。"""
+        """删除节点拥有的图及图内附页，入口节点的其他页面保留。
+
+        整组实体和图片资源在同一事务删除；一次撤销恢复原来的页面标识与内容。
+        """
         def action(node_id, page_id):
             if page_id is None:
                 raise MindMapError("图的所属节点标识无效")
-            self._delete_node_page(node_id, GRAPH_PAGE_TYPE)
+            graph = self.node_graph(node_id)
+            if graph is None:
+                raise MindMapError("该节点没有图")
+            self._editor.replace_node_graph(node_id, graph, None)
 
         page_id = graph_page_id(node_id) if isinstance(node_id, str) and node_id else None
         self._execute("remove_node_graph", action, node_id=node_id, page_id=page_id)
+
+    def copy_graph_fragment(self, owner_id: str, node_ids: Iterable[str]) -> "MindMapDocument":
+        """复制指定图的局部节点、内部连线及附属内容，返回独立的剪贴板文档。
+
+        文档的合成根承载复制的图，图片资源随附页复制。调用不会建立新绑定、
+        改变选择或写入历史；失效图及局部 ID 抛出 MindMapError。
+        """
+        graph = self.node_graph(owner_id)
+        if graph is None:
+            raise MindMapError("该节点没有图")
+        return self._editor.copy_graph_fragment(graph, node_ids)
+
+    def paste_graph_fragment(self, owner_id: str, fragment: "MindMapDocument") -> list[str]:
+        """向指定图粘贴独立片段，返回新分配的局部节点 ID，整个操作可一次撤销。
+
+        片段必须由单个合成根承载图；校验通过后在目标中复制页面、图节点绑定
+        和内部引用。图片按内容哈希复用。失败回滚所有修改，片段保持原样。
+        """
+        def action(node_id, fragment, page_id):
+            from .models import MindMapDocument
+
+            if page_id is None:
+                raise MindMapError("图的所属节点标识无效")
+            if type(fragment) is not MindMapDocument:
+                raise MindMapError("图剪贴板片段无效")
+            fragment.validate()
+            root = fragment.root
+            record = root.extension_pages.get(GRAPH_PAGE_TYPE)
+            if (record is None or root.children or root.submap_id or root.detail_page_id
+                    or fragment.inspiration.root_ids):
+                raise MindMapError("图剪贴板必须由一个节点图组成")
+            current = self.node_graph(node_id)
+            if current is None:
+                raise MindMapError("该节点没有图")
+            source = NodeGraph.from_data(record["data"], version=record["version"])
+            if not source.nodes:
+                return []
+            return self._editor.paste_graph_fragment(node_id, current, fragment, source)
+
+        return self._execute("paste_graph_fragment", action, node_id=owner_id, fragment=fragment,
+                             page_id=graph_page_id(owner_id) if isinstance(owner_id, str) and owner_id else None)
 
     def set_extension_page(self, node_id: str, type_id: str, data: dict, *, version: int = 1) -> None:
         """创建或替换节点上的一页；成功产生一条历史，失败完全回滚。

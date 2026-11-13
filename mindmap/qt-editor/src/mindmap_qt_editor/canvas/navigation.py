@@ -3,9 +3,10 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from math import isfinite
+from typing import Literal
 
 from mindmap_core import ChangeEvent, MindMapError, PathEntry, Theme
-from mindmap_core.node_pages import parse_graph_page_id
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE, parse_graph_page_id
 from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QTransform
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QMessageBox, QToolButton, QWidget
@@ -340,6 +341,41 @@ class PageNavigationMixin:
             node_id = parent
         return node_id
 
+    def _local_page_owner(self, document_id: str) -> str | None:
+        """把文档入口 ID 转成当前画布的选择 ID。入口不在当前页时返回 None。
+
+        图节点按所属图和局部标识校验，树页直接使用文档标识。仅在 GUI 线程读取
+        当前读模型，避免不同页恰好有同名或同局部 ID 的节点时误选。
+        """
+        if self.graph is None:
+            return document_id if document_id in self._document.nodes else None
+        location = self.engine.graph_node_location(document_id)
+        if location is not None and location[0] == parse_graph_page_id(self.current_page_id):
+            return location[1] if location[1] in self._document.nodes else None
+        return None
+
+    def _page_owner_id(self, key: str, *, require_selection=False) -> str:
+        """把树节点或图内局部节点解析为拥有页面的文档 ID。
+
+        菜单修改传入 require_selection 以复查图节点仍是单选。图标可明确传入局部
+        ID，不要求该节点已选中。无效目标抛出 MindMapError。
+        """
+        if self.graph is None:
+            return key
+        if require_selection and (self.selection_count != 1 or not self.is_node_selected(key)):
+            raise MindMapError("请先选择一个图节点")
+        document_id = self.engine.graph_node_document_id(self._graph_target()[1], key)
+        if document_id is None:
+            raise MindMapError("此图节点没有附属页面")
+        return document_id
+
+    def _attached_page_owner(self, page_id: str | None) -> str | None:
+        """查询页面的直接入口文档 ID。主导图和灵感区没有入口。"""
+        if page_id in (None, self.engine.inspiration_id):
+            return None
+        owner = parse_graph_page_id(page_id)
+        return owner if owner is not None else self._book_document.page_record(page_id).owner_id
+
     def _choose_inspiration_root(self, preferred=None, old_order=()):
         roots = self._book_document.inspiration.root_ids
         root = self._inspiration_root_for(preferred)
@@ -516,12 +552,7 @@ class PageNavigationMixin:
                 self._last_inspiration_root = self._inspiration_root_id
         self._document = self._book_document.page_view(
             page_id, inspiration_root_id=self._inspiration_root_id if kind == "inspiration" else None)
-        owner = parse_graph_page_id(page_id)
-        self._page_chain = ([page_id] if kind == "inspiration" else
-                            [entry.page_id for entry in self.engine.node_path(owner or self._document.root_id)
-                             if entry.page_root])
-        if owner is not None:
-            self._page_chain.append(page_id)
+        self._page_chain = [page_id] if kind == "inspiration" else [entry.page_id for entry in self._page_path_entries()]
         self._node_parents = self._document.parents()
         self._invalidate_selection_order()
         self._incremental_layout = None
@@ -552,7 +583,7 @@ class PageNavigationMixin:
         """按页面和节点标识导航，先检查输入法候选并提交有效草稿。
 
         树页恢复现场后定位指定节点。折叠目标通过临时显示范围定位，不改写折叠状态。
-        图页的 node_id 是所属树节点的标识，省略时只打开页面并恢复视图。点击当前
+        图页路径项的 node_id 是拥有该图的文档节点 ID，省略时只打开并恢复视图。点击当前
         图页路径项会传入该标识，有内容时将整图居中，保留倍率、节点选择和连线选择。
         只读也可导航。导航本身不生成内容历史，仅在画布所属 GUI 线程调用。
         """
@@ -586,6 +617,8 @@ class PageNavigationMixin:
         已在提交前完成输入检查，提交后复用此处定位，避免第二次检查把已成功的
         转换报告为失败；调用方必须保证节点确实属于当前页。
         """
+        if self.graph is not None and node_id not in self.layout_result.nodes:
+            raise MindMapError("图节点已删除")
         if node_id not in self.layout_result.nodes:
             self.focus_id = None
             self.refresh()
@@ -599,12 +632,20 @@ class PageNavigationMixin:
         self.view.ensureVisible(self.node_items[node_id].sceneBoundingRect(), 35, 35)
 
     def enter_submap(self, node_id=None):
-        """进入入口拥有的子导图，曾访问的页面恢复视图，首次访问使用原始倍率。"""
+        """进入入口拥有的子导图，恢复该页视图。
+
+        图页参数为局部 ID，树页参数为文档 ID。成功后记住当前入口的选择；只读可
+        导航，输入法候选期间保留当前页。
+        """
         key = node_id or self.current_node_id()
-        node = self.engine.get_node(key)
+        document_id = self._page_owner_id(key)
+        node = self.engine.get_node(document_id)
         if not node.submap_id:
             raise MindMapError("此节点没有子导图")
         self._prepare_page_navigation()
+        node = self.engine.get_node(document_id)
+        if not node.submap_id:
+            raise MindMapError("此节点没有子导图")
         self.select_nodes([key])
         self._switch_page(node.submap_id)
 
@@ -703,18 +744,35 @@ class PageNavigationMixin:
 
     @document_interaction
     def create_submap(self):
-        """为当前普通叶子创建并进入子导图，返回新页面 ID。
+        """为当前普通叶子或单选图节点创建并进入子导图，返回新页面 ID。
 
         无参数；纯图片、只读或输入法候选会抛出 MindMapError，纯图片检查先于
         草稿提交。创建属于内容历史，进入属于临时导航；只在 GUI 线程、画布
-        存活时调用，页面及图元由所属文档和画布管理。
+        存活时调用，页面及图元由所属文档和画布管理。图节点的现有连线保留。
         """
+        return self._create_owned_tree_page("submap")
+
+    def _create_owned_tree_page(self, kind: Literal["detail", "submap"]) -> str:
+        """在当前树节点或单选图节点上创建附页，输入检查后提交并切换本视图。"""
         self._ensure_editable()
-        if self.engine.get_node(self.current_node_id()).is_image_node:
+        if not self.engine.can_create_node_pages(self.current_page_id):
+            raise MindMapError("详情页内及其中的旧图不能创建详情页、子导图或图")
+        key = self.current_node_id()
+        target = self._graph_target() if self.graph is not None else None
+        if target is not None:
+            if self.selection_count != 1:
+                raise MindMapError("请先选择一个图节点")
+        elif self.engine.get_node(key).is_image_node:
             raise MindMapError("纯图片节点不能拥有详情页或子导图")
         self._prepare_page_navigation()
-        page_id = self.engine.create_submap(self.current_node_id())
-        self._switch_page(page_id)
+        origin = (self.current_page_id, self.current_inspiration_root_id, key) if kind == "detail" else None
+        if target is not None:
+            self._read_active_graph(target)
+            page_id = self.engine.create_graph_node_page(target[1], key, kind=kind)
+        else:
+            create = self.engine.create_detail_page if kind == "detail" else self.engine.create_submap
+            page_id = create(key)
+        self._switch_page(page_id, detail_origin=origin)
         return page_id
 
     @document_interaction
@@ -789,7 +847,8 @@ class PageNavigationMixin:
         子导图或标识无效时抛出 MindMapError；只读及输入检查复用 set_submap_favorite。
         调用返回 None，不创建页面、不导航，成功后由文档事件同步全部收藏入口。
         """
-        node = self.engine.get_node(node_id or self.current_node_id())
+        node = self.engine.get_node(self._page_owner_id(
+            node_id or self.current_node_id(), require_selection=node_id is None))
         if not node.submap_id:
             raise MindMapError("此节点没有子导图")
         self.set_submap_favorite(node.submap_id, not self.engine.is_submap_favorite(node.submap_id))
@@ -797,74 +856,53 @@ class PageNavigationMixin:
     def enter_detail_page(self, node_id=None):
         """查看共享详情，返回时恢复发起页面；只读同样允许导航。
 
-        node_id 省略时使用当前选择，显式标识须在文档中存在。解析得到的实际归属可在
-        其他页，当前选择仍保留发起节点；目标不存在时抛出中文 MindMapError。
+        node_id 省略时使用当前选择；图页使用局部 ID，树页使用文档 ID。
+        详情可归属其他页，返回时使用发起页及入口；目标不存在时抛出 MindMapError。
         仅切换当前画布的临时导航，不改变详情归属、文档、历史或保存标记。
         """
         key = node_id or self.current_node_id()
-        _, page_id = self.engine.resolve_detail_page(key)
+        document_id = self._page_owner_id(key)
+        _, page_id = self.engine.resolve_detail_page(document_id)
         if not page_id:
             raise MindMapError("此节点没有详情页")
         self._prepare_page_navigation()
-        _, page_id = self.engine.resolve_detail_page(key)
+        _, page_id = self.engine.resolve_detail_page(document_id)
         if not page_id:
             raise MindMapError("此节点没有详情页")
         self.select_nodes([key])
-        self._switch_page(page_id, detail_origin=(self.current_page_id, self.current_inspiration_root_id))
+        self._switch_page(page_id, detail_origin=(self.current_page_id, self.current_inspiration_root_id, key))
 
     @document_interaction
     def create_detail_page(self):
-        """为当前普通节点添加详情并进入，返回新页面 ID。
+        """为当前树节点或单选图节点添加详情并进入，返回新页面 ID。
 
         无参数；入口与子导图根共用同一详情，从根创建时使用当前外观并归属
         最外层入口，返回详情后恢复发起页。纯图片、只读、已有详情或详情页内目标及输入法候选抛出
         MindMapError，纯图片检查先于草稿提交。仅在 GUI 线程、画布存活时调用；
         页面由文档管理，切页会释放旧图元，外部只保存稳定页面 ID。
         """
-        self._ensure_editable()
-        if self.engine.get_node(self.current_node_id()).is_image_node:
-            raise MindMapError("纯图片节点不能拥有详情页或子导图")
-        self._prepare_page_navigation()
-        page_id = self.engine.create_detail_page(self.current_node_id())
-        self._switch_page(page_id, detail_origin=(self.current_page_id, self.current_inspiration_root_id))
-        return page_id
+        return self._create_owned_tree_page("detail")
 
     @document_interaction
     def delete_detail_page(self):
         """确认详情删除范围，保留入口、原分支及子导图；取消不触碰文档或历史。"""
         self._ensure_editable()
-        key = self.current_node_id()
+        key = self._page_owner_id(self.current_node_id(), require_selection=True)
         _, page_id = self.engine.resolve_detail_page(key)
         if not page_id:
             raise MindMapError("此节点没有详情页")
         page = self._book_document.detail_pages[page_id]
-        count = len(self._book_document.descendants(page.root_id))
-        generation, revision = self.engine.document_generation, self.engine.revision
-        choice = QMessageBox.question(
-            self, "删除详情页", f"将删除此详情页及其 {count} 个节点，保留入口节点、原分支和子导图。\n删除后可以撤销。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        if choice != QMessageBox.StandardButton.Yes:
-            return
-        self._ensure_editable()
-        if (generation, revision) != (self.engine.document_generation, self.engine.revision):
-            raise MindMapError("确认期间导图发生变化，请重新删除")
-        self._prepare_page_navigation()
-        self.engine.remove_detail_page(key)
+        count = len(self._book_document.owned_descendants(page.root_id))
+        if self._confirm_page_deletion(
+                "删除详情页", f"将删除此详情页及其 {count} 个节点，保留入口节点、原分支和子导图。\n删除后可以撤销。"):
+            self.engine.remove_detail_page(key)
 
     def return_to_parent_page(self) -> None:
         """提交有效草稿并返回上一级，输入法候选未完成时保留当前页。
 
-        图页按所属节点的最新归属恢复对应树页，再选中并显示该节点。树页优先
-        返回有效引用或详情来源，否则返回实际所属页面。只读允许返回，切页
-        本身只改变当前画布的现场，不写入文档或撤销历史。
+        附页优先回到有效的引用或详情来源，否则沿最新归属返回。图内入口转换为
+        父图的局部 ID，再选中并显示该节点。只读允许返回，切页不产生内容历史。
         """
-        owner = parse_graph_page_id(self.current_page_id)
-        if owner is not None:
-            self._prepare_page_navigation()
-            page = self.engine.node_page_id(owner)
-            self._switch_page(page, inspiration_root_id=self._inspiration_root_for(owner))
-            self._locate_page_node(owner)
-            return
         reference = self._reference_return_origin()
         if reference is not None:
             self._prepare_page_navigation()
@@ -879,22 +917,29 @@ class PageNavigationMixin:
         origin = self._detail_return_origin()
         if origin is not None:
             self._prepare_page_navigation()
-            self._switch_page(origin[0], inspiration_root_id=origin[1])
-            return
+            if self._detail_return_origin() == origin:
+                self._switch_page(origin[0], inspiration_root_id=origin[1])
+                if origin[2] in self._document.nodes and (
+                        not self.is_node_selected(origin[2]) or self.graph is not None):
+                    self._locate_page_node(origin[2])
+                return
         if self.current_page_kind == "inspiration":
             self._prepare_page_navigation()
             self._switch_page(None)
             return
         self._prepare_page_navigation()
-        owner = self._book_document.page_record(self._current_page_id).owner_id
+        owner = self._attached_page_owner(self.current_page_id)
         page = self.engine.node_page_id(owner)
+        locate = self.graph is not None or parse_graph_page_id(page) is not None
         self._switch_page(page, inspiration_root_id=self._inspiration_root_for(owner))
+        if locate and (key := self._local_page_owner(owner)) is not None:
+            self._locate_page_node(key)
 
     @document_interaction
     def delete_submap(self):
         """确认影响范围后删除所有下级页面，取消不改变内容、选择和历史。"""
         self._ensure_editable()
-        key = self.current_node_id()
+        key = self._page_owner_id(self.current_node_id(), require_selection=True)
         node = self.engine.get_node(key)
         if not node.submap_id:
             raise MindMapError("此节点没有子导图")
@@ -902,28 +947,51 @@ class PageNavigationMixin:
         nodes = self._book_document.owned_descendants(root)
         count = 1 + sum(bool(self._book_document.nodes[item].submap_id) for item in nodes)
         details = sum(bool(self._book_document.nodes[item].detail_page_id) for item in nodes)
-        generation, revision = self.engine.document_generation, self.engine.revision
-        choice = QMessageBox.question(self, "删除子导图",
-                                      f"将删除 {count} 张子导图、{details} 张详情页、{len(nodes)} 个节点，"
-                                      "保留入口节点及其详情页。\n删除后可以撤销。",
+        graphs = sum(GRAPH_PAGE_TYPE in self._book_document.nodes[item].extension_pages for item in nodes)
+        if self._confirm_page_deletion(
+                "删除子导图",
+                f"将删除 {count} 张子导图、{details} 张详情页、{graphs} 张图、{len(nodes)} 个节点，"
+                "保留入口节点及其详情页。\n删除后可以撤销。"):
+            self.engine.remove_submap(key)
+
+    def _confirm_page_deletion(self, title: str, message: str) -> bool:
+        """确认附页删除范围，核对输入检查前后的文档、页面和编辑权限。
+
+        对话框关闭后才尝试提交有效草稿；若此期间发生内容变更，调用方须重新计算
+        删除范围。取消直接返回 False，保存标记变化不影响已确认的内容版本。
+        """
+        def context():
+            return self.engine.document_generation, self._branch_content_revision, self.current_page_id
+
+        expected = context()
+        choice = QMessageBox.question(self, title, message,
                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                       QMessageBox.StandardButton.No)
         if choice != QMessageBox.StandardButton.Yes:
-            return
+            return False
         self._ensure_editable()
-        if (generation, revision) != (self.engine.document_generation, self.engine.revision):
+        if self._disposed or expected != context():
             raise MindMapError("确认期间导图发生变化，请重新删除")
         self._prepare_page_navigation()
-        self.engine.remove_submap(key)
+        if self._disposed or expected != context():
+            raise MindMapError("确认期间导图发生变化，请重新删除")
+        self._ensure_editable()
+        return True
 
-    def _page_path_entries(self, node_id: str) -> list[PathEntry]:
-        """从文档中有效节点的祖先链提取它所在的页面路径。
+    def _page_path_entries(self, node_id: str | None = None) -> list[PathEntry]:
+        """从完整祖先链提取页面路径，保留所有图、子导图和详情层级。
 
-        每级保留原有页面 ID 与页根节点 ID，普通祖先省略，独立想法使用游离根。
-        树页传当前页根，图页传所属树节点。返回新列表供调用方补充页面类型和标题，
-        不修改引擎的完整节点路径、文档或选择。
+        每项保留原有页面和文档节点 ID，普通祖先省略，独立想法使用游离根。
+        node_id 省略时取当前页，传入文档节点 ID 时查询该节点所在的页。返回新列表
+        供面包屑、溢出菜单、失效页回退和灵感目标选择共用，不修改引擎路径。
         """
-        path = self.engine.node_path(node_id)
+        if node_id is not None:
+            path = self.engine.node_path(node_id)
+        elif self.graph is not None:
+            summary = self.engine.page_summary(self.current_page_id)
+            path = summary.path if summary is not None else ()
+        else:
+            path = self.engine.node_path(self._document.root_id) if self._document.root_id else ()
         pages = [entry for entry in path if entry.page_root and entry.page_id != self.engine.inspiration_id]
         if path and path[0].page_id == self.engine.inspiration_id:
             pages.insert(0, path[1])
@@ -932,15 +1000,19 @@ class PageNavigationMixin:
     def _detail_return_origin(self):
         """借用当前详情的有效来源；来源删除后立即丢弃，不因撤销而复活旧导航。
 
-        返回（页面 ID，想法根 ID）或 None；None 页面 ID 表示有效的主导图。
+        返回（页面 ID，想法根 ID，入口 ID）或 None；None 页面 ID 表示有效的主导图。
         仅查询本画布的临时状态，不修改文档或缓存的视图现场。
         """
         origin = self._detail_origin
         if self.current_page_kind != "detail" or origin is None:
             return None
-        page, root = origin
+        page, root, entry = origin
+        graph_owner = parse_graph_page_id(page)
+        owner = self._attached_page_owner(self.current_page_id)
+        invalid_graph = graph_owner is not None and self.engine.graph_node_location(owner) != (graph_owner, entry)
         if (not self._book_document.has_page(page) or page == self.current_page_id
                 or self._book_document.page_kind(page) == "detail"
+                or invalid_graph
                 or page == self.engine.inspiration_id and root not in self._book_document.inspiration.root_ids):
             self._detail_origin = None
             return None
@@ -973,12 +1045,12 @@ class PageNavigationMixin:
         origin = self._detail_return_origin()
         if origin is not None:
             return {"main": "返回主导图", "inspiration": "返回所属想法",
-                    "submap": "返回所属子导图"}[self._book_document.page_kind(origin[0])]
+                    "submap": "返回所属子导图", "graph": "返回图节点"}[self._book_document.page_kind(origin[0])]
         owner = self._book_document.page_record(self.current_page_id).owner_id
         parent_kind = self._book_document.page_kind(self.engine.node_page_id(owner))
         return {"main": "返回主导图", "inspiration": "返回所属想法",
                 "submap": "返回所属子导图" if self.current_page_kind == "detail" else "返回上级导图",
-                "detail": "返回所属详情页"}[parent_kind]
+                "detail": "返回所属详情页", "graph": "返回图节点"}[parent_kind]
 
     def _sync_navigation(self) -> None:
         """刷新树页和图页共用的路径项、回退链及按钮状态。
@@ -990,13 +1062,9 @@ class PageNavigationMixin:
         if (not hasattr(self, "_document") or self._disposed
                 or getattr(self, "_applying_engine_event", False)):
             return
-        owner = parse_graph_page_id(self.current_page_id)
-        node_id = owner if owner is not None else self._document.root_id
-        pages = self._page_path_entries(node_id) if node_id else []
         pages = [replace(entry, text=f"{entry.text} · 详情")
-                 if self._book_document.page_kind(entry.page_id) == "detail" else entry for entry in pages]
-        if owner is not None:
-            pages.append(PathEntry(self.current_page_id, owner, self._document.title, page_root=True))
+                 if self._book_document.page_kind(entry.page_id) == "detail" else entry
+                 for entry in self._page_path_entries()]
         # 上级子图转换后，本页可能仍存在而归属路径已经改变；刷新回退链，避免
         # 之后删除本页时继续返回已经失效的祖先页面。灵感区空态也保留有效回退点。
         self._page_chain = ([self.current_page_id] if self.current_page_kind == "inspiration"

@@ -673,10 +673,6 @@ class MindMapWidget(
             for name in ("add_child", "add_sibling", "insert_parent", "edit", "delete", "copy", "cut",
                          "fold", "expand_all", "collapse_all", "move_up", "move_down", "hyperlink"):
                 self._actions[name].setEnabled(False)
-        self._actions["create_submap"].setEnabled(bool(
-            self.editable and not editing and single and node and not node.children and not node.submap_id
-            and not in_detail and not image_only))
-        self._actions["create_submap"].setToolTip("仅没有普通子节点和子导图的叶子节点可创建")
         converting = self._actions["convert_descendants_to_submap"]
         converting.setVisible(not in_detail and not image_only)
         converting.setEnabled(bool(self.editable and not editing and selected == 1 and node
@@ -687,32 +683,42 @@ class MindMapWidget(
         restoring.setEnabled(bool(self.editable and not editing and selected == 1 and node
                                   and node.submap_id and not in_detail and not image_only))
         restoring.setToolTip("仅转换当前一层；根有独立内容时保留为普通子节点")
-        self._actions["enter_submap"].setEnabled(bool(not editing and single and node and node.submap_id))
-        self._actions["delete_submap"].setEnabled(bool(
-            self.editable and not editing and single and node and node.submap_id))
-        favorite = self._actions["favorite_submap"]
-        favorite.setVisible(bool(single and node and node.submap_id))
-        favorite.setEnabled(bool(self.editable and not editing and single and node and node.submap_id))
-        checked = bool(node and self.engine.is_submap_favorite(node.submap_id))
-        favorite.setText("取消收藏子导图" if checked else "收藏子导图")
-        set_action_icon(favorite, "favorite_on" if checked else "favorite", self._ui_colors)
-        # 创建入口按所在页面过滤，已有入口按当前节点过滤；返回其他页面后立即恢复。
-        self._actions["create_submap"].setVisible(not in_detail and not image_only)
         # 结束已失效的共享编辑器时，旧选择可能已经从引擎删除而读模型尚未合并。
         # 动作借用当前读模型对应的解析缓存，正式刷新后再同步新的共享详情目标。
         detail_page = (self._detail_targets.get(node.id, (node.id, node.detail_page_id))[1]
                        if node and not in_detail else None)
-        self._actions["create_detail_page"].setVisible(
-            not in_detail and not image_only and not detail_page)
-        self._actions["create_detail_page"].setEnabled(bool(
-            self.editable and not editing and single and node and not detail_page
-            and not in_detail and not image_only))
-        for name in ("enter_detail_page", "delete_detail_page"):
-            self._actions[name].setVisible(bool(not in_detail and node and detail_page))
-            self._actions[name].setEnabled(bool(
-                not editing and single and node and detail_page
-                and (name == "enter_detail_page" or self.editable)))
+        self._update_node_page_actions(node if single else None, editing, creation_allowed=not in_detail,
+                                       show_creation=not image_only, detail_page=detail_page if single else None)
         self._sync_navigation()
+
+    def _update_node_page_actions(self, node, editing, *, creation_allowed, show_creation, detail_page):
+        """按当前节点、页面权限和正文编辑状态同步两类树页动作。
+
+        图页传入局部投影，树页传入当前可操作节点和解析后的共享详情。进入已有页只
+        需要有效目标；创建、删除和收藏要求可编辑。动作由画布拥有，供菜单共用。
+        """
+        actions = self._actions
+        can_edit = self.editable and not editing
+        submap = node.submap_id if node is not None else None
+        show = creation_allowed and show_creation
+        create_submap = actions["create_submap"]
+        create_submap.setVisible(show and (self.graph is None or not submap))
+        create_submap.setEnabled(bool(show and can_edit and node and not node.children and not submap))
+        create_submap.setToolTip("仅没有普通子节点和子导图的节点可创建")
+        create_detail = actions["create_detail_page"]
+        create_detail.setVisible(show and not detail_page)
+        create_detail.setEnabled(bool(show and can_edit and node and not detail_page))
+        for kind, page_id in (("detail_page", detail_page), ("submap", submap)):
+            for prefix in ("enter", "delete"):
+                action = actions[f"{prefix}_{kind}"]
+                action.setVisible(bool(page_id) or (kind == "submap" and self.graph is None))
+                action.setEnabled(bool(page_id and not editing and (prefix == "enter" or self.editable)))
+        favorite = actions["favorite_submap"]
+        favorite.setVisible(bool(submap))
+        favorite.setEnabled(bool(submap and can_edit))
+        checked = bool(submap and self.engine.is_submap_favorite(submap))
+        favorite.setText("取消收藏子导图" if checked else "收藏子导图")
+        set_action_icon(favorite, "favorite_on" if checked else "favorite", self._ui_colors)
 
     def set_editable(self, editable: bool) -> None:
         """切换只读模式，取消尚未提交的文本编辑与下载后续写入。"""

@@ -205,6 +205,9 @@ class MindMapController(QObject):
             keys = ("add_sibling", "edit", "delete", "graph_add_edge", "graph_text", "graph_auto_layout",
                     "graph_remove")
             menu.addActions([canvas.action(key) for key in keys])
+            pages = canvas.graph_node_page_actions()
+            if pages:
+                menu.addMenu("页面").addActions(pages)
             menu.addAction("返回所属节点", lambda: canvas.call(canvas.return_to_parent_page))
             return
         menu.addActions([canvas.action(key) for key in ("add_child", "add_sibling", "edit", "properties")])

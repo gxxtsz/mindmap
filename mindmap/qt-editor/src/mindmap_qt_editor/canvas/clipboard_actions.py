@@ -4,6 +4,7 @@ from copy import copy, deepcopy
 
 from mindmap_core import MindMapDocument, MindMapError
 from mindmap_core.formats import decode_document, detect_outline_format, encode_document
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from PySide6.QtCore import QMimeData
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -87,7 +88,7 @@ class ClipboardActionsMixin:
         if self.graph is not None:
             if self.selection_count:
                 self._copy_graph_nodes()
-                self._delete_graph_nodes(self.selected_node_ids())
+                self._delete_graph_nodes(self.selected_node_ids(), copied=True)
             return
         if self.current_page_kind != "inspiration" and self.is_node_selected(self._document.root_id):
             raise MindMapError("不能剪切根节点")
@@ -159,13 +160,16 @@ class ClipboardActionsMixin:
         else:
             return []
         include_pages = True
-        if self.current_page_kind == "detail" and (fragment.submaps or fragment.detail_pages):
+        graphs = (sum(GRAPH_PAGE_TYPE in node.extension_pages for node in fragment.nodes.values())
+                  if self.current_page_kind == "detail" else 0)
+        if self.current_page_kind == "detail" and (fragment.submaps or fragment.detail_pages or graphs):
             target_id = self.current_node_id()
             generation, revision = self.engine.document_generation, self.engine.revision
             # 明确说明只省略附属页面；关闭或取消不改写片段、当前选择或撤销历史。
             choice = QMessageBox.question(
                 self, "粘贴到详情页",
-                f"所复制的分支包含 {len(fragment.submaps)} 张子导图和 {len(fragment.detail_pages)} 张详情页。\n"
+                f"所复制的分支包含 {len(fragment.submaps)} 张子导图、"
+                f"{len(fragment.detail_pages)} 张详情页、{graphs} 张图。\n"
                 "详情页内不能拥有附属页面。是否仅粘贴普通分支、文字、图片和样式？\n"
                 "附属页面将不会粘贴，剪贴板内容保持完整。",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)

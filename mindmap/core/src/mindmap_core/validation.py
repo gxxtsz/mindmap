@@ -10,7 +10,7 @@ from .branch_styles import get_branch_style
 from .config import LayoutConfig
 from .errors import MindMapError
 from .models import InspirationArea, MindMapForestView, MindMapPage, Theme
-from .node_pages import validate_extension_pages
+from .node_pages import GRAPH_PAGE_TYPE, graph_members, graph_page_id, validate_extension_pages
 
 
 def validate_document(document, *, page_only=False) -> None:
@@ -62,6 +62,10 @@ def validate_document(document, *, page_only=False) -> None:
                 references.append((node_id, node.page_reference_root_id, page_id))
         stack.extend((child, page_id) for child in reversed(node.children))
         if not page_only:
+            members = _validate_graph_members(document, node)
+            if members and page_id in document.detail_pages:
+                raise MindMapError("详情页中的旧图不能拥有图节点附页")
+            stack.extend((key, graph_page_id(node_id)) for key in reversed(members))
             for kind, owned_id, table in (("submap", node.submap_id, document.submaps),
                                           ("detail", node.detail_page_id, document.detail_pages)):
                 if not owned_id:
@@ -187,6 +191,30 @@ def validate_page_reference(node_id, target_root_id, page_id, root_pages, inspir
         raise MindMapError("不能引用当前页")
 
 
+def _validate_graph_members(document, node) -> dict[str, str]:
+    """校验已解析的图绑定，返回供所有权遍历和事务验证使用的映射。
+
+    图节点实体可以拥有页面，不能作为普通父节点或引用节点。完整遍历检查
+    全局唯一归属，局部事务另用运行时索引检查归属是否一致。
+    """
+    record = node.extension_pages.get(GRAPH_PAGE_TYPE)
+    members = graph_members(record)
+    if record is not None:
+        page_id = graph_page_id(node.id)
+        if page_id == document.inspiration.id or page_id in document.submaps or page_id in document.detail_pages:
+            raise MindMapError("不同类型的页面不能共用标识")
+    if members:
+        for entry in record["data"]["nodes"]:
+            key = entry.get("document_node_id")
+            if key is None:
+                continue
+            target = document.nodes.get(key)
+            if (target is None or target.children or target.is_image_node or target.page_reference_root_id
+                    or target.text != entry["title"]):
+                raise MindMapError("图节点的附页实体不存在或不一致")
+    return members
+
+
 def validate_page(document, page, *, kind=None):
     """校验单张页面的归属、名称和独立外观，不遍历它所拥有的下级页面。"""
     if not isinstance(page, MindMapPage):
@@ -258,6 +286,16 @@ def validate_changes(state, journal):
         if node is None:
             continue
         validate_node(document, key, node)
+        if key in state.graph_nodes and (node.children or node.is_image_node or node.page_reference_root_id
+                                         or key in state.parents or key in state.root_pages):
+            raise MindMapError("图节点的文档归属无效")
+        old = journal.nodes[key]
+        graph = node.extension_pages.get(GRAPH_PAGE_TYPE)
+        if graph is not None and (old is None or graph != old.extension_pages.get(GRAPH_PAGE_TYPE)):
+            for member_id, local_id in _validate_graph_members(document, node).items():
+                if (state.graph_nodes.get(member_id) != (key, local_id)
+                        or member_id in state.parents or member_id in state.root_pages):
+                    raise MindMapError("图节点的文档归属无效")
         if node.page_reference_root_id is not None:
             validate_page_reference(key, node.page_reference_root_id, state.page_id(key),
                                     state.root_pages, document.inspiration.id)
@@ -284,7 +322,7 @@ def validate_changes(state, journal):
                 raise MindMapError("节点树包含循环或重复父节点")
     verified = {document.root_id}
     for key in journal.parents:
-        if key not in document.nodes:
+        if key not in document.nodes or key in state.graph_nodes:
             continue
         path, seen = [], set()
         while key not in verified and key not in state.root_pages:

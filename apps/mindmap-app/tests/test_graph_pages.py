@@ -5,11 +5,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core import GraphEdge, MindMapError, NodeGraph
-from mindmap_core.formats import load_document
+from mindmap_core import GraphEdge, MindMapEngine, MindMapError, NodeGraph
+from mindmap_core.formats import load_document, save_document
 from mindmap_core.formats.graph import format_graph_text, parse_graph_text
 from mindmap_core.node_pages import graph_page_id
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QInputMethodEvent, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -163,7 +163,13 @@ def test_graph_breadcrumb_uses_tree_page_roots(window, qtbot, location):
         expected = [(engine.inspiration_id, root, "未整理的研究", "inspiration")]
     branch = engine.add_child(root, "普通分支")
     owner = engine.add_child(branch, "Blender")
-    engine.set_node_graph(owner, NodeGraph())
+    if location == "详情页":
+        # 旧版本允许详情内挂图。通过加载旧记录构造，当前引擎不再允许创建。
+        legacy = engine.document
+        legacy.nodes[owner].extension_pages["graph"] = NodeGraph().to_record()
+        engine.replace_document(legacy)
+    else:
+        engine.set_node_graph(owner, NodeGraph())
     graph_page = graph_page_id(owner)
     expected.append((graph_page, owner, "Blender · 图", "graph"))
     engine.mark_saved()
@@ -1268,3 +1274,244 @@ def test_legacy_graph_filter_is_ignored_and_cleared_on_clean_save(window, tmp_pa
     assert saved_graph["data"] == {**graph_data, "hidden_node_ids": []}
     assert load_document(legacy_path).page_view(graph_page_id(owner)).graph == canvas.graph
     assert not opened.engine.is_dirty and not opened.engine.can_undo
+
+
+def test_graph_node_pages_use_menu_icons_navigation_and_shared_titles(window, qtbot):
+    """从产品菜单和图标创建及打开三类附页，验证最近访问和父图中的局部选择。"""
+    canvas = _create_graph(window, '节点 a "数据库"\n节点 b "数据库"\na -> b')
+    engine = canvas.engine
+    owner = engine.root_id
+    parent = canvas.current_page_id
+    canvas.select_nodes(["a"])
+    keys = ("create_detail_page", "create_submap", "node_graph")
+    errors = []
+    canvas.error_occurred.connect(errors.append)
+    menu = QMenu()
+    window.application.populate_edit_menu(menu)
+    pages = next(action.menu() for action in menu.actions() if action.text() == "页面")
+    assert all(canvas.action(key) in pages.actions() and canvas.action(key).isEnabled() for key in keys)
+    assert set(keys) <= set(dict(canvas._context_menu_groups(False))["页面"])
+    pages.actions()[0].trigger()
+
+    assert not errors
+    detail = canvas.current_page_id
+    assert canvas.current_page_kind == "detail"
+    canvas.return_to_parent_page()
+    assert canvas.current_page_id == parent and canvas.selected_node_ids() == ["a"]
+    canvas.action("create_submap").trigger()
+    assert not errors
+    submap = canvas.current_page_id
+    assert canvas.current_page_kind == "submap"
+    root = canvas.document_view.root_id
+    canvas.enter_detail_page(root)
+    assert canvas.current_page_id == detail
+    canvas.return_to_parent_page()
+    assert canvas.current_page_id == submap and canvas.selected_node_ids() == [root]
+    engine.update_node(root, text="数据库设计")
+    canvas.return_to_parent_page()
+    assert canvas.current_page_id == parent and canvas.selected_node_ids() == ["a"]
+    assert canvas.document_view.nodes["a"].text == "数据库设计"
+    assert canvas.document_view.nodes["b"].text == "数据库"
+    assert canvas.graph.edges == (GraphEdge("a", "b"),)
+    canvas.action("node_graph").trigger()
+    assert not errors
+    nested = canvas.current_page_id
+    anchor = engine.graph_node_document_id(owner, "a")
+    assert nested == graph_page_id(anchor)
+    canvas.apply_graph_text('节点 a "索引"')
+    canvas.select_nodes(["a"])
+    inner_detail = canvas.create_detail_page()
+    assert canvas.path_navigation.full_path.endswith(" · 图 › 数据库设计 · 图 › 索引 · 详情")
+    canvas.return_to_parent_page()
+    assert canvas.current_page_id == nested and canvas.selected_node_ids() == ["a"]
+    canvas.return_to_parent_page()
+    assert canvas.current_page_id == parent and canvas.selected_node_ids() == ["a"]
+    assert canvas.node_items["a"].visual.page_kinds == ("detail", "submap", "graph")
+
+    canvas.set_editable(False)
+    assert not canvas.action("delete_detail_page").isEnabled()
+    for field, target in (("detail_page_control", detail), ("submap_control", submap), ("graph_control", nested)):
+        canvas.fit_to_view()
+        control = getattr(canvas.node_items["a"], field)
+        point = canvas.view.mapFromScene(control.sceneBoundingRect().center())
+        qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        assert canvas.current_page_id == target
+        canvas.path_navigation.back_button.click()
+        assert canvas.current_page_id == parent and canvas.selected_node_ids() == ["a"]
+    window.documents.active._navigate_recent_page(inner_detail, None)
+    assert canvas.current_page_id == inner_detail
+    canvas.return_to_parent_page()
+    assert canvas.current_page_id == nested and canvas.selected_node_ids() == ["a"]
+    saved_view = canvas.capture_page_view_state()
+    canvas.navigate_to(None)
+    canvas.restore_page_view_state(saved_view)
+    assert canvas.current_page_id == nested and canvas.selected_node_ids() == ["a"]
+    canvas.navigate_to(submap)
+    assert canvas.current_page_id == submap
+    canvas.set_editable(True)
+    canvas.set_submap_favorite(submap, True)
+    canvas.return_to_parent_page()
+    canvas.select_nodes(["b"])
+    other_submap = canvas.create_submap()
+    canvas.set_submap_favorite(other_submap, True)
+    assert [entry.page_id for entry in engine.favorite_submaps(order="document")] == [submap, other_submap]
+    window.documents.active._navigate_favorite(submap)
+    assert canvas.current_page_id == submap
+    assert window.documents.save(window.documents.active)
+    reopened = MindMapEngine(load_document(window.documents.active.document.path))
+    assert reopened.page_summary(inner_detail).path == engine.page_summary(inner_detail).path
+    canvas.return_to_parent_page()
+    canvas.fit_to_view()
+    start = _outlet_point(canvas, "b")
+    detail_control = canvas.node_items["a"].detail_page_control
+    end = canvas.view.mapFromScene(detail_control.sceneBoundingRect().center())
+    _drag_edge(canvas, start, end)
+    assert canvas.current_page_id == parent and GraphEdge("b", "a") in canvas.graph.edges
+
+
+def test_graph_owned_page_deletion_and_text_replacement_sync_split_views(window, monkeypatch):
+    """确认取消、候选拦截、删除及撤销都保持图节点附页和分屏归属一致。"""
+    first = window.documents.active
+    canvas = _create_graph(window)
+    engine = canvas.engine
+    graph_page = canvas.current_page_id
+    canvas.select_nodes(["a"])
+    canvas.begin_edit("a")
+    canvas.scene.sendEvent(canvas.editor, QInputMethodEvent("候选", []))
+    with pytest.raises(MindMapError, match="候选"):
+        canvas.create_detail_page()
+    assert canvas.current_page_id == graph_page and canvas.is_composing
+    canvas.finish_edit(commit=False)
+    assert first.duplicate()
+    other = window.documents.active
+    window.host.editor.split_token(other.id, Qt.Orientation.Horizontal)
+    other.canvas.select_nodes(["a"])
+    canvas.begin_edit("a")
+    editor = canvas.editor
+    editor.setPlainText("其他标签中的草稿")
+    detail = other.canvas.create_detail_page()
+    assert other.canvas.current_page_id == detail and canvas.current_page_id == graph_page
+    assert canvas.editor is editor and editor.toPlainText() == "其他标签中的草稿"
+    assert canvas.node_items["a"].detail_page_control.isVisible()
+    canvas.finish_edit(commit=False)
+    other.canvas.return_to_parent_page()
+    other.canvas.select_nodes(["a"])
+    canvas.navigate_to(detail)
+    baseline = engine.document
+    revision = engine.revision
+    monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.No)
+    assert other.canvas.apply_graph_text('节点 b "服务"') is False
+    other.canvas.delete_selected()
+    assert engine.document == baseline and engine.revision == revision
+    prompts = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: (
+        prompts.append(args[2]) or QMessageBox.StandardButton.Yes))
+    assert other.canvas.apply_graph_text('节点 b "服务"') is True
+    assert "1 张详情页" in prompts[0]
+    assert engine.revision == revision + 1 and engine.page_summary(detail) is None
+    assert canvas.current_page_id == graph_page and other.canvas.current_page_id == graph_page
+    assert set(other.canvas.document_view.nodes) == {"b"}
+    other.canvas.action("undo").trigger()
+    assert engine.document == baseline
+    assert canvas.node_items["a"].detail_page_control.isVisible()
+    other.canvas.action("redo").trigger()
+    assert engine.page_summary(detail) is None
+    other.canvas.action("undo").trigger()
+    other.canvas.action("graph_remove").trigger()
+    assert engine.page_summary(graph_page) is None and engine.page_summary(detail) is None
+    other.canvas.action("undo").trigger()
+    assert engine.document == baseline and engine.page_summary(detail) is not None
+
+
+def test_graph_page_deletion_falls_back_to_the_owning_idea(window):
+    """从最近访问直达深层附页时，删除上级图后回到实际所属想法。"""
+    canvas = window.application.canvas
+    engine = canvas.engine
+    other_idea = engine.add_inspiration("其他想法", position=(0, 0))
+    idea = engine.add_inspiration("所属想法", position=(200, 0))
+    owner = engine.add_child(idea, "图入口")
+    engine.set_node_graph(owner, parse_graph_text(SAMPLE))
+    detail = engine.create_graph_node_page(owner, "a", kind="detail")
+    canvas.show_inspiration(other_idea)
+    window.documents.active._navigate_recent_page(detail, None)
+    assert canvas.current_page_id == detail
+    engine.remove_node_graph(owner)
+    assert canvas.current_page_id == engine.inspiration_id
+    assert canvas.current_inspiration_root_id == idea
+
+
+def test_graph_clipboard_across_files_and_legacy_detail_restrictions(window, tmp_path, monkeypatch):
+    """跨文件剪切粘贴保留附页，旧详情图及向详情粘贴沿用限制。"""
+    canvas = _create_graph(window)
+    source = canvas.engine
+    canvas.select_nodes(["a"])
+    detail = canvas.create_detail_page()
+    root = canvas.document_view.root_id
+    source.add_child(root, "附页正文")
+    canvas.return_to_parent_page()
+    canvas.select_nodes(["a", "b"])
+    canvas.cut()
+    assert not canvas.graph.nodes and source.page_summary(detail) is None
+    assert "a -> b" in QApplication.clipboard().text()
+    canvas.action("undo").trigger()
+    assert source.page_summary(detail) is not None
+
+    assert window.new_document(tmp_path / "目标.mindmap")
+    target = _create_graph(window, None)
+    first, second = target.paste()
+    assert target.graph.edges == (GraphEdge(first, second),)
+    target.enter_detail_page(first)
+    assert target.current_page_id != detail
+    assert any(node.text == "附页正文" for node in target.document_view.nodes.values())
+
+    target.return_to_parent_page()
+    target.return_to_parent_page()
+    engine = target.engine
+    detail = engine.create_detail_page(engine.root_id)
+    detail_root = engine.page_document(detail).root_id
+    graph_owner = engine.add_child(engine.root_id, "待复制分支")
+    engine.set_node_graph(graph_owner, NodeGraph())
+    clipboard = QApplication.clipboard()
+    graph_payload = bytes(clipboard.mimeData().data("application/x-python-mindmap-graph+json"))
+    graph_text = clipboard.text()
+    target.select_nodes([graph_owner])
+    target.copy()
+    target.navigate_to(detail)
+    assert not target.action("node_graph").isVisible()
+    with pytest.raises(MindMapError, match="详情页"):
+        engine.set_node_graph(detail_root, NodeGraph())
+    prompts = []
+    original = bytes(clipboard.mimeData().data("application/x-python-mindmap+json"))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: (
+        prompts.append(args[2]) or QMessageBox.StandardButton.Yes))
+    pasted, = target.paste()
+    assert "1 张图" in prompts[0] and not engine.get_node(pasted).extension_pages
+    assert bytes(clipboard.mimeData().data("application/x-python-mindmap+json")) == original
+
+    # 构造由旧版本写出的详情页图，作为保存、加载和继续编辑的兼容数据。
+    detail_engine = MindMapEngine()
+    legacy_detail = detail_engine.create_detail_page(detail_engine.root_id)
+    legacy_owner = detail_engine.page_document(legacy_detail).root_id
+    legacy = detail_engine.document
+    legacy.nodes[legacy_owner].extension_pages["graph"] = NodeGraph().to_record()
+    path = tmp_path / "旧文件.mindmap"
+    save_document(legacy, path)
+    assert window.open_path(path)
+    reopened = window.application.canvas
+    reopened.navigate_to(legacy_detail)
+    reopened.open_node_graph(legacy_owner)
+    reopened.apply_graph_text(SAMPLE)
+    reopened.select_nodes(["a"])
+    assert all(not reopened.action(key).isVisible() for key in ("create_detail_page", "create_submap", "node_graph"))
+    with pytest.raises(MindMapError, match="详情页"):
+        reopened.create_submap()
+    mime = QMimeData()
+    mime.setData("application/x-python-mindmap-graph+json", graph_payload)
+    mime.setText(graph_text)
+    clipboard.setMimeData(mime)
+    monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.Yes)
+    added = reopened.paste()
+    assert len(added) == 2 and all(node.document_node_id is None for node in reopened.graph.nodes)
+    assert window.documents.save(window.documents.active)
+    with ZipFile(path) as archive:
+        assert json.loads(archive.read("document.json"))["schema_version"] == 7

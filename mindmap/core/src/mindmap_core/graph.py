@@ -13,10 +13,15 @@ _MAX_GRAPH_COORDINATE = 100_000_000
 
 @dataclass(frozen=True, slots=True)
 class GraphNode:
-    """图内局部标识和正文；同一标识可以在不同的图中重复使用。"""
+    """图内节点。局部 ID 用于连线和图文本，允许在不同的图中重复。
+
+    document_node_id 在首次创建附页时由引擎分配，指向文档节点表中承载附页的实体。
+    普通图节点为 None；调用方可读取绑定，但只能通过引擎的页面操作建立绑定。
+    """
 
     id: str
     title: str
+    document_node_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,16 +50,27 @@ class NodeGraph:
     positions: dict[str, Point] = field(default_factory=dict)
 
     def with_content(self, nodes: tuple[GraphNode, ...], edges: tuple[GraphEdge, ...]) -> "NodeGraph":
-        """替换节点和连线，按仍存在的局部标识保留手动位置。"""
+        """替换节点和连线，按仍存在的局部 ID 保留手动位置及文档节点绑定。
+
+        图文本只提供局部标识和标题。已有节点的附页绑定从当前图继承；删除节点后
+        相应绑定从结果移除，实际级联删除由引擎提交时处理。
+        """
         ids = {node.id for node in nodes}
+        bindings = {node.id: node.document_node_id for node in self.nodes if node.document_node_id}
+        nodes = tuple(replace(node, document_node_id=bindings[node.id]) if node.id in bindings else node
+                      for node in nodes)
         return replace(self, nodes=nodes, edges=edges,
                        positions={key: point for key, point in self.positions.items() if key in ids})
 
     def to_data(self) -> dict:
-        """编码为原生节点页的独立 JSON 对象，旧筛选字段写为空数组以兼容旧版。"""
+        """编码为独立的 JSON 对象。文档节点绑定只在存在时写出，旧筛选字段写为空数组。"""
         try:
             return {
-                "nodes": [{"id": node.id, "title": node.title} for node in self.nodes],
+                "nodes": [
+                    {"id": node.id, "title": node.title, **(
+                        {"document_node_id": node.document_node_id} if node.document_node_id is not None else {}
+                    )} for node in self.nodes
+                ],
                 "edges": [[edge.source, edge.target] for edge in self.edges],
                 "positions": {key: list(point) for key, point in self.positions.items()},
                 "hidden_node_ids": [],
@@ -62,29 +78,44 @@ class NodeGraph:
         except (AttributeError, TypeError) as error:
             raise MindMapError("图的数据字段无效") from error
 
+    def to_record(self) -> dict:
+        """封装原生图数据。有文档节点绑定时写版本二，否则继续写版本一。"""
+        data = self.to_data()
+        return {"version": 2 if any("document_node_id" in node for node in data["nodes"]) else 1, "data": data}
+
     @classmethod
-    def from_data(cls, data: dict) -> "NodeGraph":
+    def from_data(cls, data: dict, *, version: int = 2) -> "NodeGraph":
         """解码原生节点页，校验局部标识、端点及坐标，失败时抛出中文错误。
 
-        版本一的旧筛选字段仍按原结构读取和校验，解码后的图只包含节点、连线和手动坐标。
+        version 取自原生图封装；版本一仅接受原有节点字段，版本二允许可选的文档节点绑定。
+        绑定在本图内唯一，存在性和全局所有权由完整文档校验。旧筛选字段只读取和校验。
         """
         from .validation import finite
 
+        if type(version) is not int or version not in (1, 2):
+            raise MindMapError("不支持的图数据版本")
         if (not isinstance(data, dict) or set(data) != {"nodes", "edges", "positions", "hidden_node_ids"}
                 or not all(isinstance(data[key], list) for key in ("nodes", "edges", "hidden_node_ids"))
                 or not isinstance(data["positions"], dict)):
             raise MindMapError("图的数据字段无效")
         nodes = []
         ids = set()
+        document_ids = set()
         for record in data["nodes"]:
-            if not isinstance(record, dict) or set(record) != {"id", "title"}:
+            if not isinstance(record, dict) or (set(record) != {"id", "title"}
+                    and (version != 2 or set(record) != {"id", "title", "document_node_id"})):
                 raise MindMapError("图节点必须包含标识和标题")
             key, title = record["id"], record["title"]
             if not isinstance(key, str) or not re.fullmatch(GRAPH_NODE_ID, key) or key in ids:
                 raise MindMapError(f"图节点标识无效或重复：{key!r}")
             validate_graph_title(title)
             ids.add(key)
-            nodes.append(GraphNode(key, title))
+            document_id = record.get("document_node_id")
+            if "document_node_id" in record:
+                if not isinstance(document_id, str) or not document_id or document_id in document_ids:
+                    raise MindMapError("图节点的文档标识无效或重复")
+                document_ids.add(document_id)
+            nodes.append(GraphNode(key, title, document_id))
         edges = {}
         for pair in data["edges"]:
             if (not isinstance(pair, list) or len(pair) != 2
