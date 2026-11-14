@@ -13,6 +13,7 @@ from mindmap_core import (
     MindMapDocument,
     MindMapEngine,
     MindMapError,
+    NodeGraph,
     Theme,
 )
 from mindmap_core.formats import load_document, save_document
@@ -1383,6 +1384,59 @@ def test_canvas_select_all_shortcut_and_edit_menu_share_the_same_action(window, 
     select_all.trigger()
     assert canvas.selected_node_ids() == [root, child]
     assert window.application.engine.document == before and window.application.engine.revision == revision
+
+
+def test_canvas_select_all_delete_confirms_removed_pages_and_undoes_once(window, qtbot, monkeypatch):
+    """桌面快捷键只删除当前页所选分支，确认范围包含折叠后代与归属附页。"""
+    canvas, engine = window.application.canvas, window.application.engine
+    root = engine.root_id
+    branch = engine.add_child(root, "折叠分支")
+    hidden = engine.add_child(branch, "带附页的后代")
+    other = engine.add_child(root, "另一条分支")
+    engine.set_expanded(branch, False)
+    retained = engine.create_detail_page(root)
+    engine.set_extension_page(root, "example", {"正文": "保留的扩展页"})
+    engine.create_detail_page(hidden)
+    engine.create_submap(hidden)
+    engine.set_node_graph(other, NodeGraph())
+    engine.set_extension_page(other, "example", {"正文": "待删除的扩展页"})
+    before, revision = engine.document, engine.revision
+    expected_count = len(before.owned_descendants(branch)) + len(before.owned_descendants(other))
+    questions, errors = [], []
+
+    def confirm(parent, title, message, buttons, default):
+        questions.append(message)
+        assert default == QMessageBox.StandardButton.No
+        return QMessageBox.StandardButton.No if len(questions) == 1 else QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", confirm)
+    canvas.error_occurred.connect(errors.append)
+    window.activateWindow()
+    canvas.view.setFocus()
+    QApplication.processEvents()
+    viewport = canvas.view.viewport()
+    canvas.select_nodes([root])
+    qtbot.keyClick(viewport, Qt.Key.Key_Delete)
+    assert errors == ["根节点不能删除"] and not questions
+    assert engine.document == before and engine.revision == revision
+    errors.clear()
+
+    qtbot.keyClick(viewport, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    assert canvas.selected_node_ids() == [root, branch, other]
+    qtbot.keyClick(viewport, Qt.Key.Key_Delete)
+    assert engine.document == before and engine.revision == revision
+    assert canvas.selected_node_ids() == [root, branch, other]
+
+    qtbot.keyClick(viewport, Qt.Key.Key_Delete)
+    after = engine.document
+    assert set(after.nodes) == {root, before.detail_pages[retained].root_id}
+    assert set(after.detail_pages) == {retained} and not after.submaps
+    assert after.root.extension_pages == before.root.extension_pages
+    assert len(questions) == 2 and not errors
+    expected_message = f"将删除 {expected_count} 个节点，以及其中的 1 张子导图、1 张详情页、1 张图、1 张扩展页。"
+    assert all(expected_message in message for message in questions)
+    qtbot.keyClick(viewport, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert engine.document == before
 
 
 def test_preferences_restore_and_local_input_shortcuts(window, qtbot):

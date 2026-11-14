@@ -1090,11 +1090,16 @@ class MindMapWidget(
         return key
 
     @document_interaction
-    def delete_selected(self):
-        """一次删除明确选中的连线或节点，复用引擎的撤销和跨视图同步。
+    def delete_selected(self) -> None:
+        """删除当前画布选中的节点或连线，返回 None。
 
-        图页只删除当前实际选中的对象。选线时保留节点和未选中的线；选节点时
-        一同删除其相连的线。普通导图的节点子树及关联资源共用一条撤销记录。
+        主导图、子导图和详情页保留页根，只选中页根时抛出 MindMapError，
+        提示“根节点不能删除”。选中分支包含其折叠后代，待删除的分支拥有附属
+        页面时先确认，取消则保留选择和文档。分支、附属页面及关联资源由引擎
+        一次提交，支持一次撤销及跨视图同步。灵感区的游离根仍可删除。
+
+        图页选中连线时只删除所选连线，选中节点时一同删除相连的线。无选择时
+        直接返回，只读时抛出 MindMapError。仅在所属 GUI 线程调用。
         """
         self._ensure_editable()
         ids = self.selected_node_ids()
@@ -1105,25 +1110,44 @@ class MindMapWidget(
             elif ids:
                 self._delete_graph_nodes(ids)
             return
-        if ids:
-            nodes = {key for root in ids for key in self._book_document.owned_descendants(root)}
-            submaps = sum(bool(self._book_document.nodes[key].submap_id) for key in nodes)
-            details = sum(bool(self._book_document.nodes[key].detail_page_id) for key in nodes)
-            graphs = sum(GRAPH_PAGE_TYPE in self._book_document.nodes[key].extension_pages for key in nodes)
-            if submaps or details or graphs:
-                generation, revision = self.engine.document_generation, self._branch_content_revision
-                choice = QMessageBox.question(
-                    self, "删除节点及附属页面",
-                    f"将删除 {len(nodes)} 个节点，以及其中的 {submaps} 张子导图、{details} 张详情页、{graphs} 张图。\n"
-                    "删除后可以撤销。",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-                if choice != QMessageBox.StandardButton.Yes:
-                    return
-                self._ensure_editable()
-                if self._disposed or (generation, revision) != (
-                        self.engine.document_generation, self._branch_content_revision):
-                    raise MindMapError("确认期间导图发生变化，请重新删除")
-            self.engine.remove_nodes(ids)
+        if not ids:
+            return
+        root_id = self._document.root_id
+        if self.current_page_kind != "inspiration" and root_id in ids:
+            if len(ids) == 1:
+                raise MindMapError("根节点不能删除")
+            ids.remove(root_id)
+
+        # 选择按树的先序排列，已随祖先纳入删除范围的后代无需再次遍历。
+        nodes = set()
+        for node_id in ids:
+            if node_id not in nodes:
+                nodes.update(self._book_document.owned_descendants(node_id))
+        submaps = details = graphs = extensions = 0
+        for node_id in nodes:
+            node = self._book_document.nodes[node_id]
+            submaps += bool(node.submap_id)
+            details += bool(node.detail_page_id)
+            has_graph = GRAPH_PAGE_TYPE in node.extension_pages
+            graphs += has_graph
+            extensions += len(node.extension_pages) - has_graph
+        if submaps or details or graphs or extensions:
+            generation, revision = self.engine.document_generation, self._branch_content_revision
+            view_key = self._view_key()
+            pages = f"{submaps} 张子导图、{details} 张详情页、{graphs} 张图"
+            if extensions:
+                pages += f"、{extensions} 张扩展页"
+            choice = QMessageBox.question(
+                self, "删除节点及附属页面",
+                f"将删除 {len(nodes)} 个节点，以及其中的 {pages}。\n删除后可以撤销。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if choice != QMessageBox.StandardButton.Yes:
+                return
+            self._ensure_editable()
+            if self._disposed or (generation, revision, view_key) != (
+                    self.engine.document_generation, self._branch_content_revision, self._view_key()):
+                raise MindMapError("确认期间导图发生变化，请重新删除")
+        self.engine.remove_nodes(ids)
 
     @document_interaction
     def toggle_expanded(self):
