@@ -1,7 +1,14 @@
 """直接装配导图主体的失败回滚、资源释放和桌面服务边界。"""
 
 import pytest
-from mindmap_desktop_api.qt import CommandSpec, MenuContribution, MenuLocation, PanelSpec, StatusItemSpec
+from mindmap_desktop_api.qt import (
+    CommandSpec,
+    MenuContribution,
+    MenuLocation,
+    PanelSpec,
+    StatusItemSpec,
+    TitleBarItemSpec,
+)
 from mindmap_desktop_runtime import DesktopRuntimeWindow
 from PySide6.QtWidgets import QLabel
 
@@ -21,6 +28,7 @@ def test_failed_application_rolls_back_services_and_aborts_startup(qtbot, tmp_pa
         context.commands.register(CommandSpec("broken.command", "测试动作", lambda: None))
         context.ui.register_panel(PanelSpec("broken.panel", "测试面板", QLabel, default_visible=True))
         context.ui.register_status(StatusItemSpec("broken.status", QLabel("状态")))
+        context.ui.register_title_bar_item(TitleBarItemSpec("broken.top", QLabel("顶部")))
         context.ui.contribute_menu(MenuContribution(MenuLocation.VIEW, lambda menu: menu.addAction("不应残留")))
         raise ValueError("主体初始化失败")
 
@@ -31,6 +39,7 @@ def test_failed_application_rolls_back_services_and_aborts_startup(qtbot, tmp_pa
     assert "broken.command" not in window.manager.actions
     assert "broken.panel" not in window.manager.specs
     assert not window.status_items and not window.menu_contributions
+    assert not window.title_bar_items and window.title_bar.items.count() == 0
 
 
 def test_application_and_owned_resources_are_released_once(qtbot, tmp_path, application_factory):

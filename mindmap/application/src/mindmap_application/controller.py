@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QSignalBlocker, QTimer
 from PySide6.QtGui import QAction, QIcon, QPalette
 from PySide6.QtWidgets import QLabel, QMenu, QStackedWidget, QWidget
 
+from .git_sync import GitSyncController
 from .operation_log import describe_display
 from .page_history import PageHistoryState
 from .sessions import MindMapSessions
@@ -63,6 +64,7 @@ class MindMapController(QObject):
         context.own(self.dispose)
         context.ui.register_status(StatusItemSpec("mindmap.view", self._status_controls,
                                                  lambda: self.active_session is not None))
+        self.git_sync = GitSyncController(self)
         headers = {"outline": (self._depth_action,), "inspiration": (self._new_inspiration_action,)}
         for identifier, title, stack, icon, position, shortcut in (
             ("outline", "大纲", self._outline_stack, "outline", "left_top", "Alt+1"),
@@ -121,19 +123,21 @@ class MindMapController(QObject):
             self._restoring_recent_pages = False
             if self.active_session is not None:
                 self.active_session._record_page_visit()
+            self._sync_document()
 
     def _sync_document(self, *_):
         if self._disposed or not hasattr(self, "settings_action"):
             return
         session = self.active_session
         self.settings_action.setEnabled(session is not None and not session.pages.active and session.canvas.graph is None)
-        self.read_only_action.setEnabled(session is not None)
+        self.read_only_action.setEnabled(session is not None and not session.document.git_busy)
         with QSignalBlocker(self.read_only_action):
             self.read_only_action.setChecked(session is not None and not session.canvas.editable)
         if session is None:
             self._status_controls.set_save_status("")
         else:
             self._status_controls.set_save_status(session.save_status, session.document.last_error)
+        self.git_sync.bind(session.document if session and not self.context.ui.restoring else None)
         self.context.ui.refresh()
 
     def new_document(self, path=None):
@@ -263,6 +267,8 @@ class MindMapController(QObject):
         self.flush_recent_pages()
         self._disposed = True
         self._recent_pages_timer.stop()
+        if hasattr(self, "git_sync"):
+            self.git_sync.dispose()
         self.sessions.dispose()
         # 大图打开的嵌套事件循环可能尚未返回，候选会话的 QObject 父链须保留到
         # 主窗口销毁，避免回调清理候选时访问已销毁的定时器。所有订阅已由上下文释放。
@@ -470,7 +476,7 @@ class MindMapController(QObject):
 
 
     def _set_read_only(self, checked):
-        if self.canvas:
+        if self.canvas and not self.active_session.document.git_busy:
             self.canvas.set_editable(not checked)
 
 

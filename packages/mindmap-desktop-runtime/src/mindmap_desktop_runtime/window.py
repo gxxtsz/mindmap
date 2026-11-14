@@ -79,6 +79,7 @@ class DesktopRuntimeWindow(DesktopWindow):
         self.command_specs = {}
         self.menu_contributions = []
         self.status_items = {}
+        self.title_bar_items = {}
         self.default_panel_ids = {"operation_log"}
         directory = Path(storage_dir) if storage_dir is not None else self.config.default_storage_dir()
         initial_state, initial_settings = migration(directory) if migration else (None, {})
@@ -386,6 +387,8 @@ class DesktopRuntimeWindow(DesktopWindow):
         for identifier, spec in self.command_specs.items():
             self.action(identifier).setEnabled(spec.enabled())
         for spec in self.status_items.values():
+            spec.widget.setVisible(spec.visible())
+        for spec in self.title_bar_items.values():
             spec.widget.setVisible(spec.visible())
         self.recent_files_button.refresh_document()
 

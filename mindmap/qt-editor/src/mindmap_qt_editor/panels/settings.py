@@ -349,6 +349,11 @@ class GlobalSettingsPanel(QWidget):
         finally:
             self._loading = loading
 
+    @property
+    def has_pending_edits(self) -> bool:
+        """全局间距有待写入的输入时返回 True，不包含已提交的画布修改。"""
+        return bool(self._pending)
+
     def flush(self) -> None:
         """提交当前导图的有效间距，一轮连续输入只形成一次撤销记录。
 

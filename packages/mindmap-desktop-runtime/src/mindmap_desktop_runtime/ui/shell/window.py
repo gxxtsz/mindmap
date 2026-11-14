@@ -229,6 +229,10 @@ class _TitleBar(QWidget):
                 button.clicked.connect(callback)
             button.setVisible(not window.spec.native_title_bar)
             self.window_controls.addWidget(button)
+        self.items = QHBoxLayout()
+        self.items.setContentsMargins(0, 0, 0, 0)
+        self.items.setSpacing(self.box.spacing())
+        self.box.insertLayout(self.box.indexOf(self.window_controls), self.items)
 
     def add_action(self, action):
         """将业务动作加入顶栏，并标记为透明工具按钮；动态追加时沿用当前主题。"""
@@ -239,8 +243,8 @@ class _TitleBar(QWidget):
         self.action_buttons.append(button)
         # 动态业务动作排在右侧导航前，保证导航始终紧邻窗控。构造期间尚未装入窗控，
         # 此时直接按声明顺序追加，随后再由主布局放置窗口按钮组。
-        if hasattr(self, "window_controls"):
-            index = self.box.count() - 1
+        if hasattr(self, "items"):
+            index = self.box.indexOf(self.items)
             if self.navigation is not None and self.box.indexOf(self.navigation) == index - 1:
                 index -= 1
             self.box.insertWidget(index, button)
@@ -457,9 +461,24 @@ class DesktopWindow(QMainWindow):
         bar.navigation = widget
         if widget is not None:
             widget.setParent(bar)
-            index = bar.box.count() - 1 if beside_window_controls else bar.box.indexOf(bar.menu_bar) + 1
+            index = bar.box.indexOf(bar.window_controls) if beside_window_controls else bar.box.indexOf(bar.menu_bar) + 1
             bar.box.insertWidget(index, widget)
             widget.show()
+
+    def add_title_bar_item(self, widget: QWidget) -> None:
+        """将独立业务控件加入右侧顶栏，按注册顺序排列在导航和窗口按钮之前。"""
+        bar = self.title_bar
+        if widget is bar or widget.isAncestorOf(bar) or bar.box.indexOf(widget) >= 0 or bar.items.indexOf(widget) >= 0:
+            raise ValueError("顶栏控件已注册或会形成循环")
+        bar.items.addWidget(widget, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+    def remove_title_bar_item(self, widget: QWidget) -> None:
+        """释放已挂载的业务控件。未挂载或已经注销的控件不受影响。"""
+        items = self.title_bar.items
+        if items.indexOf(widget) >= 0:
+            items.removeWidget(widget)
+            widget.hide()
+            widget.deleteLater()
 
     @Slot()
     def refresh_theme(self):

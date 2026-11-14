@@ -76,6 +76,19 @@ class StatusItemSpec:
     visible: Callable[[], bool] = lambda: True
 
 
+@dataclass(frozen=True)
+class TitleBarItemSpec:
+    """声明靠近最近文件的顶栏控件。标识在窗口内唯一，不进入布局配置。
+
+    widget 的交互由应用处理，宿主接管其 Qt 所有权。visible 随活动文档刷新，
+    应只读取当前状态，不执行文件操作，也不创建控件。
+    """
+
+    id: str
+    widget: QWidget
+    visible: Callable[[], bool] = lambda: True
+
+
 class CommandService(Protocol):
     def register(self, spec: CommandSpec) -> QAction:
         """注册命令并由应用上下文拥有；返回动作供应用设置勾选状态或按钮复用。"""
@@ -130,6 +143,10 @@ class UiService(Protocol):
         ...
 
     def register_status(self, spec: StatusItemSpec) -> Disposable: ...
+
+    def register_title_bar_item(self, spec: TitleBarItemSpec) -> Disposable:
+        """将控件挂到顶栏。重复标识抛出 ValueError；注销或应用退出时释放控件。"""
+        ...
 
     def contribute_menu(self, contribution: MenuContribution) -> Disposable:
         """登记动态菜单贡献并返回注销句柄。未知位置在注册时抛出 ValueError。"""

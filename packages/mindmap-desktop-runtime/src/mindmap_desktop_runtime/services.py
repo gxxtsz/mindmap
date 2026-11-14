@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import replace
 
-from mindmap_desktop_api.qt import CommandSpec, MenuContribution, MenuLocation, PanelSpec
+from mindmap_desktop_api.qt import CommandSpec, MenuContribution, MenuLocation, PanelSpec, TitleBarItemSpec
 from PySide6.QtGui import QAction, QColor, QIcon
 
 from .ui.docking import ToolWindowSpec
@@ -108,6 +108,21 @@ class UiService:
             self._window.status_items.pop(spec.id, None)
             self._window.status.removeWidget(spec.widget)
             spec.widget.deleteLater()
+
+        return self.context.own(remove)
+
+    def register_title_bar_item(self, spec: TitleBarItemSpec):
+        """挂载应用的顶栏控件，应用初始化回滚或退出时从布局移除并延迟销毁。"""
+        if spec.id in self._window.title_bar_items:
+            raise ValueError("顶栏控件标识重复")
+        visible = spec.visible()
+        self._window.add_title_bar_item(spec.widget)
+        self._window.title_bar_items[spec.id] = spec
+        spec.widget.setVisible(visible)
+
+        def remove():
+            self._window.title_bar_items.pop(spec.id, None)
+            self._window.remove_title_bar_item(spec.widget)
 
         return self.context.own(remove)
 

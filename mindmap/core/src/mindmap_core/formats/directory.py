@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -211,14 +213,27 @@ def directory_version(path: str | Path) -> DirectoryVersion | None:
 def check_directory_version(path: str | Path, expected: DirectoryVersion | None) -> None:
     """持锁完成恢复并检查目录版本；成员文件新增、移除或修改时抛出版本冲突。"""
     try:
-        root = Path(path).resolve()
-        with directory_lock(root) as staging:
-            recover_directory(root, staging)
-            require_version(root, expected)
+        with guard_directory_version(path, expected):
+            pass
     except MindMapError:
         raise
     except (OSError, ValueError) as exc:
         raise MindMapError(f"检查导图目录版本失败：{exc}") from exc
+
+
+@contextmanager
+def guard_directory_version(path: str | Path, expected: DirectoryVersion | None) -> Iterator[None]:
+    """恢复上次写入、核对内容版本，并在调用方操作期间持有导图目录锁。
+
+    若磁盘和预期版本不同，不进入代码块。仅用于短时本地操作，例如让 Git 提交或
+    快进期间不会与其他应用实例的目录事务交错。代码块内不能再次调用需要同一把锁
+    的保存、加载或版本查询；Git 自身的网络操作也应放在锁外。
+    """
+    root = Path(path).resolve()
+    with directory_lock(root) as staging:
+        recover_directory(root, staging)
+        require_version(root, expected)
+        yield
 
 
 def load_validated_directory(path: str | Path) -> tuple[ValidatedDocument, DirectoryVersion]:

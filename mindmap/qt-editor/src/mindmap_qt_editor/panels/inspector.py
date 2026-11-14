@@ -56,6 +56,11 @@ class NodePropertiesPanel(NodePropertiesForm):
         self.timer.stop()
         self._pending.clear()
 
+    @property
+    def has_pending_edits(self) -> bool:
+        """节点属性已收到有效输入但尚未提交时返回 True。"""
+        return bool(self._pending)
+
     def _resume_input(self):
         if self._pending and not self._disposed:
             self.timer.start()

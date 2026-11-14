@@ -4,11 +4,12 @@ from .directory import (
     check_directory_version,
     directory_size,
     directory_version,
+    guard_directory_version,
     load_directory,
     load_validated_directory,
     save_directory,
 )
-from .directory_storage import DirectoryVersion, DirectoryVersionConflict
+from .directory_storage import DirectoryVersion, DirectoryVersionConflict, is_directory_member
 from .edraw import import_edraw_xml
 from .files import decode_document, encode_document, load_document, load_validated_document, save_document
 from .json_codec import JsonCodec, dumps, loads
@@ -38,9 +39,11 @@ __all__ = [
     "encode_document",
     "export_outline",
     "from_dict",
+    "guard_directory_version",
     "import_outline",
     "import_indented_fragment",
     "import_edraw_xml",
+    "is_directory_member",
     "load_document",
     "load_directory",
     "load_validated_directory",

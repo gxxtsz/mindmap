@@ -76,6 +76,9 @@ class MindMapSessions(QObject):
         source = self.get(session_id)
         if source is None or source.disposed:
             return False
+        if source.document.git_busy:
+            self.window.show_status_message("正在同步导图，请等操作完成")
+            return False
         inputs = list(dict.fromkeys(view for view in (self.active, source) if view is not None))
         if any(view.is_composing for view in inputs):
             self.window.show_status_message("请先完成输入法候选，再复制标签")

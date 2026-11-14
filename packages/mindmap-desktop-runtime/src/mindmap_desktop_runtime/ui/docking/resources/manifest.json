@@ -55,6 +55,10 @@
       "sha256": "f473b2c82c0a64f0ce542d888b8d6e3538afa4b1561c876687957e9de797eb13"
     },
     {
+      "path": "icons/git-sync.svg",
+      "sha256": "3c855193fa8291b46167d4b072acfac7d878c25ababd66956aab374e4749792b"
+    },
+    {
       "path": "icons/inspiration.svg",
       "sha256": "8550764a5201421dedf6b6d8fbef0728e1f4ffc5329d63f6321fb9e6e55b1589"
     },

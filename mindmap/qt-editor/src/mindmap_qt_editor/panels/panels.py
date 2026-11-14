@@ -52,6 +52,11 @@ class MindMapPanels(QObject):
             self.properties.flush()
 
     @property
+    def has_pending_edits(self) -> bool:
+        """查询防抖期间是否有还未交给画布的输入；查询不提交内容或改变焦点。"""
+        return not self._disposed and (self.properties.has_pending_edits or self.settings.has_pending_edits)
+
+    @property
     def is_composing(self) -> bool:
         """返回面板内是否存在尚未确认的输入法候选；已释放的组合返回 False。
 

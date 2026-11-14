@@ -74,6 +74,7 @@ class MindMapDocumentHandle(QObject):
         self._file_size_bytes = None
         self.disposed = False
         self._preparing = False
+        self._git_editable = None
         self._unsubscribe = lambda: None
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -101,11 +102,18 @@ class MindMapDocumentHandle(QObject):
         return self._background_save is not None
 
     @property
+    def git_busy(self) -> bool:
+        """在 Git 本地写入和重载期间为 True；仅查询和联网时不锁定文档。"""
+        return self._git_editable is not None
+
+    @property
     def resource_uri(self):
         return self.path.as_uri() if self.path else "untitled:" + self.id
 
     def save(self, *, save_as=False, reason="explicit"):
         """将既有导图保存结果转换为通用协议，保留输入法和后台快照保护。"""
+        if self.git_busy:
+            return OperationResult.cancelled("正在同步导图，请等操作完成")
         view = self.representative
         result = (view.files.save(save_as=True) if save_as
                   else self.flush(view))
@@ -141,6 +149,35 @@ class MindMapDocumentHandle(QObject):
         self._unsubscribe = self.engine.subscribe(self._changed)
         for item in self.views:
             item.canvas.shared_views = len(self.views) > 1
+
+    def begin_git_write(self) -> bool:
+        """暂缓自动保存和编辑，直到 Git 写入和可能的重载结束。
+
+        调用前须先提交各视图的输入，且不能存在未保存修改、目录冲突或后台写入。
+        锁定时保存各标签原本的只读设置，结束时逐一恢复；其他导图不受影响。
+        """
+        if self.disposed or self.git_busy or self.is_dirty or self.is_writing or self.file_state.conflict:
+            return False
+        self.timer.stop()
+        self._git_editable = [(view, view.canvas.editable) for view in self.views]
+        for view, _ in self._git_editable:
+            view.close_popups()
+            view.canvas.set_editable(False)
+        self.sync_views()
+        return True
+
+    def finish_git_write(self) -> None:
+        """恢复同步前的编辑权限。发生磁盘冲突时继续停用自动保存。"""
+        if self._git_editable is None:
+            return
+        editable, self._git_editable = self._git_editable, None
+        if not self.disposed:
+            for view, allowed in editable:
+                if not view.disposed:
+                    view.canvas.set_editable(allowed)
+            if self.is_dirty and not self.file_state.conflict:
+                self.timer.start()
+            self.sync_views()
 
     def detach(self, view):
         """只断开指定视图；保留其他视图的保存任务，最后一个视图负责收束后台写入。"""
@@ -198,7 +235,7 @@ class MindMapDocumentHandle(QObject):
 
     def reload_after_conflict(self) -> bool:
         """用户确认后重载共享文件。取消或加载失败均保留内存中的导图与冲突标志。"""
-        if not self.file_state.conflict or not self.prepare_inputs():
+        if self.git_busy or not self.file_state.conflict or not self.prepare_inputs():
             return False
         if self.engine.is_dirty and QMessageBox.question(
             self.owner.window.context.ui.parent, "重新加载导图",
@@ -207,11 +244,26 @@ class MindMapDocumentHandle(QObject):
             QMessageBox.StandardButton.Cancel,
         ) != QMessageBox.StandardButton.Yes:
             return False
-        return self.files.reload()
+        return self.reload_preserving_views()
+
+    def reload_preserving_views(self) -> bool:
+        """完整校验磁盘后重载共享引擎，再按稳定页面 ID 恢复各标签的视口。
+
+        调用方先处理各标签的输入。失效页面由画布恢复流程回退到主图；
+        校验失败或取消时保留原文档以及所有视图。
+        """
+        snapshots = [(view, view.capture_state()) for view in self.views]
+        if not self.files.reload():
+            return False
+        for view, state in snapshots:
+            if not view.disposed:
+                view.restore_state(state)
+        return True
 
     def restore_missing(self) -> bool:
         """显式恢复丢失文件，先提交关联视图输入，再由文件控制器保护目标路径。"""
-        return self.file_state.conflict and self.prepare_inputs() and self.files.restore_missing()
+        return (not self.git_busy and self.file_state.conflict and self.prepare_inputs()
+                and self.files.restore_missing())
 
     def dispose(self):
         """幂等释放文件级计时器和订阅；调用时最后一个视图的控制器仍须存活。"""
@@ -239,7 +291,7 @@ class MindMapDocumentHandle(QObject):
     def _changed(self, event):
         """保存事件不重新启动计时器；修改、撤销和重做合并为一次延迟写入。"""
         if not self.disposed and event.kind in {"change", "undo", "redo"}:
-            if not self.file_state.conflict:
+            if not self.file_state.conflict and not self.git_busy:
                 self.timer.start()
             if self.owner.get(self.representative.id) is self.representative:
                 self.owner.window.record_operation(describe_change(event), session=self.representative)
@@ -270,6 +322,7 @@ class MindMapDocumentHandle(QObject):
             self.timer.stop()
         for view in self.views:
             self.owner._saved_path(view)
+        self.owner.window.git_sync.document_saved(self)
         self.sync_views()
 
     def _failed(self, message):
@@ -292,7 +345,7 @@ class MindMapDocumentHandle(QObject):
         直接调用默认同步，保留显式保存、测试及宿主调用的成功/失败返回语义。
         自定义写入器及含有扩展实体的快照继续同步保存。
         """
-        if self.disposed or self.file_state.conflict:
+        if self.disposed or self.file_state.conflict or self.git_busy:
             return False
         if (background and self.engine.node_count > BACKGROUND_SAVE_NODE_LIMIT
                 and self.engine.is_dirty and self.files.writer == self._write):

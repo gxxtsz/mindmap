@@ -18,7 +18,7 @@
 
 ## 界面与命令
 
-`CommandSpec`、`PanelSpec`、`StatusItemSpec` 声明导图应用的界面资源。`MenuContribution` 使用 `MenuLocation` 的稳定标识填充菜单，显示标题由桌面控制；菜单回调失败会丢弃本组未完成的动作并记录错误。
+`CommandSpec`、`PanelSpec`、`StatusItemSpec` 和 `TitleBarItemSpec` 声明导图应用的界面资源。顶栏控件并排放在最近文件旁，随活动文档刷新显隐，注销与应用退出时释放。`MenuContribution` 使用 `MenuLocation` 的稳定标识填充菜单，显示标题由桌面控制；菜单回调失败会丢弃本组未完成的动作并记录错误。
 
 标准编辑动作通过 `EditorView.edit_actions` 路由；节点专用详情页只暴露其支持的动作。主题、活动标签和布局订阅都由应用上下文拥有。
 

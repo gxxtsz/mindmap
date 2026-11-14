@@ -49,6 +49,15 @@ class DirectoryVersionConflict(MindMapError):
     """磁盘已变化或目标已移走；调用方可请求重新加载或另存内存中的快照。"""
 
 
+def is_directory_member(name: str) -> bool:
+    """判断使用斜杠分隔的相对路径是否为导图受管成员。
+
+    只识别清单、规范的页面文件及图片摘要；不读磁盘，也适用于已删除的成员。
+    其他根目录文件、路径别名和嵌套目录不属于导图。
+    """
+    return _MEMBER.fullmatch(name) is not None
+
+
 def managed_files(root: Path) -> dict[str, int] | None:
     """列出根清单和受管目录中的普通文件大小；目录不存在时返回 None。
 
@@ -72,7 +81,7 @@ def managed_files(root: Path) -> dict[str, int] | None:
     files = {}
     for path in paths:
         name = path.relative_to(root).as_posix()
-        if not _MEMBER.fullmatch(name) or path.is_symlink() or path.is_junction() or not path.is_file():
+        if not is_directory_member(name) or path.is_symlink() or path.is_junction() or not path.is_file():
             raise MindMapError(f"导图目录包含无效的文件：{name}")
         files[name] = path.stat().st_size
     return dict(sorted(files.items()))

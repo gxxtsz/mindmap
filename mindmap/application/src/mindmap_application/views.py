@@ -142,6 +142,8 @@ class MindMapEditorView(QObject):
     @property
     def save_status(self) -> str:
         """返回当前视图输入及共享文件写入状态，用于常驻状态栏展示。"""
+        if self.document.git_busy:
+            return "正在同步"
         if self.files.state.conflict:
             return "保存冲突"
         if self.document.last_error:
