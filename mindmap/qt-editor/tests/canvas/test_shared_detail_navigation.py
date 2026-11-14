@@ -2,7 +2,7 @@
 
 import pytest
 from mindmap_core import LayoutConfig, LayoutInfo, LayoutResult, MindMapEngine, MindMapError, Rect, Theme
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import load_directory, save_directory
 from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_render import VisualFactory, rendering
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -238,8 +238,8 @@ def test_graphic_export_and_saved_document_keep_shared_detail_without_copying(sh
     canvas.export(graphic)
     assert "detail" in calls and graphic.stat().st_size > 100
     path = tmp_path / "共享详情.mindmap"
-    save_document(canvas.engine.document, path)
-    restored = MindMapEngine(load_document(path))
+    save_directory(canvas.engine.document, path)
+    restored = MindMapEngine(load_directory(path))
     assert len(restored.document.detail_pages) == 1
     assert restored.resolve_detail_page(root) == (owner, detail)
     assert restored.get_node(root).detail_page_id is None

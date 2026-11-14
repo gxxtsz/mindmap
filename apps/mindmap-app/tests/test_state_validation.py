@@ -3,11 +3,14 @@
 import json
 
 from mindmap_app.migration import migrate_legacy
+from mindmap_core import MindMapDocument
+from mindmap_core.formats import save_directory
 from mindmap_desktop_runtime.state import StateStore
 
 
 def test_legacy_malformed_identifiers_do_not_discard_valid_records(tmp_path):
-    path = str(tmp_path / "历史导图.mindmap")
+    path = str(tmp_path / "历史导图")
+    save_directory(MindMapDocument.new(), path)
     valid = {"id": "mindmap.valid", "path": path, "view_state": {"page_id": "子导图"}}
     legacy = tmp_path / "documents-v1.json"
     raw = json.dumps({"schema_version": 1, "active_id": [], "recent_files": [path],

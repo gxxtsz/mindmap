@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from mindmap_core import LayoutConfig, MindMapEngine, MindMapError, Theme
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import load_directory, save_directory
 from mindmap_qt_editor.canvas import MindMapWidget
 from PySide6.QtCore import QBuffer, QIODevice, QMimeData, QPoint, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QInputMethodEvent, QKeyEvent, QRawFont
@@ -301,8 +301,8 @@ def test_image_import_roundtrip_and_invalid_asset(canvas, png_bytes, tmp_path):
     widget.import_image(b, path)
     assert len(widget.engine.document.assets) == 1
     target = tmp_path / "含图片.mindmap"
-    save_document(widget.engine.document, target)
-    assert load_document(target) == widget.engine.document
+    save_directory(widget.engine.document, target)
+    assert load_directory(target) == widget.engine.document
     path.write_bytes(b"not an image")
     with pytest.raises(MindMapError):
         widget.import_image(a, path)

@@ -2,7 +2,7 @@
 
 import pytest
 from mindmap_core import LayoutConfig, MindMapDocument, MindMapEngine, MindMapError, Node
-from mindmap_core.formats import save_document
+from mindmap_core.formats import directory_version, save_directory
 from mindmap_qt_editor.canvas import MindMapFileController, MindMapWidget
 from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRectF
 from PySide6.QtWidgets import QApplication, QFileDialog
@@ -95,8 +95,8 @@ def test_file_replacement_resets_old_zoom_and_navigation(files, qtbot, tmp_path,
     widget.view.zoom(0.4 / widget.view.transform().m11())
     source = tmp_path / "新打开.mindmap"
     document = sample_document(direction="left", text="新文档根主题")
-    save_document(document, source)
-    original = source.read_bytes()
+    save_directory(document, source)
+    original = directory_version(source)
     if operation == "open":
         assert files.open_path(source)
         assert widget.engine.document == document and files.path == source
@@ -106,7 +106,7 @@ def test_file_replacement_resets_old_zoom_and_navigation(files, qtbot, tmp_path,
     qtbot.waitUntil(lambda: assert_initial_view(widget))
     assert widget.focus_id is None
     assert not widget.engine.is_dirty and not widget.engine.can_undo and not widget.engine.can_redo
-    assert source.read_bytes() == original
+    assert directory_version(source) == original
 
 
 @pytest.mark.parametrize("operation", ["cancel_open", "cancel_new", "cancel_dialog", "invalid"])
@@ -119,13 +119,13 @@ def test_unsuccessful_file_change_keeps_view(files, qtbot, tmp_path, monkeypatch
     center = view.mapToScene(view.viewport().rect()).boundingRect().center()
     document, revision = widget.engine.document, widget.engine.revision
     source = tmp_path / "候选.mindmap"
-    save_document(sample_document(text="另一个根主题"), source)
+    save_directory(sample_document(text="另一个根主题"), source)
     if operation == "invalid":
-        source.write_bytes(b"invalid mindmap")
+        (source / "mindmap.json").write_bytes(b"invalid mindmap")
         with pytest.raises(MindMapError):
             files.open_path(source)
     elif operation == "cancel_dialog":
-        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
+        monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: "")
         assert not files.open_dialog()
     else:
         monkeypatch.setattr(files, "confirm_replace", lambda: False)
@@ -144,7 +144,7 @@ def test_hidden_replacements_initialize_only_the_latest_document(files, qtbot, t
     for text in ("已被替换的根", "最终根"):
         source = tmp_path / (text + ".mindmap")
         document = sample_document(text=text)
-        save_document(document, source)
+        save_directory(document, source)
         assert files.open_path(source)
         QApplication.processEvents()
         assert widget.view.transform().m11() == pytest.approx(0.4)

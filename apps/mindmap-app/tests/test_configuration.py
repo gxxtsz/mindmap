@@ -23,7 +23,7 @@ def test_project_configuration_namespace_and_preferences_are_isolated(qtbot, tmp
     window = build_window(restore=False)
     qtbot.addWidget(window)
     assert window.application.canvas is None
-    assert window.new_document(tmp_path / "配置隔离.mindmap")
+    assert window.new_document(tmp_path / "配置隔离")
     assert window.manager.storage_dir == configuration and window.application.canvas.wheel_mode == "zoom"
     assert window.is_always_on_top()
     window.close()

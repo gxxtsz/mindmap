@@ -2,7 +2,7 @@
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core.formats import load_document
+from mindmap_core.formats import load_directory
 from PySide6.QtCore import QPointF
 from PySide6.QtWidgets import QApplication
 
@@ -26,7 +26,7 @@ def windows(qtbot, tmp_path):
 
 def test_autosave_undo_and_file_isolation(windows, tmp_path, qtbot, caplog):
     window = windows()
-    path = tmp_path / "第一份.mindmap"
+    path = tmp_path / "第一份"
     assert window.new_document(path)
     session = window.application.active_session
     e, canvas = session.engine, session.canvas
@@ -36,16 +36,16 @@ def test_autosave_undo_and_file_isolation(windows, tmp_path, qtbot, caplog):
     canvas.select_nodes([branch])
     canvas.move_selected_to_inspiration()
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    loaded = load_document(path)
+    loaded = load_directory(path)
     assert loaded == e.document
     assert loaded.nodes[branch].detail_page_id == detail
     assert child in canvas.document_view.nodes
     e.undo()
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    assert load_document(path).root.children == [branch]
+    assert load_directory(path).root.children == [branch]
     e.redo()
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    assert window.new_document(tmp_path / "第二份.mindmap")
+    assert window.new_document(tmp_path / "第二份")
     assert not window.application.engine.document.inspiration.root_ids
     window.manager.activate_document(session.id)
     assert window.application.canvas.current_page_id == e.inspiration_id
@@ -56,7 +56,7 @@ def test_autosave_undo_and_file_isolation(windows, tmp_path, qtbot, caplog):
 @pytest.mark.parametrize("in_detail", [False, True])
 def test_restart_restores_inspiration_and_owned_detail(windows, tmp_path, qtbot, in_detail):
     window = windows()
-    assert window.new_document(tmp_path / "恢复.mindmap")
+    assert window.new_document(tmp_path / "恢复")
     canvas, e = window.application.canvas, window.application.engine
     root = e.add_inspiration("重新找回", position=(-200, 100))
     detail = e.create_detail_page(root)

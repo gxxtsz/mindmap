@@ -3,7 +3,7 @@
 
 import pytest
 from mindmap_core import BranchStyle, LayoutConfig, MindMapDocument, MindMapError
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import load_directory, save_directory
 from PySide6.QtCore import QItemSelectionModel, QPoint, Qt
 from PySide6.QtGui import QColor, QInputMethodEvent
 from PySide6.QtWidgets import (
@@ -375,8 +375,8 @@ def test_single_page_and_style_edit_preserve_all_node_content(workspace, qtbot, 
     before.style["bold"] = True
     assert canvas.engine.get_node(a) == before
     path = tmp_path / "样式及原内容.mindmap"
-    save_document(canvas.engine.document, path)
-    assert load_document(path) == canvas.engine.document
+    save_directory(canvas.engine.document, path)
+    assert load_directory(path) == canvas.engine.document
     assert canvas.engine.undo() and not canvas.engine.can_undo
     assert canvas.engine.get_node(a).note == "保留备注"
 

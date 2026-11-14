@@ -12,7 +12,13 @@ from threading import Event, Timer, get_ident
 import pytest
 from mindmap_app.app import build_window
 from mindmap_core import LayoutConfig, MindMapDocument, MindMapError, Node, Theme
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import (
+    directory_size,
+    directory_version,
+    load_directory,
+    save_directory,
+    save_document,
+)
 from mindmap_qt_editor.canvas import loading as background_loading
 from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QImage, QInputMethodEvent
@@ -94,7 +100,7 @@ def test_real_background_process_saves_without_running_in_gui_process(
     # 模拟导图桌面从包入口启动。spawn 会跳过包的 __main__ 模块，避免在无标准输出的
     # pythonw 进程中重载 PyCharm 测试启动器；实际进程创建、快照传输及写盘照常执行。
     monkeypatch.setattr(sys.modules["__main__"], "__spec__", find_spec("mindmap_app.__main__"))
-    session = create_large_session(empty_window, tmp_path / "真实后台进程.mindmap")
+    session = create_large_session(empty_window, tmp_path / "真实后台进程")
     try:
         session.engine.update_node(session.engine.root_id, text="进程保存成功")
         session.document.timer.stop()
@@ -103,7 +109,7 @@ def test_real_background_process_saves_without_running_in_gui_process(
         qtbot.waitUntil(lambda: session.document._background_save is None, timeout=15000)
         assert future.result().pid != os.getpid()
         assert not session.document.last_error and not session.engine.is_dirty
-        assert load_document(session.files.path) == session.engine.document
+        assert load_directory(session.files.path) == session.engine.document
     finally:
         session.document._finish_background_save(wait=True)
         if sessions_module._SAVE_POOL is not None:
@@ -114,7 +120,7 @@ def test_real_background_process_saves_without_running_in_gui_process(
 def test_background_save_uses_stable_version_without_marking_later_edit_saved(
     empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
 ):
-    session = create_large_session(empty_window, tmp_path / "后台版本.mindmap")
+    session = create_large_session(empty_window, tmp_path / "后台版本")
     started, release = Event(), Event()
     ui_thread = get_ident()
     worker_threads = []
@@ -123,9 +129,9 @@ def test_background_save_uses_stable_version_without_marking_later_edit_saved(
         worker_threads.append(get_ident())
         started.set()
         assert release.wait(5)
-        save_document(document, path, **options)
+        save_directory(document, path, **options)
 
-    monkeypatch.setattr("mindmap_application.documents.save_document", held_writer)
+    monkeypatch.setattr("mindmap_application.documents.save_directory", held_writer)
     monkeypatch.setattr("mindmap_application.documents.save_snapshot", held_writer)
     engine = session.engine
     try:
@@ -139,77 +145,74 @@ def test_background_save_uses_stable_version_without_marking_later_edit_saved(
         release.set()
         qtbot.waitUntil(lambda: session.document._background_save is None)
         session.document.timer.stop()
-        assert load_document(session.files.path).root.text == "捕获版本甲"
+        assert load_directory(session.files.path).root.text == "捕获版本甲"
         assert engine.is_dirty
         assert engine.undo() and not engine.is_dirty
         assert engine.redo() and engine.is_dirty
-        monkeypatch.setattr("mindmap_application.documents.save_document", save_document)
-        monkeypatch.setattr("mindmap_application.documents.save_snapshot", save_document)
+        monkeypatch.setattr("mindmap_application.documents.save_directory", save_directory)
+        monkeypatch.setattr("mindmap_application.documents.save_snapshot", save_directory)
         assert session.document.autosave() and not engine.is_dirty
-        assert load_document(session.files.path).root.text == "后台期间的版本乙"
+        assert load_directory(session.files.path).root.text == "后台期间的版本乙"
     finally:
         release.set()
         session.document._finish_background_save(wait=True)
 
 
-@pytest.mark.parametrize("changed", ["registry", "codec"])
-def test_background_request_preserves_custom_format_dispatch(empty_window, tmp_path, monkeypatch, changed):
-    """覆写注册表或编码器时使用原同步入口，不能在后台重建默认编码器绕过扩展。"""
-    session = create_large_session(empty_window, tmp_path / "扩展同步保存.mindmap")
-    registry = session.canvas.format_registry
-    provider = registry if changed == "registry" else registry.get("mindmap").exporter
-    original, calls = provider.write, []
+def test_background_request_preserves_custom_writer(empty_window, tmp_path, monkeypatch):
+    """自定义导图写入器在同步入口执行，仍收到提交快照和目录路径。"""
+    session = create_large_session(empty_window, tmp_path / "扩展同步保存")
+    calls = []
 
-    def track(*args, **kwargs):
-        calls.append(True)
-        return original(*args, **kwargs)
+    def track(document, path):
+        calls.append(path)
+        return save_directory(document, path)
 
-    monkeypatch.setattr(provider, "write", track)
+    session.files.writer = track
     monkeypatch.setattr("mindmap_application.documents._save_pool", lambda: pytest.fail("扩展保存不能建立后台进程"))
     session.engine.update_node(session.engine.root_id, text="保留自定义保存入口")
     session.document.timer.stop()
     assert session.document.autosave(background=True)
-    assert calls and session.document._background_save is None and not session.engine.is_dirty
-    assert load_document(session.files.path).root.text == "保留自定义保存入口"
+    assert calls == [session.files.path] and session.document._background_save is None and not session.engine.is_dirty
+    assert load_directory(session.files.path).root.text == "保留自定义保存入口"
 
 
 def test_background_failure_keeps_old_file_and_explicit_retry_succeeds(
     empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
 ):
-    session = create_large_session(empty_window, tmp_path / "后台失败.mindmap")
-    original = session.files.path.read_bytes()
+    session = create_large_session(empty_window, tmp_path / "后台失败")
+    original = directory_version(session.files.path)
 
     def fail(*args, **kwargs):
         raise OSError("后台磁盘写入失败")
 
-    monkeypatch.setattr("mindmap_application.documents.save_document", fail)
+    monkeypatch.setattr("mindmap_application.documents.save_directory", fail)
     monkeypatch.setattr("mindmap_application.documents.save_snapshot", fail)
     session.engine.update_node(session.engine.root_id, text="必须保留的修改")
     session.document.timer.stop()
     assert session.document.autosave(background=True)
     qtbot.waitUntil(lambda: session.document._background_save is None)
     assert "后台磁盘" in session.document.last_error and session.engine.is_dirty
-    assert session.files.path.read_bytes() == original and not session.document.timer.isActive()
-    monkeypatch.setattr("mindmap_application.documents.save_document", save_document)
-    monkeypatch.setattr("mindmap_application.documents.save_snapshot", save_document)
+    assert directory_version(session.files.path) == original and not session.document.timer.isActive()
+    monkeypatch.setattr("mindmap_application.documents.save_directory", save_directory)
+    monkeypatch.setattr("mindmap_application.documents.save_snapshot", save_directory)
     assert session.document.save() and not session.engine.is_dirty
-    assert load_document(session.files.path).root.text == "必须保留的修改"
+    assert load_directory(session.files.path).root.text == "必须保留的修改"
 
 
 @pytest.mark.parametrize("resolution", ["reload", "save_as", "restore"])
-def test_disk_conflict_pauses_autosave_and_can_be_resolved(empty_window, tmp_path, qtbot, monkeypatch, resolution):
+def test_disk_conflict_pauses_autosave_and_can_be_resolved(empty_window, tmp_path, qtbot, monkeypatch, choose_save_directory, resolution):
     """保存保护外部替换与删除，从文件菜单解决冲突后恢复正常写入。"""
     window = empty_window
-    path = tmp_path / "共享.mindmap"
+    path = tmp_path / "共享"
     session = create(window, path)
     if resolution == "restore":
-        path.unlink()
+        path.rename(tmp_path / "离线副本")
         assert not window.save() and not path.exists() and not session.engine.is_dirty
     else:
-        save_document(MindMapDocument.new("磁盘版本"), path)
+        save_directory(MindMapDocument.new("磁盘版本"), path)
         session.engine.update_node(session.engine.root_id, text="导图桌面修改")
         qtbot.waitUntil(lambda: session.files.state.conflict)
-        assert load_document(path).root.text == "磁盘版本" and session.engine.is_dirty
+        assert load_directory(path).root.text == "磁盘版本" and session.engine.is_dirty
         session.engine.update_node(session.engine.root_id, text="冲突后的修改")
         assert not session.document.timer.isActive()
         assert not window.save()
@@ -228,26 +231,26 @@ def test_disk_conflict_pauses_autosave_and_can_be_resolved(empty_window, tmp_pat
         resolve.actions()[0].trigger()
         assert session.engine.document.root.text == "磁盘版本"
     elif resolution == "save_as":
-        target = tmp_path / "保留本地修改.mindmap"
-        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+        target = tmp_path / "保留本地修改"
+        choose_save_directory(target)
         resolve.actions()[-1].trigger()
-        assert session.files.path == target and load_document(target).root.text == "冲突后的修改"
-        assert load_document(path).root.text == "磁盘版本"
+        assert session.files.path == target and load_directory(target).root.text == "冲突后的修改"
+        assert load_directory(path).root.text == "磁盘版本"
     else:
         resolve.actions()[0].trigger()
-        assert load_document(path).root.text == session.engine.document.root.text
+        assert load_directory(path).root.text == session.engine.document.root.text
     menu.deleteLater()
     assert not session.files.state.conflict and not session.document.last_error and not session.engine.is_dirty
     assert status.text() == "已保存"
 
 
 def test_background_commit_detects_external_change_after_dispatch(
-    empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor,
+    empty_window, tmp_path, monkeypatch, choose_save_directory, qtbot, controlled_save_executor,
 ):
     """工作进程已捕获旧版本时，外部写入仍会在原子替换边界阻止过期保存。"""
     from mindmap_application.background_save import save_snapshot
 
-    session = create_large_session(empty_window, tmp_path / "后台冲突.mindmap")
+    session = create_large_session(empty_window, tmp_path / "后台冲突")
     started, release = Event(), Event()
 
     def held_writer(*args, **kwargs):
@@ -264,13 +267,13 @@ def test_background_commit_detects_external_change_after_dispatch(
         assert session.document.autosave(background=True)
         qtbot.waitUntil(started.is_set)
         assert status.text() == "正在写入"
-        save_document(MindMapDocument.new("后来写入的磁盘版本"), session.files.path)
+        save_directory(MindMapDocument.new("后来写入的磁盘版本"), session.files.path)
         release.set()
         qtbot.waitUntil(lambda: session.document._background_save is None)
         assert session.files.state.conflict and session.engine.is_dirty
-        assert load_document(session.files.path).root.text == "后来写入的磁盘版本"
-        target = tmp_path / "后台冲突另存.mindmap"
-        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+        assert load_directory(session.files.path).root.text == "后来写入的磁盘版本"
+        target = tmp_path / "后台冲突另存"
+        choose_save_directory(target)
         assert empty_window.save(save_as=True)
     finally:
         release.set()
@@ -280,7 +283,7 @@ def test_background_commit_detects_external_change_after_dispatch(
 def test_explicit_save_waits_for_old_background_write_before_writing_new_version(
     empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
 ):
-    session = create_large_session(empty_window, tmp_path / "保存次序.mindmap")
+    session = create_large_session(empty_window, tmp_path / "保存次序")
     started, release = Event(), Event()
     ui_thread, writes = get_ident(), []
 
@@ -289,9 +292,9 @@ def test_explicit_save_waits_for_old_background_write_before_writing_new_version
         if get_ident() != ui_thread:
             started.set()
             assert release.wait(5)
-        save_document(document, path, **options)
+        save_directory(document, path, **options)
 
-    monkeypatch.setattr("mindmap_application.documents.save_document", held_writer)
+    monkeypatch.setattr("mindmap_application.documents.save_directory", held_writer)
     monkeypatch.setattr("mindmap_application.documents.save_snapshot", held_writer)
     try:
         session.engine.update_node(session.engine.root_id, text="先保存的版本")
@@ -303,7 +306,7 @@ def test_explicit_save_waits_for_old_background_write_before_writing_new_version
         assert session.files.save()
         assert session.document._background_save is None and not session.engine.is_dirty
         assert writes == ["先保存的版本", "最终版本"]
-        assert load_document(session.files.path).root.text == "最终版本"
+        assert load_directory(session.files.path).root.text == "最终版本"
     finally:
         release.set()
         session.document._finish_background_save(wait=True)
@@ -329,9 +332,9 @@ def test_open_initializes_after_session_and_sidebar_layout(empty_window, tmp_pat
         child = Node(f"向下展开的分支 {index}")
         document.nodes[child.id] = child
         document.root.children.append(child.id)
-    source = tmp_path / "大导图.mindmap"
-    save_document(document, source)
-    original = source.read_bytes()
+    source = tmp_path / "大导图"
+    save_directory(document, source)
+    original = directory_version(source)
     assert window.open_path(source)
     canvas = window.application.canvas
     window.manager.activate("outline", focus=False)
@@ -340,15 +343,15 @@ def test_open_initializes_after_session_and_sidebar_layout(empty_window, tmp_pat
     qtbot.waitUntil(lambda: assert_initial_canvas(canvas))
     assert canvas.engine.document == document
     assert not canvas.engine.is_dirty and not canvas.engine.can_undo
-    assert source.read_bytes() == original
+    assert directory_version(source) == original
 
 
 def test_rapid_open_initializes_hidden_tab_once_and_duplicate_open_keeps_view(empty_window, tmp_path, qtbot):
     """快速打开后被遮挡的标签延迟初始化；已打开文件再次激活时保留用户视图。"""
     window = empty_window
-    sources = [tmp_path / f"标签 {index}.mindmap" for index in range(2)]
+    sources = [tmp_path / f"标签 {index}" for index in range(2)]
     for index, source in enumerate(sources):
-        save_document(MindMapDocument.new(f"根主题 {index}"), source)
+        save_directory(MindMapDocument.new(f"根主题 {index}"), source)
     assert window.open_path(sources[0])
     first = window.application.active_session
     first.canvas.view.scale(0.4, 0.4)
@@ -382,9 +385,9 @@ def test_rapid_open_initializes_hidden_tab_once_and_duplicate_open_keeps_view(em
 @pytest.mark.parametrize("operation", ["new", "open"])
 def test_close_before_initialization_releases_canvas(empty_window, tmp_path, operation):
     """会话尚有排队初始化就关闭时，不访问已经删除的 Qt 对象。"""
-    source = tmp_path / "立即关闭.mindmap"
+    source = tmp_path / "立即关闭"
     if operation == "open":
-        save_document(MindMapDocument.new("立即关闭的根"), source)
+        save_directory(MindMapDocument.new("立即关闭的根"), source)
         assert empty_window.open_path(source)
     else:
         assert empty_window.new_document(source)
@@ -410,19 +413,19 @@ def test_outline_header_stays_icon_only_after_empty_start_and_session_switch(emp
         assert button.defaultAction().menu() is session.panels.outline.depth_menu
         assert button.toolTip() == session.panels.outline.depth_action.toolTip()
 
-    first = create(window, tmp_path / "第一份.mindmap")
+    first = create(window, tmp_path / "第一份")
     window.manager.activate("outline", focus=False)
     check(first)
     first.panels.outline.set_display_depth(4)
     check(first)
-    second = create(window, tmp_path / "第二份.mindmap")
+    second = create(window, tmp_path / "第二份")
     check(second)
     window.manager.activate_document(first.id)
     check(first)
     assert window.manager.close_document(first.id)
     assert window.manager.close_document(second.id)
     assert not button.isEnabled()
-    third = create(window, tmp_path / "重新打开.mindmap")
+    third = create(window, tmp_path / "重新打开")
     check(third)
 
 
@@ -454,25 +457,25 @@ def test_welcome_actions_and_last_close(empty_window, tmp_path, theme):
     panels = menu.actions()[2].menu().actions()[0].menu()
     assert [action.text() for action in panels.actions()] == ["操作日志"]
     menu.deleteLater()
-    session = create(window, tmp_path / "第一份.mindmap")
+    session = create(window, tmp_path / "第一份")
     assert not group.empty_widget.isVisible() and group.count() == 1
     assert window.host.right.isVisible() and session.panels.properties.isVisible()
     session.engine.update_node(session.engine.root_id, text="关闭时立即保存")
     assert window.manager.close_document(session.id)
-    assert load_document(session.files.path).root.text == "关闭时立即保存"
+    assert load_directory(session.files.path).root.text == "关闭时立即保存"
     assert window.application.active_session is None and not window.manager.documents
     assert group.empty_widget.isVisible() and session.disposed and session.canvas._disposed
     assert window.host.left.isHidden() and window.host.right.isHidden()
     assert not window.application._depth_action.isVisible()
 
 
-def test_closing_split_sessions_keeps_one_usable_welcome_page(empty_window, tmp_path, qtbot, monkeypatch):
+def test_closing_split_sessions_keeps_one_usable_welcome_page(empty_window, tmp_path, qtbot, monkeypatch, choose_save_directory):
     """真实导图桌面收起空分屏时完成自动保存和释放，最后的欢迎页仍可直接新建导图。"""
     window, area = empty_window, empty_window.host.editor
-    first = create(window, tmp_path / "左侧.mindmap")
-    second = create(window, tmp_path / "右侧.mindmap")
+    first = create(window, tmp_path / "左侧")
+    second = create(window, tmp_path / "右侧")
     area.split_token(second.id, Qt.Orientation.Horizontal)
-    third = create(window, tmp_path / "下侧.mindmap")
+    third = create(window, tmp_path / "下侧")
     area.split_token(third.id, Qt.Orientation.Vertical)
     last_group = area.find_token(third.id)[0]
     for session in (first, second, third):
@@ -482,7 +485,7 @@ def test_closing_split_sessions_keeps_one_usable_welcome_page(empty_window, tmp_
         assert window.manager.close_document(session.id)
         assert len(area.groups) == remaining
         assert session.disposed
-        assert load_document(session.files.path).root.text == "关闭前保存：" + session.files.path.stem
+        assert load_directory(session.files.path).root.text == "关闭前保存：" + session.files.path.stem
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     QApplication.processEvents()
     assert area.groups == [last_group] and last_group.empty_widget.isVisible()
@@ -491,8 +494,8 @@ def test_closing_split_sessions_keeps_one_usable_welcome_page(empty_window, tmp_
     assert window.host.left.isHidden() and window.host.right.isHidden()
     assert all(not isValid(session.canvas) for session in (first, second, third))
 
-    target = tmp_path / "欢迎页重新新建.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    target = tmp_path / "欢迎页重新新建"
+    choose_save_directory(target)
     button = next(button for button in last_group.empty_widget.findChildren(QPushButton)
                   if button.text() == "新建导图")
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
@@ -506,8 +509,8 @@ def test_closing_split_sessions_keeps_one_usable_welcome_page(empty_window, tmp_
 def test_closing_neighbor_split_preserves_inline_draft(empty_window, tmp_path, qtbot):
     """合并相邻空分屏不结束当前导图的原地文字编辑，也不提前提交草稿。"""
     window = empty_window
-    first = create(window, tmp_path / "继续编辑.mindmap")
-    second = create(window, tmp_path / "关闭相邻.mindmap")
+    first = create(window, tmp_path / "继续编辑")
+    second = create(window, tmp_path / "关闭相邻")
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     window.manager.activate_document(first.id)
     first.canvas.begin_edit(first.engine.root_id)
@@ -529,7 +532,7 @@ def test_closing_neighbor_split_preserves_inline_draft(empty_window, tmp_path, q
 def test_empty_start_preserves_sidebar_layout_across_restart(empty_window, tmp_path, qtbot):
     """有导图时保存的侧栏布局在空启动时暂停，重新打开导图后恢复原位置与宽度。"""
     window = empty_window
-    first = create(window, tmp_path / "布局.mindmap")
+    first = create(window, tmp_path / "布局")
     window.manager.activate("outline", focus=False)
     window.host.region_sizes["dock"].update(left=310, right=390)
     window.manager.refresh()
@@ -560,24 +563,24 @@ def test_empty_start_preserves_sidebar_layout_across_restart(empty_window, tmp_p
         restarted.close()
 
 
-def test_new_cancel_failure_and_path_collision_leave_sessions_unchanged(empty_window, tmp_path, monkeypatch):
+def test_new_cancel_failure_and_path_collision_leave_sessions_unchanged(empty_window, tmp_path, monkeypatch, choose_save_directory):
     window = empty_window
-    first = create(window, tmp_path / "已有.mindmap")
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
+    first = create(window, tmp_path / "已有")
+    choose_save_directory(None)
     assert not window.new_document()
     assert not window.new_document(first.files.path)
-    assert not window.new_document(tmp_path / "不存在的目录" / "失败.mindmap")
+    assert not window.new_document(tmp_path / "不存在的目录" / "失败")
     assert list(window.application.sessions.values()) == [first] and window.application.active_session is first
-    assert load_document(first.files.path).root.text == "中心主题"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "第二份"), ""))
+    assert load_directory(first.files.path).root.text == "中心主题"
+    choose_save_directory(tmp_path / "第二份")
     assert window.new_document() and len(window.application.sessions) == 2
-    assert window.application.files.path == tmp_path / "第二份.mindmap"
+    assert window.application.files.path == tmp_path / "第二份"
 
 
 def test_duplicate_open_preserves_split_position_memory_and_path_case(empty_window, tmp_path):
     window = empty_window
-    first = create(window, tmp_path / "One.mindmap")
-    second = create(window, tmp_path / "Two.mindmap")
+    first = create(window, tmp_path / "One")
+    second = create(window, tmp_path / "Two")
     window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
     first.engine.update_node(first.engine.root_id, text="不从磁盘重载")
     first.document.timer.stop()
@@ -590,81 +593,63 @@ def test_duplicate_open_preserves_split_position_memory_and_path_case(empty_wind
     assert first.engine.can_undo
 
 
-def test_save_as_cannot_overwrite_other_session(empty_window, tmp_path, monkeypatch):
+def test_save_as_cannot_overwrite_other_session(empty_window, tmp_path, monkeypatch, choose_save_directory):
     window = empty_window
-    first = create(window, tmp_path / "甲.mindmap")
-    second = create(window, tmp_path / "乙.mindmap")
+    first = create(window, tmp_path / "甲")
+    second = create(window, tmp_path / "乙")
     second.engine.update_node(second.engine.root_id, text="第二份修改")
-    original = first.files.path.read_bytes()
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(first.files.path), ""))
+    original = directory_version(first.files.path)
+    choose_save_directory(first.files.path)
     assert not window.save(save_as=True)
-    assert second.files.path == tmp_path / "乙.mindmap" and second.files.is_dirty
-    assert first.files.path.read_bytes() == original
+    assert second.files.path == tmp_path / "乙" and second.files.is_dirty
+    assert directory_version(first.files.path) == original
     assert "另一个标签" in second.document.last_error
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "另存.mindmap"), ""))
+    choose_save_directory(tmp_path / "另存")
     assert window.save(save_as=True)
-    assert second.files.path.suffix == ".mindmap" and not second.document.last_error
-    assert load_document(second.files.path).root.text == "第二份修改"
+    assert second.files.path.name == "另存" and not second.document.last_error
+    assert load_directory(second.files.path).root.text == "第二份修改"
 
 
-@pytest.mark.parametrize("suffix", ["", ".mindmap", ".MINDMAP"])
-def test_new_and_save_as_use_native_format_and_normalize_suffix(empty_window, tmp_path, monkeypatch, suffix):
-    """首次保存和另存为共用扩展名规则，外部筛选名称不能改变实际原生编码。"""
+@pytest.mark.parametrize("suffix", ["", ".计划"])
+def test_new_and_save_as_keep_directory_names(empty_window, tmp_path, choose_save_directory, suffix):
+    """新建和另存采用用户指定的目录名称，另存后原目录内容保持完整。"""
     window = empty_window
     initial = tmp_path / ("初次保存" + suffix)
     session = create(window, initial)
-    expected = initial if suffix else initial.with_suffix(".mindmap")
-    assert session.files.path == expected
-    assert load_document(expected, format_id="mindmap") == session.engine.document
-    original = expected.read_bytes()
+    assert session.files.path == initial
+    assert load_directory(initial) == session.engine.document
+    original = directory_version(initial)
     session.engine.update_node(session.engine.root_id, text="另存后的内容")
     target = tmp_path / ("另存目标" + suffix)
-    dialogs, writes = [], []
-
-    def choose(*args):
-        """模拟对话框返回废弃筛选，控制器也只能使用固定的原生编码。"""
-        dialogs.append(args[1:])
-        return str(target), "JSON 文档 (*.json)"
-
-    def writer(document, path, **options):
-        """记录真正交给写入器的路径及格式，验证补齐在路径占用检查之前完成。"""
-        writes.append((path, options["format_id"]))
-        save_document(document, path, **options)
-
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", choose)
-    session.files.writer = writer
+    choose_save_directory(target)
     assert window.save(save_as=True)
-    output = target if suffix else target.with_suffix(".mindmap")
-    assert dialogs == [("保存导图", str(expected), "思维导图 (*.mindmap)")]
-    assert writes == [(output, "mindmap")]
-    assert session.files.path == output and not session.files.is_dirty
-    assert load_document(output, format_id="mindmap") == session.engine.document
-    assert expected.read_bytes() == original
+    assert session.files.path == target and not session.files.is_dirty
+    assert load_directory(target) == session.engine.document
+    assert directory_version(initial) == original
 
 
-@pytest.mark.parametrize("suffix", [".json", ".md", ".txt", ".bin", ".png", ".svg", ".pdf"])
-def test_new_and_save_as_reject_other_suffixes_without_writing(empty_window, tmp_path, monkeypatch, suffix):
-    """手工后缀不能绕过原生筛选，已有同名文件和现有会话始终保留。"""
+@pytest.mark.parametrize("suffix", ["", ".json"])
+def test_new_and_save_as_reject_existing_files(empty_window, tmp_path, monkeypatch, choose_save_directory, suffix):
+    """目录保存拒绝覆盖普通文件，现有会话和磁盘内容始终保留。"""
     window = empty_window
-    session = create(window, tmp_path / "保留.mindmap")
+    session = create(window, tmp_path / "保留")
     original_path = session.files.path
-    original = original_path.read_bytes()
+    original = directory_version(original_path)
     session.engine.update_node(session.engine.root_id, text="保留内存修改")
     session.document.timer.stop()
     target = tmp_path / ("错误保存" + suffix)
     target.write_bytes(b"original")
     before, revision = session.engine.document, session.engine.revision
-    monkeypatch.setattr("mindmap_application.documents.save_document", lambda *args, **kwargs: pytest.fail("不能写入"))
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), "思维导图 (*.mindmap)"))
+    monkeypatch.setattr("mindmap_application.documents.save_directory", lambda *args, **kwargs: pytest.fail("不能写入"))
+    choose_save_directory(target)
     assert not window.new_document(target)
     assert not window.new_document()
     assert not window.save(save_as=True)
-    assert "仅支持保存为 .mindmap 文件" in session.document.last_error
+    assert "思维导图目录" in session.document.last_error
     assert list(window.application.sessions.values()) == [session] and window.application.active_session is session
     assert session.files.path == original_path and session.files.is_dirty
     assert session.engine.document == before and session.engine.revision == revision
-    assert original_path.read_bytes() == original and target.read_bytes() == b"original"
-    assert not target.with_suffix(".mindmap").exists()
+    assert directory_version(original_path) == original and target.read_bytes() == b"original"
 
 
 @pytest.mark.parametrize("operation", ["save", "autosave", "save_all"])
@@ -672,9 +657,9 @@ def test_new_and_save_as_reject_other_suffixes_without_writing(empty_window, tmp
 def test_bound_non_native_path_cannot_bypass_save_validation(empty_window, tmp_path, monkeypatch, operation, dirty):
     """即使外部错误绑定路径，手动、自动和批量保存也不能跳过检查或调用写入器。"""
     window = empty_window
-    session = create(window, tmp_path / "原路径.mindmap")
+    session = create(window, tmp_path / "原路径")
     original_path = session.files.path
-    original = original_path.read_bytes()
+    original = directory_version(original_path)
     recent = list(window.state.recent_files)
     if dirty:
         session.engine.update_node(session.engine.root_id, text="等待保存")
@@ -686,8 +671,8 @@ def test_bound_non_native_path_cannot_bypass_save_validation(empty_window, tmp_p
         call = {"save": window.save, "autosave": session.document.autosave, "save_all": window.save_all}[operation]
         assert not call()
         assert session.files.path == target and session.files.is_dirty == dirty
-        assert "仅支持保存为 .mindmap 文件" in session.document.last_error
-        assert target.read_bytes() == b"untouched" and original_path.read_bytes() == original
+        assert "思维导图目录" in session.document.last_error
+        assert target.read_bytes() == b"untouched" and directory_version(original_path) == original
         assert window.application.active_session is session and len(window.application.sessions) == 1
         assert window.state.recent_files == recent
     finally:
@@ -695,36 +680,36 @@ def test_bound_non_native_path_cannot_bypass_save_validation(empty_window, tmp_p
         session.files.path = original_path
 
 
-def test_new_suffix_completion_checks_other_session_ownership(empty_window, tmp_path):
-    """省略后缀的目标必须先补齐，再检查是否已经被其他会话占用。"""
-    session = create(empty_window, tmp_path / "占用.mindmap")
-    original = session.files.path.read_bytes()
-    assert not empty_window.new_document(session.files.path.with_suffix(""))
+def test_new_checks_other_session_ownership(empty_window, tmp_path):
+    """目录路径规范化后仍能识别已打开的导图。"""
+    session = create(empty_window, tmp_path / "占用")
+    original = directory_version(session.files.path)
+    assert not empty_window.new_document(session.files.path.parent / "." / session.files.path.name)
     assert len(empty_window.application.sessions) == 1 and empty_window.application.active_session is session
-    assert session.files.path.read_bytes() == original
+    assert directory_version(session.files.path) == original
 
 
-def test_save_as_cancel_keeps_pending_autosave(empty_window, tmp_path, monkeypatch, qtbot):
+def test_save_as_cancel_keeps_pending_autosave(empty_window, tmp_path, monkeypatch, choose_save_directory, qtbot):
     """取消另存为不应停止原文件已经排队的自动保存，也不改变会话路径。"""
-    session = create(empty_window, tmp_path / "取消另存为.mindmap")
+    session = create(empty_window, tmp_path / "取消另存为")
     session.engine.update_node(session.engine.root_id, text="继续自动保存")
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
+    choose_save_directory(None)
     assert not empty_window.save(save_as=True) and session.document.timer.isActive()
     qtbot.waitUntil(lambda: not session.files.is_dirty)
-    assert load_document(session.files.path).root.text == "继续自动保存"
+    assert load_directory(session.files.path).root.text == "继续自动保存"
 
 
-@pytest.mark.parametrize("suffix", [".json", ".md", ".txt", ".bin", ""])
+@pytest.mark.parametrize("suffix", [".mindmap", ".json", ""])
 def test_non_native_open_is_rejected_before_allocating_or_committing(empty_window, tmp_path, monkeypatch, suffix):
-    """拒绝扩展名发生在会话分配和输入提交前，已有修改、选择和草稿均保留。"""
+    """拒绝普通文件发生在会话分配和输入提交前，已有修改、选择和草稿均保留。"""
     window = empty_window
-    first = create(window, tmp_path / "已有.mindmap")
+    first = create(window, tmp_path / "已有")
     first.engine.add_child(first.engine.root_id, "保留修改")
     first.document.timer.stop()
     first.canvas.begin_edit(first.engine.root_id)
     first.canvas.editor.setPlainText("未提交的正文")
     source = tmp_path / ("其他文件" + suffix)
-    # 使用真正的原生容器也不能绕过扩展名限制，拒绝操作不能改写输入文件。
+    # 旧 ZIP 是普通文件，目录打开入口应在分配会话前拒绝它。
     save_document(MindMapDocument.new("其他导图"), source, format_id="mindmap")
     original = source.read_bytes()
     before, revision = first.engine.document, first.engine.revision
@@ -732,7 +717,7 @@ def test_non_native_open_is_rejected_before_allocating_or_committing(empty_windo
     monkeypatch.setattr("mindmap_application.sessions.MindMapEditorView", lambda *args: pytest.fail("拒绝前不能分配会话"))
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: pytest.fail("不再询问导入另存目标"))
     for operation in (window.application.sessions.open_path, first.files.open_path):
-        with pytest.raises(MindMapError, match="仅支持打开 .mindmap"):
+        with pytest.raises(MindMapError, match="思维导图目录"):
             operation(source)
     assert window.application.active_session is first and len(window.application.sessions) == 1
     assert first.engine.document == before and first.engine.revision == revision and first.files.is_dirty
@@ -740,14 +725,14 @@ def test_non_native_open_is_rejected_before_allocating_or_committing(empty_windo
     assert source.read_bytes() == original
 
 
-@pytest.mark.parametrize("suffix", [".json", ".md", ".txt"])
-def test_renamed_non_native_content_cannot_open(empty_window, tmp_path, suffix):
-    """额外格式改名为 .mindmap 仍必须通过原生容器校验，失败不创建标签。"""
-    first = create(empty_window, tmp_path / "原有.mindmap")
-    source = tmp_path / ("非原生" + suffix)
-    save_document(MindMapDocument.new("其他格式"), source)
-    target = tmp_path / "伪装.mindmap"
-    target.write_bytes(source.read_bytes())
+@pytest.mark.parametrize("manifest", [None, '{"format":"mindmap","schema_version":8}'])
+def test_directory_requires_native_manifest(empty_window, tmp_path, manifest):
+    """只有包含有效目录清单的文件夹可以打开，失败不创建标签。"""
+    first = create(empty_window, tmp_path / "原有")
+    target = tmp_path / "伪装"
+    target.mkdir()
+    if manifest is not None:
+        (target / "mindmap.json").write_text(manifest, encoding="utf-8")
     with pytest.raises(MindMapError):
         empty_window.open_path(target)
     assert empty_window.application.active_session is first and len(empty_window.application.sessions) == 1
@@ -756,49 +741,37 @@ def test_renamed_non_native_content_cannot_open(empty_window, tmp_path, suffix):
 
 def test_open_dialog_works_without_session_and_cancel_preserves_active(empty_window, tmp_path, monkeypatch):
     """打开入口不依赖活动控制器；取消不创建候选会话，也不替换已有内容。"""
-    source = tmp_path / "从空白页打开.mindmap"
-    save_document(MindMapDocument.new("已有文件"), source)
+    source = tmp_path / "从空白页打开"
+    save_directory(MindMapDocument.new("已有文件"), source)
     dialogs = []
 
     def choose(*args):
         dialogs.append(args[1:])
-        return str(source), "思维导图 (*.mindmap)"
+        return str(source)
 
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", choose)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", choose)
     assert empty_window.open_dialog()
-    [(title, directory, filters)] = dialogs
-    assert (title, directory) == ("打开导图", "")
-    assert filters == "思维导图 (*.mindmap)"
+    assert dialogs == [("打开导图目录",)]
     session = empty_window.application.active_session
     assert session.engine.document.root.text == "已有文件"
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: "")
     assert not empty_window.open_dialog()
     assert empty_window.application.active_session is session and len(empty_window.application.sessions) == 1
 
 
 def test_open_dialog_and_old_format_parameter_cannot_bypass_native_limit(empty_window, tmp_path, monkeypatch):
-    """即使对话框返回额外类型或调用旧参数，也不能越过文件打开边界。"""
-    first = create(empty_window, tmp_path / "当前.mindmap")
+    """对话框和命令入口不能将普通文件或交换格式当作导图目录。"""
+    first = create(empty_window, tmp_path / "当前")
     source = tmp_path / "额外.json"
     save_document(MindMapDocument.new("JSON 内容"), source)
-    selections = []
-
-    def choose(*args):
-        selections.append(args[3])
-        return str(source), "JSON 文档 (*.json)"
-
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", choose)
-    with pytest.raises(ValueError, match="只能打开 .mindmap 导图"):
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(source))
+    with pytest.raises(ValueError, match="思维导图目录"):
         empty_window.open_dialog()
-    with pytest.raises(MindMapError, match="仅支持打开 .mindmap"):
+    with pytest.raises(MindMapError, match="思维导图目录"):
         first.files.open_dialog()
     for operation in (empty_window.open_path, empty_window.application.sessions.open_path, first.files.open_path):
         with pytest.raises(TypeError):
             operation(source, format_id="json")
-    desktop_filter, mindmap_filter = selections
-    assert "思维导图 (*.mindmap)" in desktop_filter.split(";;")
-    assert "*.json" not in desktop_filter
-    assert mindmap_filter == "思维导图 (*.mindmap)"
     assert empty_window.application.active_session is first and len(empty_window.application.sessions) == 1
 
 
@@ -826,7 +799,7 @@ def test_file_drop_opens_native_document_from_main_window(empty_window, tmp_path
     if drop_target == "welcome":
         target = group.empty_widget
     else:
-        previous = create(window, tmp_path / "原有.mindmap")
+        previous = create(window, tmp_path / "原有")
         if drop_target == "canvas":
             target = previous.canvas.view.viewport()
         elif drop_target == "tabs":
@@ -838,8 +811,8 @@ def test_file_drop_opens_native_document_from_main_window(empty_window, tmp_path
     QApplication.processEvents()
     assert target.isVisible()
     source = tmp_path / "旅行 计划 #1.MINDMAP"
-    save_document(MindMapDocument.new("拖入的根主题"), source, format_id="mindmap")
-    original = source.read_bytes()
+    save_directory(MindMapDocument.new("拖入的根主题"), source)
+    original = directory_version(source)
     urls = [QUrl.fromLocalFile(str(source))]
 
     assert not drop_file_urls(target, urls, actions=Qt.DropAction.MoveAction)
@@ -849,7 +822,7 @@ def test_file_drop_opens_native_document_from_main_window(empty_window, tmp_path
     assert window.application.active_session.files.path == source.resolve()
     assert window.application.engine.document.root.text == "拖入的根主题"
     assert window.state.recent_files[0] == str(source.resolve())
-    assert source.read_bytes() == original
+    assert directory_version(source) == original
     if drop_target == "search":
         assert target.text() == "原搜索内容"
 
@@ -857,21 +830,22 @@ def test_file_drop_opens_native_document_from_main_window(empty_window, tmp_path
 def test_file_drop_filters_batch_and_reuses_tabs(empty_window, tmp_path, qtbot, monkeypatch):
     """批次先过滤不支持的文件，逐项打开导图，重复项激活原标签。"""
     window = empty_window
-    original = create(window, tmp_path / "原有.mindmap")
+    original = create(window, tmp_path / "原有")
     original.engine.update_node(original.engine.root_id, text="尚未保存的编辑")
     original.document.timer.stop()
     tab = window.host.editor.find_token(original.id)
-    first, last = tmp_path / "第一份.mindmap", tmp_path / "最后一份.mindmap"
+    first, last = tmp_path / "第一份", tmp_path / "最后一份"
     for path in (first, last):
-        save_document(MindMapDocument.new(path.stem), path)
-    broken, missing = tmp_path / "损坏.mindmap", tmp_path / "缺失.mindmap"
-    broken.write_bytes(b"invalid")
-    directory, other = tmp_path / "目录.mindmap", tmp_path / "其他类型.txt"
+        save_directory(MindMapDocument.new(path.stem), path)
+    broken, missing = tmp_path / "损坏", tmp_path / "缺失"
+    broken.mkdir()
+    (broken / "mindmap.json").write_bytes(b"invalid")
+    directory, other = tmp_path / "目录", tmp_path / "其他类型.txt"
     directory.mkdir()
-    save_document(MindMapDocument.new("其他类型"), other, format_id="mindmap")
+    other.write_text("其他类型", encoding="utf-8")
     items = (first, directory, broken, other, missing, last, original.files.path)
     urls = [QUrl.fromLocalFile(str(path)) for path in items]
-    urls.extend([QUrl("https://example.test/导图.mindmap"), QUrl("file:相对路径.mindmap")])
+    urls.extend([QUrl("https://example.test/导图"), QUrl("file:相对路径")])
     attempted = []
     open_path = window.open_path
 
@@ -881,25 +855,25 @@ def test_file_drop_filters_batch_and_reuses_tabs(empty_window, tmp_path, qtbot, 
 
     monkeypatch.setattr(window, "open_path", track_open)
     assert drop_file_urls(window.title_bar, urls)
-    qtbot.waitUntil(lambda: len(attempted) == 5)
-    assert attempted == [first, broken, missing, last, original.files.path]
+    qtbot.waitUntil(lambda: len(attempted) == 4)
+    assert attempted == [first, broken, last, original.files.path]
     assert [view.files.path for view in window.application.sessions.ordered()] == [original.files.path, first, last]
     assert window.host.editor.find_token(original.id) == tab and window.application.active_session is original
     assert original.files.is_dirty and original.engine.document.root.text == "尚未保存的编辑"
     assert window.state.recent_files == [str(original.files.path), str(last), str(first)]
     errors = [line for line in window.operation_log.plain_text().splitlines() if "打开导图失败" in line]
-    assert len(errors) == 2 and broken.name in errors[0] and missing.name in errors[1]
+    assert len(errors) == 1 and broken.name in errors[0]
     assert window.status.currentMessage()
 
 
 def test_file_drop_cancel_stops_batch_and_allows_retry(empty_window, tmp_path, qtbot, monkeypatch):
     """后台打开取消后保留此前成功项，处理过程中拒绝重入，结束后可重新拖入。"""
     window = empty_window
-    first, large, last = [tmp_path / f"{name}.mindmap" for name in ("已打开", "取消打开", "重新拖入")]
+    first, large, last = [tmp_path / f"{name}" for name in ("已打开", "取消打开", "重新拖入")]
     for path in (first, last):
-        save_document(MindMapDocument.new(path.stem), path)
-    limit = max(first.stat().st_size, last.stat().st_size)
-    large.write_bytes(b"0" * (limit + 1))
+        save_directory(MindMapDocument.new(path.stem), path)
+    limit = max(directory_size(first), directory_size(last))
+    save_directory(MindMapDocument.new("大图" * limit), large)
     last_url = [QUrl.fromLocalFile(str(last))]
     canceled = []
 
@@ -922,8 +896,8 @@ def test_file_drop_cancel_stops_batch_and_allows_retry(empty_window, tmp_path, q
 def test_file_drop_queued_before_window_close_is_discarded(empty_window, tmp_path, monkeypatch):
     """关闭窗口早于延迟回调时，已接收的拖放也不能继续打开文件。"""
     window = empty_window
-    source = tmp_path / "关闭窗口时拖入.mindmap"
-    save_document(MindMapDocument.new("待打开"), source)
+    source = tmp_path / "关闭窗口时拖入"
+    save_directory(MindMapDocument.new("待打开"), source)
     monkeypatch.setattr(window, "open_path", lambda *args: pytest.fail("窗口关闭后不能打开文件"))
     assert drop_file_urls(window.title_bar, [QUrl.fromLocalFile(str(source))])
     assert window.close()
@@ -934,15 +908,15 @@ def test_file_drop_queued_before_window_close_is_discarded(empty_window, tmp_pat
 def test_file_drop_load_finishing_after_window_close_is_discarded(empty_window, tmp_path, qtbot, monkeypatch):
     """模拟后台读取期间关闭窗口，迟到的加载结果不能访问已释放的停靠栈。"""
     window = empty_window
-    source = tmp_path / "窗口关闭时完成读取.mindmap"
-    save_document(MindMapDocument.new("待打开"), source)
+    source = tmp_path / "窗口关闭时完成读取"
+    save_directory(MindMapDocument.new("待打开"), source)
     completed = []
 
     def finish_after_close(path, parent):
         assert parent is window and window.close()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         completed.append((path, window.status.currentMessage()))
-        return background_loading.load_validated_document(path)
+        return background_loading.load_validated_directory(path)
 
     monkeypatch.setattr(background_loading, "BACKGROUND_OPEN_BYTES", 0)
     monkeypatch.setattr(background_loading, "load_native_in_background", finish_after_close)
@@ -954,8 +928,8 @@ def test_file_drop_load_finishing_after_window_close_is_discarded(empty_window, 
 
 def test_cli_explicit_file_creates_session_with_empty_startup(tmp_path):
     """启动参数必须通过会话管理器打开文件，不能依赖启动前已经存在画布。"""
-    source = tmp_path / "命令行.mindmap"
-    save_document(MindMapDocument.new("命令行打开"), source)
+    source = tmp_path / "命令行"
+    save_directory(MindMapDocument.new("命令行打开"), source)
     output = tmp_path / "窗口.png"
     result = subprocess.run(
         [sys.executable, "-m", "mindmap_app", str(source), "--state-dir", str(tmp_path / "命令行配置"),
@@ -969,7 +943,7 @@ def test_cli_explicit_file_creates_session_with_empty_startup(tmp_path):
 
 def test_tab_and_split_focus_route_independent_panels_history_and_views(empty_window, tmp_path, qtbot):
     window = empty_window
-    first = create(window, tmp_path / "甲.mindmap")
+    first = create(window, tmp_path / "甲")
     # 初始定位在显示布局完成后执行，先完成首次显示再模拟导航定位及缩放操作。
     first.canvas.view.scale(0.4, 0.4)
     qtbot.waitUntil(lambda: assert_initial_canvas(first.canvas))
@@ -979,7 +953,7 @@ def test_tab_and_split_focus_route_independent_panels_history_and_views(empty_wi
     first.canvas.view.scale(1.3, 1.3)
     first.canvas.set_editable(False)
     transform = first.canvas.view.transform()
-    second = create(window, tmp_path / "乙.mindmap")
+    second = create(window, tmp_path / "乙")
     assert not second.engine.can_undo and second.canvas.editable
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     window.activateWindow()
@@ -1010,8 +984,8 @@ def test_tab_and_split_focus_route_independent_panels_history_and_views(empty_wi
 
 def test_switch_commits_inline_input_without_returning_focus_to_old_split(empty_window, tmp_path, qtbot):
     window = empty_window
-    first = create(window, tmp_path / "甲.mindmap")
-    second = create(window, tmp_path / "乙.mindmap")
+    first = create(window, tmp_path / "甲")
+    second = create(window, tmp_path / "乙")
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     window.manager.activate_document(first.id)
     first.canvas.begin_edit(first.engine.root_id)
@@ -1026,9 +1000,9 @@ def test_switch_commits_inline_input_without_returning_focus_to_old_split(empty_
 
 def test_outline_depth_is_per_session_and_preferences_are_shared(empty_window, tmp_path):
     window = empty_window
-    first = create(window, tmp_path / "甲.mindmap")
+    first = create(window, tmp_path / "甲")
     first.panels.outline.set_display_depth(4)
-    second = create(window, tmp_path / "乙.mindmap")
+    second = create(window, tmp_path / "乙")
     assert second.panels.outline.display_depth == 4
     second.panels.outline.set_display_depth(1)
     second.canvas.set_wheel_mode("zoom")
@@ -1037,18 +1011,18 @@ def test_outline_depth_is_per_session_and_preferences_are_shared(empty_window, t
     assert first.panels.outline.display_depth == 4
     window.manager.activate_document(first.id)
     assert window.application._depth_action.menu() is first.panels.outline.depth_menu
-    third = create(window, tmp_path / "丙.mindmap")
+    third = create(window, tmp_path / "丙")
     assert third.panels.outline.display_depth == 1
     assert third.canvas.wheel_mode == "zoom" and third.canvas.edraw_paste_options == ("replace", False, False)
 
 
 def test_autosave_debounce_undo_redo_and_view_only_changes(empty_window, tmp_path, qtbot):
-    session = create(empty_window, tmp_path / "自动.mindmap")
+    session = create(empty_window, tmp_path / "自动")
     writes = []
 
     def writer(document, path, **options):
         writes.append(document.root.text)
-        return save_document(document, path, **options)
+        return save_directory(document, path, **options)
 
     session.files.writer = writer
     session.engine.update_node(session.engine.root_id, text="第一次")
@@ -1060,7 +1034,7 @@ def test_autosave_debounce_undo_redo_and_view_only_changes(empty_window, tmp_pat
     assert writes == ["第二次"] and not session.files.is_dirty
     assert session.engine.undo()
     qtbot.waitUntil(lambda: len(writes) == 2)
-    assert load_document(session.files.path).root.text == "第一次"
+    assert load_directory(session.files.path).root.text == "第一次"
     assert session.engine.redo()
     qtbot.waitUntil(lambda: len(writes) == 3)
     session.canvas.view.scale(1.1, 1.1)
@@ -1072,7 +1046,7 @@ def test_autosave_debounce_undo_redo_and_view_only_changes(empty_window, tmp_pat
 
 @pytest.mark.parametrize("operation", ["style", "layout", "collapse", "theme"])
 def test_document_changes_schedule_committed_save(empty_window, tmp_path, operation, qtbot):
-    session = create(empty_window, tmp_path / "内容.mindmap")
+    session = create(empty_window, tmp_path / "内容")
     engine = session.engine
     if operation == "style":
         engine.update_node(engine.root_id, style={"font_size": 25})
@@ -1085,12 +1059,12 @@ def test_document_changes_schedule_committed_save(empty_window, tmp_path, operat
         engine.set_theme(Theme.dark())
     assert session.document.timer.isActive()
     qtbot.waitUntil(lambda: not session.files.is_dirty)
-    assert load_document(session.files.path) == engine.document
+    assert load_directory(session.files.path) == engine.document
 
 
 def test_external_fold_button_autosaves_and_undo_redo_restore_saved_state(empty_window, tmp_path, qtbot):
     """真实按钮点击经既有防抖保存落盘，撤销重做也保存各自的折叠状态。"""
-    session = create(empty_window, tmp_path / "按钮折叠.mindmap")
+    session = create(empty_window, tmp_path / "按钮折叠")
     engine, canvas = session.engine, session.canvas
     engine.add_child(engine.root_id, "子主题")
     qtbot.waitUntil(lambda: not session.files.is_dirty)
@@ -1102,17 +1076,17 @@ def test_external_fold_button_autosaves_and_undo_redo_restore_saved_state(empty_
     qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=position)
     assert not engine.get_node(engine.root_id).expanded and session.document.timer.isActive()
     qtbot.waitUntil(lambda: not session.files.is_dirty)
-    assert not load_document(session.files.path).root.expanded
+    assert not load_directory(session.files.path).root.expanded
     assert engine.undo()
     qtbot.waitUntil(lambda: not session.files.is_dirty)
-    assert load_document(session.files.path).root.expanded
+    assert load_directory(session.files.path).root.expanded
     assert engine.redo()
     qtbot.waitUntil(lambda: not session.files.is_dirty)
-    assert not load_document(session.files.path).root.expanded
+    assert not load_directory(session.files.path).root.expanded
 
 
 def test_autosave_keeps_inline_ime_and_property_draft(empty_window, tmp_path):
-    session = create(empty_window, tmp_path / "不打断输入.mindmap")
+    session = create(empty_window, tmp_path / "不打断输入")
     session.engine.update_node(session.engine.root_id, text="已提交")
     session.canvas.begin_edit(session.engine.root_id)
     editor = session.canvas.editor
@@ -1124,7 +1098,7 @@ def test_autosave_keeps_inline_ime_and_property_draft(empty_window, tmp_path):
     editor.inputMethodEvent(event)
     assert session.document.autosave()
     assert session.canvas.editor is editor and editor.composing
-    assert load_document(session.files.path).root.text == "已提交"
+    assert load_directory(session.files.path).root.text == "已提交"
     assert session.engine.can_undo and not session.files.is_dirty
     assert not session.document.save()
     editor.inputMethodEvent(QInputMethodEvent())
@@ -1134,13 +1108,13 @@ def test_autosave_keeps_inline_ime_and_property_draft(empty_window, tmp_path):
     panel.timer.stop()
     assert session.document.autosave()
     assert panel._pending == {"style.font_size": 28}
-    assert load_document(session.files.path).root.style.get("font_size") != 28
-    assert session.document.save() and load_document(session.files.path).root.style["font_size"] == 28
+    assert load_directory(session.files.path).root.style.get("font_size") != 28
+    assert session.document.save() and load_directory(session.files.path).root.style["font_size"] == 28
 
 
 def test_saved_notification_keeps_open_appearance_menu(empty_window, tmp_path):
     """自动保存只同步文件状态，不关闭正在使用的应用设置菜单或重建状态栏按钮。"""
-    session = create(empty_window, tmp_path / "菜单.mindmap")
+    session = create(empty_window, tmp_path / "菜单")
     session.engine.add_child(session.engine.root_id, "修改")
     menu = empty_window.appearance_menu()
     menu.popup(empty_window.mapToGlobal(empty_window.rect().center()))
@@ -1154,8 +1128,8 @@ def test_saved_notification_keeps_open_appearance_menu(empty_window, tmp_path):
 
 
 def test_save_failure_preserves_file_and_retries_only_on_request_or_edit(empty_window, tmp_path, qtbot):
-    session = create(empty_window, tmp_path / "失败.mindmap")
-    original = session.files.path.read_bytes()
+    session = create(empty_window, tmp_path / "失败")
+    original = directory_version(session.files.path)
     calls = []
 
     def fail(*args, **kwargs):
@@ -1166,7 +1140,7 @@ def test_save_failure_preserves_file_and_retries_only_on_request_or_edit(empty_w
     session.engine.update_node(session.engine.root_id, text="保留内存修改")
     qtbot.waitUntil(lambda: bool(calls))
     assert session.files.is_dirty and "磁盘" in session.document.last_error
-    assert session.files.path.read_bytes() == original and not session.document.timer.isActive()
+    assert directory_version(session.files.path) == original and not session.document.timer.isActive()
     qtbot.wait(600)
     assert len(calls) == 1
     group, index = empty_window.host.editor.find_token(session.id)
@@ -1177,16 +1151,16 @@ def test_save_failure_preserves_file_and_retries_only_on_request_or_edit(empty_w
     assert session.engine.undo()
     qtbot.waitUntil(lambda: not session.document.last_error)
     assert not session.files.is_dirty and len(calls) == calls_before_undo
-    assert session.files.path.read_bytes() == original
+    assert directory_version(session.files.path) == original
     session.files.writer = session.document._write
     session.engine.update_node(session.engine.root_id, text="后续修改重试")
     qtbot.waitUntil(lambda: not session.files.is_dirty)
-    assert not session.document.last_error and load_document(session.files.path).root.text == "后续修改重试"
+    assert not session.document.last_error and load_directory(session.files.path).root.text == "后续修改重试"
 
 
 def test_save_all_order_failure_and_atomic_close_others(empty_window, tmp_path):
     window = empty_window
-    sessions = [create(window, tmp_path / f"{name}.mindmap") for name in ("甲", "乙", "丙")]
+    sessions = [create(window, tmp_path / f"{name}") for name in ("甲", "乙", "丙")]
     group, _ = window.host.editor.find_token(sessions[0].id)
     group.tabBar().moveTab(2, 0)
     writes = []
@@ -1198,7 +1172,7 @@ def test_save_all_order_failure_and_atomic_close_others(empty_window, tmp_path):
             writes.append(path.stem)
             if path.stem == "乙":
                 raise OSError("乙无法保存")
-            save_document(document, path, **options)
+            save_directory(document, path, **options)
 
         session.files.writer = writer
     window.manager.activate_document(sessions[0].id)
@@ -1215,8 +1189,8 @@ def test_save_all_order_failure_and_atomic_close_others(empty_window, tmp_path):
 
 def test_exit_failure_keeps_all_targets_and_success_releases_resources(empty_window, tmp_path):
     window = empty_window
-    first = create(window, tmp_path / "甲.mindmap")
-    second = create(window, tmp_path / "乙.mindmap")
+    first = create(window, tmp_path / "甲")
+    second = create(window, tmp_path / "乙")
     second.engine.update_node(second.engine.root_id, text="关闭前修改")
     second.document.timer.stop()
 
@@ -1235,9 +1209,9 @@ def test_exit_failure_keeps_all_targets_and_success_releases_resources(empty_win
 
 def test_layout_restore_preserves_live_documents_and_restart_reopens_files(empty_window, tmp_path, qtbot):
     window = empty_window
-    first = create(window, tmp_path / "甲.mindmap")
+    first = create(window, tmp_path / "甲")
     snapshot = window.manager.capture_layout()
-    second = create(window, tmp_path / "乙.mindmap")
+    second = create(window, tmp_path / "乙")
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     window.manager.activate_document(first.id)
     for layout in (snapshot, None):
@@ -1261,7 +1235,7 @@ def test_layout_restore_preserves_live_documents_and_restart_reopens_files(empty
     layout = json.loads(window.manager.storage_file.read_bytes())["layout"]
     assert set(layout) == {"schema_version", "session", "window_placement"}
     text = json.dumps(layout, ensure_ascii=False)
-    assert str(first.files.path) not in text and "甲.mindmap" not in text
+    assert str(first.files.path) not in text and "甲" not in text
     storage = window.manager.storage_dir
     assert window.close()
     restarted = build_window(storage_dir=storage)
@@ -1276,8 +1250,8 @@ def test_layout_restore_preserves_live_documents_and_restart_reopens_files(empty
 
 def test_save_all_shortcut_from_sidebar_preserves_active_session(empty_window, tmp_path, qtbot):
     window = empty_window
-    first = create(window, tmp_path / "甲.mindmap")
-    second = create(window, tmp_path / "乙.mindmap")
+    first = create(window, tmp_path / "甲")
+    second = create(window, tmp_path / "乙")
     first.engine.update_node(first.engine.root_id, text="保存全部")
     first.document.timer.stop()
     window.activateWindow()
@@ -1287,8 +1261,8 @@ def test_save_all_shortcut_from_sidebar_preserves_active_session(empty_window, t
     QApplication.processEvents()
     qtbot.keyClick(field.lineEdit(), Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
     assert not first.files.is_dirty and not second.files.is_dirty
-    assert load_document(first.files.path).root.text == "保存全部"
-    assert load_document(second.files.path).root.style["font_size"] == 24
+    assert load_directory(first.files.path).root.text == "保存全部"
+    assert load_directory(second.files.path).root.style["font_size"] == 24
     assert window.application.active_session is second and field.lineEdit().hasFocus()
 
 
@@ -1297,7 +1271,7 @@ def test_save_all_shortcut_from_sidebar_preserves_active_session(empty_window, t
 def test_owned_pages_are_isolated_between_sessions_and_reopen_from_main(empty_window, tmp_path, split, page_kind):
     """标签和分屏仅切换所属画布，导航现场独立，文件重开从主导图开始。"""
     window = empty_window
-    first = create(window, tmp_path / "子导图甲.mindmap")
+    first = create(window, tmp_path / "子导图甲")
     owner = first.engine.add_child(first.engine.root_id, "甲的入口")
     first.canvas.select_nodes([owner])
     create_page = "create_submap" if page_kind == "submap" else "create_detail_page"
@@ -1308,15 +1282,15 @@ def test_owned_pages_are_isolated_between_sessions_and_reopen_from_main(empty_wi
     first.engine.add_child(root, "甲的页内内容")
     first.canvas.view.zoom(1.4)
     scale = first.canvas.view.transform().m11()
-    second = create(window, tmp_path / "子导图乙.mindmap")
+    second = create(window, tmp_path / "子导图乙")
     if split:
         window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     second.canvas.select_nodes([second.engine.root_id])
     other = getattr(second.canvas, create_page)()
     second.engine.add_child(second.canvas.document_view.root_id, "乙的页内内容")
     assert window.save_all()
-    assert load_document(first.files.path) == first.engine.document
-    assert load_document(second.files.path) == second.engine.document
+    assert load_directory(first.files.path) == first.engine.document
+    assert load_directory(second.files.path) == second.engine.document
     window.manager.activate_document(first.id)
     QApplication.processEvents()
     assert first.canvas.current_page_id == page and second.canvas.current_page_id == other
@@ -1339,11 +1313,11 @@ def test_owned_pages_are_isolated_between_sessions_and_reopen_from_main(empty_wi
 @pytest.mark.parametrize("split", [False, True])
 @pytest.mark.parametrize("page_kind", ["main", "submap", "detail"])
 def test_clipboard_image_paste_isolates_sessions_and_survives_file_lifecycle(
-    empty_window, tmp_path, image_clipboard, qtbot, monkeypatch, split, page_kind,
+    empty_window, tmp_path, image_clipboard, qtbot, monkeypatch, choose_save_directory, split, page_kind,
 ):
     """真实粘贴与缩放在所属页保存，历史、另存为和关闭重开保持尺寸及资源独立。"""
     window = empty_window
-    original_path = tmp_path / "图片甲.mindmap"
+    original_path = tmp_path / "图片甲"
     first = create(window, original_path)
     owner = first.engine.add_child(first.engine.root_id, "附图位置")
     first.canvas.select_nodes([owner])
@@ -1352,7 +1326,7 @@ def test_clipboard_image_paste_isolates_sessions_and_survives_file_lifecycle(
     elif page_kind == "detail":
         first.canvas.create_detail_page()
     page, target = first.canvas.current_page_id, first.canvas.current_node_id()
-    second = create(window, tmp_path / "图片乙.mindmap")
+    second = create(window, tmp_path / "图片乙")
     if split:
         window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     assert window.save_all()
@@ -1377,25 +1351,25 @@ def test_clipboard_image_paste_isolates_sessions_and_survives_file_lifecycle(
     assert asset is not None and first.canvas.current_page_id == page
     assert first.canvas.view.transform() == transform and first.files.is_dirty
     qtbot.waitUntil(lambda: not first.files.is_dirty)
-    assert load_document(original_path) == first.engine.document
+    assert load_directory(original_path) == first.engine.document
     assert second.engine.document == other_before and second.engine.revision == other_revision
     assert not second.files.is_dirty
 
-    destination = tmp_path / "图片甲副本.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(destination), "原生导图"))
+    destination = tmp_path / "图片甲副本"
+    choose_save_directory(destination)
     assert window.save(save_as=True) and first.files.path == destination
     expected = first.engine.document
-    assert load_document(destination) == expected
+    assert load_directory(destination) == expected
     first.canvas.navigate_to(None)
     assert first.engine.undo()
     assert first.canvas.current_page_id == page
     assert image_node not in first.engine.document.nodes
     qtbot.waitUntil(lambda: not first.files.is_dirty)
-    assert asset not in load_document(destination).assets
-    assert asset in load_document(original_path).assets
+    assert asset not in load_directory(destination).assets
+    assert asset in load_directory(original_path).assets
     assert first.engine.redo()
     qtbot.waitUntil(lambda: not first.files.is_dirty)
-    assert load_document(destination) == expected
+    assert load_directory(destination) == expected
 
     # 视口事件已由画布测试逐手柄覆盖，这里验证拖动提交后的导图桌面会话及保存链。
     item = first.canvas.node_items[image_node]
@@ -1411,8 +1385,8 @@ def test_clipboard_image_paste_isolates_sessions_and_survives_file_lifecycle(
     assert width == pytest.approx(80) and first.files.is_dirty
     assert second.engine.document == other_before and not second.files.is_dirty
     qtbot.waitUntil(lambda: not first.files.is_dirty)
-    assert load_document(destination).nodes[image_node].image_width == pytest.approx(width)
-    assert load_document(original_path).nodes[image_node].image_width == 40
+    assert load_directory(destination).nodes[image_node].image_width == pytest.approx(width)
+    assert load_directory(original_path).nodes[image_node].image_width == 40
     assert first.engine.undo() and first.engine.document == expected
     qtbot.waitUntil(lambda: not first.files.is_dirty)
     assert first.engine.redo() and first.engine.get_node(image_node).image_width == width
@@ -1444,7 +1418,7 @@ def test_background_snapshot_keeps_owned_pages_and_preserves_newer_page_edit(
     empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor, page_kind
 ):
     """后台写入旧版本的全文件快照，期间对子页的修改继续保持未保存。"""
-    session = create_large_session(empty_window, tmp_path / "子图后台版本.mindmap")
+    session = create_large_session(empty_window, tmp_path / "子图后台版本")
     # 从独立新叶子创建入口，原大图结构继续覆盖后台保存阈值。
     owner = session.engine.add_child(session.engine.root_id, "后台入口")
     session.canvas.select_nodes([owner])
@@ -1455,7 +1429,7 @@ def test_background_snapshot_keeps_owned_pages_and_preserves_newer_page_edit(
     def held_writer(document, path, **options):
         started.set()
         assert release.wait(5)
-        save_document(document, path, **options)
+        save_directory(document, path, **options)
 
     monkeypatch.setattr("mindmap_application.documents.save_snapshot", held_writer)
     try:
@@ -1467,11 +1441,11 @@ def test_background_snapshot_keeps_owned_pages_and_preserves_newer_page_edit(
         release.set()
         qtbot.waitUntil(lambda: session.document._background_save is None)
         session.document.timer.stop()
-        saved = load_document(session.files.path)
+        saved = load_directory(session.files.path)
         assert saved.has_page(page) and saved.nodes[key].text == "捕获版本"
         assert session.engine.is_dirty
         assert session.document.autosave()
-        assert load_document(session.files.path).nodes[key].text == "较新的页内编辑"
+        assert load_directory(session.files.path).nodes[key].text == "较新的页内编辑"
     finally:
         release.set()
         session.document._finish_background_save(wait=True)

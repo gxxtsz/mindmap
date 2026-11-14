@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 from mindmap_core import BranchStyle, LayoutConfig, LayoutInfo, MindMapDocument, MindMapError, Theme
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import load_directory, save_directory
 from mindmap_core.layouts import TreeLayout
 from mindmap_qt_editor.controls.property_controls import MIXED
 from PySide6.QtCore import QPoint, Qt
@@ -100,11 +100,11 @@ def test_document_settings_history_save_and_reopen(workspace, qtbot, tmp_path, k
     else:
         assert getattr(after.layout, key) == value
     path = tmp_path / "全局设置.mindmap"
-    save_document(after, path)
-    assert load_document(path) == after
+    save_directory(after, path)
+    assert load_directory(path) == after
     assert canvas.engine.undo() and canvas.engine.document == before and not canvas.engine.is_dirty
     assert canvas.engine.redo() and canvas.engine.document == after
-    canvas.engine.replace_document(load_document(path))
+    canvas.engine.replace_document(load_directory(path))
     if key == "compact":
         assert panel.compact.isChecked()
     else:

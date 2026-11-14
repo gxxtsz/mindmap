@@ -2,7 +2,7 @@
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core.formats import load_document
+from mindmap_core.formats import load_directory
 from mindmap_core.node_pages import extension_page_id
 from mindmap_qt_editor.node_pages import NodePageProvider, NodePageWidget, UnavailableNodePage
 from PySide6.QtWidgets import QMenu
@@ -14,7 +14,7 @@ def window(qtbot, tmp_path):
     qtbot.addWidget(result, before_close_func=lambda item: item.dispose())
     result.resize(1200, 800)
     result.show()
-    assert result.new_document(tmp_path / "主体.mindmap")
+    assert result.new_document(tmp_path / "主体")
     return result
 
 
@@ -45,7 +45,7 @@ def test_unknown_extension_is_preserved_and_recent_page_can_reopen(window):
     view._navigate_recent_page(key, None)
     assert view.pages.active
     assert view.document.save()
-    assert load_document(view.document.path).root.extension_pages["future"]["version"] == 77
+    assert load_directory(view.document.path).root.extension_pages["future"]["version"] == 77
 
 
 def test_closed_page_callbacks_stay_invalid_when_same_page_reopens(window):

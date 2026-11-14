@@ -11,6 +11,11 @@ from mindmap_desktop_runtime.storage import JsonLayoutStore
 from PySide6.QtCore import QSettings
 
 
+def _is_directory_document(path: str) -> bool:
+    """历史会话只恢复目前可识别的导图目录；旧容器的来源仍留在历史记录中。"""
+    return (Path(path) / "mindmap.json").is_file()
+
+
 def _read_object(path: Path) -> dict | None:
     """只读取可解析的对象；损坏或暂不可读的历史文件留在原处，不覆盖为空状态。"""
     try:
@@ -76,7 +81,7 @@ def _convert_state(old: dict, layout) -> dict:
                 or not isinstance(identifier, str) or not identifier or identifier in seen):
             continue
         seen.add(identifier)
-        if record.get("plugin_id", "mindmap") != "mindmap" or Path(path).suffix.lower() != ".mindmap":
+        if record.get("plugin_id", "mindmap") != "mindmap" or not _is_directory_document(path):
             retired.append(deepcopy(record))
             continue
         view = {"id": identifier, "path": path}
@@ -97,7 +102,7 @@ def _convert_state(old: dict, layout) -> dict:
     archive = {
         "views": retired,
         "sources": list(dict.fromkeys([*(record["path"] for record in retired),
-                                        *(path for path in recent if Path(path).suffix.lower() != ".mindmap")])),
+                                        *(path for path in recent if not _is_directory_document(path))])),
         "component_state": {key: deepcopy(value) for key, value in components.items() if key != "mindmap"},
     }
     if "legacy_software_structure" in mindmap:
@@ -107,7 +112,7 @@ def _convert_state(old: dict, layout) -> dict:
     return {
         "schema_version": 2, "views": views,
         "active_id": active if isinstance(active, str) and active in identifiers else "",
-        "recent_files": [path for path in recent if Path(path).suffix.lower() == ".mindmap"][:20],
+        "recent_files": [path for path in recent if _is_directory_document(path)][:20],
         "mindmap": mindmap, "layout": _convert_layout(layout, {record["id"] for record in retired}),
         "migration_archive": archive,
     }

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from mindmap_core import MindMapDocument, MindMapEngine, MindMapError, Node
-from mindmap_core.formats import save_document
+from mindmap_core.formats import save_directory
 from mindmap_qt_editor.canvas import MindMapFileController, MindMapWidget
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QInputMethodEvent
@@ -270,7 +270,7 @@ def test_replacement_and_disposal_cancel_queued_restore(pages, tmp_path):
     canvas = create(visible=False)
     canvas.restore_page_view_state(snapshot)
     replacement = tmp_path / "替换.mindmap"
-    save_document(MindMapDocument.new("替换根"), replacement)
+    save_directory(MindMapDocument.new("替换根"), replacement)
     files = MindMapFileController(canvas, SimpleNamespace(flush_pending_edits=lambda: None))
     assert files.open_path(replacement)
     canvas.show()

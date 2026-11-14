@@ -32,7 +32,7 @@ def build_window(*, storage_dir=None, theme=None, restore=True, options=None):
 
 def run(argv=None):
     def configure(parser):
-        parser.add_argument("file", nargs="?", type=Path, help="启动时打开的文件")
+        parser.add_argument("directory", nargs="?", type=Path, help="启动时打开的导图目录")
 
     def builder(options):
         app = QApplication.instance()
@@ -42,8 +42,8 @@ def run(argv=None):
         app.setApplicationName(PRODUCT_CONFIG.title)
         window = build_window(storage_dir=options.state_dir, theme=options.theme, restore=not options.no_restore)
         window._translator = translator
-        if options.file:
-            window.call(lambda: window.open_path(options.file))
+        if options.directory:
+            window.call(lambda: window.open_path(options.directory))
         return window
 
     return run_desktop(builder, argv, description="思维导图", configure_parser=configure)

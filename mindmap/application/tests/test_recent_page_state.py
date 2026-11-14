@@ -19,7 +19,7 @@ def state_pair(tmp_path):
 
 def test_page_records_roundtrip_deduplicate_limit_and_preserve_exit_snapshot(tmp_path):
     owner, state = state_pair(tmp_path)
-    path = tmp_path / "导图.mindmap"
+    path = tmp_path / "导图"
     exit_snapshot = [{"id": "mindmap.saved", "path": str(path)}]
     owner.save_session(exit_snapshot, exit_snapshot[0]["id"])
     original = owner.store.path.read_bytes()
@@ -38,7 +38,7 @@ def test_page_records_roundtrip_deduplicate_limit_and_preserve_exit_snapshot(tmp
     assert set(payload) == {"schema_version", "recent_pages"}
 
 
-@pytest.mark.parametrize("pages", [None, [], "错误", {"相对路径.mindmap": [{}]}])
+@pytest.mark.parametrize("pages", [None, [], "错误", {"相对路径": [{}]}])
 def test_bad_optional_page_field_does_not_break_legacy_records(tmp_path, pages):
     owner, state = state_pair(tmp_path)
     payload = {"schema_version": 1, "recent_files": [], "open_documents": [], "active_id": ""}
@@ -50,7 +50,7 @@ def test_bad_optional_page_field_does_not_break_legacy_records(tmp_path, pages):
 
 
 def test_loading_skips_only_bad_entries_and_never_invents_main_page(tmp_path):
-    path = tmp_path / "导图.mindmap"
+    path = tmp_path / "导图"
     owner, state = state_pair(tmp_path)
     owner.remember(path)
     owner.application_state().set("page_history", {
@@ -68,7 +68,7 @@ def test_loading_skips_only_bad_entries_and_never_invents_main_page(tmp_path):
 
 def test_page_write_failure_preserves_file_and_memory_for_retry(tmp_path, monkeypatch):
     owner, state = state_pair(tmp_path)
-    path = tmp_path / "导图.mindmap"
+    path = tmp_path / "导图"
     owner.remember(path)
     original = owner.store.path.read_bytes()
     state.set_recent_pages(path, [(None, None), ("页面", None)])

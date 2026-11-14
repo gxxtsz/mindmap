@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 from mindmap_app.app import build_window
+from mindmap_core.formats import directory_version
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QContextMenuEvent, QDesktopServices
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu
+from PySide6.QtWidgets import QApplication, QMenu
 
 
 @pytest.fixture
@@ -46,8 +47,8 @@ def test_directory_action_tracks_active_document_and_empty_state(directory_windo
     action = window.action("app.open_directory")
     assert not action.isEnabled() and action.shortcut().isEmpty()
     assert not window.open_file_directory()
-    first = create_document(window, tmp_path / "目录甲" / "甲.mindmap")
-    second = create_document(window, tmp_path / "目录乙" / "乙.mindmap")
+    first = create_document(window, tmp_path / "目录甲" / "甲")
+    second = create_document(window, tmp_path / "目录乙" / "乙")
     recent = list(window.state.recent_files)
     for session in (first, second):
         window.manager.activate_document(session.id)
@@ -57,7 +58,7 @@ def test_directory_action_tracks_active_document_and_empty_state(directory_windo
         next(item for item in files.actions() if item.text() == "打开所在文件夹").trigger()
         menu.deleteLater()
         assert window.application.active_session is session
-    assert [Path(url.toLocalFile()) for url in opened] == [first.files.path.parent, second.files.path.parent]
+    assert [Path(url.toLocalFile()) for url in opened] == [first.files.path, second.files.path]
     assert window.state.recent_files == recent
     assert not window.open_file_directory("失效标签") and not window.open_file_directory("")
     assert window.manager.close_documents([first.id, second.id])
@@ -72,15 +73,15 @@ def test_directory_action_tracks_active_document_and_empty_state(directory_windo
 def test_readonly_directory_supports_special_paths_and_deleted_files(directory_window, tmp_path, deleted):
     """中文、空格、&、#、% 不被解释为网址；只读及文件已删除均可打开有效父目录。"""
     window, opened = directory_window
-    session = create_document(window, tmp_path / "中文 空格 & #%" / "测试.mindmap")
+    session = create_document(window, tmp_path / "中文 空格 & #%" / "测试")
     session.canvas.set_editable(False)
     if deleted:
-        session.files.path.unlink()
+        session.files.path.rename(tmp_path / "离线副本")
     window.operation_log.clear()
     assert window.action("app.open_directory").isEnabled()
     window.action("app.open_directory").trigger()
     assert len(opened) == 1 and opened[0].isLocalFile()
-    assert Path(opened[0].toLocalFile()) == session.files.path.parent
+    assert Path(opened[0].toLocalFile()) == (session.files.path.parent if deleted else session.files.path)
     assert not session.document.last_error and not session.files.is_dirty
     entry, = window.operation_log.model.entries
     assert entry.level == "info" and entry.source_path == str(session.files.path)
@@ -91,8 +92,8 @@ def test_readonly_directory_supports_special_paths_and_deleted_files(directory_w
 def test_tab_menu_opens_hit_directory_without_activation(directory_window, tmp_path, split, theme):
     """真实右键菜单命中非活动标签和其他分屏，目录图标随主题呈现，保留原活动标签。"""
     window, opened = directory_window
-    first = create_document(window, tmp_path / "来源目录" / "来源.mindmap")
-    other = create_document(window, tmp_path / "活动目录" / "活动.mindmap")
+    first = create_document(window, tmp_path / "来源目录" / "来源")
+    other = create_document(window, tmp_path / "活动目录" / "活动")
     if split:
         window.host.editor.split_token(first.id, Qt.Orientation.Horizontal)
     window.manager.set_theme(theme)
@@ -116,7 +117,7 @@ def test_tab_menu_opens_hit_directory_without_activation(directory_window, tmp_p
     QTimer.singleShot(0, choose_directory)
     point = bar.tabRect(index).center()
     bar.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point, bar.mapToGlobal(point)))
-    assert [Path(url.toLocalFile()) for url in opened] == [first.files.path.parent]
+    assert [Path(url.toLocalFile()) for url in opened] == [first.files.path]
     assert window.application.active_session is other
     assert window.host.editor.find_token(first.id) == (group, index)
     assert window.state.recent_files == recent
@@ -124,15 +125,15 @@ def test_tab_menu_opens_hit_directory_without_activation(directory_window, tmp_p
     assert entry.source_path == str(first.files.path)
 
 
-def test_directory_callbacks_follow_shared_save_as_and_layout_restore(directory_window, tmp_path, monkeypatch):
+def test_directory_callbacks_follow_shared_save_as_and_layout_restore(directory_window, tmp_path, monkeypatch, choose_save_directory):
     """复制标签及布局恢复沿用回调；任一标签另存为后，所有入口即时使用新的共享路径。"""
     window, opened = directory_window
-    first = create_document(window, tmp_path / "旧目录" / "原文件.mindmap")
+    first = create_document(window, tmp_path / "旧目录" / "原文件")
     assert window.manager.duplicate_document(first.id)
     copied = window.application.active_session
-    target = tmp_path / "新目录" / "另存.mindmap"
+    target = tmp_path / "新目录" / "另存"
     target.parent.mkdir()
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    choose_save_directory(target)
     assert window.save(save_as=True)
     assert first.files.path == copied.files.path == target
     window.manager.restore_layout(window.manager.capture_layout())
@@ -141,7 +142,7 @@ def test_directory_callbacks_follow_shared_save_as_and_layout_restore(directory_
     window.operation_log.clear()
     assert window.manager.open_document_directory(first.id)
     assert window.manager.open_document_directory(copied.id)
-    assert [Path(url.toLocalFile()) for url in opened] == [target.parent, target.parent]
+    assert [Path(url.toLocalFile()) for url in opened] == [target, target]
     assert window.application.active_session is copied and window.state.recent_files == recent
     assert len(window.operation_log.model.entries) == 2
     assert all(entry.source_path == str(target) for entry in window.operation_log.model.entries)
@@ -155,10 +156,10 @@ def test_directory_failure_logs_target_without_changing_save_state(
 ):
     """失效目录或系统失败仅提示一次，日志归属目标标签，保留原保存状态和活动导图。"""
     window, opened = directory_window
-    target = create_document(window, tmp_path / "目标目录" / "目标.mindmap")
-    other = create_document(window, tmp_path / "其他目录" / "活动.mindmap")
+    target = create_document(window, tmp_path / "目标目录" / "目标")
+    other = create_document(window, tmp_path / "其他目录" / "活动")
     if failure in ("missing", "parent_file"):
-        target.files.path.unlink()
+        target.files.path.rename(tmp_path / "离线副本")
         target.files.path.parent.rmdir()
         if failure == "parent_file":
             target.files.path.parent.write_text("此位置已被普通文件占用", encoding="utf-8")
@@ -189,8 +190,8 @@ def test_directory_failure_logs_target_without_changing_save_state(
 def test_directory_action_preserves_pending_text_and_unsaved_content(directory_window, tmp_path):
     """打开目录不主动提交正文草稿或保存已提交修改，磁盘内容、历史和最近记录保持原样。"""
     window, opened = directory_window
-    session = create_document(window, tmp_path / "草稿.mindmap")
-    disk_content = session.files.path.read_bytes()
+    session = create_document(window, tmp_path / "草稿")
+    disk_content = directory_version(session.files.path)
     session.engine.update_node(session.engine.root_id, text="已经提交，等待自动保存")
     # 暂停原有自动保存，单独检查目录操作是否主动写盘；正常应用仍保留原调度规则。
     session.document.timer.stop()
@@ -204,5 +205,5 @@ def test_directory_action_preserves_pending_text_and_unsaved_content(directory_w
     assert session.canvas.editor is editor and editor.toPlainText() == "尚未提交的中文草稿"
     assert session.engine.document == document and session.engine.revision == revision
     assert session.engine.can_undo and session.files.is_dirty
-    assert session.files.path.read_bytes() == disk_content
+    assert directory_version(session.files.path) == disk_content
     assert window.state.recent_files == recent

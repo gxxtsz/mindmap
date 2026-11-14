@@ -141,16 +141,16 @@ def test_log_presentation_keeps_paths_in_details_and_copy_when_narrow(qtbot, qap
     """展示不堆叠完整路径，窄侧栏不撑出横向滚动；详情与复制保留原始记录。"""
     panel = OperationLogPanel()
     qtbot.addWidget(panel)
-    path = r"E:\资料库\第二大脑.mindmap"
+    path = r"E:\资料库\第二大脑.计划"
     title, detail = describe_display("打开导图：" + path)
-    panel.append_entry("打开导图：" + path, source="第二大脑.mindmap", source_path=path, title=title, detail=detail)
+    panel.append_entry("打开导图：" + path, source="第二大脑.计划", source_path=path, title=title, detail=detail)
     panel.append_entry("操作失败：详细原因" * 40, source="很长的文件名" * 10, level="error")
     panel.append_entry("页面提示：已返回主导图", level="warning")
     panel.resize(280, 200)
     panel.show()
     QApplication.processEvents()
     entry = panel.model.entries[0]
-    assert entry.display_parts == ("打开导图", "") and entry.source_label == "第二大脑"
+    assert entry.display_parts == ("打开导图", "") and entry.source_label == "第二大脑.计划"
     assert path in panel.model.index(0, 0).data(Qt.ItemDataRole.ToolTipRole)
     assert not panel.grab().isNull() and panel.list_view.horizontalScrollBar().maximum() == 0
     panel.copy_all()

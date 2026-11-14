@@ -73,7 +73,8 @@ class _LogEntry:
 
     @property
     def source_label(self) -> str:
-        return PureWindowsPath(self.source).stem
+        """显示完整导图目录名，保留名称中的点号。"""
+        return PureWindowsPath(self.source).name
 
 
 class _LogModel(QAbstractListModel):

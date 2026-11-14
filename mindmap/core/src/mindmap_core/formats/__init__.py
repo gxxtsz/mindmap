@@ -1,5 +1,14 @@
 """独立文档格式包；算法是否已安装不影响文档的解析与保存。"""
 
+from .directory import (
+    check_directory_version,
+    directory_size,
+    directory_version,
+    load_directory,
+    load_validated_directory,
+    save_directory,
+)
+from .directory_storage import DirectoryVersion, DirectoryVersionConflict
 from .edraw import import_edraw_xml
 from .files import decode_document, encode_document, load_document, load_validated_document, save_document
 from .json_codec import JsonCodec, dumps, loads
@@ -13,13 +22,18 @@ from .schema import SCHEMA_VERSION, from_dict, to_dict
 __all__ = [
     "MAX_ARCHIVE_BYTES",
     "SCHEMA_VERSION",
+    "DirectoryVersion",
+    "DirectoryVersionConflict",
     "JsonCodec",
     "MindmapCodec",
     "OutlineCodec",
     "can_process_snapshot",
+    "check_directory_version",
     "create_default_format_registry",
     "decode_document",
     "detect_outline_format",
+    "directory_size",
+    "directory_version",
     "dumps",
     "encode_document",
     "export_outline",
@@ -28,9 +42,12 @@ __all__ = [
     "import_indented_fragment",
     "import_edraw_xml",
     "load_document",
+    "load_directory",
+    "load_validated_directory",
     "load_validated_document",
     "loads",
     "save_document",
+    "save_directory",
     "supports_owned_load",
     "supports_process_save",
     "to_dict",

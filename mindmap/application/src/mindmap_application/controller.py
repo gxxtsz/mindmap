@@ -158,10 +158,10 @@ class MindMapController(QObject):
         document = session.document
         path = document.path
         actions = menu.addMenu("处理保存冲突")
-        if path is not None and path.is_file():
+        if path is not None and path.is_dir():
             actions.addAction("重新加载磁盘版本…", lambda: self.call(document.reload_after_conflict))
         elif path is not None and not path.exists():
-            actions.addAction("恢复原文件", lambda: self.call(document.restore_missing))
+            actions.addAction("恢复原目录", lambda: self.call(document.restore_missing))
         actions.addAction(self.context.ui.action("app.save_as"))
 
     def populate_export_menu(self, menu: QMenu) -> None:

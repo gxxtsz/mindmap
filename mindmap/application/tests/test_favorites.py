@@ -2,9 +2,9 @@
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core.formats import load_document
+from mindmap_core.formats import directory_version, load_directory
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication
 
 
 @pytest.fixture
@@ -35,11 +35,11 @@ def test_favorites_follow_active_session_and_preserve_views(favorite_window, tmp
     window = favorite_window
     assert not window.manager.states["favorites"].visible
     assert window.application._favorites_stack.currentIndex() == 0
-    first, first_page = add_favorite(window, tmp_path / "甲.mindmap")
+    first, first_page = add_favorite(window, tmp_path / "甲")
     nested = first.engine.create_submap(first.engine.add_child(
         first.engine.page_document(first_page).root_id, "嵌套收藏"))
     first.canvas.set_submap_favorite(nested, True)
-    second, second_page = add_favorite(window, tmp_path / "乙.mindmap")
+    second, second_page = add_favorite(window, tmp_path / "乙")
     if split:
         window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     window.manager.activate_document(first.id)
@@ -77,15 +77,15 @@ def test_favorites_follow_active_session_and_preserve_views(favorite_window, tmp
     assert window.application._favorites_stack.currentIndex() == 0 and window.application._favorites_stack.count() == 1
 
 
-def test_favorites_shortcut_autosave_save_as_and_restart(favorite_window, tmp_path, qtbot, monkeypatch):
+def test_favorites_shortcut_autosave_save_as_and_restart(favorite_window, tmp_path, qtbot, monkeypatch, choose_save_directory):
     window = favorite_window
-    session, page = add_favorite(window, tmp_path / "原文件.mindmap")
+    session, page = add_favorite(window, tmp_path / "原文件")
     nested = session.engine.create_submap(session.engine.add_child(
         session.engine.page_document(page).root_id, "嵌套收藏"))
     session.canvas.set_submap_favorite(nested, True)
     session.favorites.tree_view.collapse(session.favorites.model.index_for(page))
     qtbot.waitUntil(lambda: not session.files.is_dirty, timeout=5000)
-    assert load_document(session.files.path).metadata["submap_favorites"] == [nested, page]
+    assert load_directory(session.files.path).metadata["submap_favorites"] == [nested, page]
     window.activateWindow()
     session.canvas.view.setFocus()
     QApplication.processEvents()
@@ -94,10 +94,10 @@ def test_favorites_shortcut_autosave_save_as_and_restart(favorite_window, tmp_pa
     assert window.manager.states["favorites"].visible and session.favorites.isVisible()
     assert window.manager.specs["favorites"].shortcut == "Alt+4"
     assert not window.manager.theme.icon("favorites").isNull()
-    copied = tmp_path / "另存副本.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(copied), ""))
+    copied = tmp_path / "另存副本"
+    choose_save_directory(copied)
     assert window.save(save_as=True)
-    assert load_document(copied).metadata["submap_favorites"] == [nested, page]
+    assert load_directory(copied).metadata["submap_favorites"] == [nested, page]
     window.close()
     restored = build_window(storage_dir=tmp_path / "配置", restore=True)
     qtbot.addWidget(restored)
@@ -120,17 +120,17 @@ def test_failed_favorite_save_keeps_in_memory_state_and_allows_retry(
     favorite_window, tmp_path, monkeypatch
 ):
     window = favorite_window
-    session, page = add_favorite(window, tmp_path / "写入失败.mindmap")
-    original = session.files.path.read_bytes()
+    session, page = add_favorite(window, tmp_path / "写入失败")
+    original = directory_version(session.files.path)
 
     def fail(*args, **kwargs):
         raise OSError("收藏保存失败")
 
     with monkeypatch.context() as context:
-        context.setattr("mindmap_application.documents.save_document", fail)
+        context.setattr("mindmap_application.documents.save_directory", fail)
         assert not session.document.autosave()
         assert session.files.is_dirty and session.engine.is_submap_favorite(page)
-        assert session.files.path.read_bytes() == original
+        assert directory_version(session.files.path) == original
         assert session.favorites.model.rows[0][0].page_id == page
     assert window.save()
-    assert not session.files.is_dirty and load_document(session.files.path).metadata["submap_favorites"] == [page]
+    assert not session.files.is_dirty and load_directory(session.files.path).metadata["submap_favorites"] == [page]

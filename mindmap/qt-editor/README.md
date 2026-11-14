@@ -18,7 +18,7 @@
 - [剪贴板与图片](#剪贴板与图片)
 - [布局、样式与宿主外观](#布局样式与宿主外观)
 - [拖动与画布视图](#拖动与画布视图)
-- [文件生命周期](#文件生命周期)
+- [导图目录生命周期](#导图目录生命周期)
 
 ## 安装与构建
 
@@ -66,7 +66,7 @@ finally:
 
 ### 文件状态与共享视图
 
-- 从 `mindmap_qt_editor.canvas` 导入 `MindMapFileController` 和 `MindMapFileState`。构造签名为 `MindMapFileController(canvas, panels, dialog_parent=None, *, writer=save_document, state=None, background_open=False)`，默认写入器来自 `mindmap_core.formats`。
+- 从 `mindmap_qt_editor.canvas` 导入 `MindMapFileController` 和 `MindMapFileState`。默认写入器为 `mindmap_core.formats.save_directory`。注入使用同一版本契约的写入器时可传入 `versioned_writer=True`。
 
 - 第二参数仅要求提供 `flush_pending_edits()`，没有侧栏的宿主可以提供空实现。
 
@@ -623,39 +623,35 @@ finally:
 
 - 模式独立于文档和撤销历史，只读时也可切换；持久化由宿主管理，组件自身不读写本机偏好。
 
-## 文件生命周期
+## 导图目录生命周期
 
-### 控制器与原生文件
+### 打开
 
 - `MindMapFileController` 提供独立于导图桌面的文件操作。`path` 表示当前保存位置，`is_dirty` 反映引擎修改状态。画布生命周期与偏好由宿主管理。
 
-- `new_document()`、`open_path()`、`save()` 返回是否完成操作，`confirm_replace()` 统一处理保存确认；主文档只使用 `.mindmap` 原生格式。
+- `new_document()`、`open_path()`、`save()` 返回是否完成操作，`confirm_replace()` 统一处理保存确认。
 
-- `open_path(path)` 校验 `.mindmap` 扩展名并使用原生容器解码。扩展名比较忽略大小写。
+- `open_path(path)` 将目录路径规范化为绝对路径，再读取包含 `mindmap.json` 的文档。启用 `background_open` 后，大目录在工作线程解析，等待时可取消。
 
-- `validate_open_path(path)` 在读取文件、分配会话和提交输入前校验扩展名；不匹配时抛出 `MindMapError`。
-
-- `open_dialog()` 使用 `思维导图 (*.mindmap)` 筛选。取消文件选择时返回 `False`。读取和校验成功后，`confirm_replace()` 先提交有效输入，再按需询问是否保存当前文档。
+- `open_dialog()` 选择导图目录。读取和校验成功后，`confirm_replace()` 先提交有效输入，再按需询问是否保存当前文档。取消返回 `False`。
 
 ### 保存与后台写入
 
 - 保存、导出和确认替换前，控制器会提交有效属性输入与原地文字。
 
-- `save(*, save_as=False)` 在尚无路径或显式另存时显示 `思维导图 (*.mindmap)` 筛选的保存对话框，写入器始终接收 `format_id="mindmap"`。
-
-- `validate_save_path(path)` 返回校验后的路径：没有扩展名时补齐 `.mindmap`，原生扩展名忽略大小写；其他后缀抛出 `MindMapError`，不静默改名或修改文件。
+- `save(*, save_as=False)` 在尚无路径或显式另存时先选择父目录，再输入目标目录名。`validate_save_path(path)` 核对父目录，并提供规范的绝对路径。
 
 - `save_committed()` 仅将已提交快照按当前路径原子保存为原生导图，返回是否成功；不弹出对话框、不提交侧栏草稿、不结束原地编辑。
 
 - 该接口用于宿主自动保存，无绑定路径时报告失败；与普通保存共用路径校验和可注入写入器，成功才更新路径及保存标记。
 
-- 即使快照未修改，也需验证绑定路径和原生编解码器，避免保存全部或关闭错误放行；原生编解码器不可完整读写时报告失败，不回退其他格式。
+- 即使快照未修改，也检查目录版本。磁盘内容变化时共享状态标记冲突，由宿主提供重新加载、另存和恢复目录入口。
 
 - 保存事件只更新状态，不触发画布的文档替换通知，不取消菜单、连接线预览或输入法，也不清空撤销历史。
 
 - `wait_for_pending_write` 是可选的无参回调，控制器在接管新建或已打开的文档以及写入快照前调用。
 
-- 桌面导图桌面以该屏障等待在途后台保存，避免旧任务覆盖新版本；后台保存策略由宿主管理。
+- 导图桌面以该屏障等待在途后台保存，避免旧任务覆盖新版本。宿主可通过 `check_save_target` 检查目录是否已由其他会话持有。
 
 - 多导图宿主应为每份会话分别创建画布、面板组合和文件控制器，自行管理活动会话、文件归属、计时器及关闭策略。
 
@@ -671,19 +667,13 @@ finally:
 
 - `export_dialog("txt")` 从当前页的正式快照读取全部节点，灵感区只取当前想法。选定文件后使用内置文本格式原子写入，每个节点一行，每层缩进一个 Tab。空想法抛出 `MindMapError`。
 
-- `format_filters(purpose)` 对 `open` 和 `save` 均返回 `思维导图 (*.mindmap)`，其他值抛出 `MindMapError`。剪贴板和通用编解码使用各自的格式入口。
+- 剪贴板和通用编解码继续使用独立的流式格式注册表。
 
 ### 错误与通知
 
 - `open_path()` 的异常交给宿主处理；`save()` 写入失败返回 False，并通过 `error_occurred(str)` 报告。
 
 - `state_changed` 通知文件状态变化，`message(str)` 提供导出结果提示。
-
-### 保存能力检查与宿主输入
-
-- `require_native_save_format()` 返回可完整读写的原生格式注册项；缺失或单向编码器抛出中文 `MindMapError`。
-
-- 该检查不提交输入、不读写文件，也不改变路径或修改标记，可在后台保存预检时调用。
 
 - 文件控制器仅要求 `PendingEdits.flush_pending_edits()`，无侧栏宿主可提供空实现。
 

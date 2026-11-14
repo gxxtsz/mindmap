@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from mindmap_app.app import build_window
 from mindmap_core import MindMapDocument, MindMapError
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import directory_version, load_directory, save_directory
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -37,8 +37,8 @@ def state_payload(window):
 
 def test_file_operations_update_history_but_switching_and_autosave_do_not(history_window, tmp_path):
     window = history_window
-    first = create(window, tmp_path / "甲.mindmap")
-    second = create(window, tmp_path / "乙.mindmap")
+    first = create(window, tmp_path / "甲")
+    second = create(window, tmp_path / "乙")
     recent = [str(second.files.path), str(first.files.path)]
     assert state_payload(window)["recent_files"] == recent
     window.manager.activate_document(first.id)
@@ -55,35 +55,35 @@ def test_file_operations_update_history_but_switching_and_autosave_do_not(histor
     assert state_payload(window)["views"] == []
 
 
-def test_failed_or_cancelled_file_operations_do_not_pollute_history(history_window, tmp_path, monkeypatch):
+def test_failed_or_cancelled_file_operations_do_not_pollute_history(history_window, tmp_path, monkeypatch, choose_save_directory):
     window = history_window
-    create(window, tmp_path / "原文件.mindmap")
+    create(window, tmp_path / "原文件")
     original = window.state.store.path.read_bytes()
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: "")
+    choose_save_directory(None)
     assert not window.open_dialog()
     assert not window.new_document()
     assert not window.save(save_as=True)
-    assert not window.new_document(tmp_path / "不存在的目录" / "失败.mindmap")
-    invalid = tmp_path / "损坏.mindmap"
+    assert not window.new_document(tmp_path / "不存在的目录" / "失败")
+    invalid = tmp_path / "损坏"
     invalid.write_text("不是导图", "utf-8")
-    for path in (tmp_path / "不存在.mindmap", invalid, tmp_path / "其他.json"):
+    for path in (tmp_path / "不存在", invalid, tmp_path / "其他.json"):
         with pytest.raises((MindMapError, OSError, ValueError)):
             window.open_path(path)
     assert window.state.store.path.read_bytes() == original
     assert len(window.application.sessions) == 1
 
 
-def test_save_as_updates_history_and_restored_path(history_window, tmp_path, monkeypatch, qtbot):
+def test_save_as_updates_history_and_restored_path(history_window, tmp_path, monkeypatch, choose_save_directory, qtbot):
     window = history_window
-    first = create(window, tmp_path / "原文件.mindmap")
-    second = create(window, tmp_path / "其他.mindmap")
+    first = create(window, tmp_path / "原文件")
+    second = create(window, tmp_path / "其他")
     window.manager.activate_document(first.id)
-    target = tmp_path / "另存的新文件.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    target = tmp_path / "另存的新文件"
+    choose_save_directory(target)
     # 直接使用文件控制器也必须被路径变更监听捕获。
     assert first.files.save(save_as=True)
-    assert window.state.recent_files == [str(target), str(second.files.path), str(tmp_path / "原文件.mindmap")]
+    assert window.state.recent_files == [str(target), str(second.files.path), str(tmp_path / "原文件")]
     assert window.recent_files_button.toolTip() == str(target)
     storage, identifier = window.manager.storage_dir, first.id
     assert window.close()
@@ -93,12 +93,12 @@ def test_save_as_updates_history_and_restored_path(history_window, tmp_path, mon
     assert restored.close()
 
 
-def test_successful_same_path_save_as_moves_file_to_front(history_window, tmp_path, monkeypatch):
+def test_successful_same_path_save_as_moves_file_to_front(history_window, tmp_path, monkeypatch, choose_save_directory):
     window = history_window
-    first = create(window, tmp_path / "甲.mindmap")
-    create(window, tmp_path / "乙.mindmap")
+    first = create(window, tmp_path / "甲")
+    create(window, tmp_path / "乙")
     window.manager.activate_document(first.id)
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(first.files.path), ""))
+    choose_save_directory(first.files.path)
     assert window.save(save_as=True)
     assert window.state.recent_files[0] == str(first.files.path)
 
@@ -110,14 +110,14 @@ def test_history_write_failure_does_not_fail_opening(history_window, tmp_path, m
         raise OSError("配置目录只读")
 
     monkeypatch.setattr(window.state.store, "save", fail)
-    session = create(window, tmp_path / "正常文件.mindmap")
+    session = create(window, tmp_path / "正常文件")
     assert session.files.path.exists() and len(window.application.sessions) == 1
     assert "最近文件未能保存" in window.status.currentMessage()
 
 
 def test_restart_restores_tab_order_split_positions_and_active_document(history_window, tmp_path, qtbot):
     window = history_window
-    first, second, third, fourth = [create(window, tmp_path / f"{name}.mindmap") for name in "甲乙丙丁"]
+    first, second, third, fourth = [create(window, tmp_path / f"{name}") for name in "甲乙丙丁"]
     window.host.editor.split_token(third.id, Qt.Orientation.Horizontal)
     right, _ = window.host.editor.find_token(third.id)
     window.manager.move_document(fourth.id, "main", right.group_id)
@@ -137,8 +137,8 @@ def test_restart_restores_tab_order_split_positions_and_active_document(history_
     payload = state_payload(window)
     assert [item["id"] for item in payload["views"]] == ordered
     assert payload["active_id"] == first.id
-    assert "甲.mindmap" not in json.dumps(payload["layout"], ensure_ascii=False)
-    saved_bytes = (tmp_path / "甲.mindmap").read_bytes()
+    assert "甲" not in json.dumps(payload["layout"], ensure_ascii=False)
+    saved_bytes = directory_version(tmp_path / "甲")
     restored = build_window(storage_dir=storage)
     qtbot.addWidget(restored)
     restored.show()
@@ -154,14 +154,14 @@ def test_restart_restores_tab_order_split_positions_and_active_document(history_
     assert restored.application.engine.document.root.text == "退出时提交的修改"
     assert restored.state.recent_files == recent
     assert not restored.application.engine.is_dirty and not restored.application.engine.can_undo
-    assert (tmp_path / "甲.mindmap").read_bytes() == saved_bytes
+    assert directory_version(tmp_path / "甲") == saved_bytes
     assert restored.close()
 
 
 def test_closed_tabs_stay_closed_and_clear_history_keeps_startup_session(history_window, tmp_path, qtbot):
     window = history_window
-    first = create(window, tmp_path / "关闭的导图.mindmap")
-    second = create(window, tmp_path / "保留的导图.mindmap")
+    first = create(window, tmp_path / "关闭的导图")
+    second = create(window, tmp_path / "保留的导图")
     assert window.manager.close_document(first.id)
     window.clear_recent_files()
     assert len(window.application.sessions) == 1 and window.application.active_session is second
@@ -186,7 +186,7 @@ def test_closed_tabs_stay_closed_and_clear_history_keeps_startup_session(history
 
 def test_rejected_close_does_not_commit_exit_snapshot(history_window, tmp_path):
     window = history_window
-    session = create(window, tmp_path / "退出失败.mindmap")
+    session = create(window, tmp_path / "退出失败")
     original = window.state.store.path.read_bytes()
     session.engine.update_node(session.engine.root_id, text="尚未保存的修改")
     session.document.timer.stop()
@@ -206,19 +206,19 @@ def test_rejected_close_does_not_commit_exit_snapshot(history_window, tmp_path):
 @pytest.mark.parametrize("all_failed", [False, True])
 def test_restore_skips_unreadable_files_and_preserves_recent_history(history_window, tmp_path, qtbot, all_failed):
     window = history_window
-    first, corrupt, missing = [create(window, tmp_path / f"{name}.mindmap") for name in ("正常", "损坏", "丢失")]
+    first, corrupt, missing = [create(window, tmp_path / f"{name}") for name in ("正常", "损坏", "丢失")]
     recent = list(window.state.recent_files)
     storage = window.manager.storage_dir
     assert window.close()
-    corrupt.files.path.write_text("损坏的内容", "utf-8")
-    missing.files.path.unlink()
+    (corrupt.files.path / "mindmap.json").write_text("损坏的内容", "utf-8")
+    missing.files.path.rename(tmp_path / "丢失备份")
     if all_failed:
-        first.files.path.unlink()
+        first.files.path.rename(tmp_path / "正常备份")
     restored = build_window(storage_dir=storage)
     qtbot.addWidget(restored)
     assert restored.state.recent_files == recent
     assert "部分文件暂不可用" in restored.status.currentMessage()
-    assert "损坏.mindmap" in restored.status.currentMessage() and "丢失.mindmap" in restored.status.currentMessage()
+    assert "损坏" in restored.status.currentMessage() and "丢失" in restored.status.currentMessage()
     assert len(restored.application.sessions) == (0 if all_failed else 1)
     if all_failed:
         assert restored.application.active_session is None and restored.host.right.isHidden()
@@ -231,7 +231,7 @@ def test_restore_skips_unreadable_files_and_preserves_recent_history(history_win
 def test_unified_state_recovers_safely_from_invalid_document_or_layout(history_window, tmp_path, qtbot, corrupt):
     """整个状态文件损坏时备份并重建；仅布局损坏时仍能恢复有效导图记录。"""
     window = history_window
-    first = create(window, tmp_path / "甲.mindmap")
+    first = create(window, tmp_path / "甲")
     window.manager.set_theme("dark")
     storage = window.manager.storage_dir
     assert window.close()
@@ -259,7 +259,7 @@ def test_unified_state_recovers_safely_from_invalid_document_or_layout(history_w
 
 def test_no_restore_still_reads_recent_files(history_window, tmp_path, qtbot):
     window = history_window
-    session = create(window, tmp_path / "上次的文件.mindmap")
+    session = create(window, tmp_path / "上次的文件")
     storage = window.manager.storage_dir
     assert window.close()
     restored = build_window(storage_dir=storage, restore=False)
@@ -273,8 +273,8 @@ def test_no_restore_still_reads_recent_files(history_window, tmp_path, qtbot):
 def test_recent_dropdown_mouse_and_keyboard_activate_original_tab(history_window, tmp_path, qtbot, source):
     """通过真实弹出菜单选择另一文件，验证入口、方向键和回车均走原文件打开路径。"""
     window = history_window
-    first = create(window, tmp_path / "甲.mindmap")
-    create(window, tmp_path / "乙.mindmap")
+    first = create(window, tmp_path / "甲")
+    create(window, tmp_path / "乙")
     button = window.recent_files_button
     menu = button.menu()
     chosen = []
@@ -339,12 +339,12 @@ def test_recent_menu_disambiguates_names_and_offers_open_and_clear(history_windo
     for directory in ("工作", "个人"):
         parent = tmp_path / directory
         parent.mkdir()
-        create(window, parent / "同名&导图.mindmap")
+        create(window, parent / "同名&导图")
     menu = window.recent_files_button.menu()
     menu.aboutToShow.emit()
     first, second = menu.actions()[:2]
-    assert first.text().splitlines() == ["同名&&导图.mindmap", str(tmp_path / "个人")]
-    assert second.text().splitlines() == ["同名&&导图.mindmap", str(tmp_path / "工作")]
+    assert first.text().splitlines() == ["同名&&导图", str(tmp_path / "个人")]
+    assert second.text().splitlines() == ["同名&&导图", str(tmp_path / "工作")]
     assert first.toolTip() != second.toolTip() and first.data() != second.data()
     assert first.isChecked() and not second.isChecked()
     expected_icon = window.manager.theme.icon("mindmap", 16).pixmap(16, 16).toImage()
@@ -364,11 +364,11 @@ def test_recent_menu_disambiguates_names_and_offers_open_and_clear(history_windo
 def test_real_launcher_file_precedence_and_exit_snapshot(history_window, tmp_path, extra, no_restore):
     """真实事件循环退出验证启动参数，并覆盖停靠管理器先关闭后的业务保存和记录提交。"""
     window = history_window
-    first, second = [create(window, tmp_path / f"{name}.mindmap") for name in "甲乙"]
+    first, second = [create(window, tmp_path / f"{name}") for name in "甲乙"]
     storage = window.manager.storage_dir
     assert window.close()
-    third = tmp_path / "命令行导图.mindmap"
-    save_document(MindMapDocument.new("命令行内容"), third)
+    third = tmp_path / "命令行导图"
+    save_directory(MindMapDocument.new("命令行内容"), third)
     output = tmp_path / "启动结果.json"
     source = textwrap.dedent("""\
         import json
@@ -418,4 +418,4 @@ def test_real_launcher_file_precedence_and_exit_snapshot(history_window, tmp_pat
     persisted = json.loads((storage / "mindmap-state-v2.json").read_text("utf-8"))
     assert [item["path"] for item in persisted["views"]] == expected
     if active is not None:
-        assert load_document(Path(active)).root.text == "事件循环退出前的修改"
+        assert load_directory(Path(active)).root.text == "事件循环退出前的修改"

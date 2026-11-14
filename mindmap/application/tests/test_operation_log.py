@@ -8,6 +8,7 @@ from mindmap_app.app import build_window
 from mindmap_application import documents as sessions_module
 from mindmap_application.operation_log import describe_change
 from mindmap_core import BranchStyle, LayoutConfig, MindMapError, Theme
+from mindmap_core.formats import directory_version
 from PySide6.QtCore import QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
@@ -47,7 +48,7 @@ def create(window, path):
 
 def structure_tree(window, tmp_path):
     """建立固定父子关系，后续日志不受创建及命名准备步骤影响。"""
-    engine = create(window, tmp_path / "节点增删.mindmap").engine
+    engine = create(window, tmp_path / "节点增删").engine
     engine.update_node(engine.root_id, text="第二大脑")
     parent = engine.add_child(engine.root_id, "人文学科")
     child = engine.add_child(parent, "哲学")
@@ -232,7 +233,7 @@ def test_long_multi_deletion_summary_keeps_total_count(log_window, tmp_path):
 def test_changes_are_single_commits_and_preview_reset_save_are_quiet(log_window, tmp_path):
     """事务、空操作、回滚及试算遵循提交边界，日志自身不产生文档历史。"""
     window = log_window
-    session = create(window, tmp_path / "编辑.mindmap")
+    session = create(window, tmp_path / "编辑")
     engine = session.engine
     window.operation_log.clear_action.trigger()
     with engine.transaction("批量增加主题"):
@@ -261,7 +262,7 @@ def test_changes_are_single_commits_and_preview_reset_save_are_quiet(log_window,
 def test_inline_text_log_shows_before_after_and_undo_redo_direction(log_window, tmp_path):
     """正文草稿及取消不记成功；确认后显示前后值，撤销和重做按实际方向描述。"""
     window = log_window
-    session = create(window, tmp_path / "文字修改.mindmap")
+    session = create(window, tmp_path / "文字修改")
     engine, canvas = session.engine, session.canvas
     key = engine.add_child(engine.root_id, "哲学")
     window.operation_log.clear()
@@ -295,7 +296,7 @@ def test_text_change_logs_expose_empty_content_and_control_characters(
 ):
     """空内容、末尾换行及空白差异不能被压平为看似相同的前后值。"""
     window = log_window
-    engine = create(window, tmp_path / "特殊内容.mindmap").engine
+    engine = create(window, tmp_path / "特殊内容").engine
     key = engine.add_child(engine.root_id, before)
     window.operation_log.clear()
     engine.update_node(key, text=after)
@@ -309,7 +310,7 @@ def test_text_change_logs_expose_empty_content_and_control_characters(
 def test_long_text_log_preserves_both_values_and_actual_change_context(log_window, tmp_path, position):
     """长公共内容不能挤掉新文字，也不能让首部、中部或尾部的实际差异被省略掉。"""
     window = log_window
-    engine = create(window, tmp_path / "长文字.mindmap").engine
+    engine = create(window, tmp_path / "长文字").engine
     offset = {"start": 0, "middle": 1800, "end": 3600}[position]
     before = "共" * offset + "旧标记" + "共" * (3600 - offset)
     after = "共" * offset + "新标记" + "共" * (3600 - offset)
@@ -327,7 +328,7 @@ def test_long_text_log_preserves_both_values_and_actual_change_context(log_windo
 def test_batch_text_changes_keep_one_log_and_transaction_endpoint_values(log_window, tmp_path):
     """一次事务只记一条，忽略中间草稿，按既有摘要上限展示三组并提示剩余组数。"""
     window = log_window
-    engine = create(window, tmp_path / "批量改字.mindmap").engine
+    engine = create(window, tmp_path / "批量改字").engine
     keys = [engine.add_child(engine.root_id, name + "旧") for name in ("甲", "乙", "丙", "丁")]
     window.operation_log.clear()
     with engine.transaction("批量修改文字"):
@@ -343,7 +344,7 @@ def test_batch_text_changes_keep_one_log_and_transaction_endpoint_values(log_win
 def test_linked_page_name_sync_does_not_duplicate_text_change_description(log_window, tmp_path):
     """一个入口改名会同步子导图和详情页名称，日志仍只展示一次相同的前后内容。"""
     window = log_window
-    engine = create(window, tmp_path / "名称同步.mindmap").engine
+    engine = create(window, tmp_path / "名称同步").engine
     owner = engine.add_child(engine.root_id, "哲学")
     submap = engine.create_submap(owner)
     detail = engine.create_detail_page(owner)
@@ -359,7 +360,7 @@ def test_linked_page_name_sync_does_not_duplicate_text_change_description(log_wi
 
 def test_text_logs_ignore_unchanged_text_and_keep_style_change_summary(log_window, tmp_path):
     window = log_window
-    engine = create(window, tmp_path / "文字未变.mindmap").engine
+    engine = create(window, tmp_path / "文字未变").engine
     key = engine.add_child(engine.root_id, "哲学")
     window.operation_log.clear()
     engine.update_node(key, text="哲学")
@@ -372,7 +373,7 @@ def test_text_logs_ignore_unchanged_text_and_keep_style_change_summary(log_windo
 
 def test_text_log_snapshot_survives_later_changes_and_deletion(log_window, tmp_path):
     window = log_window
-    engine = create(window, tmp_path / "文字快照.mindmap").engine
+    engine = create(window, tmp_path / "文字快照").engine
     key = engine.add_child(engine.root_id, "哲学")
     events = []
     engine.subscribe(events.append)
@@ -388,7 +389,7 @@ def test_text_log_snapshot_survives_later_changes_and_deletion(log_window, tmp_p
 def test_drag_log_names_actual_node_and_both_parents_with_undo_redo(log_window, tmp_path):
     """移动节点不在实体差量中时仍输出准确对象，撤销及重做交换实际来源和去向。"""
     window = log_window
-    engine = create(window, tmp_path / "移动日志.mindmap").engine
+    engine = create(window, tmp_path / "移动日志").engine
     engine.update_node(engine.root_id, text="第二大脑")
     engine.set_layout(LayoutConfig(direction="right"))
     source = engine.add_child(engine.root_id, "哲学")
@@ -413,7 +414,7 @@ def test_drag_log_names_actual_node_and_both_parents_with_undo_redo(log_window, 
 
 def test_same_parent_sort_reports_only_dragged_node_and_one_based_positions(log_window, tmp_path):
     window = log_window
-    engine = create(window, tmp_path / "排序.mindmap").engine
+    engine = create(window, tmp_path / "排序").engine
     engine.update_node(engine.root_id, text="人文学科")
     engine.set_layout(LayoutConfig(direction="right"))
     a, _, c = [engine.add_child(engine.root_id, name) for name in ("艺术", "历史", "哲学")]
@@ -429,7 +430,7 @@ def test_same_parent_sort_reports_only_dragged_node_and_one_based_positions(log_
 @pytest.mark.parametrize("reordered", [False, True])
 def test_side_change_log_includes_sort_when_needed(log_window, tmp_path, reordered):
     window = log_window
-    engine = create(window, tmp_path / "换边.mindmap").engine
+    engine = create(window, tmp_path / "换边").engine
     engine.update_node(engine.root_id, text="第二大脑")
     engine.set_layout(LayoutConfig(direction="both"))
     a, b, c = [engine.add_child(engine.root_id, name) for name in ("艺术", "历史", "哲学")]
@@ -448,7 +449,7 @@ def test_side_change_log_includes_sort_when_needed(log_window, tmp_path, reorder
 
 def test_multi_drag_logs_each_root_parent_once_and_excludes_descendants(log_window, tmp_path):
     window = log_window
-    engine = create(window, tmp_path / "批量拖动.mindmap").engine
+    engine = create(window, tmp_path / "批量拖动").engine
     engine.set_layout(LayoutConfig(direction="right"))
     a, b, target = [engine.add_child(engine.root_id, name) for name in ("知识库", "收藏", "人文学科")]
     first = engine.add_child(a, "哲学")
@@ -467,7 +468,7 @@ def test_multi_drag_logs_each_root_parent_once_and_excludes_descendants(log_wind
 
 def test_move_names_are_frozen_and_legacy_events_keep_generic_summary(log_window, tmp_path):
     window = log_window
-    engine = create(window, tmp_path / "快照.mindmap").engine
+    engine = create(window, tmp_path / "快照").engine
     engine.update_node(engine.root_id, text="第二大脑")
     source = engine.add_child(engine.root_id, "哲学")
     target = engine.add_child(engine.root_id, "人文学科")
@@ -487,7 +488,7 @@ def test_move_names_are_frozen_and_legacy_events_keep_generic_summary(log_window
 
 def test_unnamed_move_nodes_and_parents_have_stable_short_identifiers(log_window, tmp_path):
     window = log_window
-    engine = create(window, tmp_path / "无文字.mindmap").engine
+    engine = create(window, tmp_path / "无文字").engine
     engine.update_node(engine.root_id, text="第二大脑")
     source = engine.add_child(engine.root_id, "")
     target = engine.add_child(engine.root_id, "")
@@ -507,7 +508,7 @@ def test_unnamed_move_nodes_and_parents_have_stable_short_identifiers(log_window
 def test_edit_operations_have_chinese_summaries(log_window, tmp_path, operation, label):
     """不同编辑通道均从实际提交取得一次摘要，避免只记录菜单点击或原始英文操作名。"""
     window = log_window
-    engine = create(window, tmp_path / "操作.mindmap").engine
+    engine = create(window, tmp_path / "操作").engine
     child = engine.add_child(engine.root_id, "待操作主题")
     engine.add_child(child, "后代")
     leaf = engine.add_child(engine.root_id, "叶子")
@@ -537,10 +538,10 @@ def test_edit_operations_have_chinese_summaries(log_window, tmp_path, operation,
     assert len(entries(window)) == 1 and label in entries(window)[0]
 
 
-def test_new_open_duplicate_close_and_cancel_follow_results(log_window, tmp_path, monkeypatch):
+def test_new_open_duplicate_close_and_cancel_follow_results(log_window, tmp_path, monkeypatch, choose_save_directory):
     """文件成功才记结果，重复打开不伪装重载，所有对话框取消都保持安静。"""
     window = log_window
-    path = tmp_path / "文件.mindmap"
+    path = tmp_path / "文件"
     session = create(window, path)
     assert len(entries(window)) == 1 and "新建导图" in entries(window)[0]
     assert window.open_path(path) and window.application.active_session is session
@@ -549,8 +550,8 @@ def test_new_open_duplicate_close_and_cancel_follow_results(log_window, tmp_path
     assert len(entries(window)) == 3 and "关闭导图" in entries(window)[2]
     assert window.operation_log.isVisible() and window.open_path(path)
     assert len(entries(window)) == 4 and "打开导图" in entries(window)[3]
+    choose_save_directory(None)
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: ("", ""))
     assert not window.new_document() and not window.open_dialog() and not window.save(save_as=True)
     window.application.files.export_dialog("png")
     assert len(entries(window)) == 4
@@ -559,38 +560,38 @@ def test_new_open_duplicate_close_and_cancel_follow_results(log_window, tmp_path
 def test_errors_are_once_per_attempt_and_keep_source(log_window, tmp_path, monkeypatch):
     """业务和 UI 两层异常边界只记一次，相同失败的下一次尝试仍正常记录。"""
     window = log_window
-    create(window, tmp_path / "当前导图.mindmap")
+    create(window, tmp_path / "当前导图")
     window.operation_log.clear_action.trigger()
-    missing = tmp_path / "缺失文件.mindmap"
+    missing = tmp_path / "缺失文件"
     for _ in range(2):
         assert window.call(lambda: window.open_path(missing)) is None
     assert len(entries(window)) == 2
-    assert all("[错误] [缺失文件.mindmap] 打开导图失败" in line for line in entries(window))
+    assert all("[错误] [缺失文件] 打开导图失败" in line for line in entries(window))
     assert missing.name not in window.application.files.path.name
 
     def fail(*args, **kwargs):
         raise OSError("模拟磁盘写入失败")
 
-    monkeypatch.setattr(sessions_module, "save_document", fail)
-    assert not window.new_document(tmp_path / "创建失败.mindmap")
-    assert len(entries(window)) == 3 and "[创建失败.mindmap]" in entries(window)[-1]
+    monkeypatch.setattr(sessions_module, "save_directory", fail)
+    assert not window.new_document(tmp_path / "创建失败")
+    assert len(entries(window)) == 3 and "[创建失败]" in entries(window)[-1]
     assert "[错误]" in entries(window)[-1] and "新建导图：" not in entries(window)[-1]
 
 
-def test_manual_save_autosave_save_all_and_old_file_names(log_window, tmp_path, monkeypatch):
+def test_manual_save_autosave_save_all_and_old_file_names(log_window, tmp_path, monkeypatch, choose_save_directory):
     """自动保存不刷成功日志，手动请求记结果，另存为不回写旧记录的文件名。"""
     window = log_window
-    session = create(window, tmp_path / "原名称.mindmap")
+    session = create(window, tmp_path / "原名称")
     window.operation_log.clear_action.trigger()
     session.engine.update_node(session.engine.root_id, text="已提交修改")
-    assert window.operation_log.model.entries[0].source_path == str(tmp_path / "原名称.mindmap")
+    assert window.operation_log.model.entries[0].source_path == str(tmp_path / "原名称")
     assert session.document.autosave() and len(entries(window)) == 1
     assert window.save() and len(entries(window)) == 2 and "保存导图：" in entries(window)[-1]
-    target = tmp_path / "新名称.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    target = tmp_path / "新名称"
+    choose_save_directory(target)
     assert window.save(save_as=True)
-    assert "[原名称.mindmap]" in entries(window)[0] and "[新名称.mindmap] 另存为" in entries(window)[-1]
-    assert window.operation_log.model.entries[0].source_path == str(tmp_path / "原名称.mindmap")
+    assert "[原名称]" in entries(window)[0] and "[新名称] 另存为" in entries(window)[-1]
+    assert window.operation_log.model.entries[0].source_path == str(tmp_path / "原名称")
     assert window.operation_log.model.entries[-1].source_path == str(target)
     window.operation_log.clear_action.trigger()
     assert window.save_all() and len(entries(window)) == 1 and "保存全部完成" in entries(window)[0]
@@ -600,8 +601,8 @@ def test_manual_save_autosave_save_all_and_old_file_names(log_window, tmp_path, 
 def test_manual_save_and_close_failure_emit_one_error(log_window, tmp_path, operation):
     """关闭检查附带的取消提示只留在状态栏，不能把同一次写入失败再记一条日志。"""
     window = log_window
-    session = create(window, tmp_path / "保存失败.mindmap")
-    original = session.files.path.read_bytes()
+    session = create(window, tmp_path / "保存失败")
+    original = directory_version(session.files.path)
     session.engine.update_node(session.engine.root_id, text="保留未保存内容")
     session.document.timer.stop()
     window.operation_log.clear_action.trigger()
@@ -614,21 +615,21 @@ def test_manual_save_and_close_failure_emit_one_error(log_window, tmp_path, oper
         assert not window.manager.close_document(session.id)
     else:
         window.action("app." + operation).trigger()
-    assert len(entries(window)) == 1 and "[错误] [保存失败.mindmap]" in entries(window)[0]
-    assert session.engine.is_dirty and session.files.path.read_bytes() == original
+    assert len(entries(window)) == 1 and "[错误] [保存失败]" in entries(window)[0]
+    assert session.engine.is_dirty and directory_version(session.files.path) == original
     assert not session.disposed and window.application.active_session is session
 
 
 def test_view_navigation_selection_and_switches_do_not_log(log_window, tmp_path):
     """纯浏览不记录；后台会话的编辑独立记录来源，不切换当前活动文件。"""
     window = log_window
-    first = create(window, tmp_path / "甲.mindmap")
+    first = create(window, tmp_path / "甲")
     node = first.engine.add_child(first.engine.root_id, "子导图入口")
     page = first.engine.create_submap(node)
-    second = create(window, tmp_path / "乙.mindmap")
+    second = create(window, tmp_path / "乙")
     window.operation_log.clear_action.trigger()
     first.engine.update_node(first.engine.root_id, text="后台主题修改")
-    assert len(entries(window)) == 1 and "[甲.mindmap]" in entries(window)[0]
+    assert len(entries(window)) == 1 and "[甲]" in entries(window)[0]
     assert window.application.active_session is second
     window.operation_log.clear_action.trigger()
     second.canvas.select_nodes([second.engine.root_id])
@@ -650,8 +651,8 @@ def test_background_document_save_logs_only_failure_with_own_source(
 ):
     """后台标签同步或异步保存成功不记录，失败仅一条且不激活标签或改变焦点。"""
     window = log_window
-    first = create(window, tmp_path / "后台导图.mindmap")
-    second = create(window, tmp_path / "活动导图.mindmap")
+    first = create(window, tmp_path / "后台导图")
+    second = create(window, tmp_path / "活动导图")
     first.engine.update_node(first.engine.root_id, text="后台修改")
     first.document.timer.stop()
     window.operation_log.clear_action.trigger()
@@ -678,17 +679,17 @@ def test_background_document_save_logs_only_failure_with_own_source(
     assert window.application.active_session is second and QApplication.focusWidget() is focus
     assert len(entries(window)) == (1 if failed else 0)
     if failed:
-        assert "[错误] [后台导图.mindmap]" in entries(window)[0]
-        assert "活动导图.mindmap" not in entries(window)[0]
+        assert "[错误] [后台导图]" in entries(window)[0]
+        assert "活动导图" not in entries(window)[0]
 
 
 def test_canvas_errors_and_disposed_session_signals_do_not_leak(log_window, tmp_path):
     """编辑失败不污染保存状态，关闭后断开信号和引擎订阅，迟到结果不能追加日志。"""
     window = log_window
-    session = create(window, tmp_path / "释放.mindmap")
+    session = create(window, tmp_path / "释放")
     window.operation_log.clear_action.trigger()
     session.canvas.call(lambda: session.engine.remove_nodes([session.engine.root_id]))
-    assert len(entries(window)) == 1 and "[错误] [释放.mindmap]" in entries(window)[0]
+    assert len(entries(window)) == 1 and "[错误] [释放]" in entries(window)[0]
     assert not session.document.last_error and not session.files.is_dirty
     assert window.manager.close_document(session.id)
     count = len(entries(window))
@@ -703,7 +704,7 @@ def test_canvas_errors_and_disposed_session_signals_do_not_leak(log_window, tmp_
 def test_export_success_and_failure_are_logged_once(log_window, tmp_path, monkeypatch, format_id):
     """从真实菜单验证导出结果、错误日志、原子替换失败及取消。"""
     window = log_window
-    create(window, tmp_path / "导出源.mindmap")
+    create(window, tmp_path / "导出源")
     window.operation_log.clear_action.trigger()
     target = tmp_path / f"导出.{format_id}"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
@@ -714,7 +715,7 @@ def test_export_success_and_failure_are_logged_once(log_window, tmp_path, monkey
     action = next(action for action in exports.actions() if action.data() == format_id)
     action.trigger()
     assert target.is_file() and len(entries(window)) == 1
-    assert "[信息] [导出源.mindmap] 已导出：" in entries(window)[0]
+    assert "[信息] [导出源] 已导出：" in entries(window)[0]
 
     def fail_replace(source, destination):
         assert destination == target
@@ -725,14 +726,14 @@ def test_export_success_and_failure_are_logged_once(log_window, tmp_path, monkey
         patch.setattr("os.replace", fail_replace)
         action.trigger()
     assert target.read_bytes() == original and not list(tmp_path.glob("*.tmp"))
-    assert len(entries(window)) == 2 and "[错误] [导出源.mindmap]" in entries(window)[-1]
+    assert len(entries(window)) == 2 and "[错误] [导出源]" in entries(window)[-1]
     assert "模拟写入失败" in window.statusBar().currentMessage()
 
     wrong = tmp_path / "错误后缀.xyz"
     wrong.write_bytes(b"existing")
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(wrong), ""))
     action.trigger()
-    assert len(entries(window)) == 3 and "[错误] [导出源.mindmap]" in entries(window)[-1]
+    assert len(entries(window)) == 3 and "[错误] [导出源]" in entries(window)[-1]
     assert wrong.read_bytes() == b"existing" and not wrong.with_suffix("." + format_id).exists()
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: ("", ""))
     action.trigger()

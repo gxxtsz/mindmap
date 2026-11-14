@@ -10,7 +10,7 @@ from .navigation import PageViewState
 
 
 class InspirationViewStateMixin:
-    """扩展页面视图快照；这些状态从不写入 .mindmap 内容或引擎历史。"""
+    """扩展页面视图快照；这些状态不写入导图目录或引擎历史。"""
 
     def capture_page_view_state(self) -> dict[str, object]:
         """捕获当前页和已访问灵感视图，返回调用方独立持有的 JSON 兼容对象。

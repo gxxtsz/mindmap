@@ -9,7 +9,7 @@ uv sync --locked --all-packages --group dev
 uv run --locked --package mindmap-app mindmap
 ```
 
-也可使用 `uv run --locked --package mindmap-app python -m mindmap_app`。命令末尾可附加 `.mindmap` 文件路径，`--help` 显示完整参数。
+也可使用 `uv run --locked --package mindmap-app python -m mindmap_app`。命令末尾可附加导图目录路径，`--help` 显示完整参数。
 
 ## 装配
 
@@ -19,6 +19,6 @@ uv run --locked --package mindmap-app mindmap
 
 默认配置目录为系统配置目录下的 `mindmap`。`--state-dir` 可指定隔离目录。
 
-`mindmap-state-v2.json` 保存窗口、标签、分屏、导航和最近访问，视图记录不携带业务类型字段。`mindmap-settings-v1.json` 保存窗口与导图偏好。文档正文和节点扩展数据统一保存到 `.mindmap`。
+`mindmap-state-v2.json` 保存窗口、标签、分屏、导航和最近访问，视图记录以导图目录的绝对路径定位文档。`mindmap-settings-v1.json` 保存窗口与导图偏好。正文和节点扩展数据随各自的导图目录保存。
 
 历史窗口与导图配置由[迁移层](src/mindmap_app/migration.py)只读转换。

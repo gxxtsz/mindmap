@@ -1,12 +1,11 @@
 """从产品入口验证图与树共用画布、编辑命令和停靠侧栏。"""
 
 import json
-from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from mindmap_app.app import build_window
 from mindmap_core import GraphEdge, MindMapEngine, MindMapError, NodeGraph
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import load_directory, save_directory
 from mindmap_core.formats.graph import format_graph_text, parse_graph_text
 from mindmap_core.node_pages import graph_page_id
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QTimer
@@ -34,7 +33,7 @@ def window(qtbot, tmp_path):
     qtbot.addWidget(result, before_close_func=lambda item: item.dispose())
     result.resize(1200, 800)
     result.show()
-    assert result.new_document(tmp_path / "主体.mindmap")
+    assert result.new_document(tmp_path / "主体")
     return result
 
 
@@ -560,7 +559,7 @@ def test_manual_edges_sync_split_and_save(window, qtbot):
     other.set_editable(True)
 
     assert first.document.save()
-    fresh = load_document(first.document.path).page_view(canvas.current_page_id).graph
+    fresh = load_directory(first.document.path).page_view(canvas.current_page_id).graph
     assert fresh.edges == (updated,)
     assert fresh.positions == manual_positions
 
@@ -1230,7 +1229,7 @@ def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_pa
     canvas = _create_graph(window)
     canvas.view.zoom(1.4)
     assert view.document.save()
-    assert "graph" in load_document(view.document.path).nodes[owner].extension_pages
+    assert "graph" in load_directory(view.document.path).nodes[owner].extension_pages
     state = canvas.capture_page_view_state()
     assert window.close()
     reopened = build_window(storage_dir=tmp_path / "配置")
@@ -1255,20 +1254,21 @@ def test_graph_save_restart_remove_undo_and_owner_deletion(window, qtbot, tmp_pa
     assert canvas.engine.node_graph(owner).edges == (GraphEdge("a", "b"),)
 
 
-def test_legacy_graph_filter_is_ignored_and_cleared_on_clean_save(window, tmp_path):
-    """从旧版原生容器打开、导出并显式保存，全部边可见且仍使用原文件版本。"""
+def test_graph_filter_is_ignored_and_cleared_when_graph_is_saved(window, tmp_path):
+    """打开和编辑目录中的图，旧筛选字段不影响显示，图内容提交时清空字段。"""
     view = window.documents.active
     owner = view.engine.root_id
     _create_graph(window, THREE_NODES + "\na -> b\nb -> c\na -> a")
     assert view.document.save()
-    with ZipFile(view.document.path) as archive:
-        payload = json.loads(archive.read("document.json"))
+    main = view.document.path / "pages" / "main.json"
+    payload = json.loads(main.read_text(encoding="utf-8"))
     graph_data = payload["nodes"][0]["extension_pages"]["graph"]["data"]
     graph_data["hidden_node_ids"] = ["a"]
     graph_data["positions"] = {"a": [72, 24]}
-    legacy_path = tmp_path / "旧版图.mindmap"
-    with ZipFile(legacy_path, "w", ZIP_DEFLATED) as archive:
-        archive.writestr("document.json", json.dumps(payload, ensure_ascii=False))
+    legacy_path = tmp_path / "旧版图"
+    save_directory(view.engine.document, legacy_path)
+    page = legacy_path / "pages" / "main.json"
+    page.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     assert window.open_path(legacy_path)
     opened = window.documents.active
@@ -1288,16 +1288,15 @@ def test_legacy_graph_filter_is_ignored_and_cleared_on_clean_save(window, tmp_pa
     canvas.export(target)
     assert QImage(str(target)) == baseline
 
-    with ZipFile(legacy_path) as archive:
-        assert json.loads(archive.read("document.json")) == payload
+    assert json.loads(page.read_text(encoding="utf-8")) == payload
+    opened.engine.update_node(owner, text="更新标题")
     assert window.documents.save(opened)
-    with ZipFile(legacy_path) as archive:
-        saved = json.loads(archive.read("document.json"))
+    saved = json.loads(page.read_text(encoding="utf-8"))
     saved_graph = saved["nodes"][0]["extension_pages"]["graph"]
-    assert saved["schema_version"] == 7 and saved_graph["version"] == 1
+    assert saved_graph["version"] == 1
     assert saved_graph["data"] == {**graph_data, "hidden_node_ids": []}
-    assert load_document(legacy_path).page_view(graph_page_id(owner)).graph == canvas.graph
-    assert not opened.engine.is_dirty and not opened.engine.can_undo
+    assert load_directory(legacy_path).page_view(graph_page_id(owner)).graph == canvas.graph
+    assert not opened.engine.is_dirty and opened.engine.can_undo
 
 
 def test_graph_node_pages_use_menu_icons_navigation_and_shared_titles(window, qtbot):
@@ -1382,7 +1381,7 @@ def test_graph_node_pages_use_menu_icons_navigation_and_shared_titles(window, qt
     window.documents.active._navigate_favorite(submap)
     assert canvas.current_page_id == submap
     assert window.documents.save(window.documents.active)
-    reopened = MindMapEngine(load_document(window.documents.active.document.path))
+    reopened = MindMapEngine(load_directory(window.documents.active.document.path))
     assert reopened.page_summary(inner_detail).path == engine.page_summary(inner_detail).path
     canvas.return_to_parent_page()
     canvas.fit_to_view()
@@ -1480,7 +1479,7 @@ def test_graph_clipboard_across_files_and_legacy_detail_restrictions(window, tmp
     canvas.action("undo").trigger()
     assert source.page_summary(detail) is not None
 
-    assert window.new_document(tmp_path / "目标.mindmap")
+    assert window.new_document(tmp_path / "目标")
     target = _create_graph(window, None)
     first, second = target.paste()
     assert target.graph.edges == (GraphEdge(first, second),)
@@ -1518,8 +1517,8 @@ def test_graph_clipboard_across_files_and_legacy_detail_restrictions(window, tmp
     legacy_owner = detail_engine.page_document(legacy_detail).root_id
     legacy = detail_engine.document
     legacy.nodes[legacy_owner].extension_pages["graph"] = NodeGraph().to_record()
-    path = tmp_path / "旧文件.mindmap"
-    save_document(legacy, path)
+    path = tmp_path / "旧文件"
+    save_directory(legacy, path)
     assert window.open_path(path)
     reopened = window.application.canvas
     reopened.navigate_to(legacy_detail)
@@ -1537,5 +1536,4 @@ def test_graph_clipboard_across_files_and_legacy_detail_restrictions(window, tmp
     added = reopened.paste()
     assert len(added) == 2 and all(node.document_node_id is None for node in reopened.graph.nodes)
     assert window.documents.save(window.documents.active)
-    with ZipFile(path) as archive:
-        assert json.loads(archive.read("document.json"))["schema_version"] == 7
+    assert load_directory(path).page_view(graph_page_id(legacy_owner)).graph == reopened.graph

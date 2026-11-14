@@ -6,11 +6,12 @@ import pytest
 from mindmap_app.app import build_window
 from mindmap_application.page_history import RECENT_PAGE_LIMIT, PageHistoryState
 from mindmap_application.recent_pages import RecentPageHistory
+from mindmap_core.formats import directory_version
 from mindmap_desktop_runtime.state import StateStore
 from mindmap_desktop_runtime.ui.docking import DockPosition, DockTarget
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QInputMethodEvent
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication
 
 
 @pytest.fixture
@@ -67,11 +68,11 @@ def click_page(session, target, qtbot):
 
 def test_recent_navigation_covers_all_types_and_preserves_views_and_file(windows, tmp_path, qtbot):
     window = windows()
-    session = create_document(window, tmp_path / "导航.mindmap")
+    session = create_document(window, tmp_path / "导航")
     owner, page, detail, ideas = add_pages(session)
     assert window.save()
     canvas, engine = session.canvas, session.engine
-    before, revision = session.files.path.read_bytes(), engine.revision
+    before, revision = directory_version(session.files.path), engine.revision
     recent_files = list(window.state.recent_files)
     canvas.navigate_to(page)
     # 等首次页面定位完成后模拟用户缩放，避免把尚未执行的初始视图误当成缓存。
@@ -96,12 +97,12 @@ def test_recent_navigation_covers_all_types_and_preserves_views_and_file(windows
     assert canvas.current_page_id is None
     window.application.flush_recent_pages()
     assert engine.revision == revision and not engine.is_dirty
-    assert session.files.path.read_bytes() == before and window.state.recent_files == recent_files
+    assert directory_version(session.files.path) == before and window.state.recent_files == recent_files
 
 
 def test_file_isolation_shared_tabs_and_inactive_navigation(windows, tmp_path):
     window = windows()
-    first = create_document(window, tmp_path / "甲.mindmap")
+    first = create_document(window, tmp_path / "甲")
     owner, page, detail, ideas = add_pages(first)
     first.canvas.navigate_to(page)
     assert window.application.sessions.duplicate_session(first.id)
@@ -117,7 +118,7 @@ def test_file_isolation_shared_tabs_and_inactive_navigation(windows, tmp_path):
     window.manager.activate_document(first.id)
     assert keys(first)[0] == (None, None) and keys(first) == keys(second)
     assert second.canvas.current_page_id == detail and second.recent_pages.current_key == (detail, None)
-    other = create_document(window, tmp_path / "乙.mindmap")
+    other = create_document(window, tmp_path / "乙")
     assert keys(other) == ((None, None),) and window.application._recent_pages_stack.currentWidget() is other.recent_pages
     assert window.manager.close_document(first.id)
     assert first.recent_pages._disposed and not second.recent_pages._disposed
@@ -128,13 +129,13 @@ def test_file_isolation_shared_tabs_and_inactive_navigation(windows, tmp_path):
 
 def test_restart_ignores_intermediate_activations_and_restores_each_file(windows, tmp_path, monkeypatch):
     window = windows()
-    first = create_document(window, tmp_path / "甲.mindmap")
+    first = create_document(window, tmp_path / "甲")
     _, page, detail, ideas = add_pages(first)
     first.canvas.navigate_to(page)
     assert window.application.sessions.duplicate_session(first.id)
     duplicate = window.application.active_session
     duplicate.canvas.navigate_to(detail)
-    second = create_document(window, tmp_path / "乙.mindmap")
+    second = create_document(window, tmp_path / "乙")
     _, second_page, _, _ = add_pages(second)
     second.canvas.navigate_to(second_page)
     window.manager.activate_document(first.id)
@@ -155,16 +156,16 @@ def test_restart_ignores_intermediate_activations_and_restores_each_file(windows
         assert keys(session) == expected[str(session.files.path)]
 
 
-def test_close_reopen_save_as_and_new_overwrite_history(windows, tmp_path, monkeypatch):
+def test_close_reopen_save_as_and_new_overwrite_history(windows, tmp_path, monkeypatch, choose_save_directory):
     window = windows()
-    source = tmp_path / "原文件.mindmap"
+    source = tmp_path / "原文件"
     session = create_document(window, source)
     _, page, detail, _ = add_pages(session)
     session.canvas.navigate_to(page)
     session.canvas.navigate_to(detail)
     expected = keys(session)
-    target = tmp_path / "另存文件.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    target = tmp_path / "另存文件"
+    choose_save_directory(target)
     assert window.save(save_as=True)
     assert window.application.page_history.pages_for(source) == expected
     assert window.application.page_history.pages_for(target) == expected
@@ -182,7 +183,7 @@ def test_close_reopen_save_as_and_new_overwrite_history(windows, tmp_path, monke
 
 def test_deleted_pages_and_attached_ideas_are_pruned_without_reinserting_on_undo(windows, tmp_path):
     window = windows()
-    session = create_document(window, tmp_path / "变化.mindmap")
+    session = create_document(window, tmp_path / "变化")
     owner, page, detail, ideas = add_pages(session)
     engine, canvas = session.engine, session.canvas
     canvas.navigate_to(page)
@@ -205,7 +206,7 @@ def test_deleted_pages_and_attached_ideas_are_pruned_without_reinserting_on_undo
 @pytest.mark.parametrize("input_source", ["canvas", "properties"])
 def test_ime_blocked_navigation_preserves_history_current_page_and_draft(windows, tmp_path, qtbot, input_source):
     window = windows()
-    session = create_document(window, tmp_path / "输入保护.mindmap")
+    session = create_document(window, tmp_path / "输入保护")
     owner, page, _, _ = add_pages(session)
     canvas = session.canvas
     canvas.navigate_to(page)
@@ -238,7 +239,7 @@ def test_ime_blocked_navigation_preserves_history_current_page_and_draft(windows
 
 def test_debounced_failure_is_nonblocking_and_retry_keeps_memory(windows, tmp_path, monkeypatch, qtbot):
     window = windows()
-    session = create_document(window, tmp_path / "保存失败.mindmap")
+    session = create_document(window, tmp_path / "保存失败")
     _, page, _, _ = add_pages(session)
     assert window.save()
     original = window.state.store.path.read_bytes()
@@ -262,7 +263,7 @@ def test_debounced_failure_is_nonblocking_and_retry_keeps_memory(windows, tmp_pa
 
 def test_empty_inspiration_and_stale_navigation_never_choose_another_page(windows, tmp_path):
     window = windows()
-    session = create_document(window, tmp_path / "失效目标.mindmap")
+    session = create_document(window, tmp_path / "失效目标")
     session.canvas.show_inspiration()
     assert keys(session) == ((None, None),)
     session.canvas.navigate_to(None)
@@ -281,7 +282,7 @@ def test_empty_inspiration_and_stale_navigation_never_choose_another_page(window
 
 def test_history_evicts_oldest_different_page_and_keeps_duplicate_single(windows, tmp_path):
     window = windows()
-    session = create_document(window, tmp_path / "容量.mindmap")
+    session = create_document(window, tmp_path / "容量")
     pages = [session.engine.create_submap(session.engine.add_child(session.engine.root_id, f"页面 {index}"))
              for index in range(RECENT_PAGE_LIMIT + 2)]
     for page in pages:
@@ -294,7 +295,7 @@ def test_history_evicts_oldest_different_page_and_keeps_duplicate_single(windows
 @pytest.mark.parametrize("visible", [False, True])
 def test_sidebar_shortcut_theme_layout_and_restart(windows, tmp_path, qtbot, visible):
     window = windows()
-    session = create_document(window, tmp_path / "布局.mindmap")
+    session = create_document(window, tmp_path / "布局")
     assert window.manager.states["recent_pages"].visible and session.recent_pages.isVisible()
     assert window.manager.specs["recent_pages"].shortcut == "Alt+7"
     assert not window.manager.theme.icon("recent-pages").isNull()
@@ -328,7 +329,7 @@ def test_sidebar_shortcut_theme_layout_and_restart(windows, tmp_path, qtbot, vis
 
 def test_saved_layout_adds_missing_recent_panel_once_and_preserves_other_settings(windows, tmp_path):
     window = windows()
-    create_document(window, tmp_path / "升级.mindmap")
+    create_document(window, tmp_path / "升级")
     window.manager.activate("favorites", focus=False)
     snapshot = window.manager.capture_layout()
     snapshot["tools"] = [tool for tool in snapshot["tools"] if tool["id"] != "recent_pages"]

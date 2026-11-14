@@ -16,7 +16,7 @@ from mindmap_core import (
     Node,
 )
 from mindmap_core import validation as core_validation
-from mindmap_core.formats import MindmapCodec, create_default_format_registry, save_document
+from mindmap_core.formats import directory_version, save_directory
 from mindmap_core.layouts import TreeLayout
 from mindmap_qt_editor.canvas import MindMapFileController, MindMapWidget
 from mindmap_qt_editor.canvas import loading as background_loading
@@ -63,8 +63,8 @@ def canvas_factory(qtbot):
 def test_open_defers_inactive_text_until_navigation_and_preserves_geometry(canvas_factory, tmp_path, monkeypatch):
     document, owner, page_id, keys = paged_document()
     source = tmp_path / "按需打开.mindmap"
-    save_document(document, source)
-    original_bytes = source.read_bytes()
+    save_directory(document, source)
+    original_bytes = directory_version(source)
     files = canvas_factory()
     calls = []
     make_text = rendering.make_text
@@ -85,14 +85,14 @@ def test_open_defers_inactive_text_until_navigation_and_preserves_geometry(canva
     assert dict(files.canvas.layout_result.nodes) == expected.nodes
     assert files.engine.document == document
     assert not files.is_dirty and not files.engine.can_undo
-    assert source.read_bytes() == original_bytes
+    assert directory_version(source) == original_bytes
 
 
 def test_native_open_validates_entire_book_once(canvas_factory, tmp_path, monkeypatch):
     """计数真实全图遍历，确保大量非活动节点不会在多个接口间重复校验。"""
     document, *_ = paged_document()
     source = tmp_path / "全图仅校验一次.mindmap"
-    save_document(document, source)
+    save_directory(document, source)
     files = canvas_factory()
     original, counts = core_validation.validate_document, []
 
@@ -110,11 +110,11 @@ def test_background_open_keeps_events_running_and_commits_on_gui_thread(canvas_f
     """线程门闩控制解析完成时点，验证 GUI 有事件响应且禁止控制器重入。"""
     document, *_ = paged_document()
     source = tmp_path / "后台打开.mindmap"
-    save_document(document, source)
+    save_directory(document, source)
     files = canvas_factory(background_open=True)
     started, release = Event(), Event()
     gui_thread, worker_threads, event_threads, reentries = get_ident(), [], [], []
-    original = background_loading.load_validated_document
+    original = background_loading.load_validated_directory
 
     def held_reader(path):
         worker_threads.append(get_ident())
@@ -129,7 +129,7 @@ def test_background_open_keeps_events_running_and_commits_on_gui_thread(canvas_f
             timer.stop()
 
     monkeypatch.setattr(background_loading, "BACKGROUND_OPEN_BYTES", 0)
-    monkeypatch.setattr(background_loading, "load_validated_document", held_reader)
+    monkeypatch.setattr(background_loading, "load_validated_directory", held_reader)
     unsubscribe = files.engine.subscribe(lambda event: event_threads.append(get_ident()))
     timer = QTimer()
     timer.setInterval(5)
@@ -150,12 +150,12 @@ def test_cancel_background_open_discards_late_result(canvas_factory, tmp_path, m
     """取消立即返回，稍后完成的工作线程不能替换旧文档、路径或保存状态。"""
     document, *_ = paged_document()
     source = tmp_path / "取消后台打开.mindmap"
-    save_document(document, source)
-    original_bytes = source.read_bytes()
+    save_directory(document, source)
+    original_bytes = directory_version(source)
     files = canvas_factory(background_open=True)
     before, revision = files.engine.document, files.engine.revision
     started, release, finished = Event(), Event(), Event()
-    original = background_loading.load_validated_document
+    original = background_loading.load_validated_directory
 
     def held_reader(path):
         started.set()
@@ -173,7 +173,7 @@ def test_cancel_background_open_discards_late_result(canvas_factory, tmp_path, m
                 timer.stop()
 
     monkeypatch.setattr(background_loading, "BACKGROUND_OPEN_BYTES", 0)
-    monkeypatch.setattr(background_loading, "load_validated_document", held_reader)
+    monkeypatch.setattr(background_loading, "load_validated_directory", held_reader)
     timer = QTimer()
     timer.setInterval(5)
     timer.timeout.connect(cancel)
@@ -186,20 +186,24 @@ def test_cancel_background_open_discards_late_result(canvas_factory, tmp_path, m
         release.set()
         timer.stop()
     qtbot.waitUntil(finished.is_set)
-    assert files.engine.document == before and files.path is None and source.read_bytes() == original_bytes
+    assert files.engine.document == before and files.path is None and directory_version(source) == original_bytes
 
 
 def test_background_load_failure_cleans_up_and_allows_retry(canvas_factory, tmp_path, monkeypatch):
     files = canvas_factory(background_open=True)
     source = tmp_path / "读取失败后重试.mindmap"
-    source.write_bytes(b"invalid archive")
+    source.mkdir()
+    manifest = source / "mindmap.json"
+    manifest.write_bytes(b"invalid JSON")
     before = files.engine.document
     monkeypatch.setattr(background_loading, "BACKGROUND_OPEN_BYTES", 0)
     with pytest.raises(MindMapError):
         files.open_path(source)
     assert not files._opening and files.engine.document == before and files.path is None
     assert not any(dialog.isVisible() for dialog in files.canvas.findChildren(QProgressDialog))
-    save_document(MindMapDocument.new("重试成功"), source)
+    manifest.unlink()
+    source.rmdir()
+    save_directory(MindMapDocument.new("重试成功"), source)
     assert files.open_path(source) and files.engine.document.root.text == "重试成功"
 
 
@@ -215,7 +219,7 @@ def test_background_wait_can_outlive_destroyed_parent(tmp_path, monkeypatch, qtb
         finally:
             finished.set()
 
-    monkeypatch.setattr(background_loading, "load_validated_document", held_reader)
+    monkeypatch.setattr(background_loading, "load_validated_directory", held_reader)
     parent = QWidget()
     timer = QTimer()
     timer.setInterval(5)
@@ -249,7 +253,7 @@ def test_custom_layout_keeps_trial_isolation_and_full_validation(canvas_factory,
     files = canvas_factory(layout_registry=registry)
     document, *_ = paged_document()
     source = tmp_path / "扩展修改候选.mindmap"
-    save_document(document, source)
+    save_directory(document, source)
     original, counts = core_validation.validate_document, []
 
     def counted(candidate, **options):
@@ -272,7 +276,7 @@ def test_invalid_inactive_page_is_rejected_before_replacement(canvas_factory, tm
         engine.attach_image(keys[-1], b"invalid image")
         document = engine.document
     source = tmp_path / "页外错误.mindmap"
-    save_document(document, source)
+    save_directory(document, source)
     files = canvas_factory()
     before = files.engine.document
     confirmations = []
@@ -295,7 +299,7 @@ def test_custom_layout_still_validates_inactive_pages(canvas_factory, tmp_path):
     files = canvas_factory(layout_registry=registry)
     document, *_ = paged_document()
     source = tmp_path / "扩展校验.mindmap"
-    save_document(document, source)
+    save_directory(document, source)
     before = deepcopy(files.engine.document)
     with pytest.raises(MindMapError, match="扩展拒绝"):
         files.open_path(source)
@@ -320,26 +324,19 @@ def test_open_rejects_overflowing_geometry_before_replacement(canvas_factory, tm
         document.nodes[node.id] = node
         parent = node
     source = tmp_path / "溢出尺寸.mindmap"
-    save_document(document, source)
+    save_directory(document, source)
     before = files.engine.document
     with pytest.raises(MindMapError, match="有限数值"):
         files.open_path(source)
     assert files.engine.document == before and files.path is None
 
 
-def test_extension_reader_result_keeps_independent_ownership(canvas_factory, tmp_path):
-    """扩展读取器可以持有自己的文档，打开及后续编辑不能改写扩展仍拥有的来源。"""
+def test_stream_registry_is_independent_of_directory_open(canvas_factory, tmp_path):
+    """剪贴板的交换格式注册表不参与原生目录的打开。"""
     document, *_ = paged_document()
-
-    class RetainingCodec(MindmapCodec):
-        def read(self, stream, *, options):
-            return document
-
-    registry = FormatRegistry()
-    registry.register(create_default_format_registry().get("mindmap").info, importer=RetainingCodec())
-    files = canvas_factory(format_registry=registry)
+    files = canvas_factory(format_registry=FormatRegistry())
     source = tmp_path / "扩展来源.mindmap"
-    save_document(document, source)
+    save_directory(document, source)
     before = deepcopy(document)
     assert files.open_path(source)
     files.engine.update_node(files.engine.root_id, text="正式编辑")
@@ -359,7 +356,7 @@ def test_engine_override_keeps_original_replacement_dispatch(canvas_factory, tmp
     files = canvas_factory(engine=engine)
     source = tmp_path / "引擎扩展.mindmap"
     document, *_ = paged_document()
-    save_document(document, source)
+    save_directory(document, source)
     assert files.open_path(source)
     assert engine.replacements == 1 and engine.document == document
 

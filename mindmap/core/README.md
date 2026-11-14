@@ -47,9 +47,13 @@ engine.undo()
 
 ## 文档读写
 
-从 `mindmap_core.formats` 导入 `load_document` 和 `save_document`。用 `load_document(path)` 读取原生文件，用 `save_document(engine.document, path)` 保存完整快照。默认注册表根据 `.mindmap` 扩展名选择原生格式。
+从 `mindmap_core.formats` 导入 `load_directory` 和 `save_directory`，传入导图根目录。保存接收完整文档快照，并返回 `DirectoryVersion`。下次写入可通过 `expected_version` 检测外部修改，传入 `None` 则要求新建目录。
 
-原生文件是 ZIP 容器，`document.json` 记录文档结构与版本，图片资源位于 `assets/` 下。内置编解码器可读取结构版本 2 至 8。含图节点文档绑定时写为版本 8，其他节点扩展页写为版本 7，只有页面引用时写为版本 6，其余写为版本 5。
+目录格式版本为 1。主图和灵感区分别存于 `pages/main.json` 和 `pages/inspiration.json`，子导图及详情页按稳定 ID 定位。页面内按节点 ID 排列，实际子节点顺序由 `children` 记录。图片使用 `assets/<SHA-256>`，文件清单及全局配置在 `mindmap.json`。目录加载时会校验页面归属、跨页关系和图片完整性。
+
+目录读写使用同路径进程锁。保存暂存于同卷的父目录，写入中断时由下一次打开或保存恢复。其他程序直接修改同一工作区时，应用在提交前通过内容摘要检查是否发生冲突。
+
+历史 ZIP 文件可用 `load_document(path)` 读取供迁移。此旧格式的 `document.json` 和图片封在一个 `.mindmap` 文件中。
 
 ## 事务与事件
 
@@ -115,7 +119,7 @@ engine.undo()
 
 - 新增字段位于原有三个字段之后，兼容已有位置参数构造。
 
-- 移动信息只随内存撤销历史保存，不改变 `.mindmap` 文件格式。
+- 移动信息只随内存撤销历史保存。
 
 ## 共享文档的事件来源
 
@@ -123,7 +127,7 @@ engine.undo()
 
 - **参数与嵌套：** 来源接受非空字符串或 None，非法值抛出 ValueError；嵌套及异常退出均恢复外层来源，重入排队事件保留创建时的标识。
 
-- **撤销与兼容：** 撤销、重做记录本次触发者，来源不写入历史、保存快照或 `.mindmap` 文件；旧调用及旧事件位置参数构造保持兼容。
+- 撤销和重做记录本次触发者，来源不写入历史、保存快照或导图目录。
 
 - **异步操作：** 异步操作应在实际提交时重新进入上下文，不跨异步等待持有它。
 

@@ -108,7 +108,7 @@ def test_live_checkpoint_restores_tabs_split_and_latest_view(qtbot, tmp_path):
     qtbot.addWidget(window, before_close_func=lambda item: item.dispose())
     window.show()
     for name in ("左侧", "右侧"):
-        assert window.new_document(tmp_path / f"{name}.mindmap")
+        assert window.new_document(tmp_path / f"{name}")
     left, right = window.documents.ordered()
     window.host.editor.split_token(right.id, Qt.Orientation.Horizontal)
     window.manager.activate_document(left.id)
@@ -143,9 +143,9 @@ def test_slow_startup_preserves_saved_layout_until_all_documents_are_ready(qtbot
     window = build_window(storage_dir=directory, restore=False)
     qtbot.addWidget(window)
     window.show()
-    assert window.new_document(tmp_path / "第一份.mindmap")
+    assert window.new_document(tmp_path / "第一份")
     first = window.application.active_session
-    assert window.new_document(tmp_path / "第二份.mindmap")
+    assert window.new_document(tmp_path / "第二份")
     second = window.application.active_session
     window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
     window.manager.set_theme("dark")
@@ -162,7 +162,7 @@ def test_slow_startup_preserves_saved_layout_until_all_documents_are_ready(qtbot
     saved_layout = json.loads(saved_bytes)["layout"]["session"]
     started, release = Event(), Event()
     during_restore, reads = [], []
-    original = loading.load_validated_document
+    original = loading.load_validated_directory
 
     def delayed_reader(path):
         reads.append(path)
@@ -188,7 +188,7 @@ def test_slow_startup_preserves_saved_layout_until_all_documents_are_ready(qtbot
             QTimer.singleShot(400, record_and_release)
 
     monkeypatch.setattr(loading, "BACKGROUND_OPEN_BYTES", 0)
-    monkeypatch.setattr(loading, "load_validated_document", delayed_reader)
+    monkeypatch.setattr(loading, "load_validated_directory", delayed_reader)
     timer = QTimer()
     timer.setInterval(5)
     timer.timeout.connect(watch_reader)

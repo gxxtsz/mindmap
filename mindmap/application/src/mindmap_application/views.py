@@ -112,7 +112,7 @@ class MindMapEditorView(QObject):
 
     @property
     def title(self):
-        title = self.files.path.stem if self.files.path else "新建导图"
+        title = self.files.path.name if self.files.path else "新建导图"
         if self.files.state.conflict:
             return title + "（保存冲突）"
         return title + ("（保存失败）" if self.document.last_error else "")

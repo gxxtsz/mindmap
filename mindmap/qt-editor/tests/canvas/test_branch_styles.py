@@ -13,7 +13,7 @@ from mindmap_core import (
     MindMapEngine,
     MindMapError,
 )
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import load_directory, save_directory
 from mindmap_core.layouts import TreeLayout, create_default_layout_registry
 from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_editor.canvas.items import NodeItem
@@ -273,9 +273,9 @@ def test_export_during_preview_and_file_roundtrip(canvas, tmp_path):
     before, revision = widget.engine.document, widget.engine.revision
     widget.preview_branch_style("arrow")
     widget.export(tmp_path / "预览期间.png")
-    save_document(widget.engine.document, tmp_path / "带样式.mindmap")
+    save_directory(widget.engine.document, tmp_path / "带样式.mindmap")
     assert QImage(str(tmp_path / "正式.png")) == QImage(str(tmp_path / "预览期间.png"))
-    assert load_document(tmp_path / "带样式.mindmap") == before
+    assert load_directory(tmp_path / "带样式.mindmap") == before
     assert widget.engine.revision == revision
 
 

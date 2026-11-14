@@ -14,7 +14,7 @@
 
 应用在成功读取、校验及构造后调用 `context.documents.register_view(view)`。多个标签可以共享同一文档；同一路径不能被两份不同文档占用。复制标签保留各自的视图状态，保存和关闭按共享文档去重。
 
-`capture_state()` 仅返回可序列化的导航和显示状态。`view_state_changed(view.id)` 触发合并保存，文档正文始终存入 `.mindmap`。
+`capture_state()` 仅返回可序列化的导航和显示状态。`view_state_changed(view.id)` 触发合并保存，文档正文随导图目录单独保存。
 
 ## 界面与命令
 

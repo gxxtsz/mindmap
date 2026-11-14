@@ -204,33 +204,31 @@ class DesktopRuntimeWindow(DesktopWindow):
         self.record_operation(f"无法创建工具窗口 {tool_id}：{error}", level="error")
 
     def new_document(self, path=None):
-        """唯一新建入口只创建导图；显式提供其他文件后缀时拒绝写入。"""
-        if path is not None and Path(path).suffix and not self.can_open_path(path):
-            return False
+        """创建导图目录；未提供路径时由导图应用询问保存位置。"""
         result = self.application.new_document(Path(path) if path else None)
         self._report_result(result)
         return bool(result)
 
     @staticmethod
     def can_open_path(path) -> bool:
-        """顶级标签只接受原生导图；节点扩展自行处理所属页面的导入来源。"""
-        return Path(path).suffix.lower() == ".mindmap"
+        """判断拖放目标是否有导图目录入口，清单和页面内容由应用在打开时校验。"""
+        return (Path(path) / "mindmap.json").is_file()
 
     def file_icon(self, path: Path | None, size: int = 16) -> QIcon:
         """导图列表及标签使用统一图标，非导图路径仅作为诊断文字展示。"""
-        name = "mindmap" if path is not None and self.can_open_path(path) else "document"
+        name = "mindmap" if path is not None else "document"
         return self.manager.theme.icon(name, size)
 
     def open_path(self, path):
-        if not self.can_open_path(path):
-            raise ValueError(f"只能打开 .mindmap 导图：{path}")
+        """打开目录或激活其现有标签；相对路径及别名统一为目录绝对路径。"""
+        path = Path(path).resolve()
         existing = self.documents.find_path(path)
         if existing and not isinstance(existing, MissingView):
             self.documents.activate_view(existing.id)
             self.remember_path(path)
             self.record_operation("激活已打开的文档", session=existing)
             return True
-        result = self.application.open_document(Path(path), None, None)
+        result = self.application.open_document(path, None, None)
         if result.status == OperationStatus.FAILED:
             error = result.error or ValueError(result.message)
             error._mindmap_reported = result.reported
@@ -247,7 +245,8 @@ class DesktopRuntimeWindow(DesktopWindow):
                 self.record_operation(result.message, level="error")
 
     def open_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "打开导图", "", "思维导图 (*.mindmap)")
+        """从主窗口选择导图目录，空工作区也可使用。"""
+        path = QFileDialog.getExistingDirectory(self, "打开导图目录")
         return self.open_path(path) if path else False
 
     def save(self, *, save_as=False):
@@ -270,7 +269,8 @@ class DesktopRuntimeWindow(DesktopWindow):
         view = self.documents.active if session_id is None else self.documents.views.get(session_id)
         if self._disposed or view is None or view.document.path is None:
             return False
-        directory = view.document.path.parent
+        path = view.document.path
+        directory = path if path.exists() else path.parent
         try:
             if not directory.is_dir() or not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
                 raise OSError(f"无法打开文件夹：{directory}")
@@ -437,7 +437,7 @@ class DesktopRuntimeWindow(DesktopWindow):
             for path in paths:
                 if self._disposed:
                     break
-                if not path.is_dir() and self.call(lambda: self.open_path(path)) is False:
+                if self.call(lambda: self.open_path(path)) is False:
                     break
         finally:
             self._opening_dropped_files = False

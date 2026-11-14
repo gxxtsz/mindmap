@@ -1,13 +1,11 @@
-"""文件能力公开检查不提交输入，也不改变引擎或保存位置。"""
+"""导图目录的共享保存状态及冲突检查。"""
 
-import pytest
-from mindmap_core import FormatInfo, FormatRegistry, MindMapEngine, MindMapError
-from mindmap_core.formats import MindmapCodec
+from mindmap_core import MindMapDocument, MindMapEngine
+from mindmap_core.formats import load_directory, save_directory
 from mindmap_qt_editor.canvas import MindMapFileController, MindMapFileState, MindMapWidget
-from PySide6.QtWidgets import QFileDialog
 
 
-def test_file_controllers_can_share_path_and_cancel_before_submitting(qtbot, tmp_path, monkeypatch):
+def test_file_controllers_can_share_path_and_cancel_before_submitting(qtbot, tmp_path, monkeypatch, choose_save_directory):
     """共享状态只在成功写入后改绑，准备失败不提交输入，旧宿主默认仍独立。"""
     engine = MindMapEngine()
     canvases = [MindMapWidget(engine), MindMapWidget(engine)]
@@ -23,7 +21,7 @@ def test_file_controllers_can_share_path_and_cancel_before_submitting(qtbot, tmp
     first, second = [MindMapFileController(canvas, Inputs(), state=state) for canvas in canvases]
     independent = MindMapFileController(canvases[0], Inputs())
     target = tmp_path / "改绑.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: (str(target), ""))
+    choose_save_directory(target)
     first.prepare_save = lambda: False
     try:
         assert not first.save(save_as=True) and not calls and not target.exists()
@@ -31,7 +29,9 @@ def test_file_controllers_can_share_path_and_cancel_before_submitting(qtbot, tmp
         assert first.save(save_as=True)
         assert first.path == second.path == target and independent.path is None
         second.error_occurred.connect(errors.append)
-        monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: (str(tmp_path / "错误.txt"), ""))
+        occupied = tmp_path / "已占用"
+        occupied.mkdir()
+        choose_save_directory(occupied)
         assert not second.save(save_as=True)
         assert first.path == second.path == target and errors
     finally:
@@ -39,24 +39,24 @@ def test_file_controllers_can_share_path_and_cancel_before_submitting(qtbot, tmp
             canvas.dispose()
 
 
-def test_native_capability_check_is_pure_and_rejects_one_way_codec(qtbot):
+def test_directory_conflict_does_not_submit_inputs_or_change_path(qtbot, tmp_path):
     canvas = MindMapWidget()
     qtbot.addWidget(canvas)
 
     class Inputs:
         def flush_pending_edits(self):
-            raise AssertionError("格式预检不能提交输入")
+            raise AssertionError("已提交快照不应提交侧栏输入")
 
     files = MindMapFileController(canvas, Inputs())
-    before = canvas.engine.document, canvas.engine.revision, files.path
+    target = tmp_path / "导图"
+    version = save_directory(canvas.engine.document, target)
+    files.accept_directory_version(target, version)
+    before = canvas.engine.document, canvas.engine.revision
     try:
-        assert isinstance(files.require_native_save_format().exporter, MindmapCodec)
-        for mode in ("missing", "importer", "exporter"):
-            canvas.format_registry = FormatRegistry()
-            if mode != "missing":
-                canvas.format_registry.register(FormatInfo("mindmap", "原生", (".mindmap",)), **{mode: MindmapCodec()})
-            with pytest.raises(MindMapError, match="原生编解码器"):
-                files.require_native_save_format()
-            assert (canvas.engine.document, canvas.engine.revision, files.path) == before
+        external = MindMapDocument.new("外部修改")
+        save_directory(external, target)
+        assert not files.save_committed() and files.state.conflict
+        assert files.path == target and load_directory(target) == external
+        assert (canvas.engine.document, canvas.engine.revision) == before
     finally:
         canvas.dispose()

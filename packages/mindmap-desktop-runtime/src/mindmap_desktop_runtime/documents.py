@@ -143,12 +143,9 @@ class DocumentService(QObject):
         self.changed.emit()
 
     def display_title(self, view, *, file_name=False) -> str:
-        """为同名文件附加最短可区分的目录。标题栏可只借用文件名和区分信息。
-
-        同一文件的多个视图共用一个名称。同目录的同名异格式文件使用扩展名区分。
-        """
+        """为同名导图附加最短可区分的父目录，同一导图的多个视图共用名称。"""
         path = view.document.path
-        title = path.stem if file_name and path is not None else view.title
+        title = path.name if file_name and path is not None else view.title
         qualifier = self._file_qualifiers.get(path, "")
         return f"{title} · {qualifier}" if qualifier else title
 
@@ -159,7 +156,7 @@ class DocumentService(QObject):
         self._file_qualifiers = dict.fromkeys(paths, "")
         by_name = defaultdict(list)
         for path in paths:
-            by_name[path.stem.casefold()].append(path)
+            by_name[path.name.casefold()].append(path)
         for same_name in by_name.values():
             if len(same_name) < 2:
                 continue
@@ -174,9 +171,7 @@ class DocumentService(QObject):
                             directory = str(suffix)
                             break
                     directory = directory or str(path.parent)
-                extension = path.suffix if any(other != path and other.parent == path.parent
-                                               for other in same_name) else ""
-                self._file_qualifiers[path] = " · ".join(value for value in (directory, extension) if value)
+                self._file_qualifiers[path] = directory
         for view in self.views.values():
             self._sync_tab(view)
         return True
@@ -317,7 +312,7 @@ class MissingView:
         self.id = record["id"]
         self.document = self
         self.path = Path(record["path"])
-        self.title = self.path.stem + "（暂不可用）"
+        self.title = self.path.name + "（暂不可用）"
         self.is_dirty = False
         self.save_policy = SavePolicy.MANUAL
         self.widget = QLabel(f"暂时无法打开 {self.path.name}\n\n{error}\n\n原有视图记录已保留。")

@@ -7,6 +7,18 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+@pytest.fixture
+def choose_save_directory(monkeypatch):
+    """为新建和另存提供父目录及目录名，传入 None 模拟取消选择。"""
+    from PySide6.QtWidgets import QFileDialog, QInputDialog
+
+    def choose(path):
+        monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args: str(path.parent) if path else "")
+        monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: (path.name, True) if path else ("", False))
+
+    return choose
+
+
 @pytest.fixture(autouse=True)
 def release_offscreen_clipboard(request):
     """在离屏 Qt 测试结束时释放剪贴板载荷，保证早于 QApplication 的销毁。

@@ -9,10 +9,10 @@ import textwrap
 import pytest
 from mindmap_app.app import build_window
 from mindmap_core import MindMapEngine
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import directory_version, load_directory, save_directory
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QInputMethodEvent
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def open_pages(window, path):
     detail_root = engine.document.detail_pages[detail].root_id
     engine.add_child(detail_root, "详情内容一")
     engine.add_child(detail_root, "详情内容二")
-    save_document(engine.document, path)
+    save_directory(engine.document, path)
     assert window.open_path(path)
     return window.application.active_session, [None, first, nested, detail]
 
@@ -83,7 +83,7 @@ def test_restart_restores_each_page_in_visible_and_hidden_tabs(windows, tmp_path
     window.manager.set_option("compact", compact)
     sessions, expected = [], {}
     for index in range(4):
-        session, pages = open_pages(window, tmp_path / f"导图{index}.mindmap")
+        session, pages = open_pages(window, tmp_path / f"导图{index}")
         position(session, pages[index], index)
         sessions.append(session)
     if split:
@@ -93,7 +93,7 @@ def test_restart_restores_each_page_in_visible_and_hidden_tabs(windows, tmp_path
     for session in sessions:
         expected[session.id] = session.capture_state()
     paths = {session.id: session.files.path for session in sessions}
-    saved = {identifier: path.read_bytes() for identifier, path in paths.items()}
+    saved = {identifier: directory_version(path) for identifier, path in paths.items()}
     order = [session.id for session in window.application.sessions.ordered()]
     locations = {identifier: (window.host.editor.find_token(identifier)[0].group_id,
                               window.host.editor.find_token(identifier)[1]) for identifier in paths}
@@ -103,7 +103,7 @@ def test_restart_restores_each_page_in_visible_and_hidden_tabs(windows, tmp_path
     payload = json.loads(window.state.store.path.read_text("utf-8"))
     assert payload["schema_version"] == 2
     assert {item["id"]: item["view_state"] for item in payload["views"]} == expected
-    assert all(path.read_bytes() == saved[identifier] for identifier, path in paths.items())
+    assert all(directory_version(path) == saved[identifier] for identifier, path in paths.items())
     restored = windows(storage=storage, restore=True, visible=False)
     assert restored.application.active_session.id == sessions[2].id
     for identifier in order:
@@ -129,12 +129,12 @@ def test_restart_restores_each_page_in_visible_and_hidden_tabs(windows, tmp_path
         assert restored.application._favorites_stack.currentWidget() is session.favorites
         assert session.favorites.model.current_page_id == expected[identifier]["page_id"]
         assert not session.engine.is_dirty and not session.engine.can_undo and not session.engine.can_redo
-        assert paths[identifier].read_bytes() == saved[identifier]
+        assert directory_version(paths[identifier]) == saved[identifier]
 
 
 def test_manual_reopen_still_starts_from_main_after_startup_restore(windows, tmp_path):
     window = windows()
-    session, pages = open_pages(window, tmp_path / "手动重开.mindmap")
+    session, pages = open_pages(window, tmp_path / "手动重开")
     expected = position(session, pages[2], 2)
     storage, path = window.manager.storage_dir, session.files.path
     assert window.close()
@@ -152,7 +152,7 @@ def test_legacy_and_corrupt_view_fields_do_not_prevent_other_files_restoring(win
     window = windows()
     sessions, page_ids = [], []
     for index in range(4):
-        session, pages = open_pages(window, tmp_path / f"兼容{index}.mindmap")
+        session, pages = open_pages(window, tmp_path / f"兼容{index}")
         position(session, pages[2], 2)
         sessions.append(session)
         page_ids.append(pages[2])
@@ -180,34 +180,34 @@ def test_legacy_and_corrupt_view_fields_do_not_prevent_other_files_restoring(win
 @pytest.mark.parametrize("remove_all", [False, True])
 def test_external_changes_filter_selection_and_renamed_pages_keep_identifiers(windows, tmp_path, remove_all):
     window = windows()
-    session, pages = open_pages(window, tmp_path / "外部修改.mindmap")
+    session, pages = open_pages(window, tmp_path / "外部修改")
     expected = position(session, pages[1], 2)
     storage, path = window.manager.storage_dir, session.files.path
     assert window.close()
-    engine = MindMapEngine(load_document(path))
+    engine = MindMapEngine(load_directory(path))
     root = engine.document.submaps[pages[1]].root_id
     engine.update_node(root, text="页面已经改名")
     # 删除普通兄弟时不影响嵌套页面；全部删除允许级联清理下级页。
     removed = expected["selection"] if remove_all else expected["selection"][-1:]
     engine.remove_nodes(removed)
-    save_document(engine.document, path)
-    saved = path.read_bytes()
+    save_directory(engine.document, path)
+    saved = directory_version(path)
     restarted = windows(storage=storage, restore=True)
     assert restarted.application.canvas.current_page_id == pages[1]
     assert restarted.application.canvas.document_view.root.text == "页面已经改名"
     assert restarted.application.canvas.selected_node_ids() == ([root] if remove_all else expected["selection"][:1])
-    assert path.read_bytes() == saved
+    assert directory_version(path) == saved
 
 
 def test_external_page_removal_restores_main_without_failing_file(windows, tmp_path):
     window = windows()
-    session, pages = open_pages(window, tmp_path / "删除页面.mindmap")
+    session, pages = open_pages(window, tmp_path / "删除页面")
     position(session, pages[2], 2)
     storage, path = window.manager.storage_dir, session.files.path
     assert window.close()
-    engine = MindMapEngine(load_document(path))
+    engine = MindMapEngine(load_directory(path))
     engine.remove_submap(engine.document.submaps[pages[1]].owner_id)
-    save_document(engine.document, path)
+    save_directory(engine.document, path)
     restarted = windows(storage=storage, restore=True)
     assert restarted.application.canvas.current_page_id is None
     assert restarted.application.canvas.view.transform().isIdentity()
@@ -218,7 +218,7 @@ def test_external_page_removal_restores_main_without_failing_file(windows, tmp_p
 @pytest.mark.parametrize("failure", ["write", "ime"])
 def test_rejected_exit_does_not_replace_last_successful_view_snapshot(windows, tmp_path, failure):
     window = windows()
-    session, pages = open_pages(window, tmp_path / "退出失败.mindmap")
+    session, pages = open_pages(window, tmp_path / "退出失败")
     position(session, pages[2], 2)
     storage, state_path = window.manager.storage_dir, window.state.store.path
     assert window.close()
@@ -258,20 +258,20 @@ def test_rejected_exit_does_not_replace_last_successful_view_snapshot(windows, t
     assert state_path.read_bytes() == successful
 
 
-def test_save_as_records_current_view_for_new_path(windows, tmp_path, monkeypatch):
+def test_save_as_records_current_view_for_new_path(windows, tmp_path, monkeypatch, choose_save_directory):
     window = windows()
-    session, pages = open_pages(window, tmp_path / "原文件.mindmap")
+    session, pages = open_pages(window, tmp_path / "原文件")
     expected = position(session, pages[3], 3)
-    original = session.files.path.read_bytes()
-    target = tmp_path / "另存为.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(target), ""))
+    original = directory_version(session.files.path)
+    target = tmp_path / "另存为"
+    choose_save_directory(target)
     assert session.files.save(save_as=True)
     storage = window.manager.storage_dir
     assert window.close()
     restarted = windows(storage=storage, restore=True)
     assert restarted.application.files.path == target
     assert_snapshot(restarted.application.canvas, expected)
-    assert (tmp_path / "原文件.mindmap").read_bytes() == original
+    assert directory_version(tmp_path / "原文件") == original
 
 
 @pytest.mark.parametrize("scale", ["1", "1.5", "2"])
@@ -279,11 +279,11 @@ def test_save_as_records_current_view_for_new_path(windows, tmp_path, monkeypatc
 def test_real_launcher_explicit_file_preserves_restored_view_unless_disabled(
         windows, tmp_path, scale, no_restore):
     window = windows()
-    session, pages = open_pages(window, tmp_path / "命令行页面.mindmap")
+    session, pages = open_pages(window, tmp_path / "命令行页面")
     expected = position(session, pages[2], 2)
     storage, path = window.manager.storage_dir, session.files.path
     assert window.close()
-    original = path.read_bytes()
+    original = directory_version(path)
     output = tmp_path / "启动结果.json"
     source = textwrap.dedent("""\
         import json
@@ -328,4 +328,4 @@ def test_real_launcher_explicit_file_preserves_restored_view_unless_disabled(
         assert actual["selection"] == expected["selection"]
         assert actual["zoom"] == pytest.approx(expected["zoom"])
         assert (QPointF(*actual["center"]) - QPointF(*expected["center"])).manhattanLength() < 3 / expected["zoom"]
-    assert path.read_bytes() == original
+    assert directory_version(path) == original

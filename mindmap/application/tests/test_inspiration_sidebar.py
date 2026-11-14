@@ -2,7 +2,7 @@
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core.formats import load_document
+from mindmap_core.formats import load_directory
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QContextMenuEvent, QDragEnterEvent, QDropEvent, QInputMethodEvent, QMouseEvent
 from PySide6.QtWidgets import QAbstractItemView, QApplication, QMessageBox
@@ -14,7 +14,7 @@ def window(qtbot, tmp_path):
     qtbot.addWidget(widget)
     widget.resize(1300, 850)
     widget.show()
-    assert widget.new_document(tmp_path / "灵感测试.mindmap")
+    assert widget.new_document(tmp_path / "灵感测试")
     QApplication.processEvents()
     yield widget
     widget.close()
@@ -163,7 +163,7 @@ def test_sidebar_drag_does_not_navigate_and_accepts_main_target(window, qtbot, m
     assert panel.list_view.count() == 0
     assert canvas.view.node_drag._reflow is not None
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    assert load_document(window.application.files.path) == e.document
+    assert load_directory(window.application.files.path) == e.document
     e.undo()
     assert e.document == original and canvas.current_page_id is None
     assert panel.list_view.count() == 1
@@ -178,16 +178,16 @@ def test_drag_autosave_and_multifile_sidebar_binding(window, tmp_path, qtbot):
     canvas.select_nodes([root])
     assert canvas.detach_branch_drag(canvas.create_branch_drag())
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    assert load_document(session.files.path) == e.document
+    assert load_directory(session.files.path) == e.document
     canvas.show_inspiration(root)
-    assert window.new_document(tmp_path / "另一份.mindmap")
+    assert window.new_document(tmp_path / "另一份")
     assert window.application.active_session.inspiration.list_view.count() == 0
     window.manager.activate_document(session.id)
     assert window.application._inspiration_stack.currentWidget() is panel
     assert window.application.canvas.current_inspiration_root_id == root
     e.undo()
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    assert root in load_document(session.files.path).root.children
+    assert root in load_directory(session.files.path).root.children
 
 
 def test_list_ctrl_click_keeps_single_selection(window, qtbot):
@@ -248,7 +248,7 @@ def test_autosave_during_drag_keeps_payload_valid(window, qtbot):
     assert canvas.can_receive_branch_drag(mime, e.root_id)
     assert canvas.receive_branch_drag(mime, e.root_id)
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    assert root in load_document(window.application.files.path).root.children
+    assert root in load_directory(window.application.files.path).root.children
 
 
 def _open_item_menu(panel, qtbot, row=1, *, keyboard=False):
@@ -370,7 +370,7 @@ def test_context_menu_attach_moves_exact_root_with_owned_content(window, qtbot, 
     assert e.document == original
     e.redo()
     qtbot.waitUntil(lambda: not e.is_dirty, timeout=5000)
-    assert load_document(window.application.files.path) == e.document
+    assert load_directory(window.application.files.path) == e.document
 
 
 @pytest.mark.parametrize("keyboard", [False, True])
@@ -412,7 +412,7 @@ def test_context_menu_readonly_composition_and_stale_session_are_guarded(window,
     canvas.finish_edit(commit=False)
     _open_item_menu(panel, qtbot)
     original = e.document
-    assert window.new_document(tmp_path / "另一个文件.mindmap")
+    assert window.new_document(tmp_path / "另一个文件")
     assert not panel._menu.isVisible() and panel._menu_root is None
     panel.delete_action.trigger()
     panel.delete_requested.emit(target)

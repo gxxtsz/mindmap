@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core import MindMapError
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QLineEdit
 
@@ -21,10 +20,10 @@ def workspace(qtbot, tmp_path):
 
 def test_split_routes_commands_and_preserves_local_text_input(workspace, tmp_path, qtbot):
     window = workspace
-    assert window.new_document(tmp_path / "导图.mindmap")
+    assert window.new_document(tmp_path / "导图")
     mindmap = window.documents.active
     mindmap.engine.update_node(mindmap.engine.root_id, text="导图修改")
-    assert window.new_document(tmp_path / "另一份导图.mindmap")
+    assert window.new_document(tmp_path / "另一份导图")
     other = window.documents.active
     other.engine.update_node(other.engine.root_id, text="另一份导图修改")
     window.host.editor.split_token(other.id, Qt.Orientation.Horizontal)
@@ -58,7 +57,7 @@ def test_split_routes_commands_and_preserves_local_text_input(workspace, tmp_pat
     assert QApplication.clipboard().text() == "局部输入"
     assert mindmap.engine.document.root.text == "中心主题"
     window.manager.activate_document(other.id)
-    assert window.new_document(tmp_path / "在活动组新建.mindmap")
+    assert window.new_document(tmp_path / "在活动组新建")
     assert window.host.editor.find_token(window.documents.active.id)[0] is group
 
 
@@ -66,7 +65,7 @@ def test_same_name_titles_and_full_paths_survive_split_and_restore(workspace, tm
     window = workspace
     views = []
     for folder in ("甲", "乙"):
-        path = tmp_path / folder / "项目" / "同名.mindmap"
+        path = tmp_path / folder / "项目" / "同名"
         path.parent.mkdir(parents=True)
         assert window.new_document(path)
         views.append(window.documents.active)
@@ -90,7 +89,7 @@ def test_same_name_titles_and_full_paths_survive_split_and_restore(workspace, tm
 def test_application_restores_core_document_and_panel_after_restart(workspace, qtbot, tmp_path):
     """连续重启始终直接构造导图主体，并恢复文档与业务面板。"""
     window = workspace
-    assert window.new_document(tmp_path / "保留.mindmap")
+    assert window.new_document(tmp_path / "保留")
     view_id = window.documents.active.id
     window.documents.active.engine.update_node(window.documents.active.engine.root_id, text="保留的内容")
     window.application.show_settings_panel()
@@ -107,21 +106,20 @@ def test_application_restores_core_document_and_panel_after_restart(workspace, q
 
 
 def test_missing_file_retry_failure_preserves_placeholder_record(workspace, qtbot, tmp_path):
-    target = tmp_path / "暂时离线.mindmap"
+    target = tmp_path / "暂时离线"
     assert workspace.new_document(target)
     identifier = workspace.documents.active.id
     engine = workspace.documents.active.engine
     engine.update_node(engine.root_id, text="再次可用")
     assert workspace.close()
-    original = target.read_bytes()
-    target.unlink()
+    offline = target.rename(tmp_path / "离线副本")
     restored = build_window(storage_dir=tmp_path / "配置")
     qtbot.addWidget(restored, before_close_func=lambda item: item.dispose())
     record = restored.documents.snapshot()
-    with pytest.raises(MindMapError, match="读取文档失败"):
+    with pytest.raises(ValueError, match="思维导图目录"):
         restored.open_path(target)
     assert restored.documents.snapshot() == record
-    target.write_bytes(original)
+    offline.rename(target)
     assert restored.open_path(target)
     assert identifier not in restored.documents.views
     assert restored.documents.active.engine.document.root.text == "再次可用"
@@ -129,7 +127,7 @@ def test_missing_file_retry_failure_preserves_placeholder_record(workspace, qtbo
 
 def test_legacy_real_documents_split_pages_and_preferences_migrate_without_rewrite(workspace, qtbot, tmp_path):
     """用旧文件结构恢复真实共享导图、页面与分屏，原始三份配置逐字节保留。"""
-    assert workspace.new_document(tmp_path / "历史导图.mindmap")
+    assert workspace.new_document(tmp_path / "历史导图")
     first = workspace.documents.active
     child = first.engine.add_child(first.engine.root_id, "子导图入口")
     page = first.engine.create_submap(child)

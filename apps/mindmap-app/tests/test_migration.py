@@ -14,7 +14,7 @@ def previous_profile(qtbot, tmp_path):
     """由真实导图现场构造旧版多业务会话，确保转换覆盖分屏、偏好和来源归档。"""
     window = build_window(storage_dir=tmp_path / "准备", restore=False)
     qtbot.addWidget(window, before_close_func=lambda item: item.dispose())
-    target = tmp_path / "历史导图.mindmap"
+    target = tmp_path / "历史导图"
     assert window.new_document(target)
     first = window.documents.active
     first.engine.update_node(first.engine.root_id, text="保留导图")
@@ -56,7 +56,7 @@ def previous_profile(qtbot, tmp_path):
     settings = {"schema_version": 1, "values": {"plugins": {"enabled/mindmap": False},
                 "mindmap": {"view/wheel_mode": "zoom"}, "": {"window/always_on_top": False}}}
     (directory / "workbench-settings-v1.json").write_text(json.dumps(settings), encoding="utf-8")
-    originals = {path: path.read_bytes() for path in (*directory.iterdir(), target, source)}
+    originals = {path: path.read_bytes() for path in (*directory.iterdir(), *target.rglob("*.json"), source)}
     return directory, originals, ids, retired
 
 

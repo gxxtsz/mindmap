@@ -14,7 +14,7 @@ def test_factory_passes_registries_through_application_options(qtbot, tmp_path):
     window = build_window(storage_dir=tmp_path / "配置", restore=False, options={"layout_registry": layout, "format_registry": formats})
     qtbot.addWidget(window, before_close_func=lambda item: item.dispose())
     assert type(window) is DesktopRuntimeWindow
-    assert window.new_document(tmp_path / "注入.mindmap")
+    assert window.new_document(tmp_path / "注入")
     view = window.documents.active
     assert view.canvas.layout_registry is layout and view.canvas.format_registry is formats
     assert not hasattr(window, "canvas") and not hasattr(window, "sessions")

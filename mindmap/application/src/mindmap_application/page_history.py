@@ -19,12 +19,12 @@ def _page_key(page_id: object, root_id: object) -> PageKey:
 
 
 def _document_path(value: object) -> str:
-    """只接受原生导图绝对路径；暂时离线的文件仍可保留页面历史。"""
+    """只接受绝对目录路径；暂时离线的导图仍可保留页面历史。"""
     if not isinstance(value, str) or not value or "\0" in value:
         raise ValueError("导图路径必须是非空字符串")
     path = Path(value)
-    if not path.is_absolute() or path.suffix.lower() != ".mindmap":
-        raise ValueError("导图记录必须使用 .mindmap 文件的绝对路径")
+    if not path.is_absolute():
+        raise ValueError("导图记录必须使用目录的绝对路径")
     return path_key(path)
 
 

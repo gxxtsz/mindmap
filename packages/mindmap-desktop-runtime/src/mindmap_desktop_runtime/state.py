@@ -9,6 +9,11 @@ from mindmap_desktop_api import path_key
 from .storage import JsonLayoutStore
 
 
+def _absolute_directory_path(value: object) -> bool:
+    """校验会话资源为绝对目录路径，允许暂时无法访问的导图。"""
+    return isinstance(value, str) and "\0" not in value and Path(value).is_absolute()
+
+
 class Settings:
     """窗口与导图偏好设置，同时提供小型 QSettings 兼容接口以平稳迁移组件。"""
 
@@ -96,8 +101,7 @@ class StateStore:
             if not isinstance(item, dict) or any(not isinstance(item.get(key), str) or not item[key]
                                                 for key in ("id", "path")):
                 raise ValueError("编辑器恢复记录无效")
-            if (item["id"] in seen or not Path(item["path"]).is_absolute()
-                    or Path(item["path"]).suffix.lower() != ".mindmap"):
+            if item["id"] in seen or not _absolute_directory_path(item["path"]):
                 raise ValueError("导图标识重复或资源路径无效")
             if item.keys() - {"id", "path", "document_id", "view_state"}:
                 raise ValueError("导图视图记录包含未知字段")
@@ -114,8 +118,7 @@ class StateStore:
                     raise ValueError("共享文档标识与资源对应关系冲突")
                 document_resources[document_id] = resource
                 resource_documents[resource] = document_id
-        if not all(isinstance(item, str) and Path(item).is_absolute()
-                   and Path(item).suffix.lower() == ".mindmap" for item in recent):
+        if not all(_absolute_directory_path(item) for item in recent):
             raise ValueError("最近资源路径无效")
         if payload.keys() - {"schema_version", "views", "active_id", "recent_files", "mindmap", "layout",
                              "migration_archive"} or not isinstance(payload.get("mindmap", {}), dict):
@@ -138,9 +141,8 @@ class StateStore:
             self.store.save(self.data)
 
     def remember(self, path):
+        """记录目录绝对路径；离线目录仍可留在会话中，真实内容由打开流程校验。"""
         path = str(Path(path).resolve())
-        if Path(path).suffix.lower() != ".mindmap":
-            raise ValueError("最近导图只接受 .mindmap 文件")
         self.data["recent_files"] = [path, *(item for item in self.recent_files
                                             if path_key(item) != path_key(path))][:20]
         self.save()
@@ -172,7 +174,7 @@ class StateStore:
 
 
 class ApplicationState:
-    """导图的最近访问及界面偏好；文档正文由 .mindmap 自行保存。"""
+    """导图的最近访问及界面偏好；正文由各自的目录保存。"""
 
     def __init__(self, owner):
         self.owner = owner

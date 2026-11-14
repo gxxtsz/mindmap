@@ -106,8 +106,7 @@ class MindMapSessions(QObject):
         candidate = MindMapEditorView(self)
         try:
             if path is not None:
-                # 扩展名补齐和原生格式限制统一交给文件控制器；首次写入完成后
-                # 才注册会话，错误后缀或路径冲突不会创建半初始化的标签。
+                # 首次写入完成后才注册会话，无效目录或路径冲突不会留下标签。
                 candidate.files.path = Path(path).resolve()
             if not candidate.files.save(save_as=path is None):
                 candidate.dispose()
@@ -123,7 +122,7 @@ class MindMapSessions(QObject):
             raise
 
     def open_path(self, path):
-        """仅打开原生导图；先校验再查重，额外格式不能借已有会话绕过打开限制。"""
+        """打开导图目录；相同绝对路径复用当前已打开的文档。"""
         try:
             return self._open_path(path)
         except Exception as error:
@@ -147,7 +146,7 @@ class MindMapSessions(QObject):
         candidate = MindMapEditorView(self, session_id=session_id,
                                    document=existing.document if existing is not None else None)
         try:
-            opened = existing is not None or candidate.files.open_path(source.resolve())
+            opened = existing is not None or candidate.files.open_path(source)
             # 大文件模态等待会处理关闭事件。窗口已释放时丢弃候选，避免加载结果
             # 重新注册标签，或访问已经销毁的停靠容器。
             if not opened or self.window._disposed:

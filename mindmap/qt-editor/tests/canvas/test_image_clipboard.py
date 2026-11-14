@@ -4,7 +4,7 @@ from weakref import ref
 
 import pytest
 from mindmap_core import MindMapEngine, MindMapError
-from mindmap_core.formats import encode_document, load_document, save_document
+from mindmap_core.formats import encode_document, load_directory, save_directory
 from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_editor.canvas.clipboard import (
     CLIPBOARD_MIME,
@@ -576,8 +576,8 @@ def test_pasted_image_roundtrips_and_appears_in_export(canvas, clipboard, image,
     if source == "file":
         original.unlink()
     target = tmp_path / "剪贴板图片.mindmap"
-    save_document(widget.engine.document, target)
-    reopened = load_document(target)
+    save_directory(widget.engine.document, target)
+    reopened = load_directory(target)
     assert reopened == widget.engine.document
     assert reopened.assets[reopened.nodes[created].image_id].data == data
     output = tmp_path / "剪贴板图片.png"

@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_core.formats import load_document, save_document
+from mindmap_core.formats import directory_version, load_directory, save_directory
 from PySide6.QtCore import QBuffer, QCoreApplication, QEvent, QIODevice, QPointF, Qt, QTimer
 from PySide6.QtGui import QContextMenuEvent, QImage, QInputMethodEvent
-from PySide6.QtWidgets import QApplication, QFileDialog, QMenu
+from PySide6.QtWidgets import QApplication, QMenu
 from shiboken6 import isValid
 
 
@@ -71,8 +71,8 @@ def assert_view(canvas, expected):
 @pytest.mark.parametrize("theme,compact", [("light", False), ("light", True), ("dark", False), ("dark", True)])
 def test_copy_inactive_split_tab_uses_source_position_and_view(windows, tmp_path, theme, compact, monkeypatch):
     window = windows(theme=theme, compact=compact)
-    source = new(window, tmp_path / "来源.mindmap")
-    other = new(window, tmp_path / "其他.mindmap")
+    source = new(window, tmp_path / "来源")
+    other = new(window, tmp_path / "其他")
     window.host.editor.split_token(source.id, Qt.Orientation.Horizontal)
     source.canvas.view.zoom(1.6)
     source.canvas.view.update_navigation_rect(center=QPointF(90, -40))
@@ -82,7 +82,8 @@ def test_copy_inactive_split_tab_uses_source_position_and_view(windows, tmp_path
     group, index = window.host.editor.find_token(source.id)
     window.manager.activate_document(other.id)
     recent = list(window.state.recent_files)
-    monkeypatch.setattr("mindmap_qt_editor.canvas.files.load_document", lambda *a, **k: pytest.fail("复制不能重新读盘"))
+    monkeypatch.setattr("mindmap_qt_editor.canvas.files.load_validated_directory",
+                        lambda *a, **k: pytest.fail("复制不能重新读盘"))
     copied = duplicate(window, source)
     assert copied.document is source.document and copied.engine is source.engine
     assert copied.canvas is not source.canvas and copied.panels is not source.panels
@@ -102,8 +103,8 @@ def test_copy_inactive_split_tab_uses_source_position_and_view(windows, tmp_path
 
 def test_tab_context_menu_copies_hit_tab_without_activating_it_first(windows, tmp_path):
     window = windows()
-    first = new(window, tmp_path / "甲.mindmap")
-    second = new(window, tmp_path / "乙.mindmap")
+    first = new(window, tmp_path / "甲")
+    second = new(window, tmp_path / "乙")
     group, index = window.host.editor.find_token(first.id)
     bar = group.tabBar()
 
@@ -125,7 +126,7 @@ def test_tab_context_menu_copies_hit_tab_without_activating_it_first(windows, tm
 
 def test_tab_menu_opens_a_single_document_in_a_new_split_and_releases_menu(windows, tmp_path):
     window = windows()
-    source = new(window, tmp_path / "同一份导图.mindmap")
+    source = new(window, tmp_path / "同一份导图")
     group, index = window.host.editor.find_token(source.id)
     bar = group.tabBar()
     opened = []
@@ -153,7 +154,7 @@ def test_tab_menu_opens_a_single_document_in_a_new_split_and_releases_menu(windo
 
 def test_failed_copy_rolls_back_registered_view_without_releasing_document(windows, tmp_path, monkeypatch):
     window = windows()
-    source = new(window, tmp_path / "复制失败.mindmap")
+    source = new(window, tmp_path / "复制失败")
     install = window.application.sessions._install
 
     def fail(candidate, **options):
@@ -171,7 +172,7 @@ def test_failed_copy_rolls_back_registered_view_without_releasing_document(windo
 @pytest.mark.parametrize("page_kind", ["main", "submap", "detail", "inspiration"])
 def test_edit_and_history_sync_content_without_changing_other_view(windows, tmp_path, page_kind):
     window = windows()
-    first = new(window, tmp_path / "独立视图.mindmap")
+    first = new(window, tmp_path / "独立视图")
     engine = first.engine
     owner = engine.add_child(engine.root_id, "页面入口")
     pages = {"main": None, "submap": engine.create_submap(owner),
@@ -210,9 +211,9 @@ def test_copy_from_right_split_then_paste_into_clicked_left_node(
 ):
     """跨分屏复制文字或分支后，真实点击决定粘贴目标，失焦提交不得抢回键盘焦点。"""
     window = windows()
-    target = new(window, tmp_path / "粘贴目标.mindmap")
+    target = new(window, tmp_path / "粘贴目标")
     target_node = target.engine.add_child(target.engine.root_id, "左侧目标")
-    source = duplicate(window, target) if shared_document else new(window, tmp_path / "复制来源.mindmap")
+    source = duplicate(window, target) if shared_document else new(window, tmp_path / "复制来源")
     owner = source.engine.add_child(source.engine.root_id, "右侧入口")
     page = source.engine.create_detail_page(owner)
     source.canvas.navigate_to(page)
@@ -251,7 +252,7 @@ def test_copy_from_right_split_then_paste_into_clicked_left_node(
 
 def test_inspiration_transfer_keeps_other_root_and_unrelated_page(windows, tmp_path):
     window = windows()
-    first = new(window, tmp_path / "迁移.mindmap")
+    first = new(window, tmp_path / "迁移")
     branch = first.engine.add_child(first.engine.root_id, "可迁移")
     root = first.engine.add_inspiration("保留的想法", position=(0, 0))
     second = duplicate(window, first)
@@ -273,7 +274,7 @@ def test_inspiration_transfer_keeps_other_root_and_unrelated_page(windows, tmp_p
 
 def test_removed_page_falls_back_and_can_be_undone_from_other_tab(windows, tmp_path):
     window = windows()
-    first = new(window, tmp_path / "删除页面.mindmap")
+    first = new(window, tmp_path / "删除页面")
     owner = first.engine.add_child(first.engine.root_id, "入口")
     page = first.engine.create_submap(owner)
     second = duplicate(window, first)
@@ -288,7 +289,7 @@ def test_removed_page_falls_back_and_can_be_undone_from_other_tab(windows, tmp_p
 
 def test_save_all_commits_all_drafts_and_writes_each_file_once(windows, tmp_path, monkeypatch):
     window = windows()
-    first = new(window, tmp_path / "共享保存.mindmap")
+    first = new(window, tmp_path / "共享保存")
     child = first.engine.add_child(first.engine.root_id, "子节点")
     assert first.document.save()
     second = duplicate(window, first)
@@ -301,63 +302,63 @@ def test_save_all_commits_all_drafts_and_writes_each_file_once(windows, tmp_path
 
     def write(document, path, **options):
         writes.append(path)
-        save_document(document, path, **options)
+        save_directory(document, path, **options)
 
-    monkeypatch.setattr("mindmap_application.documents.save_document", write)
+    monkeypatch.setattr("mindmap_application.documents.save_directory", write)
     assert window.save_all()
-    saved = load_document(first.files.path)
+    saved = load_directory(first.files.path)
     assert saved.root.style["font_size"] == 26 and saved.nodes[child].style["font_size"] == 32
     assert writes == [first.files.path]
     assert not first.engine.is_dirty and not second.files.is_dirty
     assert "共 1 份文档" in window.operation_log.plain_text()
 
 
-def test_save_as_rebinds_all_views_and_rejects_other_open_file(windows, tmp_path, monkeypatch):
+def test_save_as_rebinds_all_views_and_rejects_other_open_file(windows, tmp_path, monkeypatch, choose_save_directory):
     window = windows()
-    first = new(window, tmp_path / "原文件.mindmap")
+    first = new(window, tmp_path / "原文件")
     second = duplicate(window, first)
-    occupied = new(window, tmp_path / "占用.mindmap")
+    occupied = new(window, tmp_path / "占用")
     window.manager.activate_document(second.id)
     original = first.files.path
-    before = original.read_bytes()
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: (str(occupied.files.path), ""))
+    before = directory_version(original)
+    choose_save_directory(occupied.files.path)
     assert not window.save(save_as=True)
     assert first.files.path == second.files.path == original
-    target = tmp_path / "统一另存.mindmap"
-    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a: (str(target), ""))
+    target = tmp_path / "统一另存"
+    choose_save_directory(target)
     assert window.save(save_as=True)
     assert first.files.path == second.files.path == target
     assert not first.document.last_error and not second.document.last_error
     assert all(window.manager.documents[view.id]["title"] == target.stem for view in (first, second))
     second.canvas.call(lambda: second.engine.update_node(second.engine.root_id, text="新路径修改"))
     assert first.document.save()
-    assert original.read_bytes() == before
-    assert load_document(target).root.text == "新路径修改"
+    assert directory_version(original) == before
+    assert load_directory(target).root.text == "新路径修改"
 
 
 def test_shared_save_failure_preserves_all_close_targets_and_retry(windows, tmp_path, monkeypatch):
     window = windows()
-    first = new(window, tmp_path / "保存失败.mindmap")
+    first = new(window, tmp_path / "保存失败")
     second = duplicate(window, first)
     first.canvas.call(lambda: first.engine.update_node(first.engine.root_id, text="不能丢失"))
-    before = first.files.path.read_bytes()
+    before = directory_version(first.files.path)
     window.operation_log.clear()
 
     def fail(*a, **k):
         raise OSError("模拟磁盘失败")
 
-    monkeypatch.setattr("mindmap_application.documents.save_document", fail)
+    monkeypatch.setattr("mindmap_application.documents.save_directory", fail)
     assert not window.manager.close_documents([first.id, second.id])
     assert len(window.application.sessions) == 2 and not first.disposed and not second.disposed
     assert first.document.last_error == second.document.last_error and "模拟磁盘失败" in first.document.last_error
-    assert first.files.path.read_bytes() == before
+    assert directory_version(first.files.path) == before
     assert len(window.operation_log.plain_text().splitlines()) == 1
-    monkeypatch.setattr("mindmap_application.documents.save_document", save_document)
+    monkeypatch.setattr("mindmap_application.documents.save_directory", save_directory)
     assert window.manager.close_document(first.id)
     assert first.disposed and not first.document.disposed and not second.disposed
     second.canvas.call(lambda: second.engine.add_child(second.engine.root_id, "继续编辑"))
     assert second.document.timer.isActive() and second.document.save()
-    assert load_document(second.files.path).root.children
+    assert load_directory(second.files.path).root.children
     document = second.document
     assert window.manager.close_document(second.id)
     assert document.disposed and not document.timer.isActive()
@@ -365,7 +366,7 @@ def test_shared_save_failure_preserves_all_close_targets_and_retry(windows, tmp_
 
 def test_background_save_is_shared_and_newer_changes_remain_dirty(windows, tmp_path, monkeypatch):
     window = windows()
-    first = new(window, tmp_path / "共享后台.mindmap")
+    first = new(window, tmp_path / "共享后台")
     second = duplicate(window, first)
     submitted, future = [], Future()
 
@@ -379,21 +380,21 @@ def test_background_save_is_shared_and_newer_changes_remain_dirty(windows, tmp_p
     assert first.document.autosave(background=True) and second.document.autosave(background=True)
     assert len(submitted) == 1 and first.document._background_save is second.document._background_save
     second.canvas.call(lambda: second.engine.update_node(second.engine.root_id, text="后续版本"))
-    save_document(*submitted[0])
+    save_directory(*submitted[0])
     future.set_result(None)
     first.document._finish_background_save()
     assert first.engine.is_dirty and second.engine.is_dirty and second.document.timer.isActive()
-    assert load_document(second.files.path).root.text == "后台版本"
+    assert load_directory(second.files.path).root.text == "后台版本"
     assert window.manager.close_document(first.id)
     assert not second.document.disposed and second.document.save()
-    assert load_document(second.files.path).root.text == "后续版本"
+    assert load_directory(second.files.path).root.text == "后续版本"
 
 
 @pytest.mark.parametrize("composing_source", [True, False])
 def test_copy_rejects_source_or_active_ime_without_creating_view(windows, tmp_path, composing_source):
     window = windows()
-    first = new(window, tmp_path / "来源.mindmap")
-    active = new(window, tmp_path / "当前.mindmap")
+    first = new(window, tmp_path / "来源")
+    active = new(window, tmp_path / "当前")
     target = first if composing_source else active
     target.canvas.begin_edit(target.engine.root_id)
     editor = target.canvas.editor
@@ -405,7 +406,7 @@ def test_copy_rejects_source_or_active_ime_without_creating_view(windows, tmp_pa
 
 def test_shared_save_rejects_other_tab_ime_and_autosave_keeps_draft(windows, tmp_path):
     window = windows()
-    first = new(window, tmp_path / "共享候选.mindmap")
+    first = new(window, tmp_path / "共享候选")
     second = duplicate(window, first)
     first.canvas.call(lambda: first.engine.update_node(first.engine.root_id, text="已提交"))
     second.canvas.begin_edit(second.engine.root_id)
@@ -414,7 +415,7 @@ def test_shared_save_rejects_other_tab_ime_and_autosave_keeps_draft(windows, tmp
     editor.inputMethodEvent(QInputMethodEvent("候选", []))
     assert first.document.autosave()
     assert second.canvas.editor is editor and editor.composing
-    assert load_document(first.files.path).root.text == "已提交"
+    assert load_directory(first.files.path).root.text == "已提交"
     assert not first.document.save() and len(window.application.sessions) == 2
     assert not window.manager.close_documents([first.id, second.id])
     assert second.canvas.editor is editor
@@ -423,7 +424,7 @@ def test_shared_save_rejects_other_tab_ime_and_autosave_keeps_draft(windows, tmp
 def test_page_reference_edit_menu_shared_tab_and_autosave(windows, tmp_path, monkeypatch):
     """从导图桌面编辑菜单创建引用；共享标签改名后同步显示并保存原始正文。"""
     window = windows()
-    path = tmp_path / "页面引用.mindmap"
+    path = tmp_path / "页面引用"
     first = new(window, path)
     engine = first.engine
     source = engine.add_child(engine.root_id, "保留的原文")
@@ -450,7 +451,7 @@ def test_page_reference_edit_menu_shared_tab_and_autosave(windows, tmp_path, mon
     second.canvas.call(second.canvas.finish_edit)
     assert first.canvas.document_view.nodes[source].text == "另一标签中的新标题"
     assert first.document.autosave()
-    saved = load_document(path)
+    saved = load_directory(path)
     assert saved.nodes[source].text == "保留的原文"
     assert saved.nodes[source].page_reference_root_id == root
     assert saved.nodes[root].text == "另一标签中的新标题"
@@ -469,7 +470,7 @@ def test_page_reference_edit_menu_shared_tab_and_autosave(windows, tmp_path, mon
 @pytest.mark.parametrize("inspiration", [False, True])
 def test_other_view_updates_keep_live_text_and_input_method_draft(windows, tmp_path, inspiration):
     window = windows()
-    first = new(window, tmp_path / "保留编辑.mindmap")
+    first = new(window, tmp_path / "保留编辑")
     if inspiration:
         root = first.engine.add_inspiration("原想法", position=(0, 0))
         first.canvas.show_inspiration(root)
@@ -491,7 +492,7 @@ def test_other_view_updates_keep_live_text_and_input_method_draft(windows, tmp_p
 
 def test_image_completion_and_properties_keep_other_view_selection(windows, tmp_path):
     window = windows()
-    first = new(window, tmp_path / "共享图片.mindmap")
+    first = new(window, tmp_path / "共享图片")
     child = first.engine.add_child(first.engine.root_id, "选中主题")
     second = duplicate(window, first)
     second.canvas.select_nodes([child])
@@ -518,7 +519,7 @@ def test_deleted_or_replaced_document_clears_invalid_shared_editor(windows, tmp_
     from mindmap_core import MindMapDocument
 
     window = windows()
-    first = new(window, tmp_path / "失效编辑.mindmap")
+    first = new(window, tmp_path / "失效编辑")
     child = first.engine.add_child(first.engine.root_id, "将被删除")
     second = duplicate(window, first)
     second.canvas.begin_edit(child)
@@ -533,7 +534,7 @@ def test_deleted_or_replaced_document_clears_invalid_shared_editor(windows, tmp_
 
 def test_restart_restores_all_shared_views_and_loads_file_once(windows, tmp_path, monkeypatch):
     window = windows()
-    first = new(window, tmp_path / "恢复共享.mindmap")
+    first = new(window, tmp_path / "恢复共享")
     owner = first.engine.add_child(first.engine.root_id, "子图入口")
     page = first.engine.create_submap(owner)
     second = duplicate(window, first)
@@ -555,13 +556,13 @@ def test_restart_restores_all_shared_views_and_loads_file_once(windows, tmp_path
     assert len({item["path"] for item in payload["views"]}) == 1
     from mindmap_qt_editor.canvas import files
 
-    original, loads = files.load_document, []
+    original, loads = files.load_validated_directory, []
 
     def load(path, **options):
         loads.append(path)
         return original(path, **options)
 
-    monkeypatch.setattr(files, "load_document", load)
+    monkeypatch.setattr(files, "load_validated_directory", load)
     restored = windows(storage=storage, restore=True)
     assert len(loads) == 1 and len(restored.application.sessions) == 3
     assert restored.application.active_session.id == third.id
@@ -575,11 +576,11 @@ def test_restart_restores_all_shared_views_and_loads_file_once(windows, tmp_path
 
 def test_restore_preserves_each_view_for_unavailable_shared_path(windows, tmp_path):
     window = windows()
-    source = new(window, tmp_path / "丢失.mindmap")
+    source = new(window, tmp_path / "丢失")
     duplicate(window, source)
     records = window.documents.snapshot()
     assert window.close()
-    source.files.path.unlink()
+    source.files.path.rename(tmp_path / "离线副本")
     restored = windows(restore=False)
     assert len(restored.documents.restore(records, source.id)) == len(records)
     assert not len(restored.application.sessions)
