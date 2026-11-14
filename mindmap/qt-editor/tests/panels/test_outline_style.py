@@ -4,7 +4,7 @@ import pytest
 from mindmap_core import MindMapDocument, MindMapEngine, Theme
 from mindmap_qt_editor.panels.outline import OutlinePanel
 from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QAccessible, QColor
 from PySide6.QtWidgets import QApplication
 
 
@@ -93,6 +93,32 @@ def test_custom_triangle_keeps_native_click_and_keyboard_expansion(outline, qtbo
     qtbot.keyClick(tree, Qt.Key.Key_Left if rtl else Qt.Key.Key_Right)
     assert tree.isExpanded(index)
     assert engine.document == before and engine.revision == revision
+
+
+def test_collapse_refreshes_accessible_row_indices(outline, qtbot):
+    """先读取展开后的辅助功能行，再收起分支，验证后续兄弟节点取得新的行号。"""
+    tree, engine, (group, first, last, sibling) = outline
+    previously_active = QAccessible.isActive()
+    QAccessible.setActive(True)
+    try:
+        accessible_tree = QAccessible.queryAccessibleInterface(tree)
+
+        def accessible_labels():
+            labels = []
+            for position in range(accessible_tree.childCount()):
+                row = accessible_tree.child(position)
+                if row.role() == QAccessible.Role.TreeItem:
+                    assert accessible_tree.indexOfChild(row) == position
+                    labels.append(row.text(QAccessible.Text.Name))
+            return labels
+
+        assert accessible_labels() == [engine.get_node(key).text for key in (engine.root_id, group, first, last, sibling)]
+        index = tree.tree_model.index_for(group)
+        qtbot.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=marker_center(tree, index))
+        assert not tree.isExpanded(index)
+        assert accessible_labels() == [engine.get_node(key).text for key in (engine.root_id, group, sibling)]
+    finally:
+        QAccessible.setActive(previously_active)
 
 
 @pytest.mark.parametrize("theme", [Theme(), Theme.dark()])

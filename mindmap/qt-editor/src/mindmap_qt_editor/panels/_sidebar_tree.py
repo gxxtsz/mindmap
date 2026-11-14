@@ -5,7 +5,7 @@ from __future__ import annotations
 from math import ceil, floor
 
 from PySide6.QtCore import QEvent, QPointF, QRect, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QAccessible, QAccessibleTableModelChangeEvent, QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QAbstractItemView, QTreeView
 
 from mindmap_qt_editor.theme import UiColors, apply_ui_palette, scrollbar_styles
@@ -35,6 +35,18 @@ class SidebarTreeView(QTreeView):
         self.setRootIsDecorated(True)
         self.setMouseTracking(True)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.collapsed.connect(self._refresh_accessible_rows)
+
+    def _refresh_accessible_rows(self) -> None:
+        """收起分支后，让 Qt 按当前可见行重新建立辅助功能索引。
+
+        Qt 6.12 的单分支收起会移除可见子行，却没有更新按行号缓存的辅助功能条目。
+        Windows UI 自动化遍历后续兄弟项时，旧条目可能把遍历带回前面的行，阻塞界面。
+        在 Qt 发出收起信号时立即使缓存失效，保留原生展开、收起、选择和键盘操作。
+        """
+        if QAccessible.isActive():
+            event = QAccessibleTableModelChangeEvent(self, QAccessibleTableModelChangeEvent.ModelChangeType.ModelReset)
+            QAccessible.updateAccessibility(event)
 
     def set_tree_colors(self, colors: UiColors) -> bool:
         """应用侧栏底色、条目状态、分支和滚动条配色，返回色板是否变化。
