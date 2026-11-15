@@ -49,6 +49,8 @@ engine.undo()
 
 从 `mindmap_core.formats` 导入 `load_directory` 和 `save_directory`，传入导图根目录。保存接收完整文档快照，并返回 `DirectoryVersion`。下次写入可通过 `expected_version` 检测外部修改，传入 `None` 则要求新建目录。
 
+保存已有导图目录时，可将当前快照、最近一次打开或落盘的快照及其目录版本传给 `prepare_directory_update`。将返回的目录更新交给 `save_directory`，只编码受影响的页面及变更的清单和资源。成功返回后，使用本次实际写入的快照和版本作为下次基准。
+
 目录格式版本为 1。主图和灵感区分别存于 `pages/main.json` 和 `pages/inspiration.json`，子导图及详情页按稳定 ID 定位。页面内按节点 ID 排列，实际子节点顺序由 `children` 记录。图片使用 `assets/<SHA-256>`，文件清单及全局配置在 `mindmap.json`。目录加载时会校验页面归属、跨页关系和图片完整性。
 
 目录读写使用同路径进程锁。保存暂存于同卷的父目录，写入中断时由下一次打开或保存恢复。其他程序直接修改同一工作区时，应用在提交前通过内容摘要检查是否发生冲突。
@@ -370,7 +372,7 @@ engine.undo()
 
 - 冻结的凭据不等于递归冻结文档，编码器不得修改 `snapshot.document`；需要可修改副本时使用 `engine.document`。
 
-- 后台编码使用 `snapshot.document`。实际写入成功后，在引擎线程将原始凭据传给 `mark_saved_snapshot(snapshot)`。返回 `True` 表示标记该历史版本，后续编辑仍保持未保存。
+- 将目录更新或 `snapshot.document` 交给后台编码。实际写入成功后，在引擎线程将原始凭据传给 `mark_saved_snapshot(snapshot)`。返回 `True` 表示标记该历史版本，后续编辑仍保持未保存。
 
 - 其他引擎或替换文档前的凭据返回 False，不发送保存事件；错误类型抛出 TypeError。
 

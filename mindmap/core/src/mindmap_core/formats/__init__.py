@@ -1,12 +1,14 @@
 """独立文档格式包；算法是否已安装不影响文档的解析与保存。"""
 
 from .directory import (
+    DirectoryUpdate,
     check_directory_version,
     directory_size,
     directory_version,
     guard_directory_version,
     load_directory,
     load_validated_directory,
+    prepare_directory_update,
     save_directory,
 )
 from .directory_storage import DirectoryVersion, DirectoryVersionConflict, is_directory_member
@@ -23,6 +25,7 @@ from .schema import SCHEMA_VERSION, from_dict, to_dict
 __all__ = [
     "MAX_ARCHIVE_BYTES",
     "SCHEMA_VERSION",
+    "DirectoryUpdate",
     "DirectoryVersion",
     "DirectoryVersionConflict",
     "JsonCodec",
@@ -49,6 +52,7 @@ __all__ = [
     "load_validated_directory",
     "load_validated_document",
     "loads",
+    "prepare_directory_update",
     "save_document",
     "save_directory",
     "supports_owned_load",

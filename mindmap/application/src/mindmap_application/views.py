@@ -84,7 +84,7 @@ class MindMapEditorView(QObject):
         self.canvas.document_changed.connect(self._sync_recent_page)
         self.files = MindMapFileController(self.canvas, self.panels, owner.window.context.ui.parent,
                                            writer=self.document._write, state=self.document.file_state,
-                                           background_open=True, versioned_writer=True)
+                                           background_open=True, incremental_writer=True)
         self.canvas.error_occurred.connect(self._canvas_failed)
         self.files.message.connect(self._file_message)
         self.document.attach(self)

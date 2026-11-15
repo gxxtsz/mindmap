@@ -26,6 +26,22 @@ SCHEMA_VERSION = 8
 _BASE_SCHEMA_VERSION = 5
 
 
+def _node_record(node: Node) -> dict:
+    """生成原生节点记录，供目录页和完整文档编码共用。
+
+    记录拥有独立的嵌套数据。编码时从记录省略空字段并清除图页的临时筛选值，
+    借用的节点归引擎或调用方所有。
+    """
+    record = asdict(node)
+    if node.page_reference_root_id is None:
+        record.pop("page_reference_root_id")
+    if not node.extension_pages:
+        record.pop("extension_pages")
+    elif graph := record["extension_pages"].get(GRAPH_PAGE_TYPE):
+        graph["data"]["hidden_node_ids"] = []
+    return record
+
+
 def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
     """转换为可独立交换的 JSON 对象。
 
@@ -48,20 +64,12 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
     nodes = []
     version = _BASE_SCHEMA_VERSION
     for node in document.nodes.values():
-        record = asdict(node)
-        if node.page_reference_root_id is None:
-            record.pop("page_reference_root_id")
-        else:
+        record = _node_record(node)
+        if node.extension_pages:
+            graph = record["extension_pages"].get(GRAPH_PAGE_TYPE)
+            version = max(version, 8 if graph and graph["version"] == 2 else 7)
+        elif node.page_reference_root_id is not None:
             version = max(version, 6)
-        if not node.extension_pages:
-            record.pop("extension_pages")
-        else:
-            version = max(version, 7)
-            # asdict 已复制嵌套数据，清理旧筛选不会修改文档快照。
-            if graph := record["extension_pages"].get(GRAPH_PAGE_TYPE):
-                graph["data"]["hidden_node_ids"] = []
-                if graph["version"] == 2:
-                    version = 8
         nodes.append(record)
     return {
         "format": "mindmap",

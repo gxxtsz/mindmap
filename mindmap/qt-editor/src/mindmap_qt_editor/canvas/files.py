@@ -6,14 +6,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from mindmap_core import MindMapDocument, MindMapEngine, MindMapError
+from mindmap_core import MindMapDocument, MindMapEngine, MindMapError, SaveSnapshot
 from mindmap_core.formats import (
+    DirectoryUpdate,
     DirectoryVersion,
     DirectoryVersionConflict,
     check_directory_version,
     directory_size,
     directory_version,
     load_validated_directory,
+    prepare_directory_update,
     save_directory,
     save_document,
 )
@@ -52,10 +54,12 @@ class MindMapFileState:
     立即读取新路径。宿主负责统一保存调度和状态通知，不能把不同引擎绑定到同一
     实例。未显式传入时，每个控制器创建独立状态，保持原有单画布用法。
     version 由已打开或实际写入的目录建立，冲突持续到重新加载或成功写入为止。
+    saved_snapshot 对应该磁盘版本，为各标签后续保存提供共同的页面比较基准。
     """
 
     path: Path | None = None
     version: DirectoryVersion | None = field(default=None, init=False)
+    saved_snapshot: SaveSnapshot | None = field(default=None, init=False, repr=False, compare=False)
     conflict: bool = field(default=False, init=False)
 
 
@@ -73,7 +77,7 @@ class MindMapFileController(QObject):
     error_occurred = Signal(str)
     def __init__(self, canvas, panels: PendingEdits, dialog_parent=None, *, writer=save_directory,
                  state: MindMapFileState | None = None, background_open: bool = False,
-                 versioned_writer: bool = False):
+                 versioned_writer: bool = False, incremental_writer: bool = False):
         """绑定视图与写入器，可通过 state 共享路径；状态实例由调用方和控制器共同持有。
 
         省略 state 时行为与原接口一致；共享状态不自动共享引擎或提交其他视图输入，
@@ -85,12 +89,16 @@ class MindMapFileController(QObject):
         versioned_writer=True 表示初始注入的写入器遵循 save_directory 的
         expected_version 及返回值契约，负责在提交前再次核验版本。其他写入器接收
         文档和目标路径，由控制器先检查已绑定目录。
+        incremental_writer=True 允许初始注入的原生写入器接收只读完整快照或
+        DirectoryUpdate，且遵守版本契约。内置目录写入器默认启用此能力。后续
+        换用其他写入器时继续传入独立可写的完整文档。
         """
         super().__init__(dialog_parent)
         self.canvas, self.engine, self.panels = canvas, canvas.engine, panels
         self.dialog_parent = dialog_parent
         self.writer = writer
-        self._versioned_writer = writer if versioned_writer else _SAVE_DIRECTORY
+        self._versioned_writer = writer if versioned_writer or incremental_writer else _SAVE_DIRECTORY
+        self._incremental_writer = writer if incremental_writer else _SAVE_DIRECTORY
         self.state = state if state is not None else MindMapFileState()
         self._background_open = background_open
         self._opening = False
@@ -112,6 +120,7 @@ class MindMapFileController(QObject):
         if self.state.path != value:
             self.state.path = value
             self.state.version = None
+            self.state.saved_snapshot = None
             self.state.conflict = False
 
     @property
@@ -227,17 +236,23 @@ class MindMapFileController(QObject):
             check_directory_version(source, version)
         except DirectoryVersionConflict as exc:
             raise MindMapError(f"读取文档失败：{exc}，请重试") from exc
+        snapshot = None
         if (type(self.engine) is MindMapEngine
                 and getattr(self.engine.replace_document, "__func__", None) is _REPLACE_DOCUMENT):
             # 目录解码结果尚未发布，可在预检后直接交给标准引擎。
             if (validation is not None
                     and getattr(self.engine.adopt_document, "__func__", None) is _ADOPT_DOCUMENT):
+                generation = self.engine.document_generation
                 self.engine.adopt_document(document, validation=validation)
+                # 原样接管的文档可以直接作为落盘基准。装载回调若已经编辑或
+                # 替换文档，由下一次完整写入重新建立基准。
+                if self.engine.document_generation == generation + 1 and not self.engine.is_dirty:
+                    snapshot = self.engine.capture_save_snapshot()
             else:
                 self.engine.adopt_document(document)
         else:
             self.engine.replace_document(document)
-        self.accept_directory_version(source, version)
+        self.accept_directory_version(source, version, snapshot=snapshot)
         # 初始视图使用正常倍率；由画布等待实际显示后居中，避免大型导图被整图
         # 适应压缩到无法阅读，也避免在会话安装前使用隐藏视口的占位尺寸。
         self.canvas.reset_view()
@@ -313,9 +328,41 @@ class MindMapFileController(QObject):
     def _is_bound_target(self, target: Path) -> bool:
         return self.path is not None and (target == self.path or target.resolve() == self.path.resolve())
 
-    def accept_directory_version(self, target: Path, version: DirectoryVersion) -> None:
-        """记录已打开或写入的目录版本，解除冲突并通知所有关联视图。"""
+    def capture_directory_save(
+        self, target: Path, expected: DirectoryVersion | None,
+    ) -> tuple[SaveSnapshot, MindMapDocument | DirectoryUpdate]:
+        """在界面线程捕获保存凭据及交给原生编码器的数据。
+
+        目标与已绑定目录一致且版本对应已持有的快照时生成目录更新，其余路径交付
+        完整只读快照。后台只传输第二项，第一项留在界面线程，用于磁盘提交后的
+        历史标记和下一次增量比较。调用前须确定保存目标和当前磁盘预期版本。
+        """
+        snapshot = self.engine.capture_save_snapshot()
+        previous = self.state.saved_snapshot
+        if (previous is not None and expected is not None and expected == self.state.version
+                and self._is_bound_target(target)):
+            update = prepare_directory_update(snapshot, previous, expected)
+            if update is not None:
+                return snapshot, update
+        return snapshot, snapshot.document
+
+    def accept_directory_version(
+        self, target: Path, version: DirectoryVersion, *,
+        snapshot: SaveSnapshot | None = None, written: bool = False,
+    ) -> None:
+        """交付加载或写入成功的实际目录版本及对应快照，解除冲突并通知各标签。
+
+        写入时传入 written=True，由引擎标记实际落盘的快照。自定义写入器保存
+        完整文档时标记当前游标。先更新共享磁盘状态再通知引擎
+        订阅者，使回调中的新编辑能够从最新落盘基准继续保存。
+        """
         self.state.path, self.state.version, self.state.conflict = target, version, False
+        self.state.saved_snapshot = snapshot
+        if written:
+            if snapshot is None:
+                self.engine.mark_saved()
+            else:
+                self.engine.mark_saved_snapshot(snapshot)
         self.state_changed.emit()
 
     def _write_snapshot(self, target, *, only_if_dirty=False, restore_missing=False, confirm_overwrite=False):
@@ -339,7 +386,11 @@ class MindMapFileController(QObject):
                 check_directory_version(target, expected)
                 self.state.conflict = False
                 return True
-            if self.writer == self._versioned_writer:
+            snapshot = None
+            if self.writer == self._incremental_writer and type(self.engine) is MindMapEngine:
+                snapshot, payload = self.capture_directory_save(target, expected)
+                version = self.writer(payload, target, expected_version=expected)
+            elif self.writer == self._versioned_writer:
                 version = self.writer(self.engine.document, target, expected_version=expected)
             else:
                 check_directory_version(target, expected)
@@ -355,9 +406,7 @@ class MindMapFileController(QObject):
         except (MindMapError, OSError) as exc:
             self.report_error(exc)
             return False
-        self.state.path = target
-        self.engine.mark_saved()
-        self.accept_directory_version(target, version)
+        self.accept_directory_version(target, version, snapshot=snapshot, written=True)
         return True
 
     def export_dialog(self, format_id: str = "svg"):

@@ -279,7 +279,7 @@ class MindMapDocumentHandle(QObject):
         self.deleteLater()
 
     def _write(self, document, path, **kwargs):
-        """所有写入先检查其他会话的文件归属，再复用引擎原子写入，禁止跨标签覆盖。"""
+        """检查目标归属后，原子提交原生完整快照或目录更新，防止跨会话覆盖。"""
         self._check_target_owner(path)
         return save_directory(document, path, **kwargs)
 
@@ -341,7 +341,8 @@ class MindMapDocumentHandle(QObject):
     def autosave(self, *, background=False):
         """保存已提交版本，不结束编辑、移动焦点或提交草稿。
 
-        计时器对大图启用后台写入，只在 GUI 线程捕获稳定快照。
+        计时器对大图启用后台写入。界面线程捕获稳定快照并准备受影响的目录成员，
+        后台进程负责编码及写入。
         直接调用默认同步，保留显式保存、测试及宿主调用的成功/失败返回语义。
         自定义写入器及含有扩展实体的快照继续同步保存。
         """
@@ -357,13 +358,12 @@ class MindMapDocumentHandle(QObject):
                 target = self.files.validate_save_path(self.files.path)
                 self._check_target_owner(target)
                 expected = self.files.expected_write_version(target)
-                snapshot = self.engine.capture_save_snapshot()
+                snapshot, payload = self.files.capture_directory_save(target, expected)
                 if not can_process_snapshot(snapshot.document):
                     return self.files.save_committed()
                 executor = _save_pool()
                 try:
-                    future = executor.submit(save_snapshot, snapshot.document, target,
-                                             expected_version=expected)
+                    future = executor.submit(save_snapshot, payload, target, expected_version=expected)
                 except BrokenProcessPool:
                     _discard_save_pool(executor)
                     raise MindMapError("后台保存进程不可用，请重新保存") from None
@@ -409,10 +409,8 @@ class MindMapDocumentHandle(QObject):
                 error = exc if isinstance(exc, DirectoryVersionConflict) else f"后台保存失败：{exc}"
                 self.files.report_error(error)
             return False
-        if not self.disposed:
-            self.engine.mark_saved_snapshot(snapshot)
-            if self.files.path == target:
-                self.files.accept_directory_version(target, version)
+        if not self.disposed and self.files.path == target:
+            self.files.accept_directory_version(target, version, snapshot=snapshot, written=True)
         return True
 
 

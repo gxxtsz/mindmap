@@ -13,6 +13,7 @@ import pytest
 from mindmap_app.app import build_window
 from mindmap_core import LayoutConfig, MindMapDocument, MindMapError, Node, Theme
 from mindmap_core.formats import (
+    DirectoryUpdate,
     directory_size,
     directory_version,
     load_directory,
@@ -94,13 +95,14 @@ def controlled_save_executor(monkeypatch):
 def test_real_background_process_saves_without_running_in_gui_process(
     empty_window, tmp_path, qtbot, monkeypatch,
 ):
-    """真实 spawn/pythonw 入口验收，覆盖 Windows venv 重定向及进程间模型传输。"""
+    """真实 spawn/pythonw 入口验收，覆盖 Windows venv 重定向及目录更新的进程间传输。"""
     import mindmap_application.documents as sessions_module
 
     # 模拟导图桌面从包入口启动。spawn 会跳过包的 __main__ 模块，避免在无标准输出的
     # pythonw 进程中重载 PyCharm 测试启动器；实际进程创建、快照传输及写盘照常执行。
     monkeypatch.setattr(sys.modules["__main__"], "__spec__", find_spec("mindmap_app.__main__"))
     session = create_large_session(empty_window, tmp_path / "真实后台进程")
+    assert session.files.save()
     try:
         session.engine.update_node(session.engine.root_id, text="进程保存成功")
         session.document.timer.stop()
@@ -284,15 +286,18 @@ def test_explicit_save_waits_for_old_background_write_before_writing_new_version
     empty_window, tmp_path, monkeypatch, qtbot, controlled_save_executor
 ):
     session = create_large_session(empty_window, tmp_path / "保存次序")
+    assert session.files.save()
     started, release = Event(), Event()
     ui_thread, writes = get_ident(), []
 
     def held_writer(document, path, **options):
-        writes.append(document.root.text)
+        assert isinstance(document, DirectoryUpdate)
         if get_ident() != ui_thread:
             started.set()
             assert release.wait(5)
-        save_directory(document, path, **options)
+        version = save_directory(document, path, **options)
+        writes.append(load_directory(path).root.text)
+        return version
 
     monkeypatch.setattr("mindmap_application.documents.save_directory", held_writer)
     monkeypatch.setattr("mindmap_application.documents.save_snapshot", held_writer)
