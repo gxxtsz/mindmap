@@ -32,6 +32,13 @@ class Settings:
     def sync(self):
         self.store.save({"schema_version": 1, "values": self.values})
 
+    def set_and_sync(self, key, value):
+        """提交单个偏好后再更新共享内存，写入失败时保留原值。"""
+        namespace = {**self.values.get(self.namespace, {}), key: deepcopy(value)}
+        values = {**self.values, self.namespace: namespace}
+        self.store.save({"schema_version": 1, "values": values})
+        self.values[self.namespace] = namespace
+
     @classmethod
     def load(cls, store, initial):
         """坏设置备份后降级启动；备份失败则拒绝后续覆盖，避免丢失可修复内容。"""

@@ -9,7 +9,10 @@ from PySide6.QtWidgets import QApplication
 
 from .migration import migrate_legacy
 
-PRODUCT_CONFIG = DesktopConfig(application_id="mindmap", title="思维导图", icon="mindmap")
+PRODUCT_CONFIG = DesktopConfig(
+    application_id="mindmap", title="思维导图", icon="mindmap",
+    reserved_shortcuts=(("适应窗口", "Ctrl+0"), ("编辑文字", "F2")),
+)
 
 
 def default_storage_dir() -> Path:

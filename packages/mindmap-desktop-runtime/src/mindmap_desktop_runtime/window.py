@@ -6,14 +6,18 @@ from pathlib import Path
 from mindmap_desktop_api import ApplicationContext, MindMapApplication, OperationStatus
 from mindmap_desktop_api.qt import MenuLocation
 from PySide6.QtCore import QEvent, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QKeySequenceEdit,
     QLabel,
     QMenu,
     QMessageBox,
     QPushButton,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -22,7 +26,7 @@ from .commands import EditCommandRouter
 from .config import DesktopConfig
 from .documents import DocumentService, MissingView
 from .operation_log import OperationLogPanel
-from .palette import colors_from_theme
+from .palette import apply_ui_palette, colors_from_theme
 from .recent_files import RecentFilesButton
 from .services import ApplicationDocuments, CommandRegistry, UiService
 from .state import SessionLayoutStore, Settings, StateStore
@@ -30,6 +34,11 @@ from .storage import JsonLayoutStore
 from .ui._window_placement import restore_window_placement
 from .ui.docking import DockManager, DockPosition, Theme, ToolWindowSpec
 from .ui.shell import ActionSpec, AppSpec, DesktopWindow
+from .ui.shell._windows_hotkey import WindowsVisibilityShortcut
+
+_VISIBILITY_SHORTCUT = "window/visibility_shortcut"
+_SHORTCUT_TITLE = "显示/隐藏窗口快捷键"
+_PORTABLE_TEXT = QKeySequence.SequenceFormat.PortableText
 
 
 class WelcomePage(QWidget):
@@ -75,6 +84,8 @@ class DesktopRuntimeWindow(DesktopWindow):
         self._disposed = False
         self._ready = False
         self._opening_dropped_files = False
+        self._visibility_shortcut = None
+        self._visibility_tray = None
         self.application = None
         self.command_specs = {}
         self.menu_contributions = []
@@ -156,7 +167,17 @@ class DesktopRuntimeWindow(DesktopWindow):
         elif settings_error:
             self.show_status_message(settings_error)
         self.setAcceptDrops(True)
-        QApplication.instance().installEventFilter(self)
+        app = QApplication.instance()
+        app.installEventFilter(self)
+        self._visibility_shortcut = WindowsVisibilityShortcut.create_for_platform()
+        if self._visibility_shortcut is not None:
+            self._visibility_shortcut.activated.connect(self._toggle_window_visibility)
+            app.aboutToQuit.connect(self._visibility_shortcut.release)
+            self.destroyed.connect(self._visibility_shortcut.release)
+            try:
+                self._apply_visibility_shortcut(self._read_visibility_shortcut())
+            except (OSError, ValueError) as error:
+                self.show_status_message(f"窗口快捷键未启用：{error}")
 
     def _make_context(self, options):
         """建立导图主体独享的服务。生命周期与主窗口一致，不存在业务应用注册表。"""
@@ -286,6 +307,13 @@ class DesktopRuntimeWindow(DesktopWindow):
         """保留已声明分区的顺序，补齐导图桌面常驻的文件、编辑和视图入口。"""
         return tuple(dict.fromkeys((*super()._menu_group_titles(), "文件", "编辑", "视图")))
 
+    def appearance_menu(self) -> QMenu:
+        menu = super().appearance_menu()
+        if self._visibility_shortcut is not None:
+            menu.addSeparator()
+            menu.addAction(_SHORTCUT_TITLE + "…", self._edit_visibility_shortcut)
+        return menu
+
     def main_menu(self) -> QMenu:
         """按宿主分区装配临时主菜单，标准编辑动作始终由导图桌面摆放。"""
         self.edit_commands.refresh()
@@ -406,6 +434,137 @@ class DesktopRuntimeWindow(DesktopWindow):
         self.settings.setValue("window/always_on_top", value)
         self.settings.sync()
 
+    def _read_visibility_shortcut(self) -> QKeySequence:
+        value = self.settings.value(_VISIBILITY_SHORTCUT, "")
+        if isinstance(value, str):
+            sequence = QKeySequence.fromString(value, _PORTABLE_TEXT)
+            if not value or (sequence.count() == 1 and sequence.toString(_PORTABLE_TEXT)):
+                return sequence
+        raise ValueError("已保存的窗口快捷键无效，请重新设置。")
+
+    def _apply_visibility_shortcut(self, sequence: QKeySequence, *, save=False) -> None:
+        if not sequence.isEmpty():
+            for title, shortcut in self.config.reserved_shortcuts:
+                if sequence.matches(QKeySequence(shortcut)) != QKeySequence.SequenceMatch.NoMatch:
+                    raise ValueError(f"该组合键已用于「{title}」。")
+            for action in (*self.manager.actions.values(), *self.findChildren(QAction)):
+                if any(sequence.matches(shortcut) != QKeySequence.SequenceMatch.NoMatch
+                       for shortcut in action.shortcuts()):
+                    raise ValueError(f"该组合键已用于「{action.text()}」。")
+
+        def persist():
+            value = sequence.toString(_PORTABLE_TEXT)
+            if value != self.settings.value(_VISIBILITY_SHORTCUT, ""):
+                try:
+                    self.settings.set_and_sync(_VISIBILITY_SHORTCUT, value)
+                except (OSError, ValueError, TypeError) as error:
+                    raise OSError(f"快捷键设置未能保存：{error}") from error
+
+        self._visibility_shortcut.replace(sequence, persist if save else None)
+
+    def _edit_visibility_shortcut(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(_SHORTCUT_TITLE)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        colors = colors_from_theme(self.manager.theme)
+        apply_ui_palette(dialog, colors)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel("按下要使用的快捷键，例如 F3。清空后保存即可禁用。", dialog)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        field = QKeySequenceEdit(dialog)
+        field.setAccessibleName(_SHORTCUT_TITLE)
+        field.setMaximumSequenceLength(1)
+        field.setClearButtonEnabled(True)
+        layout.addWidget(field)
+        error_label = QLabel(dialog)
+        error_label.setStyleSheet(f"color: {colors.error};")
+        error_label.setWordWrap(True)
+        error_label.hide()
+        layout.addWidget(error_label)
+        try:
+            field.setKeySequence(self._read_visibility_shortcut())
+        except ValueError as error:
+            error_label.setText(str(error))
+            error_label.show()
+        field.keySequenceChanged.connect(error_label.hide)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+                                   parent=dialog)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        layout.addWidget(buttons)
+
+        def save():
+            try:
+                self._apply_visibility_shortcut(field.keySequence(), save=True)
+            except (OSError, ValueError) as error:
+                error_label.setText(str(error))
+                error_label.show()
+            else:
+                dialog.accept()
+
+        buttons.accepted.connect(save)
+        buttons.rejected.connect(dialog.reject)
+        field.setFocus()
+        dialog.open()
+
+    def _toggle_window_visibility(self) -> None:
+        shortcut = self._visibility_shortcut
+        if self._disposed or self.manager.closing or shortcut is None:
+            return
+        modal = QApplication.activeModalWidget()
+        if modal is not None and not modal.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen):
+            shortcut.activate_window(modal)
+            return
+        if shortcut.activate_native_dialog(self) or modal is not None:
+            return
+        if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+            self._hide_to_tray()
+            return
+        self._restore_visibility_window()
+
+    def _hide_to_tray(self) -> None:
+        icon = self.windowIcon()
+        if icon.isNull() or not QSystemTrayIcon.isSystemTrayAvailable():
+            self.showMinimized()
+            return
+        tray = self._visibility_tray
+        if tray is None:
+            tray = QSystemTrayIcon(self)
+            tray.setToolTip(self.config.title)
+            menu = QMenu(self)
+            menu.addAction("显示窗口", self._restore_visibility_window)
+            menu.addAction("退出", self._quit_from_tray)
+            tray.setContextMenu(menu)
+            tray.activated.connect(self._on_tray_activated)
+            self._visibility_tray = tray
+        tray.setIcon(icon)
+        tray.show()
+        self.hide()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._restore_visibility_window()
+
+    def _restore_visibility_window(self) -> bool:
+        shortcut = self._visibility_shortcut
+        if self._disposed or self.manager.closing or shortcut is None:
+            return False
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        shortcut.activate_window(self)
+        return True
+
+    def _quit_from_tray(self) -> None:
+        if self._restore_visibility_window():
+            self.close()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._visibility_tray is not None:
+            self._visibility_tray.hide()
+
     def confirm_close(self, view):
         return QMessageBox.question(self, "保存修改", f"是否保存“{view.title}”的修改？",
                                     QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
@@ -467,6 +626,14 @@ class DesktopRuntimeWindow(DesktopWindow):
         if self._disposed:
             return
         self._disposed = True
+        if self._visibility_tray is not None:
+            self._visibility_tray.hide()
+            self._visibility_tray.contextMenu().deleteLater()
+            self._visibility_tray.deleteLater()
+            self._visibility_tray = None
+        if self._visibility_shortcut is not None:
+            self._visibility_shortcut.release()
+            self._visibility_shortcut = None
         QApplication.instance().removeEventFilter(self)
         self.edit_commands.dispose()
         self.state.restoring = True

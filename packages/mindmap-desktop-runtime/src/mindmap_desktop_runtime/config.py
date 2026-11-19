@@ -19,6 +19,8 @@ class DesktopConfig:
     application_id: str = "mindmap"
     title: str = "思维导图"
     icon: str = "mindmap"
+    # 名称和组合键，用于检查文档打开后才创建的动作。
+    reserved_shortcuts: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         """应用标识必须是单个目录名，防止默认位置跳出系统配置目录。"""
