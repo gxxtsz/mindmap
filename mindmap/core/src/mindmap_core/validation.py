@@ -12,6 +12,9 @@ from .errors import MindMapError
 from .models import InspirationArea, MindMapForestView, MindMapPage, Theme
 from .node_pages import GRAPH_PAGE_TYPE, graph_members, graph_page_id, validate_extension_pages
 
+MIN_FIXED_WIDTH = 40
+MAX_FIXED_WIDTH = 1200
+
 
 def validate_document(document, *, page_only=False) -> None:
     """验证树、引用、数值和资源。失败时抛出 MindMapError，不修补损坏输入。"""
@@ -160,6 +163,8 @@ def validate_node(document, node_id, node, *, json_data=True):
     for key in ("font_size", "width", "border_width"):
         if key in node.style:
             positive_number(node.style[key], f"节点样式 {key}", allow_zero=key == "border_width")
+    if "fixed_width" in node.style:
+        validate_fixed_width(node.style["fixed_width"])
     for key in ("font_family", "text_color", "background", "border_color"):
         if key in node.style and not isinstance(node.style[key], str):
             raise MindMapError(f"节点样式 {key} 必须为字符串")
@@ -396,3 +401,13 @@ def finite(value: Any) -> bool:
 def positive_number(value: Any, name: str, *, allow_zero: bool = False) -> None:
     if not finite(value) or (value < 0 if allow_zero else value <= 0):
         raise MindMapError(f"{name}必须为{'非负' if allow_zero else '正'}有限数值")
+
+
+def validate_fixed_width(value: object) -> None:
+    """校验树节点或图节点给定的固定正文宽度，单位为逻辑像素。
+
+    只接受位于共享范围内的有限数值。自动宽度由调用方省略字段表示，传入非法值时
+    抛出 MindMapError。查询不改写节点或输入值，可在原生解码及引擎事务中使用。
+    """
+    if not finite(value) or not MIN_FIXED_WIDTH <= value <= MAX_FIXED_WIDTH:
+        raise MindMapError(f"固定正文宽度必须在 {MIN_FIXED_WIDTH} 至 {MAX_FIXED_WIDTH} 之间")

@@ -76,7 +76,7 @@ def import_indented_fragment(text: str) -> MindMapDocument:
         )
         raise MindMapError(f"第 {line_number} 行：Tab 与空格混用导致层级存在歧义，请统一缩进方式")
 
-    fragment = MindMapDocument.new("剪贴板")
+    fragment = MindMapDocument.new("剪贴板", text_format="plain")
     parents = [fragment.root_id]
     for (_, _, value), depth in zip(records, valid[0]):
         node = Node(value, style=deepcopy(fragment.root.style))
@@ -152,7 +152,7 @@ def import_outline(text: str, *, markdown: bool = True) -> MindMapDocument:
     if not records:
         raise MindMapError("大纲内容不能为空")
     initial_depth = records[0][1]
-    document = MindMapDocument.new(records[0][2])
+    document = MindMapDocument.new(records[0][2], text_format="plain")
     parents = [document.root_id]
     for line_number, raw_depth, value in records[1:]:
         depth = raw_depth - initial_depth

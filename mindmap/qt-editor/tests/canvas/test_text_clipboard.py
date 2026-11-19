@@ -3,11 +3,12 @@
 from copy import deepcopy
 
 import pytest
-from mindmap_core import FormatRegistry, MindMapEngine, MindMapError
+from mindmap_core import FormatRegistry, GraphNode, MindMapEngine, MindMapError, NodeGraph
 from mindmap_core.formats import OutlineCodec, create_default_format_registry
 from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_editor.controls.dialogs import EdrawPasteOptions, edraw_paste_options
 from PySide6.QtCore import QMimeData, QPoint, Qt, QTimer
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -208,6 +209,72 @@ def test_indented_paste_in_readonly_and_text_editor_preserves_existing_behavior(
     qtbot.keyClick(widget.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
     assert widget.editor.toPlainText() == text
     assert widget.engine.document == before and not widget.engine.can_undo
+
+
+@pytest.mark.parametrize("in_graph", [False, True])
+def test_inline_paste_converts_html_and_keeps_format_after_enter(canvas, qtbot, qapp, in_graph):
+    """富文本提交后按保存的 Markdown 恢复标题、强调及列表，整次编辑一次撤销。"""
+    widget, target = canvas
+    engine = widget.engine
+    if in_graph:
+        target = "a"
+        engine.set_node_graph(engine.root_id, NodeGraph((GraphNode(target, "原文", text_format="markdown"),)))
+        widget.open_node_graph(engine.root_id)
+    before, revision = engine.document, engine.revision
+    mime = QMimeData()
+    mime.setHtml("<h2>标题</h2><p><strong>粗体</strong>和<em>斜体</em></p><ul><li>条目</li></ul>")
+    mime.setText("标题\n粗体和斜体\n条目")
+    qapp.clipboard().setMimeData(mime)
+    widget.begin_edit(target)
+    qtbot.keyClick(widget.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    source = widget.editor.toPlainText()
+    assert source.startswith("## 标题\n\n") and "**粗体**" in source and "*斜体*" in source
+    assert engine.revision == revision
+
+    qtbot.keyClick(widget.view, Qt.Key.Key_Return)
+    assert widget.editor is None and engine.revision == revision + 1
+    assert widget.document_view.nodes[target].text == source
+    visual = widget.node_items[target].visual.text
+    assert visual.firstBlock().blockFormat().headingLevel() == 2
+    assert visual.find("粗体").charFormat().fontWeight() == QFont.Weight.Bold
+    assert visual.find("斜体").charFormat().fontItalic()
+    assert visual.find("条目").block().textList() is not None
+    assert engine.undo() and engine.document == before
+
+
+@pytest.mark.parametrize("mime_type", ["text/markdown; charset=utf-8", "text/plain"])
+def test_inline_paste_keeps_markdown_source_sent_with_html(canvas, qtbot, qapp, mime_type):
+    widget, target = canvas
+    source = "## 标题\n\n**原始标记**"
+    mime = QMimeData()
+    if mime_type.startswith("text/markdown"):
+        mime.setData(mime_type, source.encode("utf-8"))
+        mime.setText("后备文字")
+        mime.setHtml("<strong>后备富文本</strong>")
+    else:
+        mime.setText(source)
+        mime.setHtml("<pre><span style='color:blue'>" + source + "</span></pre>")
+    qapp.clipboard().setMimeData(mime)
+    widget.begin_edit(target)
+    qtbot.keyClick(widget.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    assert widget.editor.toPlainText() == source
+    qtbot.keyClick(widget.view, Qt.Key.Key_Return)
+    assert widget.engine.get_node(target).text == source
+
+
+def test_inline_paste_html_in_plain_node_uses_plain_text(canvas, qtbot, qapp):
+    widget, target = canvas
+    widget.engine.update_node(target, text_format="plain")
+    mime = QMimeData()
+    mime.setHtml("<h2>标题</h2><strong>正文</strong>")
+    qapp.clipboard().setMimeData(mime)
+    widget.begin_edit(target)
+    qtbot.keyClick(widget.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    assert widget.editor.toPlainText() == "标题\n正文"
+    assert widget.editor.document().firstBlock().blockFormat().headingLevel() == 0
+    qtbot.keyClick(widget.view, Qt.Key.Key_Return)
+    node = widget.engine.get_node(target)
+    assert (node.text, node.text_format) == ("标题\n正文", "plain")
 
 
 def test_indented_paste_without_selection_creates_independent_inspiration_trees(canvas, monkeypatch):

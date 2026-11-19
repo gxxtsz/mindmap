@@ -139,3 +139,24 @@ def test_cached_text_layout_is_stable_across_dpi_and_zoom(qapp, monkeypatch, dar
             assert image != empty
             assert layout_signature() == expected
             assert factory.visual(node, theme, document) is visual
+
+
+def test_fixed_markdown_width_wraps_code_and_includes_the_table_layout_minimum(qapp):
+    factory = VisualFactory()
+    document = MindMapEngine().document
+    contents = "宽字符" * 70
+    source = f"```python\n{contents}\n```"
+    narrow = replace(document.root, text=source, style={"fixed_width": 80})
+    wide = replace(narrow, style={"fixed_width": 320})
+    narrow_visual = factory.visual(narrow, document.theme, document)
+    wide_visual = factory.visual(wide, document.theme, document)
+    assert narrow_visual.text.toPlainText().strip() == contents
+    assert narrow_visual.text.firstBlock().layout().lineCount() > 1
+    assert narrow_visual.width == 108 and wide_visual.width == 348
+    assert narrow_visual.height > wide_visual.height
+
+    source = "| 第一列 | 第二列 | 第三列 | 第四列 |\n| --- | --- | --- | --- |\n| 甲 | 乙 | 丙 | 丁 |"
+    table = replace(narrow, text=source, style={"fixed_width": 40})
+    visual = factory.visual(table, document.theme, document)
+    assert visual.text.size().width() > 40
+    assert visual.width == visual.text.size().width() + 28

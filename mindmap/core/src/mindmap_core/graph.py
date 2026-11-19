@@ -17,11 +17,16 @@ class GraphNode:
 
     document_node_id 在首次创建附页时由引擎分配，指向文档节点表中承载附页的实体。
     普通图节点为 None；调用方可读取绑定，但只能通过引擎的页面操作建立绑定。
+    title 保存原始正文，text_format 指定显示为纯文本（plain）或 Markdown（markdown）。
+    fixed_width 是不含留白及附页按钮的固定正文宽度，单位为逻辑像素，范围为 40 至 1200。
+    None 表示按内容自动测量。构造和旧图解码默认使用纯文本与自动宽度。
     """
 
     id: str
     title: str
     document_node_id: str | None = None
+    text_format: str = "plain"
+    fixed_width: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +57,8 @@ class NodeGraph:
     def with_content(self, nodes: tuple[GraphNode, ...], edges: tuple[GraphEdge, ...]) -> "NodeGraph":
         """替换节点和连线，按仍存在的局部 ID 保留手动位置及文档节点绑定。
 
-        图文本只提供局部标识和标题。已有节点的附页绑定从当前图继承；删除节点后
-        相应绑定从结果移除，实际级联删除由引擎提交时处理。
+        格式和固定宽度取自 nodes。已有节点的附页绑定从当前图继承。删除节点时
+        一并移除相应绑定，附页实体由引擎提交时级联删除。
         """
         ids = {node.id for node in nodes}
         bindings = {node.id: node.document_node_id for node in self.nodes if node.document_node_id}
@@ -63,14 +68,24 @@ class NodeGraph:
                        positions={key: point for key, point in self.positions.items() if key in ids})
 
     def to_data(self) -> dict:
-        """编码为独立的 JSON 对象。文档节点绑定只在存在时写出，旧筛选字段写为空数组。"""
+        """编码为独立 JSON 对象，仅写出实际存在的绑定、Markdown 格式和固定宽度。
+
+        旧筛选字段写为空数组，节点顺序和手动位置随记录保存。字段异常时抛出
+        MindMapError。调用方使用 to_record() 获取与这些字段匹配的版本。
+        """
         try:
+            nodes = []
+            for node in self.nodes:
+                record = {"id": node.id, "title": node.title}
+                if node.document_node_id is not None:
+                    record["document_node_id"] = node.document_node_id
+                if node.text_format != "plain":
+                    record["text_format"] = node.text_format
+                if node.fixed_width is not None:
+                    record["fixed_width"] = node.fixed_width
+                nodes.append(record)
             return {
-                "nodes": [
-                    {"id": node.id, "title": node.title, **(
-                        {"document_node_id": node.document_node_id} if node.document_node_id is not None else {}
-                    )} for node in self.nodes
-                ],
+                "nodes": nodes,
                 "edges": [[edge.source, edge.target] for edge in self.edges],
                 "positions": {key: list(point) for key, point in self.positions.items()},
                 "hidden_node_ids": [],
@@ -79,20 +94,28 @@ class NodeGraph:
             raise MindMapError("图的数据字段无效") from error
 
     def to_record(self) -> dict:
-        """封装原生图数据。有文档节点绑定时写版本二，否则继续写版本一。"""
+        """为原生图写入满足全部节点字段的最低版本，并返回独立记录。
+
+        Markdown 或固定宽度需要版本三，仅有附页绑定需要版本二，其余使用版本一。
+        """
         data = self.to_data()
-        return {"version": 2 if any("document_node_id" in node for node in data["nodes"]) else 1, "data": data}
+        if any("text_format" in node or "fixed_width" in node for node in data["nodes"]):
+            version = 3
+        else:
+            version = 2 if any("document_node_id" in node for node in data["nodes"]) else 1
+        return {"version": version, "data": data}
 
     @classmethod
-    def from_data(cls, data: dict, *, version: int = 2) -> "NodeGraph":
+    def from_data(cls, data: dict, *, version: int = 3) -> "NodeGraph":
         """解码原生节点页，校验局部标识、端点及坐标，失败时抛出中文错误。
 
-        version 取自原生图封装；版本一仅接受原有节点字段，版本二允许可选的文档节点绑定。
-        绑定在本图内唯一，存在性和全局所有权由完整文档校验。旧筛选字段只读取和校验。
+        version 取自原生图封装。版本二增加可选的文档节点绑定，版本三增加可选的
+        正文格式和固定宽度。缺少正文格式或宽度时使用纯文本或自动宽度。绑定在本图
+        内唯一，存在性和全局所有权由完整文档校验。旧筛选字段只读取和校验。
         """
-        from .validation import finite
+        from .validation import finite, validate_fixed_width
 
-        if type(version) is not int or version not in (1, 2):
+        if type(version) is not int or version not in (1, 2, 3):
             raise MindMapError("不支持的图数据版本")
         if (not isinstance(data, dict) or set(data) != {"nodes", "edges", "positions", "hidden_node_ids"}
                 or not all(isinstance(data[key], list) for key in ("nodes", "edges", "hidden_node_ids"))
@@ -101,9 +124,14 @@ class NodeGraph:
         nodes = []
         ids = set()
         document_ids = set()
+        required = {"id", "title"}
+        allowed = required.copy()
+        if version >= 2:
+            allowed.add("document_node_id")
+        if version >= 3:
+            allowed.update(("text_format", "fixed_width"))
         for record in data["nodes"]:
-            if not isinstance(record, dict) or (set(record) != {"id", "title"}
-                    and (version != 2 or set(record) != {"id", "title", "document_node_id"})):
+            if not isinstance(record, dict) or not required <= record.keys() <= allowed:
                 raise MindMapError("图节点必须包含标识和标题")
             key, title = record["id"], record["title"]
             if not isinstance(key, str) or not re.fullmatch(GRAPH_NODE_ID, key) or key in ids:
@@ -115,7 +143,13 @@ class NodeGraph:
                 if not isinstance(document_id, str) or not document_id or document_id in document_ids:
                     raise MindMapError("图节点的文档标识无效或重复")
                 document_ids.add(document_id)
-            nodes.append(GraphNode(key, title, document_id))
+            text_format = record.get("text_format", "plain")
+            if text_format not in ("plain", "markdown"):
+                raise MindMapError("图节点文本格式必须是 plain 或 markdown")
+            fixed_width = record.get("fixed_width")
+            if "fixed_width" in record:
+                validate_fixed_width(fixed_width)
+            nodes.append(GraphNode(key, title, document_id, text_format, fixed_width))
         edges = {}
         for pair in data["edges"]:
             if (not isinstance(pair, list) or len(pair) != 2

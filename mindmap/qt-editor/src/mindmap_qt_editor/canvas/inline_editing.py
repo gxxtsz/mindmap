@@ -2,6 +2,7 @@
 
 from collections import ChainMap
 
+from mindmap_core import MindMapError, Node
 from PySide6.QtCore import QRectF, Qt
 
 from .items import NodeEditor
@@ -27,6 +28,75 @@ class InlineEditingMixin:
         候选、不结束草稿、不改变焦点；候选完成后再调用正常的输入提交接口。
         """
         return self.editor is not None and self.editor.composing
+
+    def _selected_text_node(self) -> Node | None:
+        """单选时借用当前页文字节点，供菜单和宽度手柄查询。"""
+        if self.selection_count != 1:
+            return None
+        node = self._document.nodes.get(self.current_node_id())
+        return node if node is not None and not node.is_image_node else None
+
+    def _prepare_text_appearance(self) -> Node:
+        """提交有效的侧栏草稿，再借用当前单选节点。输入法或目标变化时抛出中文错误。
+
+        此入口供拖动开始和右键动作共用。侧栏提交可能同步重建场景，返回值须在同一
+        GUI 调用中使用，预览控制器另行记录页面版本以验证后续事件。
+        """
+        self._ensure_editable()
+        node = self._selected_text_node()
+        if node is None or self.editor is not None or self._disposed:
+            raise MindMapError("请先单选一个可编辑的文字节点")
+        if not all(guard() for guard in tuple(self._navigation_guards)):
+            raise MindMapError("请先完成输入法候选，再调整节点格式或宽度")
+        key = (self.engine.document_generation, self.current_page_id, node.id)
+        self.edits_flush_requested.emit()
+        node = self._selected_text_node()
+        if (node is None or self.editor is not None or not self.editable or self._disposed
+                or key != (self.engine.document_generation, self.current_page_id, node.id)):
+            raise MindMapError("导图或选择已发生变化，请重新操作")
+        return node
+
+    def toggle_selected_text_format(self) -> None:
+        """将单选文字节点切换为 Markdown 或纯文本，正文源码保留在节点中。
+
+        两类画布均走所属引擎的一次事务。引用节点使用目标页的正文格式，单选引用、
+        只读画布或输入法候选未确认时抛出 MindMapError。仅在所属 GUI 线程调用。
+        """
+        node = self._prepare_text_appearance()
+        if node.page_reference_root_id is not None:
+            raise MindMapError("请到引用页面修改正文格式")
+        text_format = "plain" if node.text_format == "markdown" else "markdown"
+        if self.graph is not None:
+            self._update_graph_node(node.id, text_format=text_format)
+        else:
+            self.engine.update_node(node.id, text_format=text_format)
+
+    def reset_selected_width(self) -> None:
+        """将当前单选文字节点恢复为自动宽度，重新应用自动排版的换行上限。
+
+        有固定值时只提交一次事务，可撤销。此入口确认选择、可编辑状态及面板候选，
+        调用失败抛出 MindMapError。仅在画布所属 GUI 线程使用。
+        """
+        node = self._prepare_text_appearance()
+        if "fixed_width" in node.style:
+            self._set_node_width(node.id, None)
+
+    def _set_node_width(self, node_id: str, width: int | None) -> None:
+        """将经交互确认的宽度写入当前页的节点，None 表示移除固定宽度。
+
+        node_id 在树中是文档标识，在图中是局部标识。width 为逻辑像素。调用方须
+        先验证目标与当前页相符。引擎负责校验和通知，失败时回滚整个宽度操作。
+        """
+        self._ensure_editable()
+        if self.graph is not None:
+            self._update_graph_node(node_id, fixed_width=width)
+        else:
+            style = self.engine.get_node(node_id).style
+            if width is None:
+                style.pop("fixed_width", None)
+            else:
+                style["fixed_width"] = width
+            self.engine.update_node(node_id, style=style)
 
     def begin_edit(self, node_id: str) -> None:
         """为当前页可见的普通节点开始正文编辑，返回 None。
@@ -138,7 +208,7 @@ class InlineEditingMixin:
             self._show_edit_layout(editor.base_layout)
         if commit and self.editable:
             if self.graph is not None:
-                self.call(lambda: self._rename_graph_node(node_id, text))
+                self.call(lambda: self._update_graph_node(node_id, title=text))
             else:
                 self.call(lambda: self.engine.update_node(node_id, text=text))
         self._update_actions()

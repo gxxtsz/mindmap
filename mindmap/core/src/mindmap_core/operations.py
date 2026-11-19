@@ -87,7 +87,7 @@ class DocumentEditor(InspirationEditorMixin):
 
         parent = self.edit(parent_id)
         self.require_plain_parent(parent)
-        node = Node(text)
+        node = Node(text, text_format="markdown")
         self._inherit_branch(node, parent)
         self._state.put_node(node)
         self._state.set_parent(node.id, parent_id)
@@ -105,7 +105,7 @@ class DocumentEditor(InspirationEditorMixin):
                 return self.add_inspiration(text, position=(point[0], point[1] + 100))
             raise MindMapError("根节点不能添加同级节点")
         siblings = self.edit(parent_id).children
-        child = Node(text, direction=self.node(node_id).direction)
+        child = Node(text, direction=self.node(node_id).direction, text_format="markdown")
         self._inherit_branch(child, self.node(parent_id))
         self._state.put_node(child)
         self._state.set_parent(child.id, parent_id)
@@ -122,7 +122,7 @@ class DocumentEditor(InspirationEditorMixin):
                                                position=self.document.inspiration.positions[node_id])
             raise MindMapError("不能在根节点上方插入父节点")
         node = self.node(node_id)
-        parent = Node(text, children=[node_id], direction=node.direction)
+        parent = Node(text, children=[node_id], direction=node.direction, text_format="markdown")
         self._inherit_branch(parent, self.node(parents[node_id]))
         parent_id = parents[node_id]
         siblings = self.edit(parent_id).children
@@ -199,9 +199,10 @@ class DocumentEditor(InspirationEditorMixin):
         return graphs
 
     def replace_node_graph(self, owner_id: str, previous: NodeGraph, graph: NodeGraph | None) -> None:
-        """用同一事务写入图、同步标题并级联删除移除的图节点所拥有的内容。
+        """用同一事务写入图、同步标题和格式，并级联删除移除的图节点所拥有的内容。
 
         保留相同局部 ID 的绑定，拒绝通过公共替换接口注入其他节点的文档 ID。
+        格式同步到承载附页的文档节点，以便新附页取得当前标题格式。宽度属于图内节点。
         graph 为 None 表示删除整张图。调用方已检查所属节点的创建权限。
         """
         old = {node.id: node for node in previous.nodes if node.document_node_id is not None}
@@ -214,8 +215,11 @@ class DocumentEditor(InspirationEditorMixin):
                 document_id = before.document_node_id if before is not None else None
                 if entry.document_node_id not in (None, document_id):
                     raise MindMapError("请通过附页操作建立图节点绑定")
-                if before is not None and before.title != entry.title:
-                    self._sync_page_titles(document_id, entry.title)
+                if before is not None:
+                    if before.title != entry.title:
+                        self._sync_page_titles(document_id, entry.title)
+                    if before.text_format != entry.text_format:
+                        self.edit(document_id).text_format = entry.text_format
                 nodes.append(replace(entry, document_node_id=document_id))
             record = replace(graph, nodes=tuple(nodes)).to_record()
         else:
@@ -272,7 +276,7 @@ class DocumentEditor(InspirationEditorMixin):
         if owner.children or owner.submap_id:
             raise MindMapError("只有尚无子导图的叶子节点可以创建子导图")
         source = self._state.page(node_id)
-        root = Node(owner.text, style=deepcopy(owner.style))
+        root = Node(owner.text, text_format=owner.text_format, style=deepcopy(owner.style))
         key = new_id()
         self._state.put_node(root)
         self._state.set_page(key, MindMapPage(key, root.id, node_id, source.layout, source.theme), kind="submap")
@@ -288,7 +292,8 @@ class DocumentEditor(InspirationEditorMixin):
         if not owner.children:
             raise MindMapError("此节点没有普通后代，请使用创建子导图")
         source = self._state.page(node_id)
-        root = Node(owner.text, children=list(owner.children), style=deepcopy(owner.style))
+        root = Node(owner.text, children=list(owner.children), text_format=owner.text_format,
+                    style=deepcopy(owner.style))
         page_id = new_id()
         # put_node 同时登记直接子节点的旧父引用；普通后代及其图片、详情、子图
         # 都继续使用原实体。页面和入口在同一事务内改写，不能调用级联删除接口。
@@ -312,11 +317,12 @@ class DocumentEditor(InspirationEditorMixin):
             return True
         if root.image_id and (root.image_id != owner.image_id or root.image_width != owner.image_width):
             return True
+        if root.text_format != owner.text_format:
+            return True
         defaults = Node()
         return any(getattr(root, name) != getattr(defaults, name)
                    and getattr(root, name) != getattr(owner, name)
-                   for name in ("note", "hyperlink", "tags", "icons", "style", "metadata", "text_format",
-                                "direction"))
+                   for name in ("note", "hyperlink", "tags", "icons", "style", "metadata", "direction"))
 
     def convert_submap_to_descendants(self, node_id):
         """移除当前一层页面，将完整分支接回入口，独立根内容以普通子节点保留。"""
@@ -414,7 +420,7 @@ class DocumentEditor(InspirationEditorMixin):
         if existing:
             raise MindMapError("此节点已有详情页")
         source = self._state.page(node_id)
-        root = Node(source_node.text, style=deepcopy(source_node.style))
+        root = Node(source_node.text, text_format=source_node.text_format, style=deepcopy(source_node.style))
         key = new_id()
         self._state.put_node(root)
         self._state.set_page(key, MindMapPage(key, root.id, owner_id, source.layout, source.theme), kind="detail")
@@ -526,7 +532,9 @@ class DocumentEditor(InspirationEditorMixin):
         图片、不持有 GUI 对象；仅供所属引擎同步调用，不得跨线程共享编辑器。
         """
         node_id = self.add_child(parent_id, "")
-        self.edit(node_id).metadata["image_only"] = True
+        node = self.edit(node_id)
+        node.metadata["image_only"] = True
+        node.text_format = "plain"
         self.attach_image(node_id, data, media_type, width=width)
         return node_id
 
@@ -549,7 +557,7 @@ class DocumentEditor(InspirationEditorMixin):
         if len({self._state.page_id(key) for key in roots}) != 1:
             raise MindMapError("不能同时复制不同页面的节点")
         selected = {x for root in roots for x in self.document.owned_descendants(root)}
-        fragment = MindMapDocument.new("剪贴板")
+        fragment = MindMapDocument.new("剪贴板", text_format="plain")
         fragment.root.children = roots.copy()
         source = self._state.page(roots[0])
         self._copy_owned_contents(fragment, selected, source)
@@ -602,7 +610,7 @@ class DocumentEditor(InspirationEditorMixin):
         edges = tuple(edge for edge in graph.edges if edge.source in wanted and edge.target in wanted)
         selected = {key for node in nodes if node.document_node_id
                     for key in self.document.owned_descendants(node.document_node_id)}
-        fragment = MindMapDocument.new("图剪贴板")
+        fragment = MindMapDocument.new("图剪贴板", text_format="plain")
         fragment.root.extension_pages[GRAPH_PAGE_TYPE] = NodeGraph(nodes, edges).to_record()
         self._copy_owned_contents(fragment, selected, self.document)
         return fragment

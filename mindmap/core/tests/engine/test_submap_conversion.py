@@ -62,7 +62,7 @@ def test_roundtrip_preserves_nodes_resources_order_and_atomic_history():
 @pytest.mark.parametrize("patch", [
     {"note": "根的独立备注"}, {"hyperlink": "https://example.com"}, {"tags": ["标签"]},
     {"icons": ["星标"]}, {"style": {"font_size": 23}}, {"metadata": {"附加": "资料"}},
-    {"text_format": "markdown"}, {"direction": "left"},
+    {"text_format": "plain"}, {"direction": "left"},
 ])
 def test_independent_root_attributes_keep_root_and_its_children(patch):
     engine = MindMapEngine()

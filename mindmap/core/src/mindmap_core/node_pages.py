@@ -162,7 +162,7 @@ class NodePagesMixin:
             if document_id is None:
                 from .models import Node
 
-                node = Node(entry.title)
+                node = Node(entry.title, text_format=entry.text_format)
                 self._state.put_node(node)
                 document_id = node.id
                 graph = replace(graph, nodes=tuple(
@@ -186,8 +186,9 @@ class NodePagesMixin:
     def set_node_graph(self, node_id: str, graph: NodeGraph) -> None:
         """创建或完整替换节点图；校验失败回滚事务，成功一次进入导图撤销历史。
 
-        同一局部 ID 保留既有附页；标题变化同步到关联的树页根。删掉图节点会同时
-        删除其附页。新绑定由创建附页或粘贴操作建立，调用方不能直接指定归属。
+        同一局部 ID 保留既有附页，标题变化同步到关联的树页根。格式和固定宽度取自
+        graph 的节点快照，格式也供新建附页初始化标题使用。删掉图节点会同时删除其
+        附页。新绑定由创建附页或粘贴操作建立，调用方不能直接指定归属。
         详情页内只允许更新已存在的旧图。成功后历史包含图及全部受影响的文档实体。
         """
         def action(node_id, graph, page_id):

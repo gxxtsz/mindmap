@@ -1,16 +1,36 @@
-"""节点片段及图片的剪贴板适配；图片同步读取，亿图结构解析交给无 Qt 引擎包。"""
+"""适配节点片段、正文和图片的剪贴板内容，亿图解析交给无 Qt 引擎包。"""
 
 from pathlib import Path
 
 from mindmap_core import MindMapDocument, MindMapError
 from mindmap_core.formats import MAX_ARCHIVE_BYTES, import_edraw_xml
-from mindmap_qt_render.rendering import decode_image
+from mindmap_qt_render.rendering import decode_image, text_from_html
 from PySide6.QtCore import QBuffer, QIODevice, QMimeData
 from PySide6.QtGui import QImage, QImageReader, QPixmap
 
 CLIPBOARD_MIME = "application/x-python-mindmap+json"
 GRAPH_CLIPBOARD_MIME = "application/x-python-mindmap-graph+json"
 EDRAW_CLIPBOARD_MIME = "application/edraw-mind-xml"
+
+
+def read_formatted_clipboard_text(mime: QMimeData, *, markdown: bool) -> str | None:
+    """读取原地编辑器要插入的正文源码，普通纯文本载荷返回 None，交还 Qt 粘贴。
+
+    剪贴板明确提供 UTF-8 Markdown 时直接读取。HTML 则按节点显示格式转为 Markdown
+    或提取纯文本。mime 为本次 GUI 调用借用的载荷，返回独立字符串，不缓存载荷。
+    """
+    for kind in mime.formats():
+        if kind.partition(";")[0].strip().lower() == "text/markdown":
+            try:
+                return bytes(mime.data(kind)).decode("utf-8-sig")
+            except UnicodeDecodeError:
+                continue
+    if not mime.hasHtml():
+        return None
+    source = mime.text() if mime.hasText() else None
+    if markdown or source is None:
+        return text_from_html(mime.html(), markdown=markdown, source=source)
+    return source
 
 
 def _clipboard_image_files(mime: QMimeData) -> list[Path]:

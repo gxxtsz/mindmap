@@ -286,7 +286,7 @@ class InspirationCanvasMixin(BranchTransferMixin, InspirationViewStateMixin):
             if node is None or node.page_reference_root_id is not None:
                 self.finish_edit(commit=False)
             else:
-                self._update_edit_preview(self.editor, force=True)
+                self.editor.sync_base_visual(node, self._visuals[node.id])
         after = [key for key in before if key in self._document.nodes]
         if transfers and not external:
             after = [move.node_id for move in transfers if move.node_id in self._document.nodes]

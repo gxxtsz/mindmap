@@ -1262,7 +1262,11 @@ def test_graph_filter_is_ignored_and_cleared_when_graph_is_saved(window, tmp_pat
     assert view.document.save()
     main = view.document.path / "pages" / "main.json"
     payload = json.loads(main.read_text(encoding="utf-8"))
-    graph_data = payload["nodes"][0]["extension_pages"]["graph"]["data"]
+    graph_record = payload["nodes"][0]["extension_pages"]["graph"]
+    graph_record["version"] = 1
+    graph_data = graph_record["data"]
+    for node in graph_data["nodes"]:
+        node.pop("text_format")
     graph_data["hidden_node_ids"] = ["a"]
     graph_data["positions"] = {"a": [72, 24]}
     legacy_path = tmp_path / "旧版图"

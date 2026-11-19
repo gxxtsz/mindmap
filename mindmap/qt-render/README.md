@@ -52,7 +52,9 @@ export_document(document, "导图.png", layout_registry=create_default_layout_re
 
 ### 度量与缓存
 
-- 静态正文和原地编辑都启用 `QTextOption.setUseDesignMetrics(True)`，宽度测量仍使用相同字体的 `QFontMetricsF`，使换行不依赖绘制时的像素取整。
+- 静态正文和原地编辑都启用 `QTextOption.setUseDesignMetrics(True)`。普通文本和源码输入使用同字体的 `QFontMetricsF`，Markdown 显示使用 Qt 排版后的自然宽度，使换行不依赖绘制时的像素取整。
+
+- `style.fixed_width` 指定内容区的固定宽度，单位为逻辑像素。标签和图片附件按内容宽度排版，页面入口及内边距单独计入卡片尺寸。围栏代码允许折行，列表和表格的最小排版宽度纳入卡片尺寸。
 
 - 节点尺寸可能随新度量略有变化，但改变画布倍率或设备像素比不会重新测量全图。
 

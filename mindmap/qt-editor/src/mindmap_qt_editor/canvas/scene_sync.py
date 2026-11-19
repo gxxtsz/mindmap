@@ -33,6 +33,7 @@ class SceneSyncMixin:
         external = self.is_external_event(event)
         changes = event.changes
         if event.kind != "saved":
+            self.view.text_resize.cancel()
             history_graph = (parse_graph_page_id(changes.page_id)
                              if changes is not None and event.kind in ("undo", "redo") else None)
             removed_graph_descendant = False
@@ -242,7 +243,8 @@ class SceneSyncMixin:
             self.refresh()
             if self.editor is not None:
                 self.editor.base_layout = self.layout_result
-                self._update_edit_preview(self.editor, force=True)
+                key = self.editor.node_id
+                self.editor.sync_base_visual(self._document.nodes[key], self._visuals[key])
             after = [key for key in after if key in self._document.nodes]
             self.select_nodes(after)
             event = ChangeEvent(event.operation, tuple(local_changes.node_ids) if local_changes else (),
@@ -357,8 +359,8 @@ class SceneSyncMixin:
         self.refresh()
         if self.editor is not None:
             self.editor.base_layout = self.layout_result
-            if not self.editor.refresh_page_controls(self._visuals[self.editor.node_id]):
-                self._update_edit_preview(self.editor, force=True)
+            key = self.editor.node_id
+            self.editor.sync_base_visual(self._document.nodes[key], self._visuals[key])
         self._notify_selection()
 
     def _detail_measurement_changes(self, document, dirty):

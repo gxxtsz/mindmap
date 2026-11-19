@@ -15,6 +15,7 @@ from .clipboard import (
     has_clipboard_image,
     read_clipboard_image,
     read_edraw_clipboard,
+    read_formatted_clipboard_text,
 )
 from .interactions import document_interaction
 
@@ -147,7 +148,7 @@ class ClipboardActionsMixin:
                 # 纯文本编码器已返回带合成根的片段，不能再次包装而增加可见容器节点。
                 fragment = document
             else:
-                fragment = MindMapDocument.new("剪贴板")
+                fragment = MindMapDocument.new("剪贴板", text_format="plain")
                 fragment.root.children = [document.root_id]
                 fragment.nodes.update(document.nodes)
             # 原文和解析结果必须同时满足单行单节点，避免把扩展导入器返回的树或森林
@@ -200,20 +201,29 @@ class ClipboardActionsMixin:
             self._update_history_view_after()
         return ids
 
-    def _paste_editor_image(self) -> bool:
-        """尝试接管正文编辑器的图像粘贴，返回是否已经消费本次快捷键。
+    def _paste_editor_clipboard(self) -> bool:
+        """在正文编辑器中处理图片和富文本，返回是否已消费本次粘贴快捷键。
 
-        无参数，仅由有效编辑器在 GUI 按键事件内同步调用。非图像或带专用节点片段时
-        返回 False，保留文本控件原行为；图像返回 True，失败通过 call() 发出错误信号，
-        避免坏图或输入法候选被误当成文本。MIME 对象仅借用到本次调用结束，不缓存。
+        仅在有效编辑器的 GUI 按键事件内同步调用。树页的图片沿用独立导入事务。
+        带 HTML 或 Markdown 的文字先转成节点正文再插入光标选区，确认编辑时一起保存。
+        普通纯文本交还 Qt 粘贴。MIME 对象仅借用到本次调用结束。
         """
-        if self.graph is not None:
-            return False
+        editor = self.editor
         mime = QApplication.clipboard().mimeData()
-        if (mime is None or mime.hasFormat(CLIPBOARD_MIME) or mime.hasFormat(EDRAW_CLIPBOARD_MIME)
-                or not has_clipboard_image(mime)):
+        if editor is None or mime is None:
             return False
-        self.call(lambda: self._paste_image(mime))
+        if (self.graph is None and not mime.hasFormat(CLIPBOARD_MIME)
+                and not mime.hasFormat(EDRAW_CLIPBOARD_MIME) and has_clipboard_image(mime)):
+            self.call(lambda: self._paste_image(mime))
+            return True
+        node = self._document.nodes[editor.node_id]
+        text = read_formatted_clipboard_text(mime, markdown=node.text_format == "markdown")
+        if text is None:
+            return False
+        if text:
+            cursor = editor.textCursor()
+            cursor.insertText(text)
+            editor.setTextCursor(cursor)
         return True
 
     def _paste_image(self, mime: QMimeData) -> list[str]:

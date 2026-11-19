@@ -134,7 +134,7 @@ class GraphCanvasMixin:
         add_node = "add_sibling" if on_canvas else "add_child"
         groups = [("", (add_node, "graph_add_edge", "graph_text", "graph_auto_layout"))]
         if not on_canvas:
-            groups.append(("", ("edit", "cut", "copy", "paste", "delete")))
+            groups.append(("", ("edit", "toggle_text_format", "reset_node_width", "cut", "copy", "paste", "delete")))
             if self.selection_count == 1:
                 groups.append(("页面", _GRAPH_NODE_PAGE_ACTIONS))
         else:
@@ -305,7 +305,7 @@ class GraphCanvasMixin:
         self._prepare_page_navigation()
         graph = self._read_active_graph()
         key = _unused_node_ids(graph.nodes, 1)[0]
-        nodes = (*graph.nodes, GraphNode(key, "新节点"))
+        nodes = (*graph.nodes, GraphNode(key, "新节点", text_format="markdown"))
         edges = graph.edges
         if connect_from_selection and self.selection_count == 1:
             edges = (*edges, GraphEdge(self.current_node_id(), key))
@@ -313,11 +313,16 @@ class GraphCanvasMixin:
         self.begin_edit(key)
         return key
 
-    def _rename_graph_node(self, node_id, text):
+    def _update_graph_node(self, node_id: str, **changes) -> None:
+        """按当前图内局部标识更新正文、格式或宽度，整次修改只提交一次。
+
+        changes 使用 GraphNode 的可编辑字段名。写入保留节点原标识、附页、连线和
+        手动坐标。节点或图已失效时抛出 MindMapError。只在画布所属 GUI 线程调用。
+        """
         graph = self._read_active_graph()
         if node_id not in self._document.nodes:
             raise MindMapError("要编辑的图节点已删除")
-        nodes = tuple(replace(node, title=text) if node.id == node_id else node for node in graph.nodes)
+        nodes = tuple(replace(node, **changes) if node.id == node_id else node for node in graph.nodes)
         self._write_active_graph(replace(graph, nodes=nodes))
 
     def _delete_graph_nodes(self, ids, *, copied=False):
@@ -404,16 +409,17 @@ class GraphCanvasMixin:
             self._read_active_graph(target)
             if revision != self._branch_content_revision:
                 raise MindMapError("确认期间图内容发生变化，请重新粘贴")
-            fragment = NodeGraph(tuple(GraphNode(node.id, node.title) for node in source.nodes), source.edges)
+            fragment = replace(source, nodes=tuple(replace(node, document_node_id=None) for node in source.nodes))
         else:
             fragment = parse_graph_text(mime.text())
+            fragment = replace(fragment, nodes=tuple(replace(node, text_format="markdown") for node in fragment.nodes))
         if not fragment.nodes:
             return []
         self._prepare_page_navigation()
         graph = self._read_active_graph(target)
         keys = _unused_node_ids((*graph.nodes, *fragment.nodes), len(fragment.nodes))
         remap = {node.id: key for node, key in zip(fragment.nodes, keys, strict=True)}
-        nodes = (*graph.nodes, *(GraphNode(remap[node.id], node.title) for node in fragment.nodes))
+        nodes = (*graph.nodes, *(replace(node, id=remap[node.id]) for node in fragment.nodes))
         edges = (*graph.edges, *(GraphEdge(remap[edge.source], remap[edge.target]) for edge in fragment.edges))
         self._write_active_graph(graph.with_content(nodes, edges), target)
         self.reveal_nodes(keys)
@@ -421,10 +427,11 @@ class GraphCanvasMixin:
 
     @document_interaction
     def apply_graph_text(self, text: str) -> bool:
-        """替换图的节点标题和连线，保留同一局部 ID 的附页与手动坐标。
+        """替换图的节点源码和连线，保留同一局部 ID 的格式、宽度、附页与手动坐标。
 
-        输入解析后按当前图和权限校验，删除带附页节点时先确认范围。取消返回 False；
-        成功或内容相同返回 True。只读、输入法候选或目标变化时抛出 MindMapError。
+        新的局部 ID 使用 Markdown 格式。输入解析后按当前图和权限校验，删除带附页
+        节点时先确认范围。取消返回 False，成功或内容相同返回 True。只读、输入法
+        候选或目标变化时抛出 MindMapError。
         """
         self._ensure_editable()
         parsed = parse_graph_text(text)
@@ -434,7 +441,10 @@ class GraphCanvasMixin:
         removed = {node.id for node in graph.nodes} - {node.id for node in parsed.nodes}
         if not self._confirm_graph_node_removal(graph, removed):
             return False
-        self._write_active_graph(graph.with_content(parsed.nodes, parsed.edges), target)
+        previous = {node.id: node for node in graph.nodes}
+        nodes = tuple(replace(previous[node.id], title=node.title) if node.id in previous
+                      else replace(node, text_format="markdown") for node in parsed.nodes)
+        self._write_active_graph(graph.with_content(nodes, parsed.edges), target)
         return True
 
     def edit_graph_text(self) -> None:

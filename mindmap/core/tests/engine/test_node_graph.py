@@ -4,7 +4,14 @@ from dataclasses import replace
 
 import pytest
 from mindmap_core import GraphEdge, GraphNode, MindMapEngine, MindMapError, NodeGraph, OperationRejected
-from mindmap_core.formats import from_dict, load_document, save_document, to_dict
+from mindmap_core.formats import (
+    from_dict,
+    load_directory,
+    load_document,
+    save_directory,
+    save_document,
+    to_dict,
+)
 from mindmap_core.node_pages import graph_page_id
 
 
@@ -34,8 +41,46 @@ def test_graph_persists_with_owner_and_undo_uses_graph_page_identity(tmp_path):
     assert restored.redo() and restored.node_graph(owner) is None
 
 
+def test_graph_node_format_and_width_roundtrip_with_bound_pages_and_clipboard(tmp_path):
+    engine = MindMapEngine()
+    owner = engine.root_id
+    a = GraphNode("a", "# 标题\n\n**粗体**", text_format="markdown", fixed_width=144)
+    legacy = GraphNode("b", "*原样显示*")
+    engine.set_node_graph(owner, NodeGraph((a, legacy), (GraphEdge("a", "b"),), {"a": (60, -20)}))
+    detail = engine.create_graph_node_page(owner, "a", kind="detail")
+    document = engine.document
+    assert engine.page_document(detail).root.text_format == "markdown"
+    graph = engine.node_graph(owner)
+    assert graph.to_record()["version"] == 3
+    assert graph.nodes[1] == legacy
+    projection = engine.page_document(graph_page_id(owner)).nodes["a"]
+    assert (projection.text, projection.text_format, projection.style) == (
+        a.title, "markdown", {"fixed_width": 144},
+    )
+
+    folder = tmp_path / "导图"
+    save_directory(document, folder)
+    assert load_directory(folder) == document
+    payload = to_dict(document)
+    assert payload["schema_version"] == 9 and from_dict(payload) == document
+    payload["schema_version"] = 8
+    with pytest.raises(MindMapError, match="版本 9"):
+        from_dict(payload)
+
+    target = MindMapEngine()
+    target.set_node_graph(target.root_id, NodeGraph())
+    fragment = from_dict(to_dict(engine.copy_graph_fragment(owner, ["a"])))
+    key, = target.paste_graph_fragment(target.root_id, fragment)
+    copied, = target.node_graph(target.root_id).nodes
+    assert replace(copied, id="a", document_node_id=None) == a and copied.id == key
+    assert copied.document_node_id is not None
+
+
 @pytest.mark.parametrize("patch", [
     {"nodes": (GraphNode("a", ""), GraphNode("a", "重复"))},
+    {"nodes": (GraphNode("a", "", fixed_width=True),)},
+    {"nodes": (GraphNode("a", "", fixed_width=1201),)},
+    {"nodes": (GraphNode("a", "", text_format="html"),)},
     {"edges": (GraphEdge("a", "missing"),)},
     {"positions": {"a": (float("inf"), 0)}},
     {"positions": {"a": (1e300, 0)}},

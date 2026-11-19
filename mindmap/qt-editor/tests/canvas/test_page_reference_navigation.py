@@ -145,6 +145,7 @@ def test_root_edit_updates_linked_nodes_and_outline_in_other_tab_only_where_need
     owner = engine.add_child(engine.root_id, "旧根正文")
     target_page = engine.create_submap(owner)
     target = engine.page_document(target_page).root_id
+    engine.update_node(target, text_format="plain")
     root = engine.add_inspiration("想法", position=(0, 0)) if inspiration else engine.root_id
     first = engine.add_child(root, "甲原文")
     second = engine.add_child(root, "乙原文")

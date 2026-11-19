@@ -22,6 +22,7 @@ from .items import (
     PageControlItem,
 )
 from .selection_decoration import SelectionDecoration, paint_node_selection, selection_bounds
+from .text_resizing import TextWidthResizeController
 
 # 交互缩放与“适应窗口”共用 10% 下限，避免自动适配绕过交互入口的倍率限制。
 MIN_ZOOM = 0.1
@@ -62,6 +63,7 @@ class MindMapView(QGraphicsView):
         self.node_drag = NodeDragController(self)
         self.graph_edge_edit = GraphEdgeEditController(self)
         self.image_resize = ImageResizeController(self)
+        self.text_resize = TextWidthResizeController(self)
         self._selection_bounds = QRect()
         self._pending_selection_bounds = QRect()
         self._selection_decoration = SelectionDecoration(self)
@@ -93,13 +95,20 @@ class MindMapView(QGraphicsView):
         """保留视图内部的预览查询入口，图元的创建和释放统一归拖动控制器管理。"""
         return self.node_drag.ghost
 
+    @property
+    def _active_resize(self):
+        """借用当前认领鼠标的尺寸控制器，供移动和释放事件统一路由。"""
+        if self.text_resize.active:
+            return self.text_resize
+        return self.image_resize if self.image_resize.active else None
+
     def event(self, event):
         # 拖动期间先认领 Escape，保证 keyPressEvent 可以取消当前手势；即使宿主
         # 另行注册了同名快捷键，也不应在手势尚未取消时触发宿主动作或改变视图。
         if (
             event.type() == QEvent.Type.ShortcutOverride
             and event.key() == Qt.Key.Key_Escape
-            and (self.press_node is not None or self.image_resize.active or self.node_drag.external_active
+            and (self.press_node is not None or self._active_resize is not None or self.node_drag.external_active
                  or self.graph_edge_edit.active)
         ):
             event.accept()
@@ -146,6 +155,7 @@ class MindMapView(QGraphicsView):
     def wheelEvent(self, event):
         """滚轮模式仅影响视图；Ctrl 始终临时缩放，不改写用户选择的模式。"""
         self.image_resize.cancel()
+        self.text_resize.cancel()
         pixels = event.pixelDelta().y()
         angle = event.angleDelta().y()
         if not pixels and not angle:
@@ -178,6 +188,7 @@ class MindMapView(QGraphicsView):
         内容加一屏余量的范围时，由 Qt 将视口限制到最近边界，不额外扩展空白区域。
         """
         self.image_resize.cancel()
+        self.text_resize.cancel()
         # 切页的初始定位可能还在零间隔队列中。先完成可见页的待处理定位，再接受
         # 用户缩放，避免后续编辑缓存页面状态时把刚设置的倍率恢复成 100%。
         if self.owner._view_reset_pending and self.isVisible():
@@ -344,6 +355,10 @@ class MindMapView(QGraphicsView):
             self._pointer_position = position
         position = self._pointer_position
         resize_cursor = self.image_resize.cursor_at(position)
+        if (self.text_resize.active or self._pan_button == Qt.MouseButton.NoButton
+                and self.press_node is None and not self.graph_edge_edit.owns_left_button
+                and self.text_resize.hit_test(position)):
+            resize_cursor = Qt.CursorShape.SizeHorCursor
         dragging = self.node_drag.active
         if resize_cursor is not None and not self.panning and not dragging:
             self._set_hovered_node(None, immediate=True)
@@ -409,6 +424,7 @@ class MindMapView(QGraphicsView):
         self.node_drag.cancel()
         self.graph_edge_edit.cancel()
         self.image_resize.cancel()
+        self.text_resize.cancel()
         grabber = self.scene().mouseGrabberItem()
         if isinstance(grabber, NodeItem):
             grabber.ungrabMouse()
@@ -429,7 +445,7 @@ class MindMapView(QGraphicsView):
         return result
 
     def mousePressEvent(self, event):
-        if self.image_resize.active:
+        if self._active_resize is not None:
             event.accept()
             return
         # 一个手势只由最初按下的按键拥有；额外按下或释放其他按键都不能切换手势。
@@ -456,6 +472,12 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         position = event.position().toPoint()
+        if (event.button() == Qt.MouseButton.LeftButton and not event.modifiers()
+                and self.text_resize.hit_test(position)):
+            self.owner.call(lambda: self.text_resize.begin(position))
+            self.update_cursor(position)
+            event.accept()
+            return
         if (event.button() == Qt.MouseButton.LeftButton
                 and self.graph_edge_edit.press_left(position, event.modifiers())):
             # 前景手柄和连线不属于场景图元。本次按下由视图接管，不能再交给框选或节点拖动。
@@ -529,11 +551,12 @@ class MindMapView(QGraphicsView):
                 return
             self.graph_edge_edit.owns_left_button = False
             self.graph_edge_edit.cancel()
-        if self.image_resize.active:
+        resize = self._active_resize
+        if resize is not None:
             if event.buttons() & Qt.MouseButton.LeftButton:
-                self.image_resize.update(event.position().toPoint())
+                resize.update(event.position().toPoint())
             else:
-                self.image_resize.cancel()
+                resize.cancel()
             self.update_cursor(event.position().toPoint())
             event.accept()
             return
@@ -600,9 +623,10 @@ class MindMapView(QGraphicsView):
                 self.update_cursor(position)
             event.accept()
             return
-        if self.image_resize.active:
+        resize = self._active_resize
+        if resize is not None:
             if event.button() == Qt.MouseButton.LeftButton:
-                self.owner.call(lambda: self.image_resize.finish(event.position().toPoint()))
+                self.owner.call(lambda: resize.finish(event.position().toPoint()))
             self.update_cursor(event.position().toPoint())
             event.accept()
             return
@@ -649,7 +673,8 @@ class MindMapView(QGraphicsView):
     def mouseDoubleClickEvent(self, event):
         """按钮双击仍按独立点击处理，不把事件交给正文的双击编辑入口。"""
         position = event.position().toPoint()
-        if event.button() == Qt.MouseButton.LeftButton and self.graph_edge_edit.handle_at(position):
+        if event.button() == Qt.MouseButton.LeftButton and (
+                self.graph_edge_edit.handle_at(position) or not event.modifiers() and self.text_resize.hit_test(position)):
             self.mousePressEvent(event)
             return
         if (event.button() == Qt.MouseButton.LeftButton and self.owner.current_page_kind == "inspiration"
@@ -696,7 +721,7 @@ class MindMapView(QGraphicsView):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and (
-                self.press_node is not None or self.image_resize.active or self.node_drag.external_active
+                self.press_node is not None or self._active_resize is not None or self.node_drag.external_active
                 or self.graph_edge_edit.active):
             self.cancel_interaction()
             event.accept()
@@ -752,7 +777,7 @@ class MindMapView(QGraphicsView):
         """同一事件循环只计算一次新旧外框范围，供随后前景绘制复用。"""
         if self.owner._disposed:
             return
-        current = selection_bounds(self)
+        current = selection_bounds(self).united(self.text_resize.decoration_bounds())
         dirty = self._pending_selection_bounds.united(self._selection_bounds).united(current)
         self._pending_selection_bounds = QRect()
         self._selection_bounds = current
@@ -760,7 +785,7 @@ class MindMapView(QGraphicsView):
             self.viewport().update(dirty)
 
     def drawForeground(self, painter, rect):
-        """在 GUI 视图前景绘制间隔选中外框及图片手柄，不参与场景导出。
+        """在 GUI 视图前景绘制间隔选中外框、调宽预览与尺寸手柄，不参与场景导出。
 
         painter、rect 为 Qt 本次绘制借用对象，不缓存、不修改文档或资源；仅由
         Qt GUI 线程在存活视图上调用，无额外所有权或正常业务异常。
@@ -777,6 +802,7 @@ class MindMapView(QGraphicsView):
         paint_node_selection(self, painter)
         # 缩放及滚动可能只重绘视图而不发出 scene.changed；记住实际显示的位置，
         # 使随后的局部移动仍能完整擦除旧外框，而非使用缩放前的视口坐标。
-        self._selection_bounds = QRect(self._selection_decoration.bounds)
+        self._selection_bounds = self._selection_decoration.bounds.united(self.text_resize.decoration_bounds())
         self.image_resize.paint(painter)
         self.graph_edge_edit.paint(painter)
+        self.text_resize.paint(painter)

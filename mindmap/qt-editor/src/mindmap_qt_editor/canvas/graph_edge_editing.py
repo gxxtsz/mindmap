@@ -87,7 +87,7 @@ class GraphEdgeEditController:
     def _can_edit(self) -> bool:
         owner = self.owner
         return (owner.graph is not None and not owner._disposed and owner.editable and owner.editor is None
-                and not owner._refreshing)
+                and not owner._refreshing and not self.view.text_resize.active)
 
     def _node_rect(self, key: str) -> QRectF:
         rect = self.owner.layout_result.nodes[key]

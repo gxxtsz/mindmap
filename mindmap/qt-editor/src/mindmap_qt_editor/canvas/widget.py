@@ -489,6 +489,8 @@ class MindMapWidget(
             ("add_sibling", "添加同级节点", ["Return", "Enter"], lambda w: w.add_sibling(), True),
             ("insert_parent", "插入父节点", "Shift+Return", lambda w: w.insert_parent(), True),
             ("edit", "编辑文字", "F2", lambda w: w.edit_selected(), True),
+            ("toggle_text_format", "渲染为 Markdown", None, lambda w: w.toggle_selected_text_format(), True),
+            ("reset_node_width", "恢复自动宽度", None, lambda w: w.reset_selected_width(), True),
             ("properties", "属性…", "Alt+Return", lambda w: w.edit_properties(), True),
             ("delete", "删除", "Delete", lambda w: w.delete_selected(), True),
             ("copy", "复制", "Ctrl+C", lambda w: w.copy(), False),
@@ -629,6 +631,15 @@ class MindMapWidget(
         # 全选只改变当前页的节点选择，只读画布仍可用；编辑期间交回正文控件的
         # 原生 Ctrl+A，空页面则没有可选择的节点。
         self._actions["select_all"].setEnabled(not editing and bool(self._document.nodes))
+        selected_text = self._selected_text_node()
+        text_format = self._actions["toggle_text_format"]
+        text_format.setText("显示为纯文本" if selected_text and selected_text.text_format == "markdown"
+                            else "渲染为 Markdown")
+        text_format.setVisible(selected_text is not None and not selected_text.page_reference_root_id)
+        text_format.setEnabled(text_format.isVisible() and self.editable and not editing)
+        reset_width = self._actions["reset_node_width"]
+        reset_width.setVisible(selected_text is not None and "fixed_width" in selected_text.style)
+        reset_width.setEnabled(reset_width.isVisible() and self.editable and not editing)
         self._update_graph_actions(editing)
         if self.graph is not None:
             self._sync_navigation()
@@ -734,6 +745,7 @@ class MindMapWidget(
 
             QDrag.cancel()
         if changed:
+            self.view.viewport().update()
             self.editable_changed.emit(bool(editable))
 
     def _ensure_editable(self):
@@ -1465,7 +1477,7 @@ class MindMapWidget(
                 ("", self._custom_actions),
             ]
         return [
-            ("", ("add_child", "add_sibling", "edit", "properties")),
+            ("", ("add_child", "add_sibling", "edit", "toggle_text_format", "reset_node_width", "properties")),
             ("", ("cut", "copy", "paste", "delete")),
             ("节点结构", ("insert_parent", "move_up", "move_down", "fold")),
             ("页面", ("create_submap", "convert_descendants_to_submap", "enter_submap",

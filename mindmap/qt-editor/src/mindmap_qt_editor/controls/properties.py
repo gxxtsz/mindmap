@@ -294,7 +294,7 @@ class NodePropertiesForm(QWidget):
         self.width_enabled = _CheckBox("自定义最大文本宽度")
         self.width_enabled.setObjectName("custom_width")
         self.width_enabled.setAccessibleName("自定义最大文本宽度")
-        self.width_enabled.setToolTip("关闭后恢复默认最大文本宽度，不改变其他样式")
+        self.width_enabled.setToolTip("节点使用自动宽度时应用此换行上限")
         self._row(
             form,
             self.width_enabled,

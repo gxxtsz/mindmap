@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
+    QTextCursor,
     QTextDocument,
     QTextOption,
 )
@@ -34,7 +35,12 @@ from .page_icons import paint_page_icon
 
 # 节点内容区上下各保留 8 个逻辑像素；正式测量、编辑草稿与导出共用此留白。
 _NODE_VERTICAL_PADDING = 8.0
+NODE_HORIZONTAL_PADDING = 14.0
+DEFAULT_TEXT_WIDTH = 280.0
 NODE_CARD_RADIUS = 7.0
+_MARKDOWN_FEATURES = (
+    QTextDocument.MarkdownFeature.MarkdownDialectGitHub | QTextDocument.MarkdownFeature.MarkdownNoHTML
+)
 
 PAGE_CONTROL_SIZE = 32.0
 PAGE_CONTROL_GAP = 2.0
@@ -77,16 +83,43 @@ class _TextDocument(QTextDocument):
         return None
 
 
+def text_from_html(html: str, *, markdown: bool, source: str | None = None) -> str:
+    """从剪贴板 HTML 提取可保存的节点正文，在 Qt GUI 线程同步返回字符串。
+
+    markdown 为真时将标题、强调、列表等转为节点使用的 Markdown。source 提供同一
+    载荷中的纯文本表示。若它与 HTML 显示文字一致且可直接解析出 Markdown 标记，
+    则保留原始源码，避免编辑器附带的 HTML 样式转义 Markdown。纯文本模式提取可见
+    正文。临时文档禁止读取外部资源，也不持有剪贴板和节点对象。
+    """
+    ensure_fonts()
+    document = _TextDocument()
+    document.setLayoutEnabled(False)
+    document.setHtml(html)
+    if not markdown:
+        return document.toPlainText()
+    if source:
+        words = source.split()
+        if words == document.toPlainText().split():
+            parsed = _TextDocument()
+            parsed.setLayoutEnabled(False)
+            parsed.setMarkdown(source, _MARKDOWN_FEATURES)
+            if words != parsed.toPlainText().split():
+                return source
+    return document.toMarkdown(_MARKDOWN_FEATURES).rstrip("\n")
+
+
 def make_text(text: str, font: QFont, width: float, *, markdown=False) -> QTextDocument:
     """创建按逻辑像素排版的独立文本，供节点缓存、拖动预览及导出共享。
 
     text 为正文或 Markdown 源码，font 为工厂已配置抗锯齿和像素对齐策略的
-    字体，width 为不含节点留白的最大正文宽度。markdown 为真时保留现有的
-    GitHub Markdown 解析规则并禁止 HTML；本函数不修改输入字体或读取外部资源。
+    字体，width 为不含节点留白的正文宽度，-1 表示先测自然宽度。markdown 为真时
+    使用 GitHub Markdown、禁用 HTML，并允许代码块按正文宽度折行。本函数不修改
+    输入字体或读取外部资源。
     使用字体设计度量计算换行，避免绘制倍率和设备像素取整影响缓存布局。
     返回的 QTextDocument 由调用方在 Qt GUI 线程持有，发布进视觉缓存后只读使用。
     """
     document = _TextDocument()
+    document.setUndoRedoEnabled(False)
     document.setDocumentMargin(0)
     document.setDefaultFont(font)
     option = QTextOption()
@@ -94,11 +127,18 @@ def make_text(text: str, font: QFont, width: float, *, markdown=False) -> QTextD
     option.setUseDesignMetrics(True)
     document.setDefaultTextOption(option)
     if markdown:
-        document.setMarkdown(
-            text,
-            QTextDocument.MarkdownFeature.MarkdownDialectGitHub
-            | QTextDocument.MarkdownFeature.MarkdownNoHTML,
-        )
+        document.setMarkdown(text, _MARKDOWN_FEATURES)
+        cursor = QTextCursor(document)
+        cursor.beginEditBlock()
+        block = document.firstBlock()
+        while block.isValid():
+            block_format = block.blockFormat()
+            if block_format.nonBreakableLines():
+                block_format.setNonBreakableLines(False)
+                cursor.setPosition(block.position())
+                cursor.setBlockFormat(block_format)
+            block = block.next()
+        cursor.endEditBlock()
     else:
         document.setPlainText(text)
     document.setTextWidth(width)
@@ -374,6 +414,7 @@ class VisualFactory:
     def visual(
         self, node: Node, theme: Theme, document: MindMapDocument, *, is_root=False,
         detail_page_resolver: Callable[[str], tuple[str, str | None]] | None = None,
+        cache: bool = True,
     ) -> NodeVisual:
         """取得单个节点的测量与绘制数据，返回值由本工厂缓存并只读共享。
 
@@ -392,41 +433,44 @@ class VisualFactory:
         字体保持节点所选的字族、字号和样式，统一优先抗锯齿并减轻像素网格对齐；
         标签和原地编辑继续借用同一策略。倍率与设备像素密度由实际绘制设备处理，
         不进入视觉缓存键，也不在缩放时重新排版或生成节点位图。
+        style.fixed_width 固定内容区宽度，列表和表格的 Qt 排版下限也计入卡片大小。
+        cache=False 用于视图单节点试算，借用图片缓存，临时结果只由调用方持有。
         """
         detail_page_id = node.detail_page_id
         if detail_page_resolver is not None and (is_root or node.submap_id):
             detail_page_id = detail_page_resolver(node.id)[1]
         reference = node.page_reference_root_id
         body = document.nodes.get(reference, node) if reference else node
-        key = (
-            body.text,
-            body.text_format,
-            # 连接线样式不改变节点文字或图片，切换/预览时复用原有测量缓存。
-            repr({key: value for key, value in node.style.items() if key != "branch"}),
-            tuple(node.tags),
-            tuple(node.icons),
-            node.image_id,
-            node.image_width,
-            node.is_image_node,
-            bool(node.children),
-            bool(node.note),
-            bool(node.hyperlink),
-            bool(detail_page_id),
-            bool(node.submap_id),
-            bool(reference),
-            GRAPH_PAGE_TYPE in node.extension_pages,
-            any(key != GRAPH_PAGE_TYPE for key in node.extension_pages),
-            is_root,
-            repr(theme),
-        )
-        previous = self._node_visuals.get(node.id)
-        if previous is not None and previous[0] == key:
-            return previous[1]
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            visual = self.cache[key]
-            self._node_visuals[node.id] = (key, visual)
-            return visual
+        if cache:
+            key = (
+                body.text,
+                body.text_format,
+                # 连接线样式不改变节点文字或图片，切换/预览时复用原有测量缓存。
+                repr({key: value for key, value in node.style.items() if key != "branch"}),
+                tuple(node.tags),
+                tuple(node.icons),
+                node.image_id,
+                node.image_width,
+                node.is_image_node,
+                bool(node.children),
+                bool(node.note),
+                bool(node.hyperlink),
+                bool(detail_page_id),
+                bool(node.submap_id),
+                bool(reference),
+                GRAPH_PAGE_TYPE in node.extension_pages,
+                any(key != GRAPH_PAGE_TYPE for key in node.extension_pages),
+                is_root,
+                repr(theme),
+            )
+            previous = self._node_visuals.get(node.id)
+            if previous is not None and previous[0] == key:
+                return previous[1]
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                visual = self.cache[key]
+                self._node_visuals[node.id] = (key, visual)
+                return visual
         font = QFont(node.style.get("font_family") or QApplication.font().family())
         font.setPointSizeF(float(node.style.get("font_size", 13 if is_root else 11)))
         font.setBold(bool(node.style.get("bold", is_root)))
@@ -437,19 +481,27 @@ class VisualFactory:
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         markdown = body.text_format == "markdown"
-        # 引用处可有自己的图标；与 Markdown 分段可避免图标前缀破坏目标正文的标题、列表。
-        separator = "\n\n" if reference and markdown else " "
+        # Markdown 正文单独起段，图标前缀不会破坏标题、列表和代码围栏。
+        separator = "\n\n" if markdown else " "
         text = (" ".join(node.icons) + separator if node.icons else "") + body.text
-        max_width = float(node.style.get("width", 280))
+        fixed_width = node.style.get("fixed_width")
+        max_width = float(node.style.get("width", DEFAULT_TEXT_WIDTH) if fixed_width is None else fixed_width)
         metrics = QFontMetricsF(font)
-        natural = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=40)
-        text_width = max(36, min(max_width, natural + 3))
-        if markdown:
-            text_width = max(120, min(max_width, natural + 3))
-        text_document = make_text(text, font, text_width, markdown=markdown)
+        if fixed_width is not None:
+            text_document = make_text(text, font, max_width, markdown=markdown)
+        elif markdown:
+            text_document = make_text(text, font, -1, markdown=True)
+            text_document.setTextWidth(max(36, min(max_width, text_document.idealWidth() + 3)))
+        else:
+            natural = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=40)
+            text_document = make_text(text, font, max(36, min(max_width, natural + 3)))
+        text_size = text_document.size()
+        if fixed_width is not None:
+            max_width = max(max_width, text_size.width())
         image, image_rect = None, QRectF()
         y = _NODE_VERTICAL_PADDING
-        width = text_width + 28
+        padding = NODE_HORIZONTAL_PADDING
+        width = text_size.width() + 2 * padding
         if node.image_id:
             if node.image_id not in self.pixmaps:
                 image, _ = decode_image(document.assets[node.image_id].data)
@@ -466,26 +518,26 @@ class VisualFactory:
                 image_rect = QRectF(0, 0, iw, ih)
                 width, y = iw, ih
             else:
-                image_rect = QRectF(14, y, iw, ih)
-                width = max(width, iw + 28)
+                image_rect = QRectF(padding, y, iw, ih)
+                width = max(width, iw + 2 * padding)
                 y += ih + 10
-        text_position = QPointF(14, y)
+        text_position = QPointF(padding, y)
         if not node.is_image_node:
-            y += max(metrics.height(), text_document.size().height())
+            y += max(metrics.height(), text_size.height())
         tag_font = QFont(font)
         tag_font.setPointSizeF(9)
         tag_metrics = QFontMetricsF(tag_font)
         tags = []
         if node.tags and not node.is_image_node:
             y += 8
-            x = 14.0
+            x = padding
             for tag in node.tags:
                 tag_width = min(max_width, tag_metrics.horizontalAdvance(tag) + 12)
-                if x > 14 and x + tag_width > max_width + 14:
-                    x, y = 14, y + 26
+                if x > padding and x + tag_width > max_width + padding:
+                    x, y = padding, y + 26
                 tags.append((tag, QRectF(x, y, tag_width, 22)))
+                width = max(width, x + tag_width + padding)
                 x += tag_width + 6
-                width = max(width, x + 8)
             y += 22
         if (node.note or node.hyperlink) and not node.is_image_node:
             y += 20
@@ -524,10 +576,11 @@ class VisualFactory:
         visual.page_icon_color = visual.text_color if is_root or node.style.get("background") else QColor(theme.accent)
         if visual.page_kinds:
             visual = visual.with_content_size(width, content_height)
-        self.cache[key] = visual
-        self._node_visuals[node.id] = (key, visual)
-        if len(self.cache) > 4096:
-            self.cache.popitem(last=False)
+        if cache:
+            self.cache[key] = visual
+            self._node_visuals[node.id] = (key, visual)
+            if len(self.cache) > 4096:
+                self.cache.popitem(last=False)
         return visual
 
     def measure(

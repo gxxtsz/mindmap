@@ -95,7 +95,9 @@ class Node:
     """节点实体。
 
     children 按顺序存放子节点 ID，父引用由文档临时索引推导，避免循环序列化。
-    style 支持字体、颜色、宽度等原生绘制属性；metadata 只能包含 JSON 数据。
+    text 保存原文，text_format 决定使用纯文本还是 Markdown 显示。style 中的
+    width 为自动测量的换行上限，fixed_width 为可选的固定正文宽度，均使用逻辑
+    像素。卡片留白和页面按钮另行计算。metadata 只接受 JSON 数据。
     """
 
     text: str = "新节点"
@@ -262,14 +264,14 @@ class MindMapDocument:
     inspiration: InspirationArea = field(default_factory=InspirationArea)
 
     @classmethod
-    def new(cls, text: str = "中心主题") -> MindMapDocument:
+    def new(cls, text: str = "中心主题", *, text_format: str = "markdown") -> MindMapDocument:
         """建立默认向右展开、使用圆角正交连接线的新文档。
 
-        初始样式显式写入根主题，后续新增主题通过既有的父主题复制规则沿用。
-        不改变 Node 的空样式语义，文件读取时原有的未配置曲线仍可原样恢复；
-        初始化也不经过引擎事务，因此新文档保持未修改状态且没有额外撤销记录。
+        text 是根节点原文，默认以 Markdown 显示。纯文本导入器可传入 plain。
+        初始分支样式写入根主题，后续新增主题沿用父节点的分支样式。初始化发生在
+        引擎事务外，新文档保持未修改状态且没有额外撤销记录。
         """
-        root = Node(text, style={"branch": {"kind": BranchStyle.ROUND.value}})
+        root = Node(text, text_format=text_format, style={"branch": {"kind": BranchStyle.ROUND.value}})
         return cls(root.id, {root.id: root})
 
     @property
@@ -474,13 +476,14 @@ class MindMapGraphView(MindMapPageView):
     ):
         """以局部 ID 构造扁平画布，附页入口从文档实体投影，节点和连线仍属于当前图。
 
-        有绑定时 document_nodes 须提供对应文档节点。投影保留当前节点的附页入口，
-        调用者应通过引擎修改归属。无绑定的图可省略文档节点表。
+        节点正文、格式和宽度取自图记录。有绑定时 document_nodes 须提供对应文档
+        节点以读取附页入口，调用者应通过引擎修改归属。无绑定的图可省略文档节点表。
         """
         # 图没有中心根和父子关系，大纲按声明顺序显示为平级节点。
         nodes = {}
         for entry in graph.nodes:
-            node = Node(entry.title, id=entry.id)
+            style = {} if entry.fixed_width is None else {"fixed_width": entry.fixed_width}
+            node = Node(entry.title, id=entry.id, text_format=entry.text_format, style=style)
             if entry.document_node_id is not None:
                 if document_nodes is None:
                     raise MindMapError("图节点投影缺少附页实体")

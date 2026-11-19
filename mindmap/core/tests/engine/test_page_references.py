@@ -16,7 +16,7 @@ def test_reference_displays_only_target_body_without_overwriting_source(kind):
     child = engine.add_child(source, "保留分支")
     detail = engine.create_detail_page(source)
     image = engine.attach_image(source, b"image")
-    engine.update_node(source, note="自有备注", style={"bold": True})
+    engine.update_node(source, text_format="plain", note="自有备注", style={"bold": True})
 
     engine.set_page_reference(source, target)
     engine.update_node(target, text="## 新正文", text_format="markdown", note="不引用目标备注")

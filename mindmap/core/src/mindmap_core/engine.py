@@ -267,9 +267,9 @@ class MindMapEngine(NodePagesMixin):
     def add_inspiration(self, text="新想法", *, position) -> str:
         """创建游离根并返回稳定节点 ID，普通后代及附属页面能力沿用普通节点。
 
-        position 是两个有限数值组成的逻辑像素坐标；非法文本或坐标抛出
-        MindMapError，失败完整回滚。成功只提交一次历史，不依赖 Qt；只能在
-        引擎所属线程同步调用，返回标识可跨快照保存，实体仍归文档管理。
+        text 保存新想法的 Markdown 源码，position 是两个有限数值组成的逻辑像素
+        坐标。非法文本或坐标抛出 MindMapError，失败完整回滚。成功只提交一次历史。
+        只在引擎所属线程同步调用。返回标识可跨快照保存，实体归文档管理。
         """
         return self._execute("add_inspiration", self._editor.add_inspiration,
                              text=text, position=position)
@@ -722,17 +722,17 @@ class MindMapEngine(NodePagesMixin):
         self._notify("打开文档", candidate.nodes, "reset")
 
     def add_child(self, parent_id: str, text: str = "新节点", *, index: int | None = None) -> str:
-        """添加子节点，返回新标识；index 省略时追加并展开父节点。"""
+        """添加子节点并返回新标识。text 保存 Markdown 源码，省略 index 时追加并展开父节点。"""
         return self._execute("add_child", self._editor.add_child, parent_id=parent_id, text=text, index=index)
 
     def add_sibling(self, node_id: str, text: str = "新节点", *, before: bool = False) -> str:
-        """添加同级节点，保持方向提示；根节点不允许拥有同级。"""
+        """为有同级位置的节点添加同级并沿用方向提示，text 保存 Markdown 源码。"""
         return self._execute(
             "add_sibling", self._editor.add_sibling, node_id=node_id, text=text, before=before
         )
 
     def insert_parent(self, node_id: str, text: str = "父节点") -> str:
-        """插入一级父节点，保留原节点及其后代标识。"""
+        """插入一级父节点，text 保存 Markdown 源码，保留原节点及其后代标识。"""
         return self._execute("insert_parent", self._editor.insert_parent, node_id=node_id, text=text)
 
     def update_node(self, node_id: str, **patch) -> None:
@@ -740,6 +740,8 @@ class MindMapEngine(NodePagesMixin):
 
         引用节点的正文和格式取目标页根，请修改目标根或先解除引用。其他属性仍可
         通过本接口修改，失败抛出 MindMapError 且不会部分提交。
+        设置 style 时传入完整样式对象。fixed_width 以逻辑像素表示固定正文宽度，
+        允许 40 至 1200，省略则启用自动宽度。自动宽度可由 width 指定换行上限。
         """
 
         def action(node_id, patch):

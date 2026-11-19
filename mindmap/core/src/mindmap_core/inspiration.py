@@ -51,7 +51,7 @@ class InspirationEditorMixin:
         # 分支样式使用区域的标准新建根配置，与普通新文档保持一致。
         from .branch_styles import BranchStyle
 
-        node = Node(text, style={"branch": {"kind": BranchStyle.ROUND.value}})
+        node = Node(text, text_format="markdown", style={"branch": {"kind": BranchStyle.ROUND.value}})
         self._state.put_node(node)
         area = self._edit_inspiration()
         area.root_ids.append(node.id)

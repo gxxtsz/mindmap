@@ -9,6 +9,7 @@ from mindmap_core.layouts import resolve_tree_spacing
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render import NodeVisual
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
+from mindmap_qt_render.rendering import DEFAULT_TEXT_WIDTH, NODE_HORIZONTAL_PADDING
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
@@ -422,14 +423,14 @@ class NodeItem(StaticNodeItem):
 class NodeEditor(QGraphicsTextItem):
     """无边框原地编辑器；草稿尺寸只影响画面，提交时才生成一次引擎命令。
 
-    编辑器复用节点的字体、正文位置和最大文本宽度，以真实文本布局调整圆角
-    外框。中文候选属于临时草稿，参与尺寸计算但不写入节点或撤销历史。
+    编辑器复用节点的字体、正文位置和宽度策略，以真实文本布局调整圆角外框。
+    中文候选属于临时草稿，参与尺寸计算但不写入节点或撤销历史。
     """
 
     def __init__(self, owner, node, visual):
         """以正式视觉的字体和正文宽度创建独立草稿，统一编辑前后的排版度量。
 
-        owner 提供画布及提交入口，node 只用于取得节点标识、原文和最大宽度，
+        owner 提供画布及提交入口，node 提供标识、原文和宽度策略，
         visual 为工厂发布的只读视觉。编辑器继承其抗锯齿、像素对齐及字体样式，
         文本文档启用相同的设计度量，避免进入编辑时因设备像素取整改变换行。
         构造不修改节点、共享视觉或撤销历史，实例由画布在 GUI 线程管理。
@@ -439,11 +440,10 @@ class NodeEditor(QGraphicsTextItem):
         self.composing = False
         self.finishing = False
         self.base_layout = owner.layout_result
-        self._base_visual = visual
         self.preview_visual = visual
-        self._max_width = float(node.style.get("width", 280))
         self._preedit = ""
         self._syncing_geometry = False
+        self.sync_base_visual(node, visual)
         self.setZValue(20)
         self.setFont(visual.font)
         self.setDefaultTextColor(visual.text_color)
@@ -480,19 +480,17 @@ class NodeEditor(QGraphicsTextItem):
         finally:
             painter.restore()
 
-    def refresh_page_controls(self, visual: NodeVisual) -> bool:
-        """用最新正式视觉更新草稿的附页按钮，保留原输入、选区和候选状态。
+    def sync_base_visual(self, node, visual: NodeVisual) -> None:
+        """按同一正式快照中的节点和视觉重算草稿几何，保留输入、选区和候选状态。
 
-        由同一 GUI 线程在正式布局刷新后调用。visual 取自当前编辑节点，按需重算
-        草稿尺寸。发生变化返回 True；附页变化只影响展示，等用户确认文字后才提交正文。
+        由所属 GUI 线程在初始化或分屏同步后调用。固定宽度取可排版的正式内容区，
+        自动宽度取节点样式中的换行上限。调用不修改正式视觉或提交正文。
         """
-        if (self._base_visual.page_kinds, self._base_visual.page_icon_color) == (
-                visual.page_kinds, visual.page_icon_color):
-            return False
-        self._base_visual = replace(self._base_visual, page_kinds=visual.page_kinds,
-                                    page_icon_color=visual.page_icon_color)
+        self._base_visual = visual
+        self._max_width = float(node.style.get("width", DEFAULT_TEXT_WIDTH))
+        self._fixed_width = (visual.width - visual.page_controls_width - 2 * NODE_HORIZONTAL_PADDING
+                             if "fixed_width" in node.style else None)
         self.sync_geometry(force=True)
-        return True
 
     def sync_geometry(self, *_args, force=False):
         """按当前正文及候选实时换行、调整节点，不复制或修改引擎中的文档。
@@ -505,25 +503,28 @@ class NodeEditor(QGraphicsTextItem):
             return
         self._syncing_geometry = True
         try:
-            text = self.toPlainText()
-            if self._preedit:
-                # QTextCursor 的位置按 UTF-16 计数，不能直接当成 Python 字符下标；
-                # 先换算位置，避免表情符号之后输入中文时把候选宽度算到错误行。
-                prefix = text.encode("utf-16-le")[:self.textCursor().position() * 2]
-                position = len(prefix.decode("utf-16-le"))
-                text = text[:position] + self._preedit + text[position:]
             metrics = QFontMetricsF(self.font())
-            natural = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=40)
-            width = max(36, min(self._max_width, natural + 3))
+            width = self._fixed_width
+            if width is None:
+                text = self.toPlainText()
+                if self._preedit:
+                    # 先把 UTF-16 光标位置换算为 Python 下标，供包含表情的候选文字测量。
+                    prefix = text.encode("utf-16-le")[:self.textCursor().position() * 2]
+                    position = len(prefix.decode("utf-16-le"))
+                    text = text[:position] + self._preedit + text[position:]
+                natural = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=40)
+                width = max(36, min(self._max_width, natural + 3))
             if self.textWidth() != width:
                 self.setTextWidth(width)
             base = self._base_visual
-            height = max(metrics.height(), self.document().size().height())
+            size = self.document().size()
+            height = max(metrics.height(), size.height())
             delta = height - max(metrics.height(), base.text.size().height())
             tags = [(value, rect.translated(0, delta)) for value, rect in base.tags]
-            node_width = max([width + 28, *(rect.right() + 14 for _, rect in tags)])
+            padding = NODE_HORIZONTAL_PADDING
+            node_width = max([size.width() + 2 * padding, *(rect.right() + padding for _, rect in tags)])
             if base.image is not None:
-                node_width = max(node_width, base.image_rect.right() + 14)
+                node_width = max(node_width, base.image_rect.right() + padding)
             # 页面按钮区与最小高度使用正式测量的同一入口；取消或缩短草稿时
             # 减去旧的居中留白，避免按钮区被当作文字宽度或被反复追加。
             visual = replace(base, text=self.document(), tags=tags).with_content_size(
@@ -542,9 +543,8 @@ class NodeEditor(QGraphicsTextItem):
         self.sync_geometry()
 
     def keyPressEvent(self, event):
-        # 画布粘贴动作在正文编辑时停用；仅接管图像快捷键，普通文字继续走 Qt，
-        # 图像校验失败或候选未结束时也消费按键，保持当前草稿完整。
-        if event.matches(QKeySequence.StandardKey.Paste) and self.owner._paste_editor_image():
+        # 先处理图片和带格式的文字。普通纯文本交还 Qt 的编辑器粘贴。
+        if event.matches(QKeySequence.StandardKey.Paste) and self.owner._paste_editor_clipboard():
             event.accept()
             return
         if self.composing and event.key() in (

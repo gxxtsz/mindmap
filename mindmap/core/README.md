@@ -384,7 +384,9 @@ engine.undo()
 
 内置图通过 `node_graph`、`set_node_graph` 和 `remove_node_graph` 读写。`graph_page_id(owner_id)` 返回导航标识，可用于查询页面摘要或单页投影。图内标识只在一张图内有效，手动位置与图内容共同进入事务。
 
-`create_graph_node_page(owner_id, local_id, kind=...)` 接受 `detail`、`submap` 或 `graph`，返回新页面 ID。首次创建为图节点分配文档节点 ID，写入图数据版本二的 `document_node_id`。文档节点表保存附页入口，原生页面表及资源表保存页面内容。通过 `graph_node_document_id` 查到文档节点后，可复用既有附页查询和删除接口。删除图节点会在同一事务移除其附页。旧详情页中的图保持版本一，可更新既有图内容。
+`GraphNode.title` 保存正文源码，`text_format` 指定纯文本或 Markdown，`fixed_width` 指定逻辑像素宽度。树节点使用 `Node.text_format` 和 `Node.style["fixed_width"]`。固定正文宽度可取 40 至 1200，省略时按内容测量。图数据版本三和完整 JSON 文档版本九支持这两项图节点属性，旧图的缺省值为纯文本和自动宽度。
+
+`create_graph_node_page(owner_id, local_id, kind=...)` 接受 `detail`、`submap` 或 `graph`，返回新页面 ID。首次创建为图节点分配文档节点 ID，写入图数据版本二起支持的 `document_node_id`。文档节点表保存附页入口，原生页面表及资源表保存页面内容。通过 `graph_node_document_id` 查到文档节点后，可复用既有附页查询和删除接口。删除图节点会在同一事务移除其附页。
 
 `copy_graph_fragment` 返回由合成根承载图的独立文档，`paste_graph_fragment` 把它附加到已有图并返回新局部 ID。普通树和图节点的片段复制均重建文档节点、页面及片段内部引用。
 
