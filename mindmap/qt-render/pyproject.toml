@@ -5,7 +5,12 @@ description = "思维导图的 Qt 测量、静态绘制与图形导出"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.12,<5",
+    "markdown-it-py>=3,<5",
+    "markdownify>=1.2,<2",
+    "matplotlib>=3.10,<4",
     "mindmap-core>=0.1.0,<0.2",
+    "Pygments>=2.19,<3",
     "PySide6>=6.9,<7",
 ]
 license = "MIT"

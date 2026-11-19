@@ -24,7 +24,9 @@ EXPECTED = set(MINDMAP_DIRECTORIES) | {
 }
 DEPENDENCIES = {
     "mindmap-core": set(),
-    "mindmap-qt-render": {"mindmap-core", "pyside6"},
+    "mindmap-qt-render": {
+        "beautifulsoup4", "markdown-it-py", "markdownify", "matplotlib", "mindmap-core", "pygments", "pyside6",
+    },
     "mindmap-qt-editor": {"mindmap-core", "mindmap-qt-render", "pyside6"},
     "mindmap-desktop-api": {"pyside6"},
     "mindmap-desktop-runtime": {"mindmap-desktop-api", "pyside6"},

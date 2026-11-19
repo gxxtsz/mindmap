@@ -25,12 +25,13 @@ from PySide6.QtGui import (
     QPalette,
     QPen,
     QPixmap,
-    QTextCursor,
     QTextDocument,
     QTextOption,
 )
 from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 
+from .markdown_code import style_code
+from .markdown_math import insert_formulas, mark_formulas
 from .page_icons import paint_page_icon
 
 # 节点内容区上下各保留 8 个逻辑像素；正式测量、编辑草稿与导出共用此留白。
@@ -54,7 +55,7 @@ def ensure_fonts() -> None:
     """补齐 Windows 离屏插件的空字体库，不改变正常桌面宿主的字体设置。
 
     Qt 的 Windows offscreen 插件可能返回零种字体。仅在此情况下，从当前系统
-    读取微软雅黑并注册到本进程；字体不被复制进包或写入系统目录。
+    读取中文和等宽字体并注册到本进程。注册只在本进程的字体库内生效。
     """
     if QApplication.instance() is None:
         raise MindMapError("创建图形组件或导出前必须先创建 QApplication")
@@ -63,7 +64,7 @@ def ensure_fonts() -> None:
     if sys.platform == "win32":
         directory = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
         family = None
-        for filename in ("msyh.ttc", "msyhbd.ttc", "simsun.ttc"):
+        for filename in ("msyh.ttc", "msyhbd.ttc", "simsun.ttc", "consola.ttf"):
             path = directory / filename
             if path.is_file():
                 font_id = QFontDatabase.addApplicationFont(str(path))
@@ -86,39 +87,51 @@ class _TextDocument(QTextDocument):
 def text_from_html(html: str, *, markdown: bool, source: str | None = None) -> str:
     """从剪贴板 HTML 提取可保存的节点正文，在 Qt GUI 线程同步返回字符串。
 
-    markdown 为真时将标题、强调、列表等转为节点使用的 Markdown。source 提供同一
-    载荷中的纯文本表示。若它与 HTML 显示文字一致且可直接解析出 Markdown 标记，
-    则保留原始源码，避免编辑器附带的 HTML 样式转义 Markdown。纯文本模式提取可见
-    正文。临时文档禁止读取外部资源，也不持有剪贴板和节点对象。
+    markdown 为真时将网页标题、代码、表格和公式注解等转为节点源码。网页已有
+    排版结构时以该结构为准。对于编辑器附带的简单 HTML，若 source 与其可见文字
+    一致且含 Markdown 语法，则保留 source。纯文本模式提取可见正文。处理过程
+    在进程内完成，返回的源码由调用者持有。
     """
     ensure_fonts()
+    if markdown:
+        from bs4 import BeautifulSoup
+
+        from .markdown_clipboard import clipboard_html_to_markdown, has_rendered_structure
+
+        soup = BeautifulSoup(html, "html.parser")
+        if not source or has_rendered_structure(soup):
+            return clipboard_html_to_markdown(soup)
     document = _TextDocument()
     document.setLayoutEnabled(False)
     document.setHtml(html)
     if not markdown:
         return document.toPlainText()
-    if source:
-        words = source.split()
-        if words == document.toPlainText().split():
-            parsed = _TextDocument()
-            parsed.setLayoutEnabled(False)
-            parsed.setMarkdown(source, _MARKDOWN_FEATURES)
-            if words != parsed.toPlainText().split():
-                return source
-    return document.toMarkdown(_MARKDOWN_FEATURES).rstrip("\n")
+    words = source.split()
+    if words == document.toPlainText().split():
+        marked, _ = mark_formulas(source)
+        parsed = _TextDocument()
+        parsed.setLayoutEnabled(False)
+        parsed.setMarkdown(marked, _MARKDOWN_FEATURES)
+        if words != parsed.toPlainText().split():
+            return source
+    return clipboard_html_to_markdown(soup)
 
 
-def make_text(text: str, font: QFont, width: float, *, markdown=False) -> QTextDocument:
+def make_text(
+    text: str, font: QFont, width: float, *, markdown=False,
+    foreground: QColor | None = None, background: QColor | None = None,
+) -> QTextDocument:
     """创建按逻辑像素排版的独立文本，供节点缓存、拖动预览及导出共享。
 
     text 为正文或 Markdown 源码，font 为工厂已配置抗锯齿和像素对齐策略的
     字体，width 为不含节点留白的正文宽度，-1 表示先测自然宽度。markdown 为真时
-    使用 GitHub Markdown、禁用 HTML，并允许代码块按正文宽度折行。本函数不修改
-    输入字体或读取外部资源。
+    使用 GitHub Markdown、禁用 HTML。代码和公式按 foreground、background 取色，
+    默认使用黑字白底。代码块可以折行，公式按逻辑尺寸参与节点排版。
     使用字体设计度量计算换行，避免绘制倍率和设备像素取整影响缓存布局。
     返回的 QTextDocument 由调用方在 Qt GUI 线程持有，发布进视觉缓存后只读使用。
     """
     document = _TextDocument()
+    document.setLayoutEnabled(False)
     document.setUndoRedoEnabled(False)
     document.setDocumentMargin(0)
     document.setDefaultFont(font)
@@ -127,21 +140,16 @@ def make_text(text: str, font: QFont, width: float, *, markdown=False) -> QTextD
     option.setUseDesignMetrics(True)
     document.setDefaultTextOption(option)
     if markdown:
-        document.setMarkdown(text, _MARKDOWN_FEATURES)
-        cursor = QTextCursor(document)
-        cursor.beginEditBlock()
-        block = document.firstBlock()
-        while block.isValid():
-            block_format = block.blockFormat()
-            if block_format.nonBreakableLines():
-                block_format.setNonBreakableLines(False)
-                cursor.setPosition(block.position())
-                cursor.setBlockFormat(block_format)
-            block = block.next()
-        cursor.endEditBlock()
+        source, formulas = mark_formulas(text)
+        document.setMarkdown(source, _MARKDOWN_FEATURES)
+        foreground = foreground or QColor("black")
+        if any(marker in text for marker in ("`", "~~~", "    ", "\t")):
+            style_code(document, background or QColor("white"), foreground)
+        insert_formulas(document, formulas, font, foreground)
     else:
         document.setPlainText(text)
     document.setTextWidth(width)
+    document.setLayoutEnabled(True)
     return document
 
 
@@ -481,6 +489,9 @@ class VisualFactory:
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         markdown = body.text_format == "markdown"
+        background = QColor(node.style.get("background", theme.accent if is_root else theme.node_background))
+        root_text = "#18212f" if QColor(theme.accent).lightnessF() > 0.65 else "#ffffff"
+        text_color = QColor(node.style.get("text_color", root_text if is_root else theme.text))
         # Markdown 正文单独起段，图标前缀不会破坏标题、列表和代码围栏。
         separator = "\n\n" if markdown else " "
         text = (" ".join(node.icons) + separator if node.icons else "") + body.text
@@ -488,9 +499,10 @@ class VisualFactory:
         max_width = float(node.style.get("width", DEFAULT_TEXT_WIDTH) if fixed_width is None else fixed_width)
         metrics = QFontMetricsF(font)
         if fixed_width is not None:
-            text_document = make_text(text, font, max_width, markdown=markdown)
+            text_document = make_text(text, font, max_width, markdown=markdown,
+                                      foreground=text_color, background=background)
         elif markdown:
-            text_document = make_text(text, font, -1, markdown=True)
+            text_document = make_text(text, font, -1, markdown=True, foreground=text_color, background=background)
             text_document.setTextWidth(max(36, min(max_width, text_document.idealWidth() + 3)))
         else:
             natural = max((metrics.horizontalAdvance(line) for line in text.splitlines()), default=40)
@@ -547,15 +559,8 @@ class VisualFactory:
             content_height,
             text_document,
             text_position,
-            QColor(
-                node.style.get(
-                    "text_color",
-                    ("#18212f" if QColor(theme.accent).lightnessF() > 0.65 else "#ffffff")
-                    if is_root
-                    else theme.text,
-                )
-            ),
-            QColor(node.style.get("background", theme.accent if is_root else theme.node_background)),
+            text_color,
+            background,
             QColor(node.style.get("border_color", theme.border)),
             float(node.style.get("border_width", 1)),
             image,

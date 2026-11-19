@@ -277,6 +277,37 @@ def test_inline_paste_html_in_plain_node_uses_plain_text(canvas, qtbot, qapp):
     assert (node.text, node.text_format) == ("标题\n正文", "plain")
 
 
+def test_inline_paste_keeps_code_tables_and_katex_from_web_selection(canvas, qtbot, qapp):
+    """网页的纯文本副本丢掉结构时，使用 HTML 中的代码、表格和公式注解。"""
+    widget, target = canvas
+    tex = r"\text{Target} = \text{构建产物定义} + \text{依赖关系}"
+    code = "# 定义可执行程序\nadd_executable(my_app main.cpp)\n\n# 声明链接关系"
+    mime = QMimeData()
+    mime.setText(f"例如\n{code}\n属性\t说明\nSOURCES\t源文件\n{tex}")
+    mime.setHtml(
+        f"<p>例如</p><pre><div>代码语言</div><code class='language-cmake'>{code}</code></pre>"
+        "<table><tr><th>属性</th><th>说明</th></tr><tr><td><code>SOURCES</code></td><td>源文件</td></tr></table>"
+        "<span class='katex-display'><span class='katex'><math><semantics><mtext>公式</mtext>"
+        f"<annotation encoding='application/x-tex'>{tex}</annotation></semantics></math>"
+        "<span class='katex-html'>重复的视觉文字</span></span></span>"
+    )
+    qapp.clipboard().setMimeData(mime)
+    widget.begin_edit(target)
+    qtbot.keyClick(widget.view, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+    source = widget.editor.toPlainText()
+    assert f"```cmake\n{code}\n```" in source
+    assert "| `SOURCES` | 源文件 |" in source
+    assert f"$$\n{tex}\n$$" in source
+    assert "代码语言" not in source and "重复的视觉文字" not in source
+    qtbot.keyClick(widget.view, Qt.Key.Key_Return)
+    assert widget.engine.get_node(target).text == source
+    visual = widget.node_items[target].visual.text
+    assert visual.find("# 定义可执行程序").blockFormat().headingLevel() == 0
+    table = visual.find("SOURCES").currentTable()
+    assert table is not None and table.cellAt(0, 0).firstCursorPosition().block().text() == "属性"
+    assert "\ufffc" in visual.toPlainText()
+
+
 def test_indented_paste_without_selection_creates_independent_inspiration_trees(canvas, monkeypatch):
     """灵感区空态的多根片段不留下临时容器，整组树及落点一次撤销重做。"""
     widget, _ = canvas

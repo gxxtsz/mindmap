@@ -8,7 +8,7 @@ import pytest
 from mindmap_core import MindMapEngine, Theme
 from mindmap_qt_render import VisualFactory, rendering
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QTextFormat
 
 
 def painter_state(painter):
@@ -160,3 +160,53 @@ def test_fixed_markdown_width_wraps_code_and_includes_the_table_layout_minimum(q
     visual = factory.visual(table, document.theme, document)
     assert visual.text.size().width() > 40
     assert visual.width == visual.text.size().width() + 28
+
+
+@pytest.mark.parametrize("dark", [False, True])
+def test_markdown_math_renders_in_text_and_separate_blocks(qapp, dark):
+    factory = VisualFactory()
+    document = MindMapEngine().document
+    source = r"""行内 $x_1^2$ 与 \(\alpha\)。金额为 $5 或 $10。
+
+\[
+\text{Target} = \text{构建产物定义} + \text{构建属性} + \text{依赖关系}
+\]
+
+$$\frac{1}{\sqrt{2}}$$
+
+`$literal$` 和 `\(code\)`。
+
+```cmake
+# $code$ 与 $$literal$$ 保持原样
+add_library(math STATIC math.cpp)
+```
+
+不支持的命令 \(\invalidmath{x}\) 显示原文。"""
+    theme = Theme.dark() if dark else Theme()
+    node = replace(document.root, text=source, style={"fixed_width": 380})
+    visual = factory.visual(node, theme, document)
+    text = visual.text
+    plain = text.toPlainText()
+    assert plain.count("\ufffc") == 4
+    assert "$5 或 $10" in plain and r"$literal$ 和 \(code\)" in plain
+    assert "# $code$ 与 $$literal$$ 保持原样" in plain
+    assert r"\(\invalidmath{x}\)" in plain
+    formula = text.find("\ufffc").block()
+    assert formula.text().startswith("行内")
+    assert text.formula_layout.renderers[2].viewBoxF().width() > 200
+    assert all(renderer.isValid() for renderer in text.formula_layout.renderers)
+
+    code = text.find("add_library")
+    assert code.blockFormat().stringProperty(QTextFormat.Property.BlockCodeLanguage) == "cmake"
+    assert code.charFormat().fontFixedPitch()
+    assert code.charFormat().hasProperty(QTextFormat.Property.ForegroundBrush)
+    assert code.blockFormat().hasProperty(QTextFormat.Property.BackgroundBrush)
+
+    image = QImage(ceil(visual.width), ceil(visual.height), QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    try:
+        visual.paint(painter, node)
+    finally:
+        painter.end()
+    assert not image.isNull()
