@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from mindmap_core import MindMapError
 from mindmap_core.formats import directory, json_codec
 from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_editor.canvas import attachments as attachment_actions
@@ -83,6 +84,10 @@ def test_drop_and_click_attachment_on_each_node_kind(canvas, qtbot, tmp_path, mo
     contents = "附件内容".encode("utf-8")
     source.write_bytes(contents)
     drop(canvas, key, source)
+    control = canvas.node_items[key].attachment_control
+    assert control.isVisible() and control.toolTip() == "正在导入附件…"
+    assert not control.can_activate()
+    assert canvas.document_view.nodes[key].attachment is None
     qtbot.waitUntil(lambda: canvas.document_view.nodes[key].attachment is not None)
     assert source.read_bytes() == contents
     source.unlink()
@@ -98,11 +103,43 @@ def test_drop_and_click_attachment_on_each_node_kind(canvas, qtbot, tmp_path, mo
     monkeypatch.setattr(QDesktopServices, "openUrl", open_url)
     monkeypatch.setattr(attachment_actions, "_opened_attachment_directories", [])
     canvas.set_editable(False)
-    control = canvas.node_items[key].attachment_control
+    assert canvas.node_items[key].attachment_control is control
     assert control.isVisible() and control.toolTip() == source.name
     click = canvas.view.mapFromScene(control.mapToScene(control.boundingRect().center()))
     qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=click)
     assert opened == [(source.name, contents)]
+
+
+def test_pending_paperclip_is_visible_during_read_and_clears_on_failure(canvas, qtbot, tmp_path, monkeypatch):
+    engine = canvas.engine
+    key = engine.root_id
+    engine.add_child(key, "子节点")
+    source = tmp_path / "附件.txt"
+    source.write_bytes(b"incoming")
+    future = Future()
+    monkeypatch.setattr(attachment_actions, "_load_pool", lambda: SimpleNamespace(submit=lambda *_: future))
+    errors, opened = [], []
+    canvas.error_occurred.connect(errors.append)
+    monkeypatch.setattr(QDesktopServices, "openUrl", lambda url: opened.append(url))
+    layout, revision = canvas.layout_result, engine.revision
+
+    drop(canvas, key, source)
+    item = canvas.node_items[key]
+    control = item.attachment_control
+    assert control.isVisible() and not control.can_activate()
+    assert not control.boundingRect().intersects(item.fold_control.button_rect())
+    assert canvas.layout_result is layout and engine.revision == revision
+    qtbot.waitUntil(lambda: canvas._pending_attachment.prepared)
+    assert control.isVisible()
+    position = canvas.view.mapFromScene(control.mapToScene(control.boundingRect().center()))
+    assert canvas.view.itemAt(position) is control
+    qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=position)
+    assert not opened and not errors
+
+    future.set_exception(MindMapError("读取附件失败"))
+    qtbot.waitUntil(lambda: canvas._pending_attachment is None)
+    assert not control.isVisible() and errors == ["读取附件失败"]
+    assert engine.revision == revision and not engine.document.assets
 
 
 @pytest.mark.parametrize("graph", [False, True])

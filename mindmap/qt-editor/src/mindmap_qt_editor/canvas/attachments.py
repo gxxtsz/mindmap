@@ -1,5 +1,6 @@
 """在画布上读入文件，并用系统默认应用打开已保存的附件。"""
 
+from concurrent.futures import Future
 from dataclasses import dataclass
 from os import fstat
 from pathlib import Path
@@ -12,6 +13,7 @@ from mindmap_core.node_pages import parse_graph_page_id
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox
+from shiboken6 import isValid
 
 from .loading import _load_pool
 
@@ -24,6 +26,14 @@ class _AttachmentTarget:
     context: tuple[int, str | tuple[str, str | None] | None]
     graph: NodeGraph | None
     attachment: FileAttachment | None
+
+
+@dataclass(slots=True)
+class _AttachmentImport:
+    node_id: str
+    target: _AttachmentTarget
+    future: Future[tuple[str, bytes]]
+    prepared: bool = False
 
 
 def _read_attachment(path: Path) -> tuple[str, bytes]:
@@ -48,16 +58,32 @@ class AttachmentActionsMixin:
     """文件读取完成后回到 GUI 线程，确认原附件仍属于同一节点。"""
 
     def _init_attachments(self):
-        self._pending_attachment = None
+        self._pending_attachment: _AttachmentImport | None = None
         self._attachment_timer = QTimer(self)
         self._attachment_timer.setInterval(20)
         self._attachment_timer.timeout.connect(self._poll_attachment)
 
     def _stop_attachment_read(self):
         self._attachment_timer.stop()
-        if self._pending_attachment is not None:
-            self._pending_attachment[2].cancel()
-            self._pending_attachment = None
+        pending, self._pending_attachment = self._pending_attachment, None
+        if pending is not None:
+            pending.future.cancel()
+            self._sync_attachment_control(pending.node_id)
+
+    def _sync_attachment_control(self, node_id: str):
+        item = self.node_items.get(node_id)
+        if item is not None and isValid(item):
+            item._sync_optional_page_controls()
+
+    def _attachment_is_pending(self, node_id: str) -> bool:
+        pending = self._pending_attachment
+        return (
+            pending is not None
+            and pending.node_id == node_id
+            and not self._disposed
+            and pending.target.context == self._attachment_context()
+            and pending.target.graph is self.graph
+        )
 
     def _attachment_context(self):
         return self.engine.document_generation, self._view_key()
@@ -79,26 +105,47 @@ class AttachmentActionsMixin:
         self._ensure_editable()
         if self._pending_attachment is not None:
             raise MindMapError("正在读取附件，请稍后重试")
-        context = self._attachment_context()
-        self._prepare_page_navigation()
         target = self._attachment_target(node_id)
-        if target.context != context:
-            raise MindMapError("附件所属页面已切换，请重新拖入")
-        self._pending_attachment = node_id, target, _load_pool().submit(_read_attachment, path)
+        future = _load_pool().submit(_read_attachment, path)
+        self._pending_attachment = _AttachmentImport(node_id, target, future)
+        self._sync_attachment_control(node_id)
+        # 等到首次轮询再提交草稿，让画布先绘制导入中的回形针。
         self._attachment_timer.start()
         return True
 
+    def _prepare_attachment_target(self, pending: _AttachmentImport) -> _AttachmentTarget:
+        self._verify_attachment_target(pending.node_id, pending.target)
+        self._prepare_page_navigation()
+        self._ensure_editable()
+        target = self._attachment_target(pending.node_id)
+        if target.context != pending.target.context:
+            raise MindMapError("附件所属页面已切换，请重新拖入")
+        if target.attachment != pending.target.attachment:
+            raise MindMapError("导入期间附件目标发生变化，请重新拖入")
+        return target
+
     def _poll_attachment(self):
-        if self._pending_attachment is None:
-            return
-        node_id, target, future = self._pending_attachment
-        if not future.done():
+        pending = self._pending_attachment
+        if pending is None or (pending.prepared and not pending.future.done()):
             return
         self._attachment_timer.stop()
         try:
-            self.call(lambda: self._finish_attachment_import(node_id, target, future.result()))
+            if not pending.prepared:
+                target = self.call(lambda: self._prepare_attachment_target(pending))
+                if target is None or self._pending_attachment is not pending:
+                    return
+                pending.target = target
+                pending.prepared = True
+                self._sync_attachment_control(pending.node_id)
+            if not pending.future.done():
+                self._attachment_timer.start()
+                return
+            self.call(
+                lambda: self._finish_attachment_import(pending.node_id, pending.target, pending.future.result())
+            )
         finally:
-            self._pending_attachment = None
+            if self._pending_attachment is pending and not self._attachment_timer.isActive():
+                self._stop_attachment_read()
 
     def _finish_attachment_import(self, node_id, target, file):
         self._verify_attachment_target(node_id, target)

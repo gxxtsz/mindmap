@@ -7,7 +7,7 @@ from weakref import ref
 
 from mindmap_core.layouts import resolve_tree_spacing
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
-from mindmap_qt_render import NodeVisual
+from mindmap_qt_render import NodeVisual, paint_page_icon
 from mindmap_qt_render.items import NodeItem as StaticNodeItem
 from mindmap_qt_render.rendering import DEFAULT_TEXT_WIDTH, NODE_HORIZONTAL_PADDING
 from PySide6.QtCore import QRectF, Qt, QTimer
@@ -203,19 +203,20 @@ class PageControlItem(QGraphicsObject):
         "attachment": ("attachment", "打开附件"),
     }
 
-    def __init__(self, node_item, *, kind="submap"):
+    def __init__(self, node_item, *, kind="submap", pending=False):
         """创建不抢焦点的页面入口；命中和导航由视图路由，子图元只维护悬停。"""
         super().__init__(node_item)
         self.kind = kind
         self.field_name, self.label = self._kinds[kind]
         self._node_item_ref = ref(node_item)
         self._rect = QRectF()
+        self._pending = False
         self.hovered = False
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setAcceptHoverEvents(True)
         self.setZValue(2)
         self.setToolTip(self.label)
-        self.sync()
+        self.sync(pending=pending)
 
     @property
     def node_item(self):
@@ -223,18 +224,25 @@ class PageControlItem(QGraphicsObject):
         item = self._node_item_ref()
         return item if item is not None and isValid(item) else None
 
-    def sync(self):
+    def sync(self, *, pending=False):
         """跟随正式或编辑预览视觉更新内部命中矩形，不重新计算正文宽度。"""
         item = self.node_item
         if item is None:
             return
-        rect = item.visual.page_control_rect(self.kind)
+        self._pending = pending
+        if pending:
+            # 临时徽标位于卡片右上角，给正文和折叠按钮留出操作空间。
+            card = item.visual.card_rect()
+            rect = QRectF(card.right() - 24, card.top() - 20, 24, 24)
+        else:
+            rect = item.visual.page_control_rect(self.kind)
         if rect != self._rect:
             self.prepareGeometryChange()
             self._rect = rect
-        self.setVisible(self.kind in item.visual.page_kinds)
-        if self.kind == "attachment" and item.node.attachment is not None:
-            self.setToolTip(item.node.attachment.name)
+        self.setVisible(pending or self.kind in item.visual.page_kinds)
+        if self.kind == "attachment":
+            attachment = item.node.attachment
+            self.setToolTip("正在导入附件…" if pending else attachment.name if attachment else self.label)
         if not self.isVisible():
             self.hovered = False
         self.update()
@@ -242,7 +250,8 @@ class PageControlItem(QGraphicsObject):
     def can_activate(self):
         """只读仍允许导航；文字编辑、拖动和销毁期间的迟到点击保持原位。"""
         item = self.node_item
-        if not (item and item.owner and not item.owner._disposed and not item.owner._applying_engine_event
+        if self._pending or not (
+                item and item.owner and not item.owner._disposed and not item.owner._applying_engine_event
                 and (item.owner.editor is None or self.kind == "attachment") and not item.owner.view.node_drag.active):
             return False
         if self.kind == "graph":
@@ -273,6 +282,15 @@ class PageControlItem(QGraphicsObject):
         """绘制共享页面图形及可操作时的悬停底色，不使用画布底色覆盖节点。"""
         item = self.node_item
         if item is None:
+            return
+        if self._pending:
+            colors = item.owner.ui_colors
+            painter.save()
+            painter.setBrush(QColor(colors.surface))
+            painter.setPen(QColor(colors.border))
+            painter.drawRoundedRect(self._rect.adjusted(1, 1, -1, -1), 5, 5)
+            paint_page_icon(painter, self.kind, self._rect.adjusted(4, 4, -4, -4), colors.muted)
+            painter.restore()
             return
         if self.hovered and self.can_activate():
             color = QColor(item.visual.page_icon_color if item.visual.page_icon_color is not None
@@ -391,14 +409,16 @@ class NodeItem(StaticNodeItem):
             self.reference_control = PageControlItem(self, kind="reference")
 
     def _sync_optional_page_controls(self):
-        """按实际挂载内容创建图或扩展入口。删除内容后隐藏按钮，供撤销时复用。"""
+        """同步可选入口和正在导入的附件，隐藏后的按钮可复用。"""
         for kind, attr in (("extension", "extension_control"), ("graph", "graph_control"),
                            ("attachment", "attachment_control")):
             control = getattr(self, attr)
+            pending = (kind == "attachment" and self.owner is not None and self.node.attachment is None
+                       and self.owner._attachment_is_pending(self.node.id))
             if control is not None:
-                control.sync()
-            elif self.owner is not None and kind in self.visual.page_kinds:
-                setattr(self, attr, PageControlItem(self, kind=kind))
+                control.sync(pending=pending)
+            elif self.owner is not None and (kind in self.visual.page_kinds or pending):
+                setattr(self, attr, PageControlItem(self, kind=kind, pending=pending))
 
     def itemChange(self, change, value):
         result = super().itemChange(change, value)
