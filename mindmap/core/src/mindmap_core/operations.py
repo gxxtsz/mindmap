@@ -5,11 +5,12 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import fields, replace
 
+from .attachments import BINARY_MEDIA_TYPE, FileAttachment
 from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
 from .graph import NodeGraph, validate_graph_title
 from .inspiration import InspirationEditorMixin
-from .models import Asset, MindMapDocument, MindMapPage, Node, _resolve_detail_page, new_id
+from .models import Asset, MindMapDocument, MindMapPage, Node, _resolve_detail_page, new_id, node_asset_ids
 from .node_pages import GRAPH_PAGE_TYPE, graph_members
 from .transactions import DocumentState
 from .validation import validate_page_reference
@@ -153,6 +154,7 @@ class DocumentEditor(InspirationEditorMixin):
 
         allowed = {item.name for item in fields(Node)} - {
             "id", "children", "submap_id", "detail_page_id", "page_reference_root_id", "extension_pages",
+            "attachment",
         }
         if patch.keys() - allowed:
             raise MindMapError("包含不可直接修改的节点字段")
@@ -201,11 +203,11 @@ class DocumentEditor(InspirationEditorMixin):
     def replace_node_graph(self, owner_id: str, previous: NodeGraph, graph: NodeGraph | None) -> None:
         """用同一事务写入图、同步标题和格式，并级联删除移除的图节点所拥有的内容。
 
-        保留相同局部 ID 的绑定，拒绝通过公共替换接口注入其他节点的文档 ID。
+        保留相同局部 ID 的绑定与附件，拒绝通过公共替换接口注入其他节点的文档 ID。
         格式同步到承载附页的文档节点，以便新附页取得当前标题格式。宽度属于图内节点。
         graph 为 None 表示删除整张图。调用方已检查所属节点的创建权限。
         """
-        old = {node.id: node for node in previous.nodes if node.document_node_id is not None}
+        old = {node.id: node for node in previous.nodes if node.document_node_id or node.attachment}
         if graph is not None:
             record = graph.to_record()
             graph = NodeGraph.from_data(record["data"], version=record["version"])
@@ -215,17 +217,19 @@ class DocumentEditor(InspirationEditorMixin):
                 document_id = before.document_node_id if before is not None else None
                 if entry.document_node_id not in (None, document_id):
                     raise MindMapError("请通过附页操作建立图节点绑定")
-                if before is not None:
+                if document_id is not None:
                     if before.title != entry.title:
                         self._sync_page_titles(document_id, entry.title)
                     if before.text_format != entry.text_format:
                         self.edit(document_id).text_format = entry.text_format
-                nodes.append(replace(entry, document_node_id=document_id))
+                attachment = entry.attachment or (before.attachment if before is not None else None)
+                nodes.append(replace(entry, document_node_id=document_id, attachment=attachment))
             record = replace(graph, nodes=tuple(nodes)).to_record()
         else:
             record = None
         for entry in old.values():
-            self._remove_owned_nodes(self.document.owned_descendants(entry.document_node_id))
+            if entry.document_node_id is not None:
+                self._remove_owned_nodes(self.document.owned_descendants(entry.document_node_id))
         self._state.set_graph(owner_id, record)
 
     def set_page_reference(self, node_id, target_root_id):
@@ -322,7 +326,7 @@ class DocumentEditor(InspirationEditorMixin):
         defaults = Node()
         return any(getattr(root, name) != getattr(defaults, name)
                    and getattr(root, name) != getattr(owner, name)
-                   for name in ("note", "hyperlink", "tags", "icons", "style", "metadata", "direction"))
+                   for name in ("note", "hyperlink", "tags", "icons", "style", "metadata", "direction", "attachment"))
 
     def convert_submap_to_descendants(self, node_id):
         """移除当前一层页面，将完整分支接回入口，独立根内容以普通子节点保留。"""
@@ -541,11 +545,48 @@ class DocumentEditor(InspirationEditorMixin):
     def attach_image(self, node_id: str, data: bytes, media_type: str = "image/png", *, width=160) -> str:
         """原子导入图片资源并关联节点，相同内容只保存一份。"""
 
+        if not isinstance(media_type, str) or not media_type.startswith("image/"):
+            raise MindMapError("图片资源类型无效")
         asset = Asset.from_bytes(data, media_type)
-        self._state.set_asset(asset.id, asset)
+        self._store_asset(asset)
         node = self.edit(node_id)
         node.image_id, node.image_width = asset.id, width
         return asset.id
+
+    def _store_asset(self, asset: Asset) -> None:
+        """共用相同字节，图片引用需要保留可识别的图片类型。"""
+        previous = self.document.assets.get(asset.id)
+        if previous is None or (asset.is_image and previous.media_type != asset.media_type):
+            self._state.set_asset(asset.id, asset)
+
+    def set_node_attachment(self, node_id, file, graph_owner_id, page_id=None) -> None:
+        """在当前事务内写入附件，树节点与图节点共用资源表。"""
+        asset = attachment = None
+        if file is not None:
+            if not isinstance(file, tuple) or len(file) != 2:
+                raise MindMapError("附件需要文件名和字节内容")
+            name, content = file
+            asset = Asset.from_bytes(content, BINARY_MEDIA_TYPE)
+            attachment = FileAttachment(name, asset.id)
+        if graph_owner_id is None:
+            if node_id in self._state.graph_nodes:
+                raise MindMapError("请用所属图和局部标识指定图节点")
+            self.edit(node_id).attachment = attachment
+        else:
+            if page_id is None:
+                raise MindMapError("图的所属节点标识无效")
+            record = self.node(graph_owner_id).extension_pages.get(GRAPH_PAGE_TYPE)
+            if record is None:
+                raise MindMapError("节点图不存在")
+            graph = NodeGraph.from_data(record["data"], version=record["version"])
+            index = next((index for index, entry in enumerate(graph.nodes) if entry.id == node_id), None)
+            if index is None:
+                raise MindMapError("图节点不存在")
+            nodes = list(graph.nodes)
+            nodes[index] = replace(nodes[index], attachment=attachment)
+            self._state.set_graph(graph_owner_id, replace(graph, nodes=tuple(nodes)).to_record())
+        if asset is not None:
+            self._store_asset(asset)
 
     def copy_fragment(self, node_ids) -> MindMapDocument:
         """建立跨实例剪贴板文档，保留选中子树的层级、节点属性和所需图片资源。"""
@@ -589,11 +630,8 @@ class DocumentEditor(InspirationEditorMixin):
             fragment.metadata[_CLIPBOARD_REFERENCES] = {
                 "source": self._state.clipboard_token, "targets": external_references,
             }
-        fragment.assets = {
-            node.image_id: self.document.assets[node.image_id]
-            for node in fragment.nodes.values()
-            if node.image_id
-        }
+        fragment.assets = {key: self.document.assets[key]
+                           for node in fragment.nodes.values() for key in node_asset_ids(node)}
         fragment.layout, fragment.theme = deepcopy(source.layout), deepcopy(source.theme)
         fragment.validate()
 
@@ -625,7 +663,7 @@ class DocumentEditor(InspirationEditorMixin):
         pages = [page for page in fragment.iter_pages() if page.owner_id in mapping]
         page_mapping = {page.id: new_id() for page in pages}
         root_mapping = {page.root_id: mapping[page.root_id] for page in pages}
-        image_ids = set()
+        asset_ids = set()
         for node_id, new in mapping.items():
             node = deepcopy(fragment.nodes[node_id])
             node.id, node.children = new, [mapping[x] for x in node.children]
@@ -638,15 +676,14 @@ class DocumentEditor(InspirationEditorMixin):
                     if "document_node_id" in entry:
                         entry["document_node_id"] = mapping[entry["document_node_id"]]
             self._state.put_node(node)
-            if node.image_id:
-                image_ids.add(node.image_id)
+            asset_ids.update(node_asset_ids(node))
         for page in pages:
             key = page_mapping[page.id]
             self._state.set_page(key, MindMapPage(
                 key, mapping[page.root_id], mapping[page.owner_id], page.layout, page.theme),
                 kind=fragment.page_kind(page.id))
-        for key in image_ids:
-            self._state.set_asset(key, fragment.assets[key])
+        for key in asset_ids:
+            self._store_asset(fragment.assets[key])
         return mapping
 
     def _restore_fragment_references(self, fragment, mapping):
@@ -657,15 +694,18 @@ class DocumentEditor(InspirationEditorMixin):
             if isinstance(targets, dict):
                 self._restore_clipboard_references(targets, mapping)
 
-    def paste_graph_fragment(self, owner_id, current, fragment, source) -> list[str]:
+    def paste_graph_fragment(self, owner_id, current, fragment, source, *, include_pages: bool) -> list[str]:
         """将已校验图剪贴板片段追加到目标图，重建局部和文档标识，返回新增局部 ID。
 
         详情页中的旧图只能粘贴没有绑定的普通图内容。所有节点、页面、引用和资源
         同属外层事务，任一步失败均由引擎回滚。
         """
-        if any(entry.document_node_id for entry in source.nodes):
+        if include_pages and any(entry.document_node_id for entry in source.nodes):
             self.require_page_owner(owner_id)
-        mapping = self._copy_fragment_entities(fragment, fragment.nodes.keys() - {fragment.root_id})
+        mapping = (self._copy_fragment_entities(fragment, fragment.nodes.keys() - {fragment.root_id})
+                   if include_pages else {})
+        for key in {entry.attachment.asset_id for entry in source.nodes if entry.attachment is not None}:
+            self._store_asset(fragment.assets[key])
         used = {entry.id for entry in current.nodes}
         local_mapping = {}
         index = 1
@@ -705,8 +745,8 @@ class DocumentEditor(InspirationEditorMixin):
                 node.extension_pages.clear()
             fragment.submaps.clear()
             fragment.detail_pages.clear()
-            images = {node.image_id for node in fragment.nodes.values() if node.image_id}
-            fragment.assets = {key: asset for key, asset in fragment.assets.items() if key in images}
+            asset_ids = {key for node in fragment.nodes.values() for key in node_asset_ids(node)}
+            fragment.assets = {key: fragment.assets[key] for key in asset_ids}
         selected = {key for root in fragment.root.children for key in fragment.owned_descendants(root)}
         if any(node.submap_id or node.detail_page_id or GRAPH_PAGE_TYPE in node.extension_pages
                for node in (fragment.nodes[key] for key in selected)):
@@ -738,7 +778,7 @@ class DocumentEditor(InspirationEditorMixin):
                 self.edit(key).page_reference_root_id = target
 
     def prune_unused_assets(self) -> None:
-        """提交事务前清理无节点引用的图片；资源差异与节点差异一起进入撤销历史。"""
+        """清理无节点引用的资源。"""
         doc = self.document
-        referenced = {node.image_id for node in doc.nodes.values() if node.image_id}
+        referenced = {key for node in doc.nodes.values() for key in node_asset_ids(node)}
         doc.assets = {key: value for key, value in doc.assets.items() if key in referenced}

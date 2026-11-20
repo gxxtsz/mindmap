@@ -9,7 +9,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QEvent, QMimeData, QObject, QStandardPaths, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QMimeData, QObject, QStandardPaths, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QActionGroup, QDrag, QKeySequence
 from PySide6.QtWidgets import QApplication, QMenu, QTabWidget, QWidget
 from shiboken6 import isValid
@@ -557,10 +557,13 @@ class DockManager(QObject):
         if self.closing or self.refreshing or self._dragging:
             return
         # 菜单/下拉框会暂时改变 Qt 焦点；等同一事件循环完成后依据真实归属判断。
-        QTimer.singleShot(0, self._process_focus)
+        # 宿主销毁后，Qt 会取消绑定到该宿主的焦点回调。
+        host = self.hosts.get("main")
+        if host is not None and isValid(host):
+            QTimer.singleShot(0, host, self._process_focus)
 
     def _process_focus(self):
-        if self.closing or self.refreshing or self._dragging:
+        if self.closing or self.refreshing or self._dragging or not isValid(self):
             return
         app = QApplication.instance()
         if app.activePopupWidget() is not None:
@@ -570,7 +573,7 @@ class DockManager(QObject):
             return
         for document_id, doc in self.documents.items():
             page = doc["widget"]
-            if focus is page or page.isAncestorOf(focus):
+            if not doc["closed"] and isValid(page) and (focus is page or page.isAncestorOf(focus)):
                 for host in self.hosts.values():
                     location = host.editor.find_token(document_id)
                     if location and location[0].area.host is host:
@@ -1452,9 +1455,18 @@ class DockManager(QObject):
         if self.closing:
             return
         self.save_session()
+        self._stop_callbacks()
+
+    @Slot()
+    def _stop_callbacks(self):
+        """在正常关闭或宿主直接销毁时停止处理全局事件及待保存请求。"""
+        if self.closing:
+            return
         self.closing = True
         self._save_timer.stop()
         app = QApplication.instance()
-        app.removeEventFilter(self)
-        app.focusChanged.disconnect(self._focus_changed)
-        self.parking.deleteLater()
+        if app is not None:
+            app.removeEventFilter(self)
+            app.focusChanged.disconnect(self._focus_changed)
+        if isValid(self.parking):
+            self.parking.deleteLater()

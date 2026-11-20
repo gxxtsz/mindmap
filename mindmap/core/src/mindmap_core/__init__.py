@@ -1,5 +1,6 @@
 """稳定的思维导图核心；不导入布局及格式实现、应用层或 Qt。"""
 
+from .attachments import FileAttachment
 from .branch_styles import BranchStyle, apply_branch_style, branch_style_targets, get_branch_style
 from .config import Direction, LayoutConfig
 from .engine import MindMapEngine, SaveSnapshot
@@ -45,6 +46,7 @@ __all__ = [
     "Direction",
     "DocumentExporter",
     "DocumentImporter",
+    "FileAttachment",
     "FormatInfo",
     "FormatRegistration",
     "FormatRegistry",

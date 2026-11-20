@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from .errors import MindMapError
 from .history import ChangeSet, NodeMove, NodePlacement
-from .models import MindMapDocument, new_id
+from .models import MindMapDocument, new_id, node_asset_ids
 from .node_pages import GRAPH_PAGE_TYPE, graph_members, graph_page_id, parse_graph_page_id
 
 
@@ -36,8 +36,7 @@ class DocumentState:
         self.asset_counts = Counter()
         for key, node in document.nodes.items():
             self._index_graph(key, node.extension_pages.get(GRAPH_PAGE_TYPE), add=True)
-            if node.image_id:
-                self.asset_counts[node.image_id] += 1
+            self.asset_counts.update(node_asset_ids(node))
             if node.page_reference_root_id:
                 self.reference_sources.setdefault(node.page_reference_root_id, set()).add(key)
         self.unused_assets = set(document.assets) - self.asset_counts.keys()
@@ -208,12 +207,13 @@ class DocumentState:
                         self.parents[child] = key
         for key, pair in nodes.items():
             old, new = pair[1 - index], pair[index]
-            if old is not None and old.image_id:
-                self.asset_counts[old.image_id] -= 1
-                if not self.asset_counts[old.image_id]:
-                    del self.asset_counts[old.image_id]
-            if new is not None and new.image_id:
-                self.asset_counts[new.image_id] += 1
+            if old is not None:
+                for asset_id in node_asset_ids(old):
+                    self.asset_counts[asset_id] -= 1
+                    if not self.asset_counts[asset_id]:
+                        del self.asset_counts[asset_id]
+            if new is not None:
+                self.asset_counts.update(node_asset_ids(new))
             old_target = old.page_reference_root_id if old is not None else None
             new_target = new.page_reference_root_id if new is not None else None
             if old_target != new_target:

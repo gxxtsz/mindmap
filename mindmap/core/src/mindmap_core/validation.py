@@ -6,10 +6,11 @@ import math
 from collections import Counter
 from typing import Any
 
+from .attachments import BINARY_MEDIA_TYPE, FileAttachment
 from .branch_styles import get_branch_style
 from .config import LayoutConfig
 from .errors import MindMapError
-from .models import InspirationArea, MindMapForestView, MindMapPage, Theme
+from .models import Asset, InspirationArea, MindMapForestView, MindMapPage, Theme, node_asset_ids
 from .node_pages import GRAPH_PAGE_TYPE, graph_members, graph_page_id, validate_extension_pages
 
 MIN_FIXED_WIDTH = 40
@@ -89,12 +90,7 @@ def validate_document(document, *, page_only=False) -> None:
     for node_id, target_root_id, page_id in references:
         validate_page_reference(node_id, target_root_id, page_id, root_pages, document.inspiration.id)
     for key, asset in document.assets.items():
-        if not isinstance(asset.data, bytes) or not asset.data:
-            raise MindMapError("图片数据必须为非空字节串")
-        if key != asset.id or hashlib.sha256(asset.data).hexdigest() != key:
-            raise MindMapError("图片内容与资源标识不匹配")
-        if not isinstance(asset.media_type, str) or not asset.media_type.startswith("image/"):
-            raise MindMapError("资源必须是图片")
+        validate_asset(key, asset)
     if (
         not isinstance(document.theme.palette, list)
         or not document.theme.palette
@@ -120,6 +116,19 @@ def validate_document(document, *, page_only=False) -> None:
         )
     except (TypeError, ValueError) as exc:
         raise MindMapError("元数据与样式必须是有效的 JSON 数据") from exc
+
+
+def validate_asset(key, asset):
+    """校验图片和文件共用的资源记录；空字节只用于文件附件。"""
+    if not isinstance(asset, Asset) or not isinstance(asset.data, bytes):
+        raise MindMapError("资源数据必须为字节串")
+    if key != asset.id or hashlib.sha256(asset.data).hexdigest() != key:
+        raise MindMapError("资源内容与标识不匹配")
+    if asset.is_image:
+        if not asset.data:
+            raise MindMapError("图片数据必须为非空字节串")
+    elif asset.media_type != BINARY_MEDIA_TYPE:
+        raise MindMapError("资源类型无效")
 
 
 def validate_node(document, node_id, node, *, json_data=True):
@@ -172,8 +181,17 @@ def validate_node(document, node_id, node, *, json_data=True):
         if key in node.style and not isinstance(node.style[key], bool):
             raise MindMapError(f"节点样式 {key} 必须为布尔值")
     positive_number(node.image_width, "图片宽度")
-    if node.image_id is not None and node.image_id not in document.assets:
-        raise MindMapError(f"图片资源缺失：{node.image_id}")
+    if node.image_id is not None:
+        image = document.assets.get(node.image_id)
+        if image is None:
+            raise MindMapError(f"图片资源缺失：{node.image_id}")
+        if not isinstance(image, Asset) or not image.is_image:
+            raise MindMapError("图片必须关联图片资源")
+    if node.attachment is not None and not isinstance(node.attachment, FileAttachment):
+        raise MindMapError("节点附件记录无效")
+    for asset_id in node_asset_ids(node):
+        if asset_id not in document.assets:
+            raise MindMapError(f"附件资源缺失：{asset_id}")
     if json_data:
         try:
             json.dumps([node.metadata, node.style], allow_nan=False)
@@ -215,6 +233,7 @@ def _validate_graph_members(document, node) -> dict[str, str]:
                 continue
             target = document.nodes.get(key)
             if (target is None or target.children or target.is_image_node or target.page_reference_root_id
+                    or target.attachment is not None
                     or target.text != entry["title"]):
                 raise MindMapError("图节点的附页实体不存在或不一致")
     return members
@@ -292,6 +311,7 @@ def validate_changes(state, journal):
             continue
         validate_node(document, key, node)
         if key in state.graph_nodes and (node.children or node.is_image_node or node.page_reference_root_id
+                                         or node.attachment is not None
                                          or key in state.parents or key in state.root_pages):
             raise MindMapError("图节点的文档归属无效")
         old = journal.nodes[key]
@@ -354,24 +374,18 @@ def validate_changes(state, journal):
     usage = Counter()
     for key, old in journal.nodes.items():
         node = document.nodes.get(key)
-        if old is not None and old.image_id:
-            usage[old.image_id] -= 1
-        if node is not None and node.image_id:
-            usage[node.image_id] += 1
+        if old is not None:
+            usage.subtract(node_asset_ids(old))
+        if node is not None:
+            usage.update(node_asset_ids(node))
     candidates = set(usage) | set(journal.assets) | getattr(state, "unused_assets", set())
     for key in candidates:
         if state.asset_counts.get(key, 0) + usage[key] == 0 and key in document.assets:
             state.set_asset(key, None)
     for key in journal.assets:
         asset = document.assets.get(key)
-        if asset is None:
-            continue
-        if not isinstance(asset.data, bytes) or not asset.data:
-            raise MindMapError("图片数据必须为非空字节串")
-        if key != asset.id or hashlib.sha256(asset.data).hexdigest() != key:
-            raise MindMapError("图片内容与资源标识不匹配")
-        if not isinstance(asset.media_type, str) or not asset.media_type.startswith("image/"):
-            raise MindMapError("资源必须是图片")
+        if asset is not None:
+            validate_asset(key, asset)
     if journal.settings:
         if not isinstance(document.layout, LayoutConfig):
             raise MindMapError("布局配置必须为 LayoutConfig")

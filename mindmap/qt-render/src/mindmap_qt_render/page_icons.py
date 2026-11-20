@@ -7,6 +7,7 @@ from PySide6.QtGui import QColor, QPainter
 from PySide6.QtSvg import QSvgRenderer
 
 _PAGE_ICON_BODIES = {
+    "attachment": '<path d="m8 13 6-6a2.2 2.2 0 0 1 3.1 3.1l-7 7a3.8 3.8 0 0 1-5.4-5.4l7.7-7.7a5.2 5.2 0 0 1 7.4 7.4l-7.7 7.7"/>',
     "main": '<path d="m3 10 9-7 9 7M5 9v12h14V9M9 21v-8h6v8"/>',
     "detail": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
     "extension": '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 17h7m-3.5-3.5v7"/>',
@@ -27,7 +28,7 @@ _PAGE_ICON_BODIES = {
 def page_icon_body(kind: str) -> str:
     """取得页面图标的 SVG 图形体，供共享 UI 的多状态图标工厂复用。
 
-    kind 接受 main、detail、submap、reference、extension、graph；返回值使用 24×24 坐标，调用方负责
+    kind 接受 main、detail、submap、reference、extension、graph、attachment；返回值使用 24×24 坐标，调用方负责
     SVG 外壳、颜色、两单位描边及圆角端点。未知类别显式抛出 ValueError，
     不把数据错误静默显示成另一种页面。本接口不创建 Qt 对象或读取文档。
     """

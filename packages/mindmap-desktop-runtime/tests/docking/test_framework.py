@@ -4,6 +4,7 @@ import copy
 
 import pytest
 from mindmap_desktop_runtime.ui.docking import (
+    DockHost,
     DockManager,
     DockPosition,
     DockTarget,
@@ -13,7 +14,9 @@ from mindmap_desktop_runtime.ui.docking import (
     ToolWindowSpec,
     ViewMode,
 )
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPlainTextEdit
+from shiboken6 import isValid
 
 
 def test_manager_does_not_modify_application_style_palette_or_font(qapp, tmp_path):
@@ -182,6 +185,44 @@ def test_two_managers_do_not_claim_each_others_tool_focus(system_factory):
     one.manager.active_id = ""
     one.manager._process_focus()
     assert one.manager.active_id == ""
+
+
+def test_destroying_host_cancels_queued_focus_and_save(qapp, tmp_path, monkeypatch):
+    manager = DockManager(storage_dir=tmp_path)
+    host = DockHost(manager)
+    manager.add_document("doc", "文档", QLabel("正文"))
+    focus_checks = []
+    monkeypatch.setattr(manager, "_process_focus", lambda: focus_checks.append(True))
+    manager._focus_changed(None, None)
+    manager.schedule_save()
+    assert manager._save_timer.isActive()
+
+    try:
+        host.deleteLater()
+        QCoreApplication.sendPostedEvents(host, QEvent.Type.DeferredDelete)
+        assert not isValid(host)
+        qapp.processEvents()
+        assert manager.closing and not manager._save_timer.isActive()
+        assert not focus_checks
+        assert not manager.storage_file.exists()
+    finally:
+        if not manager.closing:
+            manager.hosts.clear()
+            manager.shutdown()
+
+
+def test_focus_skips_destroyed_document_and_activates_live_document(docking, monkeypatch):
+    manager = docking.manager
+    live = QPlainTextEdit("仍可编辑")
+    manager.add_document("live", "可编辑文档", live)
+    docking.document.deleteLater()
+    QCoreApplication.sendPostedEvents(docking.document, QEvent.Type.DeferredDelete)
+    assert not isValid(docking.document)
+    manager._set_active_document("")
+
+    monkeypatch.setattr(QApplication, "focusWidget", staticmethod(lambda: live))
+    manager._process_focus()
+    assert manager.active_document_id == "live"
 
 
 @pytest.mark.parametrize("operation", ["move", "restore"])

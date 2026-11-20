@@ -1,4 +1,4 @@
-"""映射原生文档结构，图节点的格式和固定宽度使用版本 9。"""
+"""映射原生文档结构，按实际使用的字段写出最低兼容版本。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from dataclasses import asdict
 
 from mindmap_core import (
     Asset,
+    FileAttachment,
     InspirationArea,
     LayoutConfig,
     MindMapDocument,
@@ -20,9 +21,12 @@ from mindmap_core import (
     Theme,
     ValidatedDocument,
 )
+from mindmap_core.attachments import BINARY_MEDIA_TYPE
+from mindmap_core.graph import GRAPH_ATTACHMENT_VERSION
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
+_ATTACHMENT_SCHEMA_VERSION = 10
 _BASE_SCHEMA_VERSION = 5
 
 
@@ -35,6 +39,8 @@ def _node_record(node: Node) -> dict:
     record = asdict(node)
     if node.page_reference_root_id is None:
         record.pop("page_reference_root_id")
+    if node.attachment is None:
+        record.pop("attachment")
     if not node.extension_pages:
         record.pop("extension_pages")
     elif graph := record["extension_pages"].get(GRAPH_PAGE_TYPE):
@@ -47,14 +53,17 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
-    图节点格式和固定宽度需要版本 9，图节点绑定需要版本 8，普通图和扩展详情
-    至少使用版本 7，页面引用至少使用版本 6。编码时省略空字段。
+    文件附件需要版本 10，图节点格式和固定宽度需要版本 9，图节点绑定需要版本 8，
+    普通图和扩展详情至少使用版本 7，页面引用至少使用版本 6。编码时省略空字段。
     """
     if isinstance(document, MindMapPageView):
         raise MindMapError("单页读模型不能保存为完整文件，请使用引擎的完整文档快照")
     document.validate()
+    version = _BASE_SCHEMA_VERSION
     assets = []
     for asset in document.assets.values():
+        if asset.media_type == BINARY_MEDIA_TYPE:
+            version = _ATTACHMENT_SCHEMA_VERSION
         record = {"id": asset.id, "media_type": asset.media_type}
         if embed_assets:
             record["data"] = base64.b64encode(asset.data).decode("ascii")
@@ -62,9 +71,10 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
             record["path"] = f"assets/{asset.id}"
         assets.append(record)
     nodes = []
-    version = _BASE_SCHEMA_VERSION
     for node in document.nodes.values():
         record = _node_record(node)
+        if node.attachment is not None:
+            version = _ATTACHMENT_SCHEMA_VERSION
         if node.extension_pages:
             graph = record["extension_pages"].get(GRAPH_PAGE_TYPE)
             version = max(version, 6 + graph["version"] if graph else 7)
@@ -87,7 +97,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
 
 def from_dict(data: dict, *, resources: dict[str, bytes] | None = None) -> MindMapDocument:
-    """读取版本 2 至 8，校验全部页面关系及资源后返回独立文档。"""
+    """读取支持的文档版本，校验全部页面关系及资源后返回独立文档。"""
     return _from_dict(data, resources=resources, copy_input=True)
 
 
@@ -135,11 +145,17 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                     raise MindMapError("页面引用需要版本 6 文档格式")
                 if version < 7 and name == "nodes" and "extension_pages" in record:
                     raise MindMapError("节点附属数据需要版本 7 文档格式")
+                if name == "nodes" and "attachment" in record:
+                    if version < _ATTACHMENT_SCHEMA_VERSION:
+                        raise MindMapError("节点附件需要版本 10 文档格式")
+                    record["attachment"] = FileAttachment.from_data(record["attachment"])
                 entity = factory(**record)
-                if version < 9 and name == "nodes" and isinstance(entity.extension_pages, dict):
+                if name == "nodes" and isinstance(entity.extension_pages, dict):
                     graph = entity.extension_pages.get(GRAPH_PAGE_TYPE)
                     if isinstance(graph, dict):
-                        if graph.get("version") == 3:
+                        if version < _ATTACHMENT_SCHEMA_VERSION and graph.get("version") == GRAPH_ATTACHMENT_VERSION:
+                            raise MindMapError("图节点附件需要版本 10 文档格式")
+                        if version < 9 and graph.get("version") == 3:
                             raise MindMapError("图节点格式和固定宽度需要版本 9 文档格式")
                         if version < 8 and graph.get("version") == 2:
                             raise MindMapError("图节点附页需要版本 8 文档格式")
@@ -162,11 +178,14 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                 content = base64.b64decode(record["data"], validate=True)
             elif resources is not None and record.get("path") == f"assets/{key}":
                 if key not in resources:
-                    raise MindMapError(f"图片资源缺失：{key}")
+                    raise MindMapError(f"文档资源缺失：{key}")
                 content = resources[key]
             else:
-                raise MindMapError(f"图片资源缺失：{key}")
-            assets[key] = Asset(key, content, record["media_type"])
+                raise MindMapError(f"文档资源缺失：{key}")
+            media_type = record["media_type"]
+            if version < _ATTACHMENT_SCHEMA_VERSION and media_type == BINARY_MEDIA_TYPE:
+                raise MindMapError("文件资源需要版本 10 文档格式")
+            assets[key] = Asset(key, content, media_type)
         def page_factory(**record):
             if set(record) != {"id", "root_id", "owner_id", "layout", "theme"}:
                 raise MindMapError("页面字段不完整或包含未知字段")

@@ -9,10 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from .attachments import BINARY_MEDIA_TYPE, FileAttachment
 from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError
-from .graph import NodeGraph
+from .graph import GRAPH_ATTACHMENT_VERSION, NodeGraph
 from .node_pages import GRAPH_PAGE_TYPE, graph_members, parse_graph_page_id
 
 _ATOMIC_TYPES = frozenset((str, int, float, bool, bytes, type(None)))
@@ -122,6 +123,7 @@ class Node:
     # 专用详情页以扩展类型为键，值只含 version 和 data；与节点一起复制、删除和撤销。
     # 核心仅校验封装及 JSON 数据，不依赖具体扩展；未安装扩展的内容仍可无损保存。
     extension_pages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    attachment: FileAttachment | None = None
 
     @property
     def is_image_node(self) -> bool:
@@ -168,18 +170,37 @@ class Node:
         return result
 
 
+def node_asset_ids(node: Node):
+    """遍历已校验节点和它直接挂载的图引用的资源。"""
+    if node.image_id is not None:
+        yield node.image_id
+    if node.attachment is not None:
+        yield node.attachment.asset_id
+    graph = node.extension_pages.get(GRAPH_PAGE_TYPE)
+    if graph is not None and graph["version"] >= GRAPH_ATTACHMENT_VERSION:
+        for entry in graph["data"]["nodes"]:
+            if "attachment" in entry:
+                yield entry["attachment"]["asset_id"]
+
+
 @dataclass(frozen=True)
 class Asset:
-    """不可变图片资源。内容哈希用于去重，二进制数据不参与历史深拷贝。"""
+    """不可变文档资源。按内容哈希去重，历史共享同一份二进制数据。"""
 
     id: str
     data: bytes
     media_type: str = "image/png"
 
+    @property
+    def is_image(self) -> bool:
+        return isinstance(self.media_type, str) and self.media_type.startswith("image/")
+
     @classmethod
     def from_bytes(cls, data: bytes, media_type: str = "image/png") -> Asset:
-        """从图片字节建立资源；图像能否解码由图形适配层进一步检查。"""
-        if not isinstance(data, bytes) or not data:
+        """从原始字节建立资源，文件附件可以是空文件。"""
+        if not isinstance(data, bytes):
+            raise MindMapError("资源内容必须为字节串")
+        if not data and media_type != BINARY_MEDIA_TYPE:
             raise MindMapError("图片内容不能为空")
         return cls(hashlib.sha256(data).hexdigest(), data, media_type)
 
@@ -408,7 +429,7 @@ class MindMapDocument:
                 raise KeyError(page_id)
             graph = NodeGraph.from_data(record["data"], version=record["version"])
             return MindMapGraphView(graph, self.layout, self.theme,
-                                    f"{self.display_node(owner_id).text} · 图", self.nodes)
+                                    f"{self.display_node(owner_id).text} · 图", self.nodes, self.assets)
         page = self.page_record(page_id)
         if page_id == self.inspiration.id:
             if inspiration_root_id is not None:
@@ -417,12 +438,12 @@ class MindMapDocument:
                 page = InspirationArea(page.id, [inspiration_root_id],
                                        {inspiration_root_id: (0.0, 0.0)}, page.layout, page.theme)
             nodes = {key: self.display_node(key) for root in page.root_ids for key in self.descendants(root)}
-            assets = {n.image_id: self.assets[n.image_id] for n in nodes.values() if n.image_id}
+            assets = {key: self.assets[key] for node in nodes.values() for key in node_asset_ids(node)}
             return MindMapForestView(page, nodes, assets, self.metadata)
         if inspiration_root_id is not None:
             raise KeyError(inspiration_root_id)
         nodes = {key: self.display_node(key) for key in self.descendants(page.root_id)}
-        assets = {node.image_id: self.assets[node.image_id] for node in nodes.values() if node.image_id}
+        assets = {key: self.assets[key] for node in nodes.values() for key in node_asset_ids(node)}
         view = MindMapPageView(page.root_id, nodes, assets, page.layout, page.theme, self.metadata)
         # 页面类别只属于读模型上下文，不是文件字段；详情页单页校验仍执行嵌套禁令。
         view.kind = self.page_kind(page_id)
@@ -473,6 +494,7 @@ class MindMapGraphView(MindMapPageView):
     def __init__(
         self, graph: NodeGraph, layout: LayoutConfig, theme: Theme, title: str,
         document_nodes: dict[str, Node] | None = None,
+        document_assets: dict[str, Asset] | None = None,
     ):
         """以局部 ID 构造扁平画布，附页入口从文档实体投影，节点和连线仍属于当前图。
 
@@ -481,9 +503,14 @@ class MindMapGraphView(MindMapPageView):
         """
         # 图没有中心根和父子关系，大纲按声明顺序显示为平级节点。
         nodes = {}
+        assets = {}
         for entry in graph.nodes:
             style = {} if entry.fixed_width is None else {"fixed_width": entry.fixed_width}
-            node = Node(entry.title, id=entry.id, text_format=entry.text_format, style=style)
+            node = Node(entry.title, id=entry.id, text_format=entry.text_format, style=style,
+                        attachment=entry.attachment)
+            if entry.attachment is not None and document_assets is not None:
+                key = entry.attachment.asset_id
+                assets[key] = document_assets[key]
             if entry.document_node_id is not None:
                 if document_nodes is None:
                     raise MindMapError("图节点投影缺少附页实体")
@@ -493,7 +520,7 @@ class MindMapGraphView(MindMapPageView):
                     # 图标只依赖页面是否存在。子图内容不进入父图布局或测量差量。
                     node.extension_pages = {GRAPH_PAGE_TYPE: source.extension_pages[GRAPH_PAGE_TYPE]}
             nodes[entry.id] = node
-        super().__init__("", nodes, layout=layout, theme=theme)
+        super().__init__("", nodes, assets, layout=layout, theme=theme)
         self.graph, self.title = graph, title
 
     @property

@@ -10,12 +10,13 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from ..controls.dialogs import EdrawPasteOptions, edraw_paste_options
 from .clipboard import (
-    CLIPBOARD_MIME,
     EDRAW_CLIPBOARD_MIME,
     has_clipboard_image,
+    node_clipboard_format,
     read_clipboard_image,
     read_edraw_clipboard,
     read_formatted_clipboard_text,
+    write_node_clipboard,
 )
 from .interactions import document_interaction
 
@@ -55,14 +56,12 @@ class ClipboardActionsMixin:
             self.edraw_paste_options_changed.emit(*options)
 
     def copy(self):
-        """使用注入的 JSON 与 Markdown 格式导出片段，文件与剪贴板共享解析协议。"""
+        """复制节点片段及可在其他应用粘贴的 Markdown 大纲。"""
         if self.graph is not None:
             return self._copy_graph_nodes()
         fragment = self.engine.copy_fragment(self.selected_node_ids())
         mime = QMimeData()
-        mime.setData(
-            CLIPBOARD_MIME, encode_document(fragment, registry=self.format_registry, format_id="json")
-        )
+        write_node_clipboard(mime, fragment, self.format_registry)
         # 专用格式保存原文，纯文本剪贴板则应与画布一致。只有片段外引用需要
         # 额外投影；单页副本不会把投影文字误写回附属页的所有权关系或原片段。
         outline = fragment
@@ -125,8 +124,10 @@ class ClipboardActionsMixin:
             return []
         outline_title = None
         show_outline_options = True
-        if mime.hasFormat(CLIPBOARD_MIME):
-            fragment = decode_document(bytes(mime.data(CLIPBOARD_MIME)), registry=self.format_registry)
+        if (node_format := node_clipboard_format(mime)) is not None:
+            kind, codec = node_format
+            fragment = decode_document(bytes(mime.data(kind)), format_id=codec,
+                                       registry=self.format_registry if codec == "json" else None)
         elif mime.hasFormat(EDRAW_CLIPBOARD_MIME):
             # 先读完并验证结构，再询问放置方式；亿图解析失败时不能降级为纯文本。
             fragment = read_edraw_clipboard(bytes(mime.data(EDRAW_CLIPBOARD_MIME)))
@@ -212,7 +213,7 @@ class ClipboardActionsMixin:
         mime = QApplication.clipboard().mimeData()
         if editor is None or mime is None:
             return False
-        if (self.graph is None and not mime.hasFormat(CLIPBOARD_MIME)
+        if (self.graph is None and node_clipboard_format(mime) is None
                 and not mime.hasFormat(EDRAW_CLIPBOARD_MIME) and has_clipboard_image(mime)):
             self.call(lambda: self._paste_image(mime))
             return True

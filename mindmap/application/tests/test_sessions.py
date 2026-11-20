@@ -780,12 +780,12 @@ def test_open_dialog_and_old_format_parameter_cannot_bypass_native_limit(empty_w
     assert empty_window.application.active_session is first and len(empty_window.application.sessions) == 1
 
 
-def drop_file_urls(target, urls, *, actions=Qt.DropAction.CopyAction | Qt.DropAction.MoveAction):
+def drop_file_urls(target, urls, *, actions=Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, position=None):
     """从窗口入口投递完整拖放序列，由 Qt 命中子控件；Shift 模拟来源建议移动。"""
     mime = QMimeData()
     mime.setUrls(urls)
     window = QWidget.window(target)
-    position = QPointF(target.mapTo(window, target.rect().center()))
+    position = QPointF(target.mapTo(window, target.rect().center() if position is None else position))
     args = (position, actions, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier)
     for event in (QDragEnterEvent(*args), QDragMoveEvent(*args), QDropEvent(*args)):
         QApplication.sendEvent(window.windowHandle(), event)
@@ -793,6 +793,36 @@ def drop_file_urls(target, urls, *, actions=Qt.DropAction.CopyAction | Qt.DropAc
             return False
         assert event.dropAction() == Qt.DropAction.CopyAction
     return True
+
+
+def test_file_drop_on_node_autosaves_and_survives_save_as_and_reopen(
+    empty_window, tmp_path, qtbot, choose_save_directory,
+):
+    path = tmp_path / "带附件的导图"
+    session = create(empty_window, path)
+    canvas = session.canvas
+    root = session.engine.root_id
+    source = tmp_path / "参考 资料.txt"
+    content = "这是附件".encode("utf-8")
+    source.write_bytes(content)
+    QApplication.processEvents()
+    item = canvas.node_items[root]
+    point = canvas.view.mapFromScene(item.mapToScene(item.visual.card_rect().center()))
+    assert drop_file_urls(canvas.view.viewport(), [QUrl.fromLocalFile(str(source))], position=point)
+    qtbot.waitUntil(lambda: session.engine.get_node(root).attachment is not None)
+    attachment = session.engine.get_node(root).attachment
+    qtbot.waitUntil(lambda: not session.engine.is_dirty)
+    assert (path / "assets" / attachment.asset_id).read_bytes() == content
+
+    source.rename(tmp_path / "已移走的源文件.txt")
+    target = tmp_path / "附件另存"
+    choose_save_directory(target)
+    assert empty_window.save(save_as=True)
+    assert load_directory(target).assets[attachment.asset_id].data == content
+    assert empty_window.open_path(path)
+    reopened = empty_window.application.active_session
+    assert reopened.engine.get_node(root).attachment == attachment
+    assert reopened.canvas.node_items[root].attachment_control.isVisible()
 
 
 @pytest.mark.parametrize("drop_target", ["welcome", "canvas", "tabs", "search"])

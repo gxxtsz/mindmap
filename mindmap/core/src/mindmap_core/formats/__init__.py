@@ -10,6 +10,7 @@ from .directory import (
     load_validated_directory,
     prepare_directory_update,
     save_directory,
+    validate_directory_capacity,
 )
 from .directory_storage import DirectoryVersion, DirectoryVersionConflict, is_directory_member
 from .edraw import import_edraw_xml
@@ -58,4 +59,5 @@ __all__ = [
     "supports_owned_load",
     "supports_process_save",
     "to_dict",
+    "validate_directory_capacity",
 ]

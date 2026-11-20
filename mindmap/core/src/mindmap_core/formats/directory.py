@@ -21,6 +21,7 @@ from mindmap_core import (
     SaveSnapshot,
     ValidatedDocument,
 )
+from mindmap_core.models import node_asset_ids
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE, graph_members
 
 from .directory_storage import (
@@ -113,13 +114,14 @@ def _preserve_checkout_line_endings(
     return DirectoryVersion(tuple(entries))
 
 
-def _manifest_record(document: MindMapDocument) -> dict:
+def _manifest_record(document: MindMapDocument, *, assets=None) -> dict:
+    assets = document.assets if assets is None else assets
     return {
         "format": _DIRECTORY_FORMAT,
         "schema_version": _DIRECTORY_VERSION,
         "root_id": document.root_id,
         "assets": [{"id": key, "media_type": asset.media_type, "path": f"assets/{key}"}
-                   for key, asset in sorted(document.assets.items())],
+                   for key, asset in sorted(assets.items())],
         "layout": asdict(document.layout),
         "theme": asdict(document.theme),
         "metadata": document.metadata,
@@ -186,6 +188,18 @@ def _encode(document: MindMapDocument) -> dict[str, bytes]:
     return payload
 
 
+def validate_directory_capacity(document: MindMapDocument) -> None:
+    """检查即将提交的导图能否保存，按保存编码计算页面、清单和仍有引用的资源。"""
+    asset_ids = {key for node in document.nodes.values() for key in node_asset_ids(node)}
+    assets = {key: document.assets[key] for key in asset_ids}
+    size = sum(len(asset.data) for asset in assets.values()) + len(_json_bytes(_manifest_record(document, assets=assets)))
+    if size <= MAX_ARCHIVE_BYTES:
+        size += sum(len(_encode_page(page, _page_nodes(document, roots)))
+                    for page, roots in _page_sources(document).values())
+    if size > MAX_ARCHIVE_BYTES:
+        raise MindMapError("添加附件后导图目录大小超过保存限制")
+
+
 def _decode(root: Path) -> tuple[ValidatedDocument, DirectoryVersion]:
     sizes = managed_files(root)
     if sizes is None or MANIFEST not in sizes:
@@ -248,16 +262,16 @@ def _decode(root: Path) -> tuple[ValidatedDocument, DirectoryVersion]:
         manifest[group] = records
     resources = {}
     if not isinstance(manifest["assets"], list):
-        raise MindMapError("导图图片清单必须是列表")
+        raise MindMapError("导图资源清单必须是列表")
     for asset in manifest["assets"]:
         if not isinstance(asset, dict) or asset.keys() != {"id", "path", "media_type"}:
-            raise MindMapError("导图图片清单条目无效")
+            raise MindMapError("导图资源清单条目无效")
         key = asset["id"]
         if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key) or asset["path"] != f"assets/{key}":
-            raise MindMapError("导图图片标识或路径无效")
+            raise MindMapError("导图资源标识或路径无效")
         resources[key] = read(asset["path"])
     if entries.keys() != sizes.keys():
-        raise MindMapError("导图目录包含未列入清单的页面或图片")
+        raise MindMapError("导图目录包含未列入清单的页面或资源")
     manifest.update(format="mindmap", schema_version=SCHEMA_VERSION, nodes=nodes, inspiration=inspiration)
     validation = _from_dict(manifest, resources=resources, with_validation=True)
     document = validation.document

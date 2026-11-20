@@ -226,7 +226,7 @@ class NodePagesMixin:
     def copy_graph_fragment(self, owner_id: str, node_ids: Iterable[str]) -> "MindMapDocument":
         """复制指定图的局部节点、内部连线及附属内容，返回独立的剪贴板文档。
 
-        文档的合成根承载复制的图，图片资源随附页复制。调用不会建立新绑定、
+        文档的合成根承载复制的图，附件和图片资源随片段复制。调用不会建立新绑定、
         改变选择或写入历史；失效图及局部 ID 抛出 MindMapError。
         """
         graph = self.node_graph(owner_id)
@@ -234,17 +234,22 @@ class NodePagesMixin:
             raise MindMapError("该节点没有图")
         return self._editor.copy_graph_fragment(graph, node_ids)
 
-    def paste_graph_fragment(self, owner_id: str, fragment: "MindMapDocument") -> list[str]:
+    def paste_graph_fragment(
+        self, owner_id: str, fragment: "MindMapDocument", *, include_pages: bool = True,
+    ) -> list[str]:
         """向指定图粘贴独立片段，返回新分配的局部节点 ID，整个操作可一次撤销。
 
         片段必须由单个合成根承载图；校验通过后在目标中复制页面、图节点绑定
-        和内部引用。图片按内容哈希复用。失败回滚所有修改，片段保持原样。
+        和内部引用。include_pages 为 False 时只复制图节点、连线和直接关联的附件。
+        资源按内容哈希复用，失败回滚所有修改，片段保持原样。
         """
-        def action(node_id, fragment, page_id):
+        def action(node_id, fragment, page_id, include_pages):
             from .models import MindMapDocument
 
             if page_id is None:
                 raise MindMapError("图的所属节点标识无效")
+            if not isinstance(include_pages, bool):
+                raise MindMapError("是否包含附属页面必须为布尔值")
             if type(fragment) is not MindMapDocument:
                 raise MindMapError("图剪贴板片段无效")
             fragment.validate()
@@ -259,10 +264,11 @@ class NodePagesMixin:
             source = NodeGraph.from_data(record["data"], version=record["version"])
             if not source.nodes:
                 return []
-            return self._editor.paste_graph_fragment(node_id, current, fragment, source)
+            return self._editor.paste_graph_fragment(node_id, current, fragment, source, include_pages=include_pages)
 
         return self._execute("paste_graph_fragment", action, node_id=owner_id, fragment=fragment,
-                             page_id=graph_page_id(owner_id) if isinstance(owner_id, str) and owner_id else None)
+                             page_id=graph_page_id(owner_id) if isinstance(owner_id, str) and owner_id else None,
+                             include_pages=include_pages)
 
     def set_extension_page(self, node_id: str, type_id: str, data: dict, *, version: int = 1) -> None:
         """创建或替换节点上的一页；成功产生一条历史，失败完全回滚。

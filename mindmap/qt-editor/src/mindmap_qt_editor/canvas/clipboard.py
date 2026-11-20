@@ -3,7 +3,9 @@
 from pathlib import Path
 
 from mindmap_core import MindMapDocument, MindMapError
-from mindmap_core.formats import MAX_ARCHIVE_BYTES, import_edraw_xml
+from mindmap_core.formats import MAX_ARCHIVE_BYTES, encode_document, import_edraw_xml
+from mindmap_core.graph import GRAPH_ATTACHMENT_VERSION
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render.rendering import decode_image, text_from_html
 from PySide6.QtCore import QBuffer, QIODevice, QMimeData
 from PySide6.QtGui import QImage, QImageReader, QPixmap
@@ -11,6 +13,33 @@ from PySide6.QtGui import QImage, QImageReader, QPixmap
 CLIPBOARD_MIME = "application/x-python-mindmap+json"
 GRAPH_CLIPBOARD_MIME = "application/x-python-mindmap-graph+json"
 EDRAW_CLIPBOARD_MIME = "application/edraw-mind-xml"
+_ARCHIVE_MIMES = {
+    CLIPBOARD_MIME: "application/x-python-mindmap+zip",
+    GRAPH_CLIPBOARD_MIME: "application/x-python-mindmap-graph+zip",
+}
+
+
+def node_clipboard_format(mime: QMimeData, json_mime: str = CLIPBOARD_MIME) -> tuple[str, str] | None:
+    """选择节点片段的 MIME 类型和编解码器，兼容已有 JSON 载荷。"""
+    archive_mime = _ARCHIVE_MIMES[json_mime]
+    if mime.hasFormat(archive_mime):
+        return archive_mime, "mindmap"
+    if mime.hasFormat(json_mime):
+        return json_mime, "json"
+    return None
+
+
+def write_node_clipboard(mime: QMimeData, fragment: MindMapDocument, registry, *, json_mime=CLIPBOARD_MIME):
+    """带附件的节点片段使用原生容器，避免 Base64 将文件放大到超过读取限制。"""
+    has_attachment = any(
+        node.attachment is not None
+        or node.extension_pages.get(GRAPH_PAGE_TYPE, {}).get("version", 0) >= GRAPH_ATTACHMENT_VERSION
+        for node in fragment.nodes.values()
+    )
+    if has_attachment:
+        mime.setData(_ARCHIVE_MIMES[json_mime], encode_document(fragment, format_id="mindmap"))
+    else:
+        mime.setData(json_mime, encode_document(fragment, registry=registry, format_id="json"))
 
 
 def read_formatted_clipboard_text(mime: QMimeData, *, markdown: bool) -> str | None:

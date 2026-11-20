@@ -62,6 +62,7 @@ from mindmap_qt_editor.icons import (
 )
 from mindmap_qt_editor.theme import UiColors, apply_ui_palette, dialog_styles, ui_colors
 
+from .attachments import AttachmentActionsMixin
 from .clipboard_actions import ClipboardActionsMixin
 from .graph import GraphCanvasMixin
 from .inline_editing import InlineEditingMixin
@@ -80,6 +81,7 @@ class MindMapWidget(
     SceneSyncMixin,
     InlineEditingMixin,
     ClipboardActionsMixin,
+    AttachmentActionsMixin,
     GraphCanvasMixin,
     NodeSelectionMixin,
     InspirationCanvasMixin,
@@ -225,6 +227,7 @@ class MindMapWidget(
         self._custom_actions = []
         self.network = QNetworkAccessManager(self)
         self._downloads = set()
+        self._init_attachments()
         self._create_actions()
         self._view_controls = (
             _ViewControls(self.view, [self.action("fit"), self.action("center")])
@@ -250,6 +253,7 @@ class MindMapWidget(
 
             QDrag.cancel()
         self._disposed = True
+        self._stop_attachment_read()
         self._detail_origin = None
         self._reference_origin = None
         self._detail_targets.clear()
@@ -556,6 +560,7 @@ class MindMapWidget(
             ("wheel_zoom", "滚轮缩放", None, lambda w: w.set_wheel_mode("zoom"), False),
             ("branch_style", "分支连接线样式", None, lambda w: None, True),
             ("node_graph", "添加图", None, lambda w: w.open_node_graph(create=True), False),
+            ("remove_attachment", "移除附件", None, lambda w: w.remove_node_attachment(), True),
             ("graph_text", "编辑图文本…", None, lambda w: w.edit_graph_text(), False),
             ("graph_add_edge", "添加连线…", None, lambda w: w.choose_graph_edge(), True),
             ("graph_auto_layout", "DOT 自动布局", None, lambda w: w.auto_layout_graph(), True),
@@ -640,6 +645,10 @@ class MindMapWidget(
         reset_width = self._actions["reset_node_width"]
         reset_width.setVisible(selected_text is not None and "fixed_width" in selected_text.style)
         reset_width.setEnabled(reset_width.isVisible() and self.editable and not editing)
+        attachment_node = self._document.nodes.get(self.current_node_id()) if self.selection_count == 1 else None
+        remove_attachment = self._actions["remove_attachment"]
+        remove_attachment.setVisible(attachment_node is not None and attachment_node.attachment is not None)
+        remove_attachment.setEnabled(remove_attachment.isVisible() and self.editable and not editing)
         self._update_graph_actions(editing)
         if self.graph is not None:
             self._sync_navigation()
@@ -1487,6 +1496,7 @@ class MindMapWidget(
             ("", ("node_graph",)),
             ("灵感", ("add_inspiration", "move_to_inspiration", "attach_inspirations", "group_inspirations")),
             ("图片和链接", ("image", "image_url", "remove_image", "hyperlink")),
+            ("", ("remove_attachment",)),
             ("", ("undo", "redo")),
             ("", self._custom_actions),
         ]

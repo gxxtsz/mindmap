@@ -25,6 +25,7 @@ _OPERATION_NAMES = {
     "move_up": "调整节点顺序", "set_expanded": "调整节点折叠状态",
     "set_layout": "修改导图布局", "set_theme": "修改导图主题", "set_branch_style": "修改分支样式",
     "add_image_child": "新增图片节点", "attach_image": "关联节点图片",
+    "set_node_attachment": "更新节点附件",
     "paste_fragment": "粘贴节点", "copy_nodes": "复制节点到导图",
     "create_submap": "创建子导图", "remove_submap": "删除子导图",
     "convert_descendants_to_submap": "后代转为子导图",

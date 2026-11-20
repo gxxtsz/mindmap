@@ -31,6 +31,7 @@ class DockHost(QWidget):
         self.setObjectName(f"dock_host_{host_id}")
         self.setAcceptDrops(True)
         self.manager.hosts[host_id] = self
+        self.destroyed.connect(manager._stop_callbacks)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)

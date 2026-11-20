@@ -228,7 +228,7 @@ class NodeVisual:
     def page_controls_width(self) -> float:
         """返回入口增加的完整宽度；无入口时为零，原正文宽度不受影响。"""
         count = len(self.page_kinds)
-        if not count:
+        if not count or self.image_only:
             return 0.0
         return PAGE_CONTENT_GAP + count * PAGE_CONTROL_SIZE + (count - 1) * PAGE_CONTROL_GAP
 
@@ -261,6 +261,10 @@ class NodeVisual:
         """
         if kind not in self.page_kinds:
             return QRectF()
+        if self.image_only:
+            side = min(PAGE_CONTROL_SIZE, self.width, self.height)
+            margin = min(4.0, (min(self.width, self.height) - side) / 2)
+            return QRectF(self.width - side - margin, margin, side, side)
         count = len(self.page_kinds)
         strip = count * PAGE_CONTROL_SIZE + (count - 1) * PAGE_CONTROL_GAP
         x = self.width - PAGE_RIGHT_PADDING - strip
@@ -271,8 +275,16 @@ class NodeVisual:
         """在入口中心绘制 16×16 图形；不绘制悬停底色，也不注册导航行为。"""
         rect = self.page_control_rect(kind)
         if not rect.isEmpty():
-            paint_page_icon(painter, kind, rect.adjusted(8, 8, -8, -8),
-                            self.page_icon_color if self.page_icon_color is not None else self.text_color)
+            inset = rect.width() / 4
+            color = self.page_icon_color if self.page_icon_color is not None else self.text_color
+            if self.image_only:
+                painter.save()
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(24, 33, 47, 210))
+                painter.drawRoundedRect(rect, 5, 5)
+                painter.restore()
+                color = QColor("white")
+            paint_page_icon(painter, kind, rect.adjusted(inset, inset, -inset, -inset), color)
 
     def card_rect(self) -> QRectF:
         """返回节点局部坐标中的实际绘制矩形，普通卡片以此为圆角边框中心线。
@@ -328,6 +340,8 @@ class NodeVisual:
                     painter.drawRect(self.image_rect)
                 if node.children and controls:
                     self.paint_fold_control(painter, node)
+                if page_controls:
+                    self.paint_page_control(painter, "attachment")
                 return
             # 独立调用仍可请求原有描边；画布把交互高亮交给前景层，正式边框不随
             # 选中或文字焦点变化，避免把根节点同色的加粗描边和新外框重复绘制。
@@ -463,6 +477,7 @@ class VisualFactory:
                 bool(node.children),
                 bool(node.note),
                 bool(node.hyperlink),
+                node.attachment is not None,
                 bool(detail_page_id),
                 bool(node.submap_id),
                 bool(reference),
@@ -573,13 +588,14 @@ class VisualFactory:
                 ("detail", detail_page_id), ("submap", node.submap_id), ("reference", reference),
                 ("graph", GRAPH_PAGE_TYPE in node.extension_pages),
                 ("extension", any(key != GRAPH_PAGE_TYPE for key in node.extension_pages)),
+                ("attachment", node.attachment),
             ) if target),
             content_height=content_height,
             image_only=node.is_image_node,
         )
         # 普通底色使用强调色；根节点和自定义底色跟随正文色，避免蓝底蓝图标。
         visual.page_icon_color = visual.text_color if is_root or node.style.get("background") else QColor(theme.accent)
-        if visual.page_kinds:
+        if visual.page_kinds and not visual.image_only:
             visual = visual.with_content_size(width, content_height)
         if cache:
             self.cache[key] = visual

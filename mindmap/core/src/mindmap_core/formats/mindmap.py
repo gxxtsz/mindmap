@@ -1,4 +1,4 @@
-"""带图片资源的 ZIP 文档容器；始终通过流读取，不向磁盘解压。"""
+"""带二进制资源的 ZIP 文档容器，通过流读取。"""
 
 import json
 import re
@@ -12,7 +12,7 @@ from .schema import _from_dict, to_dict
 
 
 class MindmapCodec:
-    """完整保存节点、布局、主题和图片资源的原生容器格式。"""
+    """完整保存节点、布局、主题和资源的原生容器格式。"""
 
     def read(self, stream, *, options):
         """先校验容器目录和容量，再解析结构、校验资源哈希，不写入文件系统。"""
@@ -28,7 +28,7 @@ class MindmapCodec:
         return _read_archive(stream)
 
     def write(self, document, stream, *, options):
-        """JSON 中只写资源引用，原始图片字节独立保存，避免重复 Base64 编码。"""
+        """JSON 中只写资源引用，原始字节独立保存。"""
         with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr(
                 "document.json",

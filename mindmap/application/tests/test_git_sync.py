@@ -148,6 +148,8 @@ def test_commit_push_only_map_files_and_retry_failed_push(window, qtbot, copies)
     notes.write_text("保留暂存和未暂存版本", encoding="utf-8")
     (local / "随手记.txt").write_text("不提交", encoding="utf-8")
     page = session.engine.create_detail_page(one)
+    session.engine.set_node_attachment(one, ("随导图保存的附件.txt", "附件内容".encode("utf-8")))
+    asset_path = f"assets/{session.engine.get_node(one).attachment.asset_id}"
     assert "待保存" in sync.button.text()
     assert sync.actions["提交并推送"].isEnabled()
     before = git(server, "rev-parse", "main")
@@ -157,7 +159,7 @@ def test_commit_push_only_map_files_and_retry_failed_push(window, qtbot, copies)
     assert git(server, "rev-parse", "main") == before
     assert git(local, "log", "-1", "--format=%s") == "更新导图"
     assert set(git(local, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").splitlines()) == {
-        "mindmap.json", f"pages/{page}.json", "pages/main.json",
+        "mindmap.json", f"pages/{page}.json", "pages/main.json", asset_path,
     }
     assert git(local, "ls-files", "-s", "--", notes.name) == staged
     assert git(local, "status", "--porcelain", "--", "mindmap.json", "pages") == ""
@@ -167,6 +169,7 @@ def test_commit_push_only_map_files_and_retry_failed_push(window, qtbot, copies)
     sync.actions["提交并推送"].trigger()
     qtbot.waitUntil(lambda: sync.button.text() == "Git 同步 · 已同步", timeout=12000)
     assert git(server, "rev-parse", "main") == head == git(local, "rev-parse", "HEAD")
+    assert git(server, "cat-file", "-p", f"main:{asset_path}") == "附件内容"
     assert git(local, "ls-files", "-s", "--", notes.name) == staged
 
 

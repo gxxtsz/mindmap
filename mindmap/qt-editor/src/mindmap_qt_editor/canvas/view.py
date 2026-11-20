@@ -2,11 +2,12 @@
 
 from contextlib import contextmanager
 from math import ceil
+from pathlib import Path
 from time import monotonic
 from weakref import ref
 
 from PySide6.QtCore import QEvent, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsView
 from shiboken6 import isValid
 
@@ -61,6 +62,8 @@ class MindMapView(QGraphicsView):
         self._selection_click = None
         self.drag_origin = QPointF()
         self.node_drag = NodeDragController(self)
+        self._attachment_drag_file = None
+        self._attachment_drop_node = None
         self.graph_edge_edit = GraphEdgeEditController(self)
         self.image_resize = ImageResizeController(self)
         self.text_resize = TextWidthResizeController(self)
@@ -117,6 +120,20 @@ class MindMapView(QGraphicsView):
 
     def dragEnterEvent(self, event):
         """为有效原生拖入建立共用预览，空白处暂时接受进入以允许继续寻找落点。"""
+        if event.mimeData().hasUrls():
+            path = self._local_attachment_path(event)
+            try:
+                self._attachment_drag_file = path if path is not None and path.is_file() else None
+            except (OSError, ValueError):
+                self._attachment_drag_file = None
+            if self._attachment_drag_file is None:
+                self._set_attachment_drop_node(None)
+                event.ignore()
+            else:
+                self._set_attachment_drop_node(self._attachment_node_at(event.position().toPoint()))
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+            return
         if self.owner.graph is not None:
             event.ignore()
             return
@@ -131,6 +148,16 @@ class MindMapView(QGraphicsView):
 
     def dragMoveEvent(self, event):
         """正文、同级间隙和吸附均交给节点控制器，预览不参与下一帧命中。"""
+        if event.mimeData().hasUrls():
+            copy_allowed = self._attachment_drag_file is not None and event.possibleActions() & Qt.DropAction.CopyAction
+            node_id = self._attachment_node_at(event.position().toPoint()) if copy_allowed else None
+            self._set_attachment_drop_node(node_id)
+            if node_id is None:
+                event.ignore()
+            else:
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+            return
         if self.node_drag.update_external(event.mimeData(), event.position().toPoint()):
             event.setDropAction(Qt.DropAction.MoveAction)
             event.accept()
@@ -138,11 +165,24 @@ class MindMapView(QGraphicsView):
             event.ignore()
 
     def dragLeaveEvent(self, event):
+        self._attachment_drag_file = None
+        self._set_attachment_drop_node(None)
         self.node_drag.cancel_external()
         event.accept()
 
     def dropEvent(self, event):
         """释放时复查落点后再提交；异常和取消统一清理未提交的影像及滚动。"""
+        if event.mimeData().hasUrls():
+            path, self._attachment_drag_file = self._attachment_drag_file, None
+            self._set_attachment_drop_node(None)
+            node_id = self._attachment_node_at(event.position().toPoint())
+            if (path is not None and node_id is not None and path == self._local_attachment_path(event)
+                    and self.owner.call(lambda: self.owner._start_attachment_import(node_id, path))):
+                event.setDropAction(Qt.DropAction.CopyAction)
+                event.accept()
+            else:
+                event.ignore()
+            return
         changed = self.owner.call(lambda: self.node_drag.drop_external(
             event.mimeData(), event.position().toPoint()))
         self.node_drag.cancel_external()
@@ -151,6 +191,30 @@ class MindMapView(QGraphicsView):
             event.accept()
         else:
             event.ignore()
+
+    def _local_attachment_path(self, event) -> Path | None:
+        if not self.owner.editable or not event.possibleActions() & Qt.DropAction.CopyAction:
+            return None
+        urls = event.mimeData().urls()
+        if len(urls) != 1 or not urls[0].isLocalFile():
+            return None
+        path = Path(urls[0].toLocalFile())
+        return path if path.is_absolute() else None
+
+    def _attachment_node_at(self, position):
+        if self.owner._disposed or not self.owner.editable:
+            return None
+        item = self.itemAt(position)
+        if isinstance(item, PageControlItem):
+            item = item.node_item
+        if isinstance(item, NodeEditor):
+            return item.node_id
+        return item.node.id if isinstance(item, NodeItem) else None
+
+    def _set_attachment_drop_node(self, node_id):
+        if node_id != self._attachment_drop_node:
+            self._attachment_drop_node = node_id
+            self.viewport().update()
 
     def wheelEvent(self, event):
         """滚轮模式仅影响视图；Ctrl 始终临时缩放，不改写用户选择的模式。"""
@@ -419,6 +483,8 @@ class MindMapView(QGraphicsView):
         self.press_node = None
         self._fold_pressed = False
         self._selection_click = None
+        self._attachment_drag_file = None
+        self._set_attachment_drop_node(None)
         self._set_hovered_node(None, immediate=True)
         self._expire_fold_hovers(clear=True)
         self.node_drag.cancel()
@@ -484,19 +550,21 @@ class MindMapView(QGraphicsView):
             self.update_cursor(position)
             event.accept()
             return
+        item = self.itemAt(position)
         handle = self.image_resize.hit_test(position)
-        if handle is not None and event.button() == Qt.MouseButton.LeftButton:
+        if (handle is not None and event.button() == Qt.MouseButton.LeftButton
+                and not isinstance(item, PageControlItem)):
             self.owner.call(lambda: self.image_resize.begin(handle, event.position().toPoint()))
             self.update_cursor(event.position().toPoint())
             event.accept()
             return
-        item = self.itemAt(event.position().toPoint())
         if isinstance(item, PageControlItem) and event.button() == Qt.MouseButton.LeftButton:
             if item.can_activate():
                 # 切页会释放当前图元，回调只捕获节点 ID，不能在被销毁的按钮实例上继续执行。
                 key = item.node_item.node.id
                 enter = {"extension": self.owner.extension_page_requested.emit,
                          "graph": self.owner.open_node_graph,
+                         "attachment": self.owner.open_node_attachment,
                          "detail": self.owner.enter_detail_page, "submap": self.owner.enter_submap,
                          "reference": self.owner.open_page_reference}[item.kind]
                 self.owner.call(lambda: enter(key))
@@ -800,6 +868,18 @@ class MindMapView(QGraphicsView):
                              "按 Tab 添加节点，或右键选择“编辑图文本”")
             painter.restore()
         paint_node_selection(self, painter)
+        target = self.owner.node_items.get(self._attachment_drop_node)
+        if target is not None:
+            painter.save()
+            accent = QColor(self.owner.ui_colors.accent)
+            pen = QPen(accent, 2)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            accent.setAlpha(36)
+            painter.setBrush(accent)
+            outline = target.visual.card_outline(pixel_size=1 / self.transform().m11())
+            painter.drawPath(target.mapToScene(outline))
+            painter.restore()
         # 缩放及滚动可能只重绘视图而不发出 scene.changed；记住实际显示的位置，
         # 使随后的局部移动仍能完整擦除旧外框，而非使用缩放前的视口坐标。
         self._selection_bounds = self._selection_decoration.bounds.united(self.text_resize.decoration_bounds())

@@ -200,6 +200,7 @@ class PageControlItem(QGraphicsObject):
         "reference": ("page_reference_root_id", "打开引用页面"),
         "extension": ("extension_pages", "打开扩展详情"),
         "graph": ("extension_pages", "打开图"),
+        "attachment": ("attachment", "打开附件"),
     }
 
     def __init__(self, node_item, *, kind="submap"):
@@ -232,6 +233,8 @@ class PageControlItem(QGraphicsObject):
             self.prepareGeometryChange()
             self._rect = rect
         self.setVisible(self.kind in item.visual.page_kinds)
+        if self.kind == "attachment" and item.node.attachment is not None:
+            self.setToolTip(item.node.attachment.name)
         if not self.isVisible():
             self.hovered = False
         self.update()
@@ -240,7 +243,7 @@ class PageControlItem(QGraphicsObject):
         """只读仍允许导航；文字编辑、拖动和销毁期间的迟到点击保持原位。"""
         item = self.node_item
         if not (item and item.owner and not item.owner._disposed and not item.owner._applying_engine_event
-                and item.owner.editor is None and not item.owner.view.node_drag.active):
+                and (item.owner.editor is None or self.kind == "attachment") and not item.owner.view.node_drag.active):
             return False
         if self.kind == "graph":
             return GRAPH_PAGE_TYPE in item.node.extension_pages
@@ -301,6 +304,7 @@ class NodeItem(StaticNodeItem):
         self.reference_control = None
         self.extension_control = None
         self.graph_control = None
+        self.attachment_control = None
         self._sync_reference_control()
         self._sync_optional_page_controls()
 
@@ -388,7 +392,8 @@ class NodeItem(StaticNodeItem):
 
     def _sync_optional_page_controls(self):
         """按实际挂载内容创建图或扩展入口。删除内容后隐藏按钮，供撤销时复用。"""
-        for kind, attr in (("extension", "extension_control"), ("graph", "graph_control")):
+        for kind, attr in (("extension", "extension_control"), ("graph", "graph_control"),
+                           ("attachment", "attachment_control")):
             control = getattr(self, attr)
             if control is not None:
                 control.sync()

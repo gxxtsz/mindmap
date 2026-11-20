@@ -853,6 +853,20 @@ class MindMapEngine(NodePagesMixin):
             width=width,
         )
 
+    def set_node_attachment(
+        self, node_id: str, file: tuple[str, bytes] | None, *, graph_owner_id: str | None = None,
+    ) -> None:
+        """设置单个文件附件，传入 None 移除，资源更新和清理同属一次事务。
+
+        file 为文件名和完整字节。树节点使用文档标识，图节点指定所属节点及图内局部标识。
+        """
+        origin = {}
+        if graph_owner_id is not None:
+            origin["page_id"] = (graph_page_id(graph_owner_id)
+                                 if isinstance(graph_owner_id, str) and graph_owner_id else None)
+        self._execute("set_node_attachment", self._editor.set_node_attachment, node_id=node_id, file=file,
+                      graph_owner_id=graph_owner_id, **origin)
+
     def copy_fragment(self, node_ids) -> MindMapDocument:
         """建立包含属性、资源和布局配置的独立剪贴板文档，不修改原文档。"""
         return self._editor.copy_fragment(node_ids)

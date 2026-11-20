@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 
 from mindmap_core import GraphEdge, GraphNode, MindMapError, NodeGraph
-from mindmap_core.formats import decode_document, encode_document
+from mindmap_core.formats import decode_document
 from mindmap_core.formats.graph import format_graph_text, parse_graph_text
 from mindmap_core.layouts.graph import build_graph_layout, graph_layout
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE, graph_page_id, parse_graph_page_id
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .clipboard import GRAPH_CLIPBOARD_MIME
+from .clipboard import GRAPH_CLIPBOARD_MIME, node_clipboard_format, write_node_clipboard
 from .interactions import document_interaction
 
 _TREE_ACTIONS = (
@@ -137,6 +137,7 @@ class GraphCanvasMixin:
             groups.append(("", ("edit", "toggle_text_format", "reset_node_width", "cut", "copy", "paste", "delete")))
             if self.selection_count == 1:
                 groups.append(("页面", _GRAPH_NODE_PAGE_ACTIONS))
+                groups.append(("", ("remove_attachment",)))
         else:
             groups.append(("", ("paste", "fit", "center", "reset_zoom", "zoom_in", "zoom_out")))
         return [*groups, ("", ("undo", "redo", "graph_remove"))]
@@ -371,8 +372,7 @@ class GraphCanvasMixin:
             record = fragment.root.extension_pages[GRAPH_PAGE_TYPE]
             graph = NodeGraph.from_data(record["data"], version=record["version"])
             mime = QMimeData()
-            mime.setData(GRAPH_CLIPBOARD_MIME, encode_document(fragment, registry=self.format_registry,
-                                                              format_id="json"))
+            write_node_clipboard(mime, fragment, self.format_registry, json_mime=GRAPH_CLIPBOARD_MIME)
             mime.setText(format_graph_text(graph))
             QApplication.clipboard().setMimeData(mime)
 
@@ -383,36 +383,34 @@ class GraphCanvasMixin:
         if mime is None:
             return []
         target = self._graph_target()
-        if mime.hasFormat(GRAPH_CLIPBOARD_MIME):
-            payload = bytes(mime.data(GRAPH_CLIPBOARD_MIME))
-            document = decode_document(payload, registry=self.format_registry, format_id="json")
+        if (node_format := node_clipboard_format(mime, GRAPH_CLIPBOARD_MIME)) is not None:
+            kind, codec = node_format
+            document = decode_document(bytes(mime.data(kind)), format_id=codec,
+                                       registry=self.format_registry if codec == "json" else None)
             record = document.root.extension_pages.get(GRAPH_PAGE_TYPE)
             if record is None or document.root.children or document.root.submap_id or document.root.detail_page_id:
                 raise MindMapError("图剪贴板片段无效")
             source = NodeGraph.from_data(record["data"], version=record["version"])
-            if self.engine.can_create_node_pages(self.current_page_id) or not any(
-                    node.document_node_id for node in source.nodes):
-                self._prepare_page_navigation()
-                self._ensure_editable()
-                self._read_active_graph(target)
-                keys = self.engine.paste_graph_fragment(target[1], document)
-                if keys:
-                    self.reveal_nodes(keys)
-                return keys
-            revision = self._branch_content_revision
-            if QMessageBox.question(
-                    self, "粘贴到详情页中的图", "是否仅粘贴图节点和连线？附页仍保留在剪贴板。",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
-                return []
+            include_pages = self.engine.can_create_node_pages(self.current_page_id) or not any(
+                node.document_node_id for node in source.nodes)
+            if not include_pages:
+                revision = self._branch_content_revision
+                if QMessageBox.question(
+                        self, "粘贴到详情页中的图", "是否只粘贴图节点、连线和附件？附页仍保留在剪贴板。",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                    return []
+                if revision != self._branch_content_revision:
+                    raise MindMapError("确认期间图内容发生变化，请重新粘贴")
+            self._prepare_page_navigation()
             self._ensure_editable()
             self._read_active_graph(target)
-            if revision != self._branch_content_revision:
-                raise MindMapError("确认期间图内容发生变化，请重新粘贴")
-            fragment = replace(source, nodes=tuple(replace(node, document_node_id=None) for node in source.nodes))
-        else:
-            fragment = parse_graph_text(mime.text())
-            fragment = replace(fragment, nodes=tuple(replace(node, text_format="markdown") for node in fragment.nodes))
+            keys = self.engine.paste_graph_fragment(target[1], document, include_pages=include_pages)
+            if keys:
+                self.reveal_nodes(keys)
+            return keys
+        fragment = parse_graph_text(mime.text())
+        fragment = replace(fragment, nodes=tuple(replace(node, text_format="markdown") for node in fragment.nodes))
         if not fragment.nodes:
             return []
         self._prepare_page_navigation()
