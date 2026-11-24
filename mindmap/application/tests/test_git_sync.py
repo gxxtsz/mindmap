@@ -3,16 +3,20 @@
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, get_ident
 
 import pytest
 from mindmap_app.app import build_window
-from mindmap_application import documents
+from mindmap_application import documents, git_sync
 from mindmap_application.git_repository import GitRepository
 from mindmap_application.views import MindMapEditorView
 from mindmap_core import MindMapDocument, MindMapEngine
-from mindmap_core.formats import load_directory, save_directory
+from mindmap_core.formats import is_directory_member, load_directory, save_directory
+from mindmap_qt_editor.canvas import loading
 from PySide6.QtTest import QSignalSpy
+from PySide6.QtWidgets import QApplication
+
+_AUTO = "每小时自动同步"
 
 
 def git(path, *args):
@@ -338,3 +342,350 @@ def test_commit_waits_for_ime_and_background_save(window, qtbot, copies, monkeyp
         qtbot.waitUntil(lambda: sync.button.text() == "Git 同步 · 已同步", timeout=12000)
     assert git(server, "rev-parse", "main") != before
     assert load_directory(local).root.text == "后台快照"
+
+
+@pytest.fixture
+def advance_hour(monkeypatch):
+    """推进定时器使用的单调时钟，从同一个 Qt 超时信号触发调度。"""
+    now = 100.0
+    monkeypatch.setattr(git_sync, "monotonic", lambda: now)
+
+    def advance(sync, seconds=3600):
+        nonlocal now
+        now += seconds
+        sync._auto_timer.timeout.emit()
+
+    return advance
+
+
+def wait_for_hourly_sync(qtbot, sync, path):
+    """等到指定目录的请求走完所有阶段，包括等待现有任务后的接续请求。"""
+    qtbot.waitUntil(lambda: not sync._busy(path)
+                    and not any(item.queued and item.path == path for item in sync._auto_schedules.values()),
+                    timeout=12000)
+
+
+def edit_and_save(session, text):
+    session.engine.update_node(session.engine.root_id, text=text)
+    assert session.document.autosave()
+
+
+def test_hourly_opt_in_persists_and_syncs_background_once(window, qtbot, copies, tmp_path, monkeypatch, advance_hour):
+    server, local, second, _, _ = copies
+    session, sync = open_map(window, qtbot, local)
+    auto = sync.actions[_AUTO]
+    assert auto.isCheckable() and auto.isEnabled() and not auto.isChecked() and not sync._auto_timer.isActive()
+    edit_and_save(session, "后台标签的已保存内容")
+    notes = local / "单独暂存.txt"
+    notes.write_text("其他文件", encoding="utf-8")
+    git(local, "add", "--", notes.name)
+    staged = git(local, "ls-files", "-s", "--", notes.name)
+    auto.trigger()
+    assert auto.isChecked() and sync._auto_timer.interval() == 3_600_000
+
+    assert session.duplicate()
+    assert window.application.active_session.document is session.document
+    foreground, _ = open_map(window, qtbot, second)
+    assert not auto.isChecked() and len(sync._auto_schedules) == 1
+    inspected = []
+    prepare = GitRepository.prepare_auto_sync
+
+    def track_probe(repo):
+        inspected.append(repo.path)
+        return prepare(repo)
+
+    monkeypatch.setattr(GitRepository, "prepare_auto_sync", track_probe)
+    original_head = git(local, "rev-parse", "HEAD")
+    advance_hour(sync, 3599)
+    assert not sync._busy(local) and not inspected
+    advance_hour(sync, 1)
+    wait_for_hourly_sync(qtbot, sync, local)
+
+    head = git(local, "rev-parse", "HEAD")
+    assert head != original_head and git(server, "rev-parse", "main") == head
+    paths = git(local, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").splitlines()
+    assert paths and all(map(is_directory_member, paths))
+    assert git(local, "ls-files", "-s", "--", notes.name) == staged
+    assert window.application.active_session is foreground and inspected == [local]
+    assert any(item.message == "已自动推送导图" and item.source_path == str(local)
+               for item in window.operation_log.model.entries)
+    assert git(second, "rev-parse", "HEAD") == original_head
+
+    window.dispose()
+    restored = build_window(storage_dir=tmp_path / "配置", restore=False)
+    qtbot.addWidget(restored, before_close_func=lambda item: item.dispose())
+    restored.show()
+    try:
+        _, reopened = open_map(restored, qtbot, local)
+        assert reopened.actions[_AUTO].isChecked() and reopened._auto_timer.interval() == 3_600_000
+        log_before = restored.operation_log.plain_text()
+        advance_hour(reopened, 3599)
+        assert not reopened._busy(local) and inspected == [local]
+        advance_hour(reopened, 1)
+        wait_for_hourly_sync(qtbot, reopened, local)
+        assert inspected == [local, local] and restored.operation_log.plain_text() == log_before
+        assert git(local, "rev-parse", "HEAD") == head
+    finally:
+        restored.dispose()
+
+
+def test_hourly_timer_queues_once_behind_an_existing_remote_check(window, qtbot, copies, monkeypatch):
+    server, local, _, _, _ = copies
+    session, sync = open_map(window, qtbot, local)
+    edit_and_save(session, "等检查完再提交")
+    head = git(local, "rev-parse", "HEAD")
+    checking, release = Event(), Event()
+    fetch = GitRepository.fetch
+    probes = []
+
+    def wait_for_remote(repo, upstream):
+        checking.set()
+        assert release.wait(12)
+        return fetch(repo, upstream)
+
+    prepare = GitRepository.prepare_auto_sync
+
+    def track_probe(repo):
+        probes.append(repo.path)
+        return prepare(repo)
+
+    monkeypatch.setattr(GitRepository, "fetch", wait_for_remote)
+    monkeypatch.setattr(GitRepository, "prepare_auto_sync", track_probe)
+    monkeypatch.setattr(git_sync, "_AUTO_INTERVAL", 100)
+    check_remote(qtbot, sync)
+    try:
+        qtbot.waitUntil(checking.is_set, timeout=12000)
+        sync.actions[_AUTO].trigger()
+        schedule = sync._auto_schedules[session.document]
+        first_due = schedule.due_at
+        qtbot.waitUntil(lambda: schedule.queued and schedule.due_at >= first_due + 0.15, timeout=3000)
+        sync._auto_timer.stop()
+        assert not probes and git(local, "rev-parse", "HEAD") == head
+    finally:
+        release.set()
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert probes == [local]
+    assert git(local, "rev-parse", "HEAD") == git(server, "rev-parse", "main") != head
+
+
+def test_hourly_fast_forward_reloads_large_background_map_without_modal(
+    window, qtbot, copies, tmp_path, monkeypatch, advance_hour,
+):
+    server, local, second, one, two = copies
+
+    def add_submaps(engine):
+        engine.create_submap(one)
+        engine.create_submap(two)
+
+    edit_disk(second, add_submaps)
+    git(local, "pull", "--ff-only")
+    first, sync = open_map(window, qtbot, local)
+    sync.actions[_AUTO].trigger()
+    first.canvas.enter_submap(one)
+    page_id = first.canvas.current_page_id
+    first.canvas.restore_page_view_state({**first.canvas.capture_page_view_state(), "zoom": 1.5})
+    assert first.duplicate()
+    other = window.application.active_session
+    other.canvas.restore_page_view_state({"page_id": None})
+    other.canvas.enter_submap(two)
+    other.canvas.set_editable(False)
+    assert window.new_document(tmp_path / "当前导图")
+    foreground = window.application.active_session
+
+    def update_remote(engine):
+        engine.update_node(engine.root_id, text="大型远程导图")
+        engine.remove_submap(two)
+        engine.set_node_attachment(one, ("大附件.txt", b"A" * (loading.BACKGROUND_OPEN_BYTES + 1)))
+
+    edit_disk(second, update_remote)
+    gui_thread = get_ident()
+    decoding, release = Event(), Event()
+    load = git_sync.load_validated_directory
+
+    def load_on_worker(path):
+        assert get_ident() != gui_thread
+        decoding.set()
+        assert release.wait(12)
+        return load(path)
+
+    def reject_modal(*args):
+        pytest.fail("定时重载应使用后台已校验的结果")
+
+    monkeypatch.setattr(git_sync, "load_validated_directory", load_on_worker)
+    monkeypatch.setattr(loading, "load_native_in_background", reject_modal)
+    advance_hour(sync)
+    try:
+        qtbot.waitUntil(decoding.is_set, timeout=12000)
+        assert first.document.git_busy and not first.canvas.editable
+        assert QApplication.activeModalWidget() is None and foreground.canvas.editable
+        foreground.engine.add_child(foreground.engine.root_id, "后台重载时仍可编辑")
+    finally:
+        release.set()
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert window.application.active_session is foreground
+    assert first.engine.document.root.text == other.engine.document.root.text == "大型远程导图"
+    assert first.canvas.current_page_id == page_id
+    assert first.canvas.capture_page_view_state()["zoom"] == pytest.approx(1.5)
+    assert other.canvas.current_page_id is None
+    assert first.canvas.editable and not other.canvas.editable
+    assert not first.document.git_busy and git(local, "rev-parse", "HEAD") == git(server, "rev-parse", "main")
+    assert "已自动更新导图" in window.operation_log.plain_text()
+
+
+def test_hourly_invalid_remote_content_uses_save_conflict(window, qtbot, copies, advance_hour):
+    _, local, second, _, _ = copies
+    session, sync = open_map(window, qtbot, local)
+    root_text = session.engine.document.root.text
+    manifest = second / "mindmap.json"
+    manifest.write_text("{远程破损", encoding="utf-8")
+    git(second, "add", "--", manifest.name)
+    git(second, "commit", "-m", "破损的导图")
+    git(second, "push")
+    sync.actions[_AUTO].trigger()
+    advance_hour(sync)
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert session.document.file_state.conflict and not session.document.git_busy
+    assert session.canvas.editable and session.engine.document.root.text == root_text
+    assert (local / manifest.name).read_bytes() == manifest.read_bytes()
+    assert not session.document.autosave() and "Git 已更新，但导图未重新加载" in window.operation_log.plain_text()
+
+
+def test_hourly_skips_drafts_and_in_progress_save(window, qtbot, copies, monkeypatch, advance_hour):
+    server, local, _, _, _ = copies
+    session, sync = open_map(window, qtbot, local)
+    edit_and_save(session, "等待输入法候选")
+    head = git(local, "rev-parse", "HEAD")
+    composing = True
+    monkeypatch.setattr(MindMapEditorView, "is_composing", property(lambda self: composing))
+    sync.actions[_AUTO].trigger()
+    advance_hour(sync)
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert git(local, "rev-parse", "HEAD") == head and session.is_composing
+
+    composing = False
+    monkeypatch.setattr(documents, "BACKGROUND_SAVE_NODE_LIMIT", 1)
+    began, release = Event(), Event()
+    save = documents.save_snapshot
+
+    def wait_to_save(*args, **kwargs):
+        began.set()
+        assert release.wait(12)
+        return save(*args, **kwargs)
+
+    monkeypatch.setattr(documents, "save_snapshot", wait_to_save)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(documents, "_SAVE_POOL", pool)
+        session.engine.update_node(session.engine.root_id, text="正在保存的版本")
+        session.document.timer.stop()
+        try:
+            assert session.document.autosave(background=True)
+            qtbot.waitUntil(began.is_set)
+            assert session.document.is_writing
+            advance_hour(sync)
+            assert not sync._busy(local)
+        finally:
+            release.set()
+        qtbot.waitUntil(lambda: not session.document.is_writing)
+    assert git(local, "rev-parse", "HEAD") == git(server, "rev-parse", "main") == head
+    assert not sync._auto_schedules[session.document].queued
+    advance_hour(sync)
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert git(local, "rev-parse", "HEAD") == git(server, "rev-parse", "main") != head
+
+
+def test_hourly_skips_diverged_branches(window, qtbot, copies, advance_hour):
+    server, local, second, _, _ = copies
+    session, sync = open_map(window, qtbot, local)
+    edit_and_save(session, "本地版本")
+    git(local, "add", "--", "pages")
+    git(local, "commit", "-m", "本地版本")
+    edit_disk(second, lambda engine: engine.update_node(engine.root_id, text="远端版本"))
+    edit_and_save(session, "本地版本之上还有改动")
+    local_head, remote_head = git(local, "rev-parse", "HEAD"), git(server, "rev-parse", "main")
+    sync.actions[_AUTO].trigger()
+    advance_hour(sync)
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert git(local, "rev-parse", "HEAD") == local_head and git(server, "rev-parse", "main") == remote_head
+    assert load_directory(local).root.text == "本地版本之上还有改动"
+    assert "请先处理本地修改或分叉" in window.operation_log.plain_text()
+
+
+def test_hourly_checks_remote_before_commit_and_retries_failed_push(
+    window, qtbot, copies, tmp_path, advance_hour,
+):
+    server, local, _, _, _ = copies
+    session, sync = open_map(window, qtbot, local)
+    original_head = git(local, "rev-parse", "HEAD")
+    edit_and_save(session, "保留提交，等待推送")
+    git(local, "remote", "set-url", "origin", str(tmp_path / "离线远程"))
+    sync.actions[_AUTO].trigger()
+    advance_hour(sync)
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert git(local, "rev-parse", "HEAD") == original_head
+
+    git(local, "remote", "set-url", "origin", str(server))
+    git(server, "config", "receive.hideRefs", "refs/heads/main")
+    advance_hour(sync)
+    wait_for_hourly_sync(qtbot, sync, local)
+    committed = git(local, "rev-parse", "HEAD")
+    assert committed != original_head and git(server, "rev-parse", "main") == original_head
+    assert "自动同步未完成" in window.operation_log.plain_text()
+
+    git(server, "config", "--unset", "receive.hideRefs")
+    advance_hour(sync)
+    wait_for_hourly_sync(qtbot, sync, local)
+    assert git(local, "rev-parse", "HEAD") == git(server, "rev-parse", "main") == committed
+    assert git(local, "rev-list", "--count", f"{original_head}..HEAD") == "1"
+
+
+@pytest.mark.parametrize("cancel_by", ["disable", "save_as", "close", "disable_after_commit"])
+def test_hourly_cancels_pending_writes_when_registration_changes(
+    window, qtbot, copies, tmp_path, monkeypatch, advance_hour, choose_save_directory, cancel_by,
+):
+    server, local, _, _, _ = copies
+    session, sync = open_map(window, qtbot, local)
+    edit_and_save(session, "切换期间的本地内容")
+    initial_head = git(local, "rev-parse", "HEAD")
+    waiting, release = Event(), Event()
+    after_commit = cancel_by == "disable_after_commit"
+    method = "commit" if after_commit else "prepare_auto_sync"
+    original = getattr(GitRepository, method)
+
+    def pause(repo, *args, **kwargs):
+        result = original(repo, *args, **kwargs)
+        waiting.set()
+        assert release.wait(12)
+        return result
+
+    monkeypatch.setattr(GitRepository, method, pause)
+    auto = sync.actions[_AUTO]
+    auto.trigger()
+    advance_hour(sync)
+    try:
+        qtbot.waitUntil(waiting.is_set, timeout=12000)
+        if cancel_by == "save_as":
+            choose_save_directory(tmp_path / "另存的新目录")
+            assert window.save(save_as=True)
+            # 模拟新目录已取得自己的写入锁，旧目录的检查结果只能结束原任务。
+            assert session.document.begin_git_write()
+        elif cancel_by == "close":
+            assert window.manager.close_document(session.id)
+        else:
+            auto.trigger()
+            assert not auto.isChecked() and not sync._auto_timer.isActive()
+            if not after_commit:
+                auto.trigger()
+                assert auto.isChecked()
+    finally:
+        release.set()
+    try:
+        wait_for_hourly_sync(qtbot, sync, local)
+        if cancel_by == "save_as":
+            assert session.document.git_busy and not session.canvas.editable
+    finally:
+        if cancel_by == "save_as":
+            session.document.finish_git_write()
+    assert git(server, "rev-parse", "main") == initial_head
+    latest_local = git(local, "rev-parse", "HEAD")
+    assert (latest_local != initial_head) == after_commit
+    assert not session.document.git_busy

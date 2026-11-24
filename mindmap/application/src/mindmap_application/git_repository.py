@@ -246,6 +246,22 @@ class GitRepository:
             current = self._require_current(check.upstream, head=expected.head)
         return current, check
 
+    def prepare_auto_sync(self) -> tuple[GitStatus, RemoteCheck | None]:
+        """为定时同步取回当前分支的上游，返回同一轮的本地状态和远程检查结果。
+
+        后台调用方不需要活动标签或缓存状态。遇到无上游或未完成的 Git 操作，
+        直接返回本地状态。取回成功后再次核对 HEAD、跟踪引用和远程地址，
+        供调用方选择快进、提交或推送。每个写入步骤仍须独立复核。
+        """
+        state = self.status()
+        if state.upstream is None or state.blocked:
+            return state, None
+        check = self.fetch(state.upstream)
+        current = self._require_current(state.upstream, head=state.head)
+        if not check.error:
+            self._require_fetched(current, check)
+        return current, check
+
     def fast_forward(self, check: RemoteCheck, head: str, version: DirectoryVersion) -> bool:
         """对核对过的远程提交做一次快进；未修改工作区返回 False。
 
@@ -272,12 +288,15 @@ class GitRepository:
         check_directory_version(self.path, version)
         raise error
 
-    def commit(self, expected: GitStatus, version: DirectoryVersion) -> str:
+    def commit(self, expected: GitStatus, version: DirectoryVersion, *, check: RemoteCheck | None = None) -> str:
         """保存后只将导图文件写入新提交，保留其他路径的已暂存内容。
 
         新文件先登记到索引，再对精确的成员列表使用 --only。若同一受管文件
         已部分暂存，交由外部 Git 选择最终内容；不会覆盖该文件的暂存版本。
         返回新提交的完整标识，无须提交时返回原标识。
+
+        定时同步传入本轮的远程检查结果。在目录写入锁内复核远程地址和跟踪
+        引用，仅当本地分支与上游齐平或领先时提交。手动提交可省略此参数。
         """
         with guard_directory_version(self.path, version):
             state = self._require_current(expected.upstream, head=expected.head)
@@ -285,6 +304,10 @@ class GitRepository:
                 raise GitSyncError("当前分支已变化，请检查后重试")
             if state.blocked:
                 raise GitSyncError(state.blocked)
+            if check is not None:
+                self._require_fetched(state, check)
+                if state.behind:
+                    raise GitSyncError("远程有更新，请先处理两端的修改")
             if any(change.code == "!!" for change in state.members):
                 raise GitSyncError("有导图文件被 Git 忽略，请调整忽略规则后重试")
             if not state.members:
@@ -303,12 +326,20 @@ class GitRepository:
 
     def _require_fetched(self, state: GitStatus, check: RemoteCheck) -> None:
         """拒绝使用已失败或已被远程引用、地址变化替换的快照。"""
-        if (not _HEAD_ID.fullmatch(check.head) or check.head != state.remote_head
+        if (check.error or check.upstream != state.upstream
+                or not _HEAD_ID.fullmatch(check.head) or check.head != state.remote_head
                 or self._remote_url(check.upstream) != check.url):
             raise GitSyncError(check.error or "远程状态已变化，请检查后重试")
 
-    def push(self, check: RemoteCheck, head: str) -> bool:
-        """推送本次已核对的提交，不依赖 push.default，也不会推送其他分支或标签。"""
+    def push(self, check: RemoteCheck, head: str, *, version: DirectoryVersion | None = None) -> bool:
+        """把 head 指定的提交推送到 check 对应的上游分支。
+
+        定时同步传入编辑器已确认的落盘版本，发现导图文件在本轮发生外部修改
+        时停止推送。只在校验目录版本期间持锁，随后独立复核分支、上游和目标
+        地址。没有待推送提交时返回 False，推送成功时返回 True。
+        """
+        if version is not None:
+            check_directory_version(self.path, version)
         current = self._require_current(check.upstream, head=head)
         self._require_fetched(current, check)
         if current.blocked:

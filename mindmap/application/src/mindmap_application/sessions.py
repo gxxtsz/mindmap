@@ -65,6 +65,7 @@ class MindMapSessions(QObject):
         self.sync(session)
         if remember:
             self.window._remember_path(session.files.path)
+        self.window.git_sync.track_document(session.document)
 
     def duplicate_session(self, session_id: str) -> bool:
         """为指定标签创建共享内容的独立视图，紧邻来源插入并激活，返回是否成功。
@@ -209,6 +210,7 @@ class MindMapSessions(QObject):
                 if self.get(view.id) is view:
                     self._known_paths[view.id] = session.files.path
             self.window._remember_path(session.files.path)
+            self.window.git_sync.track_document(session.document)
 
     def sync(self, session):
         """同步标签显示和文件状态；保存或另存为后使用当前路径，悬停提示保留完整路径。"""

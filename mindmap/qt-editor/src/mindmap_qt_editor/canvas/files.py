@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from mindmap_core import MindMapDocument, MindMapEngine, MindMapError, SaveSnapshot
+from mindmap_core import MindMapDocument, MindMapEngine, MindMapError, SaveSnapshot, ValidatedDocument
 from mindmap_core.formats import (
     DirectoryUpdate,
     DirectoryVersion,
@@ -184,36 +184,42 @@ class MindMapFileController(QObject):
         """读取原生目录，内容与画布校验成功后才询问替换并绑定目录。"""
         return self._open(self.validate_open_path(path))
 
-    def reload(self) -> bool:
+    def reload(self, *, prepared: tuple[ValidatedDocument, DirectoryVersion] | None = None) -> bool:
         """用磁盘最新内容替换当前文件。调用方须先检查关联视图并确认放弃本地修改。
 
-        沿用原生加载、后台取消及完整画布预检。任何失败都保留旧文档与磁盘版本。
+        prepared 可传入后台从当前目录读取的校验凭据和目录版本，供定时同步在
+        GUI 线程直接预检并接管文档。接管前仍核对磁盘版本，失败时保留旧文档
+        和已登记的版本。省略参数时沿用原生读取及大图的可取消进度提示。
         """
-        return self.path is not None and self._open(self.validate_open_path(self.path), replacing=True)
+        return self.path is not None and self._open(
+            self.validate_open_path(self.path), replacing=True, prepared=prepared)
 
-    def _open(self, source, *, replacing=False):
+    def _open(self, source, *, replacing=False, prepared=None):
         if self._opening:
             return False
         self._opening = True
         try:
-            return self._open_path(source, replacing=replacing)
+            return self._open_path(source, replacing=replacing, prepared=prepared)
         finally:
             self._opening = False
 
-    def _open_path(self, source, *, replacing):
-        """在禁止同一控制器重入的边界内准备候选，全部预检成功后才提交。"""
+    def _load_directory(self, source):
+        """按目录大小读取并校验导图。经过进度提示取消时返回空结果。"""
         # 只用总大小选择打开方式。清单缺失也交给目录读取器处理未完成的写入。
         try:
             size = directory_size(source) if self._background_open else None
         except (MindMapError, OSError):
             size = None
         if size is not None and size > loading.BACKGROUND_OPEN_BYTES:
-            result = loading.load_native_in_background(source, self.dialog_parent)
-            if result is None:
-                return False
-            validation, version = result
-        else:
-            validation, version = load_validated_directory(source)
+            return loading.load_native_in_background(source, self.dialog_parent)
+        return load_validated_directory(source)
+
+    def _open_path(self, source, *, replacing, prepared=None):
+        """在禁止同一控制器重入的边界内预检并接管读取到的候选文档。"""
+        loaded = prepared if prepared is not None else self._load_directory(source)
+        if loaded is None:
+            return False
+        validation, version = loaded
         document = validation.document
         # 只有标准只读预检可以延续加载凭据；扩展可能修改候选，仍须重新校验。
         reuse_validation = (

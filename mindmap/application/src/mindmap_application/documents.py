@@ -9,7 +9,7 @@ from multiprocessing import get_context
 from pathlib import Path
 from uuid import uuid4
 
-from mindmap_core import MindMapEngine, MindMapError
+from mindmap_core import MindMapEngine, MindMapError, ValidatedDocument
 from mindmap_core.formats import (
     DirectoryVersion,
     DirectoryVersionConflict,
@@ -153,8 +153,8 @@ class MindMapDocumentHandle(QObject):
     def begin_git_write(self) -> bool:
         """暂缓自动保存和编辑，直到 Git 写入和可能的重载结束。
 
-        调用前须先提交各视图的输入，且不能存在未保存修改、目录冲突或后台写入。
-        锁定时保存各标签原本的只读设置，结束时逐一恢复；其他导图不受影响。
+        调用方须确认各视图的输入已完成。手动同步可先提交输入，定时同步会跳过
+        正在编辑的文档。锁定时保存每个标签的编辑权限并暂缓自动保存，完成时逐一恢复。
         """
         if self.disposed or self.git_busy or self.is_dirty or self.is_writing or self.file_state.conflict:
             return False
@@ -246,14 +246,17 @@ class MindMapDocumentHandle(QObject):
             return False
         return self.reload_preserving_views()
 
-    def reload_preserving_views(self) -> bool:
+    def reload_preserving_views(
+        self, *, prepared: tuple[ValidatedDocument, DirectoryVersion] | None = None,
+    ) -> bool:
         """完整校验磁盘后重载共享引擎，再按稳定页面 ID 恢复各标签的视口。
 
-        调用方先处理各标签的输入。失效页面由画布恢复流程回退到主图；
-        校验失败或取消时保留原文档以及所有视图。
+        调用方先确认各标签的输入已完成。传入 prepared 时，文件控制器使用后台
+        读取到的校验凭据和目录版本，在 GUI 线程复核文件并接管文档。失效页面
+        由画布恢复流程回退到主图。校验失败或取消时保留原文档和各标签视图。
         """
         snapshots = [(view, view.capture_state()) for view in self.views]
-        if not self.files.reload():
+        if not self.files.reload(prepared=prepared):
             return False
         for view, state in snapshots:
             if not view.disposed:
@@ -273,6 +276,7 @@ class MindMapDocumentHandle(QObject):
         self.timer.stop()
         self._finish_background_save(wait=True)
         self.disposed = True
+        self.owner.window.git_sync.track_document(self)
         self.timer.stop()
         self._save_poll.stop()
         self._unsubscribe()

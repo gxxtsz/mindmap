@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING
 
-from mindmap_core.formats import DirectoryVersionConflict
+from mindmap_core import ValidatedDocument
+from mindmap_core.formats import DirectoryVersion, DirectoryVersionConflict, load_validated_directory
+from mindmap_desktop_api import path_key
 from mindmap_desktop_api.qt import TitleBarItemSpec
 from PySide6.QtCore import QObject, QSize, Qt, QTimer
 from PySide6.QtGui import QAction
@@ -22,6 +26,9 @@ if TYPE_CHECKING:
 
 _LOCAL_INTERVAL = 2_000
 _REMOTE_INTERVAL = 30_000
+_AUTO_INTERVAL = 3_600_000
+_AUTO_PATHS = "git/auto_sync_paths"
+_AUTO = "每小时自动同步"
 _CHECK, _UPDATE, _COMMIT, _SYNC = "立即检查", "更新导图", "仅提交", "提交并推送"
 
 
@@ -34,14 +41,39 @@ class _Task:
     failed: Callable[[Exception], None]
 
 
+@dataclass
+class _AutoSchedule:
+    """一份已启用导图的小时计时。对象身份也用于识别关闭、改绑前提交的旧任务。"""
+
+    path: Path
+    due_at: float
+    queued: bool = False
+
+
 _SavedAction = tuple["MindMapDocumentHandle", GitRepository, str, GitStatus, RemoteCheck | None]
+_LoadedDirectory = tuple[ValidatedDocument, DirectoryVersion]
+
+
+def _fast_forward_and_load(
+    repository: GitRepository, check: RemoteCheck, head: str, version: DirectoryVersion,
+) -> _LoadedDirectory | None:
+    """在工作线程快进并读取已更新的目录。加载失败时将已变化的磁盘标记为保存冲突。
+
+    Git 写入结束后才重新取得目录锁读取，避免嵌套持锁。没有更新时返回空结果。
+    """
+    if not repository.fast_forward(check, head, version):
+        return None
+    try:
+        return load_validated_directory(repository.path)
+    except Exception as error:
+        raise DirectoryVersionConflict(f"Git 已更新，但导图未重新加载：{error}") from error
 
 
 class GitSyncController(QObject):
-    """按活动导图显示 Git 状态。同一路径的任务串行，其他标签可继续使用。
+    """显示活动导图的 Git 状态，并为启用的共享文档调度定时同步。
 
     同一路径的写操作串行，本地和远程检查有独立计时器。慢速远程检查期间仍可
-    读取本地状态；任务回到主线程后按文档和路径识别归属。
+    读取本地状态。定时任务逐份处理，并通过文档、路径及计时身份识别迟到的结果。
     """
 
     def __init__(self, window: MindMapController):
@@ -49,6 +81,7 @@ class GitSyncController(QObject):
         self.window = window
         self.document: MindMapDocumentHandle | None = None
         self.path: Path | None = None
+        self._path_key: str | None = None
         self.status: GitStatus | None = None
         self.remote: RemoteCheck | None = None
         self.local_error = ""
@@ -56,6 +89,10 @@ class GitSyncController(QObject):
         self._jobs: dict[tuple[Path, str], _Task] = {}
         self._notified: dict[tuple[Path, Upstream], str] = {}
         self._waiting_save: dict[Path, _SavedAction] = {}
+        paths = window.preferences.value(_AUTO_PATHS, [])
+        self._auto_paths = {path for path in paths if isinstance(path, str)} if isinstance(paths, list) else set()
+        self._auto_schedules: dict[MindMapDocumentHandle, _AutoSchedule] = {}
+        self._auto_running: _AutoSchedule | None = None
         self._local_again = False
         self._want_remote = False
         self._manual_check = False
@@ -64,6 +101,9 @@ class GitSyncController(QObject):
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="mindmap-git")
         self._local_timer = self._timer(_LOCAL_INTERVAL, self._read_local)
         self._remote_timer = self._timer(_REMOTE_INTERVAL, self._request_remote)
+        self._auto_timer = self._timer(_AUTO_INTERVAL, self._queue_auto_sync)
+        self._auto_timer.setSingleShot(True)
+        self._auto_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._poll = self._timer(40, self._finish_jobs)
 
         self.button = QToolButton()
@@ -83,6 +123,11 @@ class GitSyncController(QObject):
                            (_UPDATE, lambda: self._start(_UPDATE)), (_COMMIT, lambda: self._start(_COMMIT)),
                            (_SYNC, lambda: self._start(_SYNC))):
             self.actions[label] = self.menu.addAction(label, run)
+        self.menu.addSeparator()
+        auto = self.actions[_AUTO] = self.menu.addAction(_AUTO)
+        auto.setCheckable(True)
+        auto.setToolTip("打开这份导图时，每小时同步当前分支与其上游")
+        auto.triggered.connect(self._set_auto_sync)
         self.menu.aboutToShow.connect(self._render)
         self.button.setMenu(self.menu)
         window.context.ui.register_title_bar_item(
@@ -104,6 +149,7 @@ class GitSyncController(QObject):
         if document is not self.document or path != self.path:
             self.menu.close()
             self.document, self.path = document, path
+            self._path_key = path_key(path) if path is not None else None
             self.status = self.remote = None
             self.local_error = ""
             self._local_again = self._manual_check = False
@@ -121,6 +167,87 @@ class GitSyncController(QObject):
         if document is self.document and document.path == self.path:
             self._read_local()
 
+    def track_document(self, document: MindMapDocumentHandle) -> None:
+        """在打开、另存或关闭共享文档时更新定时同步登记，仅由 GUI 线程调用。
+
+        启用的目录首次登记时从当前时刻计时。同一文档的其他标签沿用原计时。
+        路径改绑或最后一个标签关闭后，旧登记上的等待和检查结果随即失效。
+        """
+        if self._disposed:
+            return
+        path = None if document.disposed else document.path
+        previous = self._auto_schedules.get(document)
+        if path is not None and path_key(path) in self._auto_paths:
+            if previous is not None and previous.path == path:
+                return
+            self._auto_schedules[document] = _AutoSchedule(path, monotonic() + _AUTO_INTERVAL / 1000)
+        elif previous is not None:
+            del self._auto_schedules[document]
+        else:
+            return
+        self._arm_auto_timer()
+
+    def _set_auto_sync(self, checked: bool) -> None:
+        """持久化当前目录的开关，写入成功后才调整计时。"""
+        document, key = self.document, self._path_key
+        if self._disposed or document is None or key is None:
+            return
+        paths = self._auto_paths | {key} if checked else self._auto_paths - {key}
+        settings = self.window.preferences
+        previous = settings.value(_AUTO_PATHS, [])
+        settings.setValue(_AUTO_PATHS, sorted(paths))
+        try:
+            settings.sync()
+        except (OSError, ValueError, TypeError) as error:
+            settings.setValue(_AUTO_PATHS, previous)
+            message = f"保存自动同步设置失败：{error}"
+            self.window.record_operation(message, session=self.path, level="error")
+            self.window.show_status_message(message)
+        else:
+            self._auto_paths = paths
+            self.track_document(document)
+        self._render()
+
+    def _arm_auto_timer(self) -> None:
+        """单个计时器等待最早到期的目录，标签切换不会改变各自的目标时刻。"""
+        if not self._auto_schedules:
+            self._auto_timer.stop()
+            return
+        earliest = min(schedule.due_at for schedule in self._auto_schedules.values())
+        self._auto_timer.start(max(1, ceil((earliest - monotonic()) * 1000)))
+
+    def _queue_auto_sync(self) -> None:
+        """每个到期目录只保留一个请求。正在写盘时跳过本轮，避免读取保存事务的中间状态。"""
+        if self._disposed:
+            return
+        now = monotonic()
+        for document, schedule in self._auto_schedules.items():
+            if schedule.due_at <= now:
+                schedule.due_at = now + _AUTO_INTERVAL / 1000
+                schedule.queued = schedule is not self._auto_running and not document.is_writing
+        self._arm_auto_timer()
+        self._start_due_auto_sync()
+
+    def _start_due_auto_sync(self) -> None:
+        """同一路径的现有任务结束后接续定时检查，逐份处理到期的导图。"""
+        if self._disposed or self._auto_running is not None:
+            return
+        for document, schedule in self._auto_schedules.items():
+            path = schedule.path
+            if (not schedule.queued or self._busy(path) or self._has(path, "local", "remote")
+                    or document.git_busy):
+                continue
+            schedule.queued = False
+            if not self._auto_current(document, schedule) or document.is_writing:
+                continue
+            self._start_auto_sync(document, schedule)
+            break
+
+    def _auto_current(self, document: MindMapDocumentHandle, schedule: _AutoSchedule) -> bool:
+        """每个写入步骤派发前，确认它仍归属于原文档、原目录和原开关登记。"""
+        return (not self._disposed and self._auto_schedules.get(document) is schedule
+                and not document.disposed and document.path == schedule.path)
+
     def _current(self, path: Path) -> bool:
         return not self._disposed and self.path == path and self.document is not None
 
@@ -128,7 +255,8 @@ class GitSyncController(QObject):
         return any((path, kind) in self._jobs for kind in kinds)
 
     def _busy(self, path: Path | None) -> bool:
-        return self._has(path, "action") or path in self._waiting_save
+        return (self._has(path, "action") or path in self._waiting_save
+                or (self._auto_running is not None and self._auto_running.path == path))
 
     def _submit(self, path, kind, run, done, failed):
         key = path, kind
@@ -154,6 +282,7 @@ class GitSyncController(QObject):
             if not pending[0].is_writing:
                 del self._waiting_save[path]
                 self._wait_for_save(*pending, resumed=True)
+        self._start_due_auto_sync()
         if not self._jobs and not self._waiting_save:
             self._poll.stop()
 
@@ -238,8 +367,9 @@ class GitSyncController(QObject):
             self._notified[key] = check.head
             self.window.show_status_message(f"{self.path.name}：远程有 {state.behind} 个新提交")
 
-    def _pending_save(self) -> bool:
-        document = self.document
+    @staticmethod
+    def _pending_save(document: MindMapDocumentHandle | None) -> bool:
+        """只读检查共享文档的各个视图和保存状态，保留正在输入的草稿和候选。"""
         return bool(document and (document.is_dirty or document.is_writing or any(
             view.canvas.is_editing or view.is_composing or view.panels.has_pending_edits for view in document.views)))
 
@@ -249,7 +379,7 @@ class GitSyncController(QObject):
         state, check, path, document = self.status, self.remote, self.path, self.document
         busy = self._busy(path) or bool(document and document.git_busy)
         checking = self._has(path, "remote")
-        pending = self._pending_save()
+        pending = self._pending_save(document)
         flags, detail = [], []
         remote_current = bool(state and check and check.head and state.upstream == check.upstream
                               and state.remote_head == check.head)
@@ -315,6 +445,10 @@ class GitSyncController(QObject):
         self.actions[_SYNC].setEnabled(bool(ready and not ignored and state.upstream and (can_commit or state.ahead)
                                             and (not state.behind or not remote_current)))
         self.actions[_SYNC].setText("推送" if state and state.ahead and not can_commit else _SYNC)
+        auto = self.actions[_AUTO]
+        enabled = self._path_key in self._auto_paths
+        auto.setChecked(enabled)
+        auto.setEnabled(enabled or bool(state and state.head and state.upstream))
         palette = self.window.context.ui
         color = palette.theme_color("warning" if flags else "text-default").name()
         appearance = (color, palette.theme_color("text-default").name())
@@ -328,6 +462,85 @@ class GitSyncController(QObject):
                     right: 7px;
                 }}
             """)
+
+    def _auto_writable(self, document: MindMapDocumentHandle) -> bool:
+        """仅使用已确认的落盘内容。定时任务不会提交界面草稿或代替用户处理保存错误。"""
+        return not (self._pending_save(document) or document.file_state.conflict or document.last_error)
+
+    def _start_auto_sync(self, document: MindMapDocumentHandle, schedule: _AutoSchedule) -> None:
+        """为到期目录独立取回上游。任务和结果均绑定该轮的文档和计时登记，允许切换标签。"""
+        path = schedule.path
+        repository = GitRepository(path)
+        can_write = self._auto_writable(document)
+        self._auto_running = schedule
+
+        def failed(error):
+            if self._auto_current(document, schedule):
+                self._action_failed(document, path, _AUTO, error)
+            else:
+                self._action_done(document, path)
+
+        self._submit(path, "action", repository.prepare_auto_sync,
+                     lambda result: self._write_auto(document, schedule, repository, can_write, *result), failed)
+        self._render()
+
+    def _write_auto(
+        self, document: MindMapDocumentHandle, schedule: _AutoSchedule, repository: GitRepository,
+        can_write: bool, state: GitStatus, check: RemoteCheck | None,
+    ) -> None:
+        """用本轮新取回的 Git 状态选择快进、提交或推送，再检查各标签能否安全写入。"""
+        path = schedule.path
+        if not self._auto_current(document, schedule):
+            self._action_done(document, path)
+            return
+        if self._current(path) and self.document is document:
+            self.status, self.remote, self.local_error = state, check, ""
+        if check is None or check.error or state.blocked or state.problem:
+            problem = state.blocked or state.problem or (check.error if check else "当前分支未设置远程上游")
+            self._action_done(document, path, f"自动同步已跳过：{problem}", level="warning")
+            return
+        if state.behind and (state.ahead or state.changes):
+            self._action_done(document, path, "自动同步已跳过，远程有更新，请先处理本地修改或分叉", level="warning")
+            return
+        version = document.file_state.version
+        if not can_write or version is None or not self._auto_writable(document):
+            self._action_done(document, path)
+            return
+        if not (state.behind or state.members):
+            if state.ahead:
+                self._push_auto(document, schedule, repository, check, state.head, version)
+            else:
+                self._action_done(document, path)
+            return
+        if not document.begin_git_write() or not self._auto_current(document, schedule):
+            self._action_done(document, path)
+            return
+        if state.behind:
+            self._run_action(document, repository, _AUTO,
+                             lambda: _fast_forward_and_load(repository, check, state.head, version),
+                             lambda loaded: self._reloaded(document, path, loaded is not None,
+                                                           label=_AUTO, prepared=loaded))
+        else:
+            self._run_action(document, repository, _AUTO, lambda: repository.commit(state, version, check=check),
+                             lambda head: self._push_auto(document, schedule, repository, check, head, version,
+                                                          committed=head != state.head))
+
+    def _push_auto(
+        self, document: MindMapDocumentHandle, schedule: _AutoSchedule, repository: GitRepository,
+        check: RemoteCheck, head: str, version: DirectoryVersion, *, committed: bool = False,
+    ) -> None:
+        """本地提交结束即可恢复编辑，仍以本轮校验的提交标识推送。
+
+        开关、文档或路径已经改变时，结束后续步骤。若提交已成功，记录本地待推送状态。
+        """
+        path = schedule.path
+        if document.path == path:
+            document.finish_git_write()
+        if not self._auto_current(document, schedule) or not self._auto_writable(document):
+            self._action_done(document, path, "已自动提交导图，待推送" if committed else None)
+            return
+        self._run_action(document, repository, _AUTO, lambda: repository.push(check, head, version=version),
+                         lambda pushed: self._pushed(document, path, check, head, pushed, automatic=True))
 
     def _start(self, label):
         path, document, state = self.path, self.document, self.status
@@ -407,16 +620,24 @@ class GitSyncController(QObject):
             self._run_action(document, repository, label, lambda: repository.commit(state, version),
                              lambda head: self._committed(document, repository, label, state, check, head))
 
-    def _reloaded(self, document, path, changed):
+    def _reloaded(self, document, path, changed, *, label=_UPDATE, prepared: _LoadedDirectory | None = None):
+        """在 GUI 线程接管更新的导图并恢复视图。已下发的快进即使关闭开关也须完成重载。"""
+        if document.disposed or document.path != path:
+            self._action_done(document, path)
+            return
         if changed:
             try:
-                if not document.reload_preserving_views():
+                if not document.reload_preserving_views(prepared=prepared):
                     raise GitSyncError("已取消重新加载")
             except Exception as exc:
                 error = DirectoryVersionConflict(f"Git 已更新，但导图未重新加载：{exc}")
-                self._action_failed(document, path, _UPDATE, error)
+                self._action_failed(document, path, label, error)
                 return
-        self._action_done(document, path, "已更新导图" if changed else "导图已是最新版本")
+        if label == _AUTO:
+            message = "已自动更新导图" if changed else None
+        else:
+            message = "已更新导图" if changed else "导图已是最新版本"
+        self._action_done(document, path, message)
 
     def _committed(self, document, repository, label, state, check, head):
         path = repository.path
@@ -432,21 +653,31 @@ class GitSyncController(QObject):
             self._run_action(document, repository, label, lambda: repository.push(check, head),
                              lambda pushed: self._pushed(document, path, check, head, pushed))
 
-    def _pushed(self, document, path, check, head, pushed):
-        if pushed and self._current(path):
+    def _pushed(self, document, path, check, head, pushed, *, automatic=False):
+        if pushed and self._current(path) and self.document is document:
             self.remote = RemoteCheck(check.upstream, head, url=check.url)
-        self._action_done(document, path, "已推送导图" if pushed else "没有需要推送的提交")
+        if automatic:
+            message = "已自动推送导图" if pushed else None
+        else:
+            message = "已推送导图" if pushed else "没有需要推送的提交"
+        self._action_done(document, path, message)
 
     def _action_failed(self, document, path, label, error):
-        if isinstance(error, DirectoryVersionConflict) and not document.disposed:
+        if isinstance(error, DirectoryVersionConflict) and not document.disposed and document.path == path:
             document.files.report_error(error)
         self._action_done(document, path, f"{label}未完成：{error}", level="error")
 
-    def _action_done(self, document, path, message, *, level="info"):
-        document.finish_git_write()
-        self.window.record_operation(message, session=path, level=level)
+    def _action_done(self, document, path, message=None, *, level="info"):
+        # 另存后的文档可能已经取得新目录的锁，迟到的结果只结束原目录的任务。
+        if document.path == path:
+            document.finish_git_write()
+        if self._auto_running is not None and self._auto_running.path == path:
+            self._auto_running = None
+        if message:
+            self.window.record_operation(message, session=path, level=level)
         if self._current(path):
-            self.window.show_status_message(message)
+            if message and self.document is document:
+                self.window.show_status_message(message)
             self._read_local()
             self._render()
 
@@ -455,8 +686,10 @@ class GitSyncController(QObject):
         if self._disposed:
             return
         self._disposed = True
-        for timer in (self._local_timer, self._remote_timer, self._poll):
+        for timer in (self._local_timer, self._remote_timer, self._auto_timer, self._poll):
             timer.stop()
         self._jobs.clear()
         self._waiting_save.clear()
+        self._auto_schedules.clear()
+        self._auto_running = None
         self._pool.shutdown(wait=False, cancel_futures=True)
