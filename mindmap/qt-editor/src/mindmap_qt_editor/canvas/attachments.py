@@ -1,7 +1,7 @@
-"""在画布上读入文件，并用系统默认应用打开已保存的附件。"""
+"""在画布上拖入 SVG 或普通附件，并用系统默认应用打开已保存的附件。"""
 
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from os import fstat
 from pathlib import Path
 from stat import S_ISREG
@@ -9,8 +9,10 @@ from tempfile import TemporaryDirectory
 
 from mindmap_core import FileAttachment, MindMapError, NodeGraph
 from mindmap_core.formats import MAX_ARCHIVE_BYTES, validate_directory_capacity
+from mindmap_core.layouts.graph import build_graph_layout, graph_child_position, graph_layout
+from mindmap_core.models import SVG_MEDIA_TYPE, Asset
 from mindmap_core.node_pages import parse_graph_page_id
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QRectF, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox
 from shiboken6 import isValid
@@ -33,6 +35,7 @@ class _AttachmentImport:
     node_id: str
     target: _AttachmentTarget
     future: Future[tuple[str, bytes]]
+    svg: bool = False
     prepared: bool = False
 
 
@@ -55,7 +58,7 @@ def _read_attachment(path: Path) -> tuple[str, bytes]:
 
 
 class AttachmentActionsMixin:
-    """文件读取完成后回到 GUI 线程，确认原附件仍属于同一节点。"""
+    """文件读取完成后回到 GUI 线程，核对正式落点后提交。"""
 
     def _init_attachments(self):
         self._pending_attachment: _AttachmentImport | None = None
@@ -70,17 +73,26 @@ class AttachmentActionsMixin:
             pending.future.cancel()
             self._sync_attachment_control(pending.node_id)
 
+    def _stop_svg_drop(self):
+        pending = self._pending_attachment
+        if pending is not None and pending.svg:
+            self._stop_attachment_read()
+
     def _sync_attachment_control(self, node_id: str):
         item = self.node_items.get(node_id)
         if item is not None and isValid(item):
             item._sync_optional_page_controls()
 
-    def _attachment_is_pending(self, node_id: str) -> bool:
+    def _pending_file_kind(self, node_id: str) -> str | None:
         pending = self._pending_attachment
+        if pending is not None and pending.node_id == node_id and self._file_drop_is_current(pending):
+            return "svg_import" if pending.svg else "attachment"
+        return None
+
+    def _file_drop_is_current(self, pending: _AttachmentImport) -> bool:
         return (
-            pending is not None
-            and pending.node_id == node_id
-            and not self._disposed
+            not self._disposed
+            and pending.node_id in self.document_view.nodes
             and pending.target.context == self._attachment_context()
             and pending.target.graph is self.graph
         )
@@ -104,12 +116,15 @@ class AttachmentActionsMixin:
     def _start_attachment_import(self, node_id: str, path: Path) -> bool:
         self._ensure_editable()
         if self._pending_attachment is not None:
-            raise MindMapError("正在读取附件，请稍后重试")
+            raise MindMapError("正在读取文件，请稍后重试")
         target = self._attachment_target(node_id)
+        svg = path.suffix.casefold() == ".svg"
+        if svg and target.graph is None:
+            self._check_image_parent(node_id)
         future = _load_pool().submit(_read_attachment, path)
-        self._pending_attachment = _AttachmentImport(node_id, target, future)
+        self._pending_attachment = _AttachmentImport(node_id, target, future, svg=svg)
         self._sync_attachment_control(node_id)
-        # 等到首次轮询再提交草稿，让画布先绘制导入中的回形针。
+        # 等到首次轮询再验证和提交，让画布先绘制导入状态。
         self._attachment_timer.start()
         return True
 
@@ -126,10 +141,18 @@ class AttachmentActionsMixin:
 
     def _poll_attachment(self):
         pending = self._pending_attachment
-        if pending is None or (pending.prepared and not pending.future.done()):
+        if pending is None:
+            return
+        if pending.svg and not self._file_drop_is_current(pending):
+            self._stop_attachment_read()
+            return
+        if (pending.prepared or pending.svg) and not pending.future.done():
             return
         self._attachment_timer.stop()
         try:
+            if pending.svg:
+                self.call(lambda: self._finish_svg_drop(pending, pending.future.result()[1]))
+                return
             if not pending.prepared:
                 target = self.call(lambda: self._prepare_attachment_target(pending))
                 if target is None or self._pending_attachment is not pending:
@@ -146,6 +169,54 @@ class AttachmentActionsMixin:
         finally:
             if self._pending_attachment is pending and not self._attachment_timer.isActive():
                 self._stop_attachment_read()
+
+    def _add_svg_node(self, node_id, data, width, position=None):
+        graph_owner_id = parse_graph_page_id(self.current_page_id)
+        if graph_owner_id is None:
+            return self.engine.add_image_child(node_id, data, SVG_MEDIA_TYPE, width=width)
+        return self.engine.add_graph_image_node(graph_owner_id, node_id, data, width=width, position=position)
+
+    def _preview_svg_drop(self, node_id, data, width):
+        """试算容量与手动图坐标，退出候选事务后再提交正式节点。"""
+        position = None
+        with self.engine.preview_operation() as (candidate, _):
+            key = self._add_svg_node(node_id, data, width)
+            if self.graph is not None and self.graph.positions:
+                page = candidate.page_view(self.current_page_id)
+                _, sizes = self.factory.measure(page)
+                automatic = build_graph_layout(sizes, page.graph.edges, color=page.theme.accent)
+                layout = graph_layout(page.graph, automatic)
+                position = graph_child_position(layout, node_id, key)
+                self.engine.set_node_graph(parse_graph_page_id(self.current_page_id),
+                                           replace(page.graph, positions={**page.graph.positions, key: position}))
+            validate_directory_capacity(candidate)
+        return position
+
+    def _finish_svg_drop(self, pending: _AttachmentImport, data: bytes):
+        self._ensure_editable()
+        node_id = pending.node_id
+        asset = Asset.from_bytes(data, SVG_MEDIA_TYPE)
+        _, size = self.factory.image_for_asset(asset)
+        width = size.width()
+        revision = self.engine.revision
+        position = self._preview_svg_drop(node_id, data, width)
+        self._prepare_page_navigation()
+        if self._pending_attachment is not pending or self._attachment_context() != pending.target.context:
+            return
+        self._ensure_editable()
+        if node_id not in self.document_view.nodes:
+            raise MindMapError("SVG 的落点节点已失效")
+        if revision != self.engine.revision:
+            position = self._preview_svg_drop(node_id, data, width)
+        key = self._add_svg_node(node_id, data, width, position)
+        if self._attachment_context() == pending.target.context and not self._disposed:
+            rect = self.layout_result.nodes.get(key)
+            if rect is not None:
+                self.select_nodes([key])
+                self.view.ensureVisible(QRectF(rect.x, rect.y, rect.width, rect.height), 35, 35)
+                self._update_history_view_after()
+            if pending.target.graph is None:
+                self.image_imported.emit(key)
 
     def _finish_attachment_import(self, node_id, target, file):
         self._verify_attachment_target(node_id, target)

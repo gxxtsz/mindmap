@@ -12,6 +12,7 @@ from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent, EventDispatcher
+from .geometry import Point
 from .history import HistoryManager
 from .loading import ValidatedDocument
 from .models import MindMapDocument, Node, PageSummary, PathEntry, Theme
@@ -851,6 +852,20 @@ class MindMapEngine(NodePagesMixin):
             data=data,
             media_type=media_type,
             width=width,
+        )
+
+    def add_graph_image_node(
+        self, graph_owner_id: str, source_id: str, data: bytes, *, width: float, position: Point | None = None,
+    ) -> str:
+        """原子创建图中的 SVG 图片及其入边，返回新图节点的局部标识。
+
+        source_id 是落点的局部标识，position 是可选的逻辑坐标。界面调用方负责
+        先校验 SVG 内容。整次创建只记录一次历史，资源与图一起保存和撤销。
+        """
+        page_id = graph_page_id(graph_owner_id) if isinstance(graph_owner_id, str) and graph_owner_id else None
+        return self._execute(
+            "add_graph_image_node", self._editor.add_graph_image_node, page_id=page_id,
+            graph_owner_id=graph_owner_id, source_id=source_id, data=data, width=width, position=position,
         )
 
     def set_node_attachment(

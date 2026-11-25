@@ -125,7 +125,8 @@ class GraphCanvasMixin:
             actions[key].setEnabled(False)
         self._update_node_page_actions(node if eligible else None, editing, creation_allowed=allowed,
                                        show_creation=eligible, detail_page=node.detail_page_id if eligible else None)
-        for key in ("edit", "cut", "copy"):
+        actions["edit"].setEnabled(bool(self.selection_count and can_edit and node and not node.is_image_node))
+        for key in ("cut", "copy"):
             actions[key].setEnabled(bool(self.selection_count and not editing and (key == "copy" or self.editable)))
         actions["delete"].setEnabled(bool(can_edit and (self.selection_count or self.graph_edge_selection_count)))
 

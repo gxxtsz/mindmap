@@ -2,9 +2,9 @@
 
 from ...geometry import LayoutResult
 from ...graph import NodeGraph
-from .geometry import build_graph_layout, move_graph_nodes
+from .geometry import build_graph_layout, graph_child_position, move_graph_nodes
 
-__all__ = ["build_graph_layout", "graph_layout", "move_graph_nodes"]
+__all__ = ["build_graph_layout", "graph_child_position", "graph_layout", "move_graph_nodes"]
 
 
 def graph_layout(graph: NodeGraph, automatic: LayoutResult) -> LayoutResult:

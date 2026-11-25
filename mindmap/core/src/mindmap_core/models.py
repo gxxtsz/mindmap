@@ -13,10 +13,11 @@ from .attachments import BINARY_MEDIA_TYPE, FileAttachment
 from .branch_styles import BranchStyle
 from .config import LayoutConfig
 from .errors import MindMapError
-from .graph import GRAPH_ATTACHMENT_VERSION, NodeGraph
+from .graph import GRAPH_ATTACHMENT_VERSION, GRAPH_IMAGE_VERSION, NodeGraph
 from .node_pages import GRAPH_PAGE_TYPE, graph_members, parse_graph_page_id
 
 _ATOMIC_TYPES = frozenset((str, int, float, bool, bytes, type(None)))
+SVG_MEDIA_TYPE = "image/svg+xml"
 
 
 def _copy_node_field(value, memo):
@@ -181,6 +182,17 @@ def node_asset_ids(node: Node):
         for entry in graph["data"]["nodes"]:
             if "attachment" in entry:
                 yield entry["attachment"]["asset_id"]
+            if "image_id" in entry:
+                yield entry["image_id"]
+
+
+def graph_image_ids(node: Node):
+    """遍历节点所挂载图中的图片资源。"""
+    graph = node.extension_pages.get(GRAPH_PAGE_TYPE)
+    if graph is not None and graph["version"] >= GRAPH_IMAGE_VERSION:
+        for entry in graph["data"]["nodes"]:
+            if "image_id" in entry:
+                yield entry["image_id"]
 
 
 @dataclass(frozen=True)
@@ -487,7 +499,7 @@ class MindMapPageView(MindMapDocument):
 
 
 class MindMapGraphView(MindMapPageView):
-    """将图节点投影为画布已有的文字节点接口；有向边仍从图数据单独读取。"""
+    """将图节点投影为画布已有的节点接口；有向边仍从图数据单独读取。"""
 
     kind = "graph"
 
@@ -508,9 +520,12 @@ class MindMapGraphView(MindMapPageView):
             style = {} if entry.fixed_width is None else {"fixed_width": entry.fixed_width}
             node = Node(entry.title, id=entry.id, text_format=entry.text_format, style=style,
                         attachment=entry.attachment)
-            if entry.attachment is not None and document_assets is not None:
-                key = entry.attachment.asset_id
-                assets[key] = document_assets[key]
+            if entry.image_id is not None:
+                node.image_id, node.image_width = entry.image_id, entry.image_width
+                node.metadata["image_only"] = True
+            if document_assets is not None:
+                for key in entry.asset_ids():
+                    assets[key] = document_assets[key]
             if entry.document_node_id is not None:
                 if document_nodes is None:
                     raise MindMapError("图节点投影缺少附页实体")

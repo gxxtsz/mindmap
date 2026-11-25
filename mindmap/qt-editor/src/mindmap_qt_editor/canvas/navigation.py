@@ -523,6 +523,7 @@ class PageNavigationMixin:
         """
         if not self._book_document.has_page(page_id):
             raise MindMapError("导图页面不存在")
+        self._stop_svg_drop()
         event = ChangeEvent("切换导图页面", (), self.engine.revision, "navigation")
         if notify:
             self.document_changing.emit(event)

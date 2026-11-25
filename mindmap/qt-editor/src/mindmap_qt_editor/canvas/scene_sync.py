@@ -33,6 +33,7 @@ class SceneSyncMixin:
         external = self.is_external_event(event)
         changes = event.changes
         if event.kind != "saved":
+            self.view.image_resize.cancel()
             self.view.text_resize.cancel()
             history_graph = (parse_graph_page_id(changes.page_id)
                              if changes is not None and event.kind in ("undo", "redo") else None)
@@ -63,7 +64,6 @@ class SceneSyncMixin:
                 return
         # 在画布刷新引发选择信号之前通知宿主，防止旧侧栏输入被提交到新文档或撤销状态。
         if event.kind != "saved":
-            self.view.image_resize.cancel()
             self.view.node_drag.document_changed()
             # 自动保存只更新保存标记，不触发文档替换通知，不打断菜单或未完成输入。
             self.document_changing.emit(event)

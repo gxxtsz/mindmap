@@ -5,6 +5,7 @@ from pathlib import Path
 from mindmap_core import MindMapDocument, MindMapError
 from mindmap_core.formats import MAX_ARCHIVE_BYTES, encode_document, import_edraw_xml
 from mindmap_core.graph import GRAPH_ATTACHMENT_VERSION
+from mindmap_core.models import SVG_MEDIA_TYPE
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render.rendering import decode_image, text_from_html
 from PySide6.QtCore import QBuffer, QIODevice, QMimeData
@@ -30,13 +31,13 @@ def node_clipboard_format(mime: QMimeData, json_mime: str = CLIPBOARD_MIME) -> t
 
 
 def write_node_clipboard(mime: QMimeData, fragment: MindMapDocument, registry, *, json_mime=CLIPBOARD_MIME):
-    """带附件的节点片段使用原生容器，避免 Base64 将文件放大到超过读取限制。"""
+    """带附件或 SVG 的节点片段使用原生容器，避免 Base64 放大文件。"""
     has_attachment = any(
         node.attachment is not None
         or node.extension_pages.get(GRAPH_PAGE_TYPE, {}).get("version", 0) >= GRAPH_ATTACHMENT_VERSION
         for node in fragment.nodes.values()
     )
-    if has_attachment:
+    if has_attachment or any(asset.media_type == SVG_MEDIA_TYPE for asset in fragment.assets.values()):
         mime.setData(_ARCHIVE_MIMES[json_mime], encode_document(fragment, format_id="mindmap"))
     else:
         mime.setData(json_mime, encode_document(fragment, registry=registry, format_id="json"))

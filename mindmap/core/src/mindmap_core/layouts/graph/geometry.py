@@ -333,3 +333,22 @@ def move_graph_nodes(layout: LayoutResult, edges: tuple[GraphEdge, ...], positio
                                            loop=edge.source == edge.target,
                                            paired=GraphEdge(edge.target, edge.source) in edge_set)
     return _layout_result(nodes, branches)
+
+
+def graph_child_position(layout: LayoutResult, source_id: str, child_id: str) -> Point:
+    """从落点下方按层间距查找第一个能放下新节点的位置。"""
+    source, child = layout.nodes[source_id], layout.nodes[child_id]
+    x = source.center[0] - child.width / 2
+    y = source.bottom + _RANK_GAP
+    obstacles = sorted(
+        (rect for key, rect in layout.nodes.items()
+         if key != child_id and rect.x < x + child.width and x < rect.right),
+        key=lambda rect: rect.y,
+    )
+    for rect in obstacles:
+        if rect.bottom + _RANK_GAP <= y:
+            continue
+        if y + child.height + _RANK_GAP <= rect.y:
+            break
+        y = rect.bottom + _RANK_GAP
+    return x, y

@@ -201,6 +201,7 @@ class PageControlItem(QGraphicsObject):
         "extension": ("extension_pages", "打开扩展详情"),
         "graph": ("extension_pages", "打开图"),
         "attachment": ("attachment", "打开附件"),
+        "svg_import": (None, "正在导入 SVG…"),
     }
 
     def __init__(self, node_item, *, kind="submap", pending=False):
@@ -233,7 +234,11 @@ class PageControlItem(QGraphicsObject):
         if pending:
             # 临时徽标位于卡片右上角，给正文和折叠按钮留出操作空间。
             card = item.visual.card_rect()
-            rect = QRectF(card.right() - 24, card.top() - 20, 24, 24)
+            if self.kind == "svg_import":
+                width = QFontMetricsF(item.visual.tag_font).horizontalAdvance(self.label) + 16
+                rect = QRectF(card.right() - width, card.top() - 26, width, 24)
+            else:
+                rect = QRectF(card.right() - 24, card.top() - 20, 24, 24)
         else:
             rect = item.visual.page_control_rect(self.kind)
         if rect != self._rect:
@@ -250,7 +255,7 @@ class PageControlItem(QGraphicsObject):
     def can_activate(self):
         """只读仍允许导航；文字编辑、拖动和销毁期间的迟到点击保持原位。"""
         item = self.node_item
-        if self._pending or not (
+        if self.field_name is None or self._pending or not (
                 item and item.owner and not item.owner._disposed and not item.owner._applying_engine_event
                 and (item.owner.editor is None or self.kind == "attachment") and not item.owner.view.node_drag.active):
             return False
@@ -289,7 +294,12 @@ class PageControlItem(QGraphicsObject):
             painter.setBrush(QColor(colors.surface))
             painter.setPen(QColor(colors.border))
             painter.drawRoundedRect(self._rect.adjusted(1, 1, -1, -1), 5, 5)
-            paint_page_icon(painter, self.kind, self._rect.adjusted(4, 4, -4, -4), colors.muted)
+            if self.kind == "svg_import":
+                painter.setFont(item.visual.tag_font)
+                painter.setPen(QColor(colors.muted))
+                painter.drawText(self._rect, Qt.AlignmentFlag.AlignCenter, self.label)
+            else:
+                paint_page_icon(painter, self.kind, self._rect.adjusted(4, 4, -4, -4), colors.muted)
             painter.restore()
             return
         if self.hovered and self.can_activate():
@@ -323,6 +333,7 @@ class NodeItem(StaticNodeItem):
         self.extension_control = None
         self.graph_control = None
         self.attachment_control = None
+        self.svg_import_control = None
         self._sync_reference_control()
         self._sync_optional_page_controls()
 
@@ -409,12 +420,12 @@ class NodeItem(StaticNodeItem):
             self.reference_control = PageControlItem(self, kind="reference")
 
     def _sync_optional_page_controls(self):
-        """同步可选入口和正在导入的附件，隐藏后的按钮可复用。"""
+        """同步可选入口和导入状态，隐藏后的控件可复用。"""
+        pending_kind = self.owner._pending_file_kind(self.node.id) if self.owner is not None else None
         for kind, attr in (("extension", "extension_control"), ("graph", "graph_control"),
-                           ("attachment", "attachment_control")):
+                           ("attachment", "attachment_control"), ("svg_import", "svg_import_control")):
             control = getattr(self, attr)
-            pending = (kind == "attachment" and self.owner is not None and self.node.attachment is None
-                       and self.owner._attachment_is_pending(self.node.id))
+            pending = kind == pending_kind and (kind != "attachment" or self.node.attachment is None)
             if control is not None:
                 control.sync(pending=pending)
             elif self.owner is not None and (kind in self.visual.page_kinds or pending):

@@ -8,7 +8,7 @@ from pathlib import Path
 from mindmap_core import Curve, LayoutRegistry, MindMapError
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QMarginsF, QRectF, QSize, QSizeF
 from PySide6.QtGui import QColor, QImage, QPageSize, QPainter, QPdfWriter
-from PySide6.QtSvg import QSvgGenerator
+from PySide6.QtSvg import QSvgGenerator, QSvgRenderer
 from PySide6.QtWidgets import QGraphicsScene
 
 from .items import NodeItem
@@ -70,7 +70,10 @@ def export_document(
             raise MindMapError("无法分配导出图片内存")
         device.fill(QColor(document.theme.background))
     elif extension == ".svg":
-        device = QSvgGenerator()
+        # SVG 1.1 支持把导入图片的裁剪边界一起写入矢量文件。
+        has_svg = any(isinstance(visuals[key].image, QSvgRenderer) for key in layout.nodes)
+        version = QSvgGenerator.SvgVersion.Svg11 if has_svg else QSvgGenerator.SvgVersion.SvgTiny12
+        device = QSvgGenerator(version)
         device.setOutputDevice(buffer)
         device.setSize(QSize(width, height))
         device.setViewBox(QRectF(0, 0, width, height))

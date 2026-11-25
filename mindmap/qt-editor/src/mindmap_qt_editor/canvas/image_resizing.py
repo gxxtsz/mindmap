@@ -167,7 +167,10 @@ class ImageResizeController:
         if owner.is_composing or not all(guard() for guard in tuple(owner._navigation_guards)):
             raise MindMapError("请先完成输入法候选，再调整图片尺寸")
         if not isclose(width, old_width, rel_tol=1e-9, abs_tol=1e-7):
-            owner.engine.update_node(key, image_width=width)
+            if owner.graph is None:
+                owner.engine.update_node(key, image_width=width)
+            else:
+                owner._update_graph_node(key, image_width=width)
 
     def cancel(self) -> None:
         """幂等丢弃预览、恢复原图，返回 None，不提交文档、草稿或历史。
@@ -194,7 +197,7 @@ class ImageResizeController:
         painter.save()
         if self.active:
             paint_image_shadow(painter, self._rect, self.view.scene().backgroundBrush().color())
-            painter.drawPixmap(self._rect, self._visual.image, QRectF(self._visual.image.rect()))
+            self._visual.paint_image(painter, self._rect)
         painter.resetTransform()
         accent = QColor(self.view.owner._document.theme.accent)
         painter.setPen(QPen(accent, 1.5))

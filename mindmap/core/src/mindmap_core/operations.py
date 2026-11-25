@@ -8,9 +8,18 @@ from dataclasses import fields, replace
 from .attachments import BINARY_MEDIA_TYPE, FileAttachment
 from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
-from .graph import NodeGraph, validate_graph_title
+from .graph import GraphEdge, GraphNode, NodeGraph, validate_graph_title
 from .inspiration import InspirationEditorMixin
-from .models import Asset, MindMapDocument, MindMapPage, Node, _resolve_detail_page, new_id, node_asset_ids
+from .models import (
+    SVG_MEDIA_TYPE,
+    Asset,
+    MindMapDocument,
+    MindMapPage,
+    Node,
+    _resolve_detail_page,
+    new_id,
+    node_asset_ids,
+)
 from .node_pages import GRAPH_PAGE_TYPE, graph_members
 from .transactions import DocumentState
 from .validation import validate_page_reference
@@ -556,8 +565,32 @@ class DocumentEditor(InspirationEditorMixin):
     def _store_asset(self, asset: Asset) -> None:
         """共用相同字节，图片引用需要保留可识别的图片类型。"""
         previous = self.document.assets.get(asset.id)
-        if previous is None or (asset.is_image and previous.media_type != asset.media_type):
+        if previous is None or (asset.is_image and previous.media_type not in (SVG_MEDIA_TYPE, asset.media_type)):
             self._state.set_asset(asset.id, asset)
+
+    def add_graph_image_node(self, graph_owner_id, source_id, data, width, position, page_id) -> str:
+        """在同一事务内创建图图片节点、关联资源并从落点新增连线。"""
+        if page_id is None:
+            raise MindMapError("图的所属节点标识无效")
+        record = self.node(graph_owner_id).extension_pages.get(GRAPH_PAGE_TYPE)
+        if record is None:
+            raise MindMapError("节点图不存在")
+        graph = NodeGraph.from_data(record["data"], version=record["version"])
+        used = {entry.id for entry in graph.nodes}
+        if not isinstance(source_id, str) or source_id not in used:
+            raise MindMapError("图节点已不存在")
+        index = 1
+        while f"n{index}" in used:
+            index += 1
+        key = f"n{index}"
+        asset = Asset.from_bytes(data, SVG_MEDIA_TYPE)
+        node = GraphNode(key, "", image_id=asset.id, image_width=width)
+        positions = graph.positions if position is None else {**graph.positions, key: position}
+        updated = replace(graph, nodes=(*graph.nodes, node), edges=(*graph.edges, GraphEdge(source_id, key)),
+                          positions=positions)
+        self._store_asset(asset)
+        self._state.set_graph(graph_owner_id, updated.to_record())
+        return key
 
     def set_node_attachment(self, node_id, file, graph_owner_id, page_id=None) -> None:
         """在当前事务内写入附件，树节点与图节点共用资源表。"""
@@ -704,7 +737,7 @@ class DocumentEditor(InspirationEditorMixin):
             self.require_page_owner(owner_id)
         mapping = (self._copy_fragment_entities(fragment, fragment.nodes.keys() - {fragment.root_id})
                    if include_pages else {})
-        for key in {entry.attachment.asset_id for entry in source.nodes if entry.attachment is not None}:
+        for key in {key for entry in source.nodes for key in entry.asset_ids()}:
             self._store_asset(fragment.assets[key])
         used = {entry.id for entry in current.nodes}
         local_mapping = {}

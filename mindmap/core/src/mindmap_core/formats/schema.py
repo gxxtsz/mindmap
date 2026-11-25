@@ -22,10 +22,11 @@ from mindmap_core import (
     ValidatedDocument,
 )
 from mindmap_core.attachments import BINARY_MEDIA_TYPE
-from mindmap_core.graph import GRAPH_ATTACHMENT_VERSION
+from mindmap_core.graph import GRAPH_ATTACHMENT_VERSION, GRAPH_IMAGE_VERSION
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
+_GRAPH_IMAGE_SCHEMA_VERSION = 11
 _ATTACHMENT_SCHEMA_VERSION = 10
 _BASE_SCHEMA_VERSION = 5
 
@@ -53,7 +54,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
-    文件附件需要版本 10，图节点格式和固定宽度需要版本 9，图节点绑定需要版本 8，
+    图图片节点需要版本 11，文件附件需要版本 10，图节点格式和固定宽度需要版本 9，图节点绑定需要版本 8，
     普通图和扩展详情至少使用版本 7，页面引用至少使用版本 6。编码时省略空字段。
     """
     if isinstance(document, MindMapPageView):
@@ -74,7 +75,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
     for node in document.nodes.values():
         record = _node_record(node)
         if node.attachment is not None:
-            version = _ATTACHMENT_SCHEMA_VERSION
+            version = max(version, _ATTACHMENT_SCHEMA_VERSION)
         if node.extension_pages:
             graph = record["extension_pages"].get(GRAPH_PAGE_TYPE)
             version = max(version, 6 + graph["version"] if graph else 7)
@@ -153,6 +154,8 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                 if name == "nodes" and isinstance(entity.extension_pages, dict):
                     graph = entity.extension_pages.get(GRAPH_PAGE_TYPE)
                     if isinstance(graph, dict):
+                        if version < _GRAPH_IMAGE_SCHEMA_VERSION and graph.get("version") == GRAPH_IMAGE_VERSION:
+                            raise MindMapError("图图片节点需要版本 11 文档格式")
                         if version < _ATTACHMENT_SCHEMA_VERSION and graph.get("version") == GRAPH_ATTACHMENT_VERSION:
                             raise MindMapError("图节点附件需要版本 10 文档格式")
                         if version < 9 and graph.get("version") == 3:

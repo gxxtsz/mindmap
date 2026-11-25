@@ -197,7 +197,7 @@ def validate_directory_capacity(document: MindMapDocument) -> None:
         size += sum(len(_encode_page(page, _page_nodes(document, roots)))
                     for page, roots in _page_sources(document).values())
     if size > MAX_ARCHIVE_BYTES:
-        raise MindMapError("添加附件后导图目录大小超过保存限制")
+        raise MindMapError("导图目录大小超过保存限制")
 
 
 def _decode(root: Path) -> tuple[ValidatedDocument, DirectoryVersion]:

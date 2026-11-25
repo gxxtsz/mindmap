@@ -12,6 +12,7 @@ from mindmap_core.formats import (
     save_document,
     to_dict,
 )
+from mindmap_core.models import SVG_MEDIA_TYPE
 from mindmap_core.node_pages import graph_page_id
 
 
@@ -39,6 +40,35 @@ def test_graph_persists_with_owner_and_undo_uses_graph_page_identity(tmp_path):
     assert restored.page_summary(page) is None and restored.node_graph(copy) == graph
     assert restored.undo() and restored.node_graph(owner) == graph
     assert restored.redo() and restored.node_graph(owner) is None
+
+
+def test_graph_image_record_validates_resource_and_rolls_back_invalid_creation():
+    engine = MindMapEngine()
+    owner = engine.root_id
+    engine.set_node_graph(owner, NodeGraph((GraphNode("a", "落点"),)))
+    sibling = engine.add_child(owner, "有附件的主题")
+    engine.set_node_attachment(sibling, ("说明.txt", b"notes"))
+    data = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>'
+    before, revision = engine.document, engine.revision
+    with pytest.raises(MindMapError, match="图片宽度"):
+        engine.add_graph_image_node(owner, "a", data, width=0)
+    assert engine.document == before and engine.revision == revision
+
+    key = engine.add_graph_image_node(owner, "a", data, width=10)
+    page = engine.page_document(graph_page_id(owner))
+    node = page.nodes[key]
+    record = to_dict(engine.document)
+    assert record["schema_version"] == 11
+    assert record["nodes"][0]["extension_pages"]["graph"]["version"] == 5
+    assert from_dict(record) == engine.document
+    assert page.assets[node.image_id].media_type == SVG_MEDIA_TYPE and node.is_image_node
+    record["schema_version"] = 10
+    with pytest.raises(MindMapError, match="版本 11"):
+        from_dict(record)
+    record["schema_version"] = 11
+    record["assets"] = [asset for asset in record["assets"] if asset["id"] != node.image_id]
+    with pytest.raises(MindMapError, match="SVG 图片资源缺失"):
+        from_dict(record)
 
 
 def test_graph_node_format_and_width_roundtrip_with_bound_pages_and_clipboard(tmp_path):

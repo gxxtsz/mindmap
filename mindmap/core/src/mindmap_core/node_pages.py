@@ -158,6 +158,8 @@ class NodePagesMixin:
             entry = next((entry for entry in graph.nodes if entry.id == local_id), None) if graph else None
             if entry is None:
                 raise MindMapError("图节点不存在")
+            if entry.image_id is not None:
+                raise MindMapError("纯图片节点不能创建附页")
             document_id = entry.document_node_id
             if document_id is None:
                 from .models import Node

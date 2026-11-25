@@ -10,7 +10,16 @@ from .attachments import BINARY_MEDIA_TYPE, FileAttachment
 from .branch_styles import get_branch_style
 from .config import LayoutConfig
 from .errors import MindMapError
-from .models import Asset, InspirationArea, MindMapForestView, MindMapPage, Theme, node_asset_ids
+from .models import (
+    SVG_MEDIA_TYPE,
+    Asset,
+    InspirationArea,
+    MindMapForestView,
+    MindMapPage,
+    Theme,
+    graph_image_ids,
+    node_asset_ids,
+)
 from .node_pages import GRAPH_PAGE_TYPE, graph_members, graph_page_id, validate_extension_pages
 
 MIN_FIXED_WIDTH = 40
@@ -189,6 +198,10 @@ def validate_node(document, node_id, node, *, json_data=True):
             raise MindMapError("图片必须关联图片资源")
     if node.attachment is not None and not isinstance(node.attachment, FileAttachment):
         raise MindMapError("节点附件记录无效")
+    for asset_id in graph_image_ids(node):
+        image = document.assets.get(asset_id)
+        if not isinstance(image, Asset) or image.media_type != SVG_MEDIA_TYPE:
+            raise MindMapError(f"图节点的 SVG 图片资源缺失或类型无效：{asset_id}")
     for asset_id in node_asset_ids(node):
         if asset_id not in document.assets:
             raise MindMapError(f"附件资源缺失：{asset_id}")

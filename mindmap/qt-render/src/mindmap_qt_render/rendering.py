@@ -10,8 +10,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mindmap_core import BranchPath, Curve, MindMapDocument, MindMapError, Node, Theme
+from mindmap_core.models import SVG_MEDIA_TYPE, Asset
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, Qt
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QColor,
@@ -28,11 +29,13 @@ from PySide6.QtGui import (
     QTextDocument,
     QTextOption,
 )
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication, QGraphicsPathItem
 
 from .markdown_code import style_code
 from .markdown_math import insert_formulas, mark_formulas
 from .page_icons import paint_page_icon
+from .svg import load_svg
 
 # 节点内容区上下各保留 8 个逻辑像素；正式测量、编辑草稿与导出共用此留白。
 _NODE_VERTICAL_PADDING = 8.0
@@ -210,7 +213,7 @@ class NodeVisual:
     background: QColor
     border: QColor
     border_width: float
-    image: QPixmap | None
+    image: QPixmap | QSvgRenderer | None
     image_rect: QRectF
     tags: list[tuple[str, QRectF]]
     tag_font: QFont
@@ -223,6 +226,19 @@ class NodeVisual:
     content_height: float = 0.0
     # 纯图片只绘制原始矩形和临时选中轮廓；默认值兼容旧视觉构造接口。
     image_only: bool = False
+
+    def paint_image(self, painter: QPainter, rect: QRectF | None = None) -> None:
+        """共用正式绘制和尺寸预览，使用当前绘画设备的变换绘制图片。"""
+        bounds = self.image_rect if rect is None else rect
+        if isinstance(self.image, QSvgRenderer):
+            painter.save()
+            try:
+                painter.setClipRect(bounds, Qt.ClipOperation.IntersectClip)
+                self.image.render(painter, bounds)
+            finally:
+                painter.restore()
+        elif self.image is not None:
+            painter.drawPixmap(bounds, self.image, QRectF(self.image.rect()))
 
     @property
     def page_controls_width(self) -> float:
@@ -332,8 +348,7 @@ class NodeVisual:
         try:
             painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
             if self.image_only:
-                if self.image is not None:
-                    painter.drawPixmap(self.image_rect, self.image, QRectF(self.image.rect()))
+                self.paint_image(painter)
                 if selected:
                     painter.setPen(QPen(QColor(accent), 1.5))
                     painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -351,8 +366,7 @@ class NodeVisual:
             )
             painter.setBrush(self.background)
             painter.drawRoundedRect(self.card_rect(), NODE_CARD_RADIUS, NODE_CARD_RADIUS)
-            if self.image is not None:
-                painter.drawPixmap(self.image_rect, self.image, QRectF(self.image.rect()))
+            self.paint_image(painter)
             if not editing:
                 draw_text(painter, self.text, self.text_position, self.text_color)
             painter.setFont(self.tag_font)
@@ -431,7 +445,23 @@ class VisualFactory:
         # 活文档中的每个节点保留一份最近视觉；4096 项内容 LRU 只负责跨节点复用。
         # 大图不能依赖有限 LRU 容纳全部节点，否则顺序测量会反复淘汰尚未访问的项。
         self._node_visuals: dict[str, tuple[tuple, NodeVisual]] = {}
-        self.pixmaps: OrderedDict[str, QPixmap] = OrderedDict()
+        self._images: OrderedDict[tuple[str, bool], tuple[QPixmap | QSvgRenderer, QSizeF]] = OrderedDict()
+
+    def image_for_asset(self, asset: Asset) -> tuple[QPixmap | QSvgRenderer, QSizeF]:
+        """校验资源并缓存绘制对象，SVG 仅缓存解析结果与尺寸。"""
+        svg = asset.media_type == SVG_MEDIA_TYPE
+        key = (asset.id, svg)
+        if key not in self._images:
+            if svg:
+                self._images[key] = load_svg(asset.data)
+            else:
+                pixmap, _ = decode_image(asset.data)
+                self._images[key] = pixmap, QSizeF(pixmap.size())
+            if len(self._images) > 128:
+                self._images.popitem(last=False)
+        else:
+            self._images.move_to_end(key)
+        return self._images[key]
 
     def visual(
         self, node: Node, theme: Theme, document: MindMapDocument, *, is_root=False,
@@ -463,6 +493,7 @@ class VisualFactory:
             detail_page_id = detail_page_resolver(node.id)[1]
         reference = node.page_reference_root_id
         body = document.nodes.get(reference, node) if reference else node
+        asset = document.assets[node.image_id] if node.image_id else None
         if cache:
             key = (
                 body.text,
@@ -472,6 +503,7 @@ class VisualFactory:
                 tuple(node.tags),
                 tuple(node.icons),
                 node.image_id,
+                asset is not None and asset.media_type == SVG_MEDIA_TYPE,
                 node.image_width,
                 node.is_image_node,
                 bool(node.children),
@@ -529,15 +561,10 @@ class VisualFactory:
         y = _NODE_VERTICAL_PADDING
         padding = NODE_HORIZONTAL_PADDING
         width = text_size.width() + 2 * padding
-        if node.image_id:
-            if node.image_id not in self.pixmaps:
-                image, _ = decode_image(document.assets[node.image_id].data)
-                self.pixmaps[node.image_id] = image
-                if len(self.pixmaps) > 128:
-                    self.pixmaps.popitem(last=False)
-            image = self.pixmaps[node.image_id]
+        if asset is not None:
+            image, size = self.image_for_asset(asset)
             iw = node.image_width if node.is_image_node else min(node.image_width, max_width)
-            ih = iw * image.height() / image.width()
+            ih = iw * size.height() / size.width()
             if not node.is_image_node and ih > 260:
                 iw *= 260 / ih
                 ih = 260

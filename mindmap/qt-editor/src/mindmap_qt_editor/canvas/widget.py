@@ -31,6 +31,7 @@ from mindmap_core.layouts import (
     supports_incremental_layout,
 )
 from mindmap_core.layouts.graph import build_graph_layout, graph_layout
+from mindmap_core.models import graph_image_ids
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render.exporting import export_document
 from mindmap_qt_render.rendering import VisualFactory, decode_image
@@ -744,6 +745,7 @@ class MindMapWidget(
         """切换只读模式，取消尚未提交的文本编辑与下载后续写入。"""
         changed = self.editable != bool(editable)
         if not editable:
+            self._stop_svg_drop()
             self._cancel_branch_menu()
             self.finish_edit(commit=False)
         self.editable = editable
@@ -1411,17 +1413,16 @@ class MindMapWidget(
                         else (key, document.nodes[key].detail_page_id))
         else:
             resolver = document.detail_page_resolver() if document.submaps else None
+            image_ids = {key for node in document.nodes.values() for key in graph_image_ids(node)}
+            if defer_inactive_pages:
+                image_ids.update(node.image_id for node in document.nodes.values() if node.image_id)
+            for key in image_ids:
+                self.factory.image_for_asset(document.assets[key])
         if defer_inactive_pages and not isinstance(document, MindMapPageView):
             # 配置及图片不依赖正文排版，先逐项校验，损坏的非活动页也必须在替换前拒绝。
             records = [document, *document.iter_pages(), document.inspiration]
             for record in records:
                 self.layout_registry.validate_config(record.layout)
-            image_ids = {node.image_id for node in document.nodes.values() if node.image_id}
-            for key in image_ids:
-                if key not in self.factory.pixmaps:
-                    self.factory.pixmaps[key] = decode_image(document.assets[key].data)[0]
-                    if len(self.factory.pixmaps) > 128:
-                        self.factory.pixmaps.popitem(last=False)
             pages = [document.page_view()]
             pages.extend(document.page_view(page.id) for page in document.iter_pages()
                          if not supports_incremental_layout(self.layout_registry, page.layout.algorithm_id))
