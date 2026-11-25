@@ -145,9 +145,14 @@ class NodePageHost(QStackedWidget):
 
     导图保持原控件及视口，返回无需重新加载。扩展只在进入时创建；离开时捕获
     视口并释放订阅。不同标签分别持有容器，内容由同一引擎同步。
+
+    visible_page_changed 在画布或扩展详情的可见页面更新后发送，无参数。宿主可
+    在同一 GUI 线程读取当前页面和灵感根标识。扩展详情在准备期间定位其入口所
+    产生的画布通知不会转发。重复显示同一个页面时，接收方可按页面标识合并通知。
     """
 
     page_changed = Signal()
+    visible_page_changed = Signal()
     state_changed = Signal()
 
     def __init__(self, canvas, registry: NodePageRegistry, *, prepare_input, theme_color, theme_icon, report):
@@ -286,6 +291,42 @@ class NodePageHost(QStackedWidget):
             self._switching = False
         self.page_changed.emit()
         self.state_changed.emit()
+        self.visible_page_changed.emit()
+        return True
+
+    def navigate_to_page(
+        self, page_id: str | None, node_id: str | None = None, *, inspiration_root_id: str | None = None,
+    ) -> bool:
+        """在当前容器内打开已有页面，返回页面是否已显示。
+
+        page_id 为稳定页面标识，None 表示主导图。node_id 可用于画布路径定位，
+        inspiration_root_id 仅用于打开灵感区的一棵独立想法，二者不能同时指定。
+        扩展标识先解析为节点 ID 和类型，再交给 open_page 打开。视口及草稿使用既有页面
+        接口处理，支持只读浏览。只有画布跳转成功才关闭当前扩展详情。
+
+        在 GUI 线程调用。容器释放、正在切换或扩展页输入检查拒绝时返回 False。
+        画布的输入检查和无效目标抛出的 MindMapError 交由调用方报告。
+        """
+        if self._disposed or self._switching:
+            return False
+        if inspiration_root_id is not None and (
+            page_id != self.canvas.engine.inspiration_id or node_id is not None
+        ):
+            raise MindMapError("请为灵感区指定一个想法根或路径节点")
+        target = parse_extension_page_id(page_id)
+        if target is not None:
+            return self.open_page(*target)
+
+        # 隐藏画布的选区和页面信号不能提前关闭扩展。导航拒绝时保留原来的详情控件。
+        self._switching = self.active
+        try:
+            if inspiration_root_id is None:
+                self.canvas.navigate_to(page_id, node_id)
+            else:
+                self.canvas.show_inspiration(inspiration_root_id)
+        finally:
+            self._switching = False
+        self.close_page()
         return True
 
     def _create_page(self, provider, record):
@@ -346,6 +387,7 @@ class NodePageHost(QStackedWidget):
         self.canvas.setFocus()
         self.page_changed.emit()
         self.state_changed.emit()
+        self.visible_page_changed.emit()
 
     def _release_page(self):
         if self._page is not None:
@@ -406,8 +448,12 @@ class NodePageHost(QStackedWidget):
         self._sync_permissions()
 
     def _canvas_navigated(self, *_):
-        if not self._switching:
+        if self._disposed or self._switching:
+            return
+        if self.active:
             self.close_page()
+        else:
+            self.visible_page_changed.emit()
 
     def _sync_path(self):
         node_id, type_id = self._target
@@ -422,8 +468,7 @@ class NodePageHost(QStackedWidget):
     def _navigate(self, page_id, node_id):
         if parse_extension_page_id(page_id):
             return
-        self.close_page()
-        self.canvas.call(lambda: self.canvas.navigate_to(page_id, node_id))
+        self.canvas.call(lambda: self.navigate_to_page(page_id, node_id))
 
     def _confirm_remove(self):
         if not self.active or not self.canvas.editable:

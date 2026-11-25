@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from mindmap_core import MindMapError
-from mindmap_core.node_pages import parse_extension_page_id
+from mindmap_core import ChangeEvent, MindMapError
 from mindmap_desktop_api import OperationResult
 from mindmap_qt_editor.canvas import MindMapFileController, MindMapWidget
 from mindmap_qt_editor.node_pages import NodePageHost
@@ -14,6 +13,7 @@ from PySide6.QtCore import QObject, Qt
 from PySide6.QtWidgets import QApplication
 
 from .documents import MindMapDocumentHandle
+from .page_history import PageKey
 
 
 class MindMapEditorView(QObject):
@@ -32,6 +32,7 @@ class MindMapEditorView(QObject):
         self.engine = self.document.engine
         self.disposed = False
         self._navigating_recent_page = False
+        self._replaying_page_history = False
         self._last_recent_page_key = None
         colors = owner.window.ui_colors
         # 历史动作由标签栏承载，视图操作由主窗口状态栏承载，画布不再创建浮条。
@@ -80,8 +81,6 @@ class MindMapEditorView(QObject):
         self.recent_pages = RecentPagesPanel(self.canvas)
         self.recent_pages.hide()
         self.recent_pages.navigate_requested.connect(self._navigate_recent_page)
-        self.canvas.page_changed.connect(self._sync_recent_page)
-        self.canvas.document_changed.connect(self._sync_recent_page)
         self.files = MindMapFileController(self.canvas, self.panels, owner.window.context.ui.parent,
                                            writer=self.document._write, state=self.document.file_state,
                                            background_open=True, incremental_writer=True)
@@ -100,8 +99,11 @@ class MindMapEditorView(QObject):
             self.canvas, owner.window.page_registry, prepare_input=self.prepare_input,
             theme_color=owner.window.context.ui.theme_color, theme_icon=owner.window.context.ui.theme_icon,
             report=self._file_message)
+        self._reset_page_history()
         self.pages.page_changed.connect(self._extension_page_changed)
+        self.pages.visible_page_changed.connect(self._visible_page_changed)
         self.pages.state_changed.connect(self._view_state_changed)
+        self.canvas.document_changed.connect(self._reset_history_on_document_replacement)
         owner.window._configure_session(self)
 
     icon = "mindmap"
@@ -185,10 +187,10 @@ class MindMapEditorView(QObject):
         if isinstance(state, dict) and state.get("version", 1) == 1:
             self.canvas.restore_page_view_state(state)
             self.pages.restore_state(state.get("extension"))
+            self._reset_page_history()
 
     def _extension_page_changed(self):
-        """更新当前标签的页内导航、侧栏及状态栏，后台视图不抢占活动界面。"""
-        self._sync_recent_page()
+        """更新扩展详情依赖的侧栏及状态栏，后台视图不抢占活动界面。"""
         if self.owner.active is self:
             self.owner.window._bind_session(self)
             self.owner.window.context.documents.sync(self)
@@ -201,11 +203,73 @@ class MindMapEditorView(QObject):
         if not self.disposed and self.owner.active is self:
             self.owner.window._bind_session(self)
 
-    def current_page_key(self):
-        """最近访问使用统一页面身份，扩展页没有灵感根参数。"""
-        pages = getattr(self, "pages", None)
-        return ((pages.current_page_id, None) if pages is not None and pages.active else
+    def current_page_key(self) -> PageKey:
+        """查询当前显示的页面 ID 和灵感根 ID，供最近访问和侧键历史定位。
+
+        主导图的两个标识均为 None。独立想法使用灵感区 ID 和游离根 ID，其余页面
+        只有页面 ID。扩展详情打开时返回扩展标识。在所属 GUI 线程读取，不切换页面。
+        """
+        return ((self.pages.current_page_id, None) if self.pages.active else
                 (self.canvas.current_page_id, self.canvas.current_inspiration_root_id))
+
+    def _reset_page_history(self) -> None:
+        """以最终显示的页面建立标签自己的历史起点，复制和恢复不借用旧记录。"""
+        self._page_visits: list[PageKey] = [self.current_page_key()]
+        self._page_visit_index = 0
+
+    def _reset_history_on_document_replacement(self, event: ChangeEvent) -> None:
+        """引擎整份替换时重新建立起点，随后如有视图恢复则以恢复后的页面为准。"""
+        if event.kind == "reset" and not self.disposed:
+            self._reset_page_history()
+            self._sync_recent_page()
+
+    def _visible_page_changed(self) -> None:
+        """确认实际显示的页面，普通跳转替换前进分支，回放只更新最近访问。"""
+        if self.disposed:
+            return
+        self._sync_recent_page()
+        if self._replaying_page_history:
+            return
+        key = self.current_page_key()
+        if key != self._page_visits[self._page_visit_index]:
+            del self._page_visits[self._page_visit_index + 1:]
+            self._page_visits.append(key)
+            self._page_visit_index = len(self._page_visits) - 1
+
+    def navigate_page_history(self, *, forward: bool) -> None:
+        """在活动标签的访问历史中移动一步。forward 为真时前进，否则后退。
+
+        从当前记录开始沿指定方向查找，跳过与当前页相同或已失效的目标。只有目标
+        确实显示后才移动历史位置。输入法仍有候选或该方向没有有效页面时，保留当前页。
+        只允许在 GUI 线程操作当前活动标签，历史在标签内存中保留，不写入文件。
+        """
+        if self.disposed or self._replaying_page_history or self.owner.active is not self:
+            return
+        current = self.current_page_key()
+        step = 1 if forward else -1
+        index = self._page_visit_index + step
+        while 0 <= index < len(self._page_visits):
+            target = self._page_visits[index]
+            if target != current and self._history_target_exists(target):
+                break
+            index += step
+        else:
+            return
+
+        self._replaying_page_history = True
+        try:
+            page_id, root_id = target
+            shown = self.canvas.call(lambda: self.pages.navigate_to_page(page_id, inspiration_root_id=root_id))
+            if shown and self.current_page_key() == target:
+                self._page_visit_index = index
+        finally:
+            self._replaying_page_history = False
+
+    def _history_target_exists(self, target: PageKey) -> bool:
+        """按稳定标识校验回放目标。记录中的空灵感区只有在仍为空时才有效。"""
+        if target == (self.engine.inspiration_id, None):
+            return not self.engine.inspiration_items()
+        return self.engine.page_summary(*target) is not None
 
     def duplicate(self):
         return OperationResult() if self.owner.duplicate_session(self.id) else OperationResult.cancelled()
@@ -269,7 +333,7 @@ class MindMapEditorView(QObject):
         self._last_recent_page_key = key
         self.document.recent_pages.visit(*key)
 
-    def _sync_recent_page(self, *_):
+    def _sync_recent_page(self) -> None:
         """用完整页面键检测实际切换；文字编辑和自动保存的通知不改变访问顺序。"""
         if self.disposed:
             return
@@ -293,15 +357,7 @@ class MindMapEditorView(QObject):
             if self.engine.page_summary(page_id, root_id) is None:
                 self.document.recent_pages.refresh()
                 raise MindMapError("该页面已不存在，已从最近访问中移除")
-            target = parse_extension_page_id(page_id)
-            if target is not None:
-                return self.pages.open_page(*target)
-            self.pages.close_page()
-            if root_id is not None:
-                self.canvas.show_inspiration(root_id)
-            else:
-                self.canvas.navigate_to(page_id)
-            return True
+            return self.pages.navigate_to_page(page_id, inspiration_root_id=root_id)
 
         self._navigating_recent_page = True
         try:
@@ -361,7 +417,8 @@ class MindMapEditorView(QObject):
 
     def _show_inspiration(self):
         """导航成功后打开共享左侧灵感工具；后台恢复候选不抢占其他文件焦点。"""
-        if not self._navigating_recent_page and self.owner.get(self.id) is self and self.owner.active is self:
+        if (not self._navigating_recent_page and not self._replaying_page_history
+                and self.owner.get(self.id) is self and self.owner.active is self):
             self.owner.window.context.ui.activate_panel("inspiration", focus=False)
 
     def dispose(self):

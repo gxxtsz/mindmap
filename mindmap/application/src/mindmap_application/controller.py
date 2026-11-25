@@ -8,9 +8,9 @@ from mindmap_desktop_api.qt import CommandSpec, MenuContribution, MenuLocation, 
 from mindmap_qt_editor.node_pages import NodePageRegistry
 from mindmap_qt_editor.theme import UiColors
 from mindmap_qt_render import ensure_fonts
-from PySide6.QtCore import QObject, QSignalBlocker, QTimer
-from PySide6.QtGui import QAction, QIcon, QPalette
-from PySide6.QtWidgets import QLabel, QMenu, QStackedWidget, QWidget
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, Qt, QTimer
+from PySide6.QtGui import QAction, QIcon, QMouseEvent, QPalette
+from PySide6.QtWidgets import QApplication, QLabel, QMenu, QStackedWidget, QWidget
 
 from .git_sync import GitSyncController
 from .operation_log import describe_display
@@ -94,6 +94,7 @@ class MindMapController(QObject):
         self._settings_visible = False
         self.refresh_theme()
         self._bind_session(None)
+        QApplication.instance().installEventFilter(self)
 
     def show_status_message(self, message):
         self.context.ui.show_message(message)
@@ -261,11 +262,40 @@ class MindMapController(QObject):
         )
         self._sync_depth_action()
 
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """在主窗口处理鼠标侧键，避免子控件先取得焦点并改变活动分屏。
+
+        只接收所属主窗口的 Qt 鼠标事件。在按下侧键且没有其他鼠标键按住时，
+        让当前活动标签移动一次历史位置。释放和双击通知一并消费，返回 True，
+        防止对子控件再次派发。其他事件和弹窗输入返回 False，继续由 Qt 处理。
+        由 QApplication 在 GUI 线程调用，控制器释放时解除过滤。
+        """
+        if self._disposed or not isinstance(event, QMouseEvent) or event.type() not in (
+            QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick,
+        ):
+            return False
+        button = event.button()
+        if (button not in (Qt.MouseButton.BackButton, Qt.MouseButton.ForwardButton)
+                or watched is not self.context.ui.parent.windowHandle()):
+            return False
+        if QApplication.activePopupWidget() is not None or QApplication.activeModalWidget() is not None:
+            return False
+
+        if event.type() == QEvent.Type.MouseButtonPress and event.buttons() == button:
+            session = self.active_session
+            if session is not None and not self.context.ui.restoring:
+                self.call(lambda: session.navigate_page_history(forward=button == Qt.MouseButton.ForwardButton))
+        event.accept()
+        return True
+
     def dispose(self):
         if self._disposed:
             return
         self.flush_recent_pages()
         self._disposed = True
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self._recent_pages_timer.stop()
         if hasattr(self, "git_sync"):
             self.git_sync.dispose()
