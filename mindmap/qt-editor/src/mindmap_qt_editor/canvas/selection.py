@@ -76,6 +76,10 @@ class NodeSelectionMixin:
     def _store_selection(self, ids):
         if ids == self._selected_ids:
             return False
+        if self.graph_group_items:
+            for key in self._selected_ids ^ ids:
+                if key in self.graph_group_items:
+                    self.graph_group_items[key].set_group_selected(key in ids)
         self._selected_ids = ids
         self._ordered_selection = None
         self._selection_revision += 1

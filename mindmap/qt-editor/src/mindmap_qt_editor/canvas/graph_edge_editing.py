@@ -66,6 +66,7 @@ class GraphEdgeEditController:
         self._drag: _EdgeDrag | None = None
         self._box_origin: QPoint | None = None
         self._box_additive = False
+        self._box_nodes = False
         self._rubber_band: QRubberBand | None = None
         self._pointer = QPoint()
         self._moved = False
@@ -91,10 +92,10 @@ class GraphEdgeEditController:
         return (owner.graph is not None and not owner._disposed and owner.editable and owner.editor is None
                 and not owner._refreshing and not self.view.text_resize.active)
 
-    def _node_rect(self, key: str, *, connection=False) -> QRectF:
-        """返回视口中的卡片矩形，接线目标则使用组节点的外框。"""
+    def _node_rect(self, key: str) -> QRectF:
+        """返回视口中的接线边界，分组使用完整外框。"""
         layout = self.owner.layout_result
-        frame = layout.group_frames.get(key) if connection else None
+        frame = layout.group_frames.get(key)
         rect = frame.bounds if frame else layout.nodes[key]
         return self.view.viewportTransform().mapRect(QRectF(rect.x, rect.y, rect.width, rect.height))
 
@@ -132,7 +133,15 @@ class GraphEdgeEditController:
                 handles = (_Handle(start - offset + down, start, edge.target, edge, True),
                            _Handle(end + offset + down, end, edge.source, edge))
         outlet = self._outlet()
-        return (*handles, outlet) if outlet is not None else handles
+        if outlet is not None:
+            handles = (*handles, outlet)
+        return tuple(handle for handle in handles
+                     if self.view.graph_point_visible(self._handle_rank(handle), handle.anchor))
+
+    def _handle_rank(self, handle):
+        edge = handle.original
+        key = (edge.source if handle.moving_source else edge.target) if edge else handle.fixed_node
+        return self.owner.node_items[key].zValue()
 
     def handle_at(self, position) -> _Handle | None:
         """命中视口前景中的圆形热区。已选连线的端点优先于节点出线把手。"""
@@ -140,7 +149,8 @@ class GraphEdgeEditController:
             return None
         for handle in self._handles():
             delta = QPointF(position) - handle.center
-            if delta.x() ** 2 + delta.y() ** 2 <= _HIT_RADIUS ** 2:
+            if (delta.x() ** 2 + delta.y() ** 2 <= _HIT_RADIUS ** 2
+                    and self.view.graph_point_visible(self._handle_rank(handle), position)):
                 return handle
         return None
 
@@ -156,8 +166,11 @@ class GraphEdgeEditController:
                 corridor = QRectF(outlet.anchor.x() - 1, outlet.anchor.y() - _HIT_RADIUS,
                                   _OUTLET_OFFSET + _HIT_RADIUS + 1, 2 * _HIT_RADIUS)
             if position is None or not corridor.contains(QPointF(position)):
+                fallback = self.owner.current_node_id() if self.owner.selection_count == 1 else None
+                if fallback in self.owner.layout_result.group_frames:
+                    fallback = None
                 self._outlet_node = (item.node.id if isinstance(item, NodeItem) else
-                                     self.owner.current_node_id() if self.owner.selection_count == 1 else None)
+                                     self.view.graph_group_at(position) or fallback)
         if self._outlet_node != previous:
             self.view.viewport().update()
         if self.active or (not blocked and self.handle_at(position) is not None):
@@ -220,14 +233,18 @@ class GraphEdgeEditController:
                 self._pointer = QPoint(position)
                 self._moved = False
         else:
+            if not isinstance(item, NodeItem) and self.view.graph_group_at(position) is not None:
+                self.clear_selection()
+                return False
             edge = None if isinstance(item, NodeItem) else self.owner.graph_edge_at(position)
             if edge is None:
-                if not box or isinstance(item, NodeItem) or self.handle_at(position) is not None:
+                if isinstance(item, NodeItem) or self.handle_at(position) is not None:
                     self.clear_selection()
                     return False
                 self.view.setFocus(Qt.FocusReason.MouseFocusReason)
                 self._box_origin = QPoint(position)
                 self._box_additive = toggle
+                self._box_nodes = not box
                 self._moved = False
             else:
                 self.view.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -261,9 +278,9 @@ class GraphEdgeEditController:
         # 入口图标属于卡片。拖线已经认领手势，松手时将图标区域也视为目标节点。
         if isinstance(item, PageControlItem):
             item = item.node_item
-        if not isinstance(item, NodeItem):
+        key = item.node.id if isinstance(item, NodeItem) else self.view.graph_group_at(position)
+        if key is None:
             return None
-        key = item.node.id
         handle = drag.handle
         edge = (GraphEdge(key, handle.fixed_node) if handle.moving_source else GraphEdge(handle.fixed_node, key))
         return (key, edge) if edge not in drag.edges and graph_edge_in_scope(edge, drag.parents) else None
@@ -275,8 +292,16 @@ class GraphEdgeEditController:
             self.move(position)
             rect = self._box_rect(position) if self._moved else QRect()
             additive = self._box_additive
+            nodes = self._box_nodes
             self.cancel()
-            if not rect.isEmpty():
+            if nodes:
+                selected = set(self.owner.selected_node_ids()) if additive else set()
+                if not rect.isEmpty():
+                    selected.update(item.node.id for item in self.view.items(rect) if isinstance(item, NodeItem)
+                                    and self.owner._graph_item_visible_in_rect(item, rect))
+                self.clear_selection()
+                self.owner.select_nodes(selected)
+            elif not rect.isEmpty():
                 edges = self.owner._graph_edges_in_rect(rect)
                 if additive:
                     edges |= self._selected_edges
@@ -299,6 +324,7 @@ class GraphEdgeEditController:
         redraw = self._drag is not None or self._outlet_node is not None
         self._drag = self._outlet_node = None
         self._box_origin = None
+        self._box_nodes = False
         if self._rubber_band is not None:
             self._rubber_band.hide()
         self._moved = False
@@ -348,40 +374,33 @@ class GraphEdgeEditController:
             margin = (width + outline_width) / 2 + 1
             bounds = transform.mapRect(item.boundingRect()).adjusted(-margin, -margin, margin, margin)
             if bounds.intersects(viewport):
-                visible.append((transform.map(item.path()), transform.map(branch_arrow_path(branch)), width))
+                clip = self.view.graph_visible_region(item.zValue(), bounds.intersected(viewport),
+                                                      pixel_ratio=painter.device().devicePixelRatioF())
+                visible.append((transform.map(item.path()), transform.map(branch_arrow_path(branch)), width, clip))
         if not visible:
             return
-        cover = QPainterPath()
-        # 卡片可能互相叠放，交叠部分也必须遮住底下的连线。
-        cover.setFillRule(Qt.FillRule.WindingFill)
-        pixel_size = 1 / (zoom * painter.device().devicePixelRatioF())
-        for item in self.owner.node_items.values():
-            if view_transform.mapRect(item.sceneBoundingRect()).intersects(viewport):
-                transform = item.deviceTransform(view_transform)
-                cover.addPath(transform.map(item.visual.card_outline(pixel_size=pixel_size)))
-        if self.owner.editor is not None:
-            bounds = view_transform.mapRect(self.owner.editor.sceneBoundingRect()).intersected(viewport)
-            if not bounds.isEmpty():
-                cover.addRect(bounds)
         painter.save()
         try:
-            clip = QPainterPath()
-            clip.addRect(viewport)
-            painter.setClipPath(clip.subtracted(cover), Qt.ClipOperation.IntersectClip)
             stroke = QPen(color, 1, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
             if outline is not None:
                 stroke.setColor(outline)
                 arrow_outline = QPen(stroke)
                 arrow_outline.setWidthF(outline_width)
-                for path, arrow, width in visible:
+                for path, arrow, width, clip in visible:
+                    painter.save()
+                    painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
                     stroke.setWidthF(width + outline_width)
                     painter.strokePath(path, stroke)
                     painter.strokePath(arrow, arrow_outline)
+                    painter.restore()
                 stroke.setColor(color)
-            for path, arrow, width in visible:
+            for path, arrow, width, clip in visible:
+                painter.save()
+                painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
                 stroke.setWidthF(width)
                 painter.strokePath(path, stroke)
                 painter.fillPath(arrow, color)
+                painter.restore()
         finally:
             painter.restore()
 
@@ -415,6 +434,10 @@ class GraphEdgeEditController:
                     self._paint_preview(painter, drag, color)
                 return
             for handle in handles:
+                painter.save()
+                bounds = QRectF(handle.anchor, handle.center).normalized().adjusted(-7, -7, 7, 7)
+                painter.setClipPath(self.view.graph_visible_region(self._handle_rank(handle), bounds),
+                                    Qt.ClipOperation.IntersectClip)
                 color = selected_color if handle.original is not None else accent
                 painter.setPen(QPen(color, 1.5))
                 center = handle.center
@@ -426,14 +449,15 @@ class GraphEdgeEditController:
                     x, y = QPointF(2, 0), QPointF(0, 2)
                     painter.drawLine(center - x, center + x)
                     painter.drawLine(center - y, center + y)
+                painter.restore()
         finally:
             painter.restore()
 
     def _paint_preview(self, painter: QPainter, drag: _EdgeDrag, color: QColor) -> None:
         """用操作对应的颜色绘制跟随指针的虚线，命中合法节点时贴边并指向实际终点。"""
-        fixed = self._node_rect(drag.handle.fixed_node, connection=True)
+        fixed = self._node_rect(drag.handle.fixed_node)
         candidate = self._candidate(drag, self._pointer)
-        moving = self._node_rect(candidate[0], connection=True) if candidate is not None else None
+        moving = self._node_rect(candidate[0]) if candidate is not None else None
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if moving is not None:
             painter.setPen(QPen(color, 2))
@@ -448,8 +472,7 @@ class GraphEdgeEditController:
         else:
             handle = drag.handle
             if handle.original is None:
-                card = self._node_rect(handle.fixed_node)
-                start = QPointF(card.right(), card.center().y())
+                start = QPointF(fixed.right(), fixed.center().y())
             else:
                 # 改接只移动被拖动的一端，虚线另一端继续从正式连线的原锚点出发。
                 branch = self.owner.layout_result.branches[handle.original.key]

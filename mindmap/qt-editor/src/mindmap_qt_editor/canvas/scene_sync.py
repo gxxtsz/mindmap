@@ -5,7 +5,7 @@ from dataclasses import replace
 from mindmap_core import ChangeEvent, ChangeSet, LayoutResult, Rect
 from mindmap_core.layouts import create_incremental_layout, supports_incremental_layout
 from mindmap_core.node_pages import parse_graph_page_id
-from mindmap_qt_render.graph_groups import GraphGroupItem
+from mindmap_qt_render.graph_groups import GraphGroupItem, GraphStacking
 from mindmap_qt_render.rendering import BranchItem
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor
@@ -357,7 +357,10 @@ class SceneSyncMixin:
         else:
             self._measure_dirty = tuple(key for key in previous.nodes.keys() | updated.nodes.keys()
                                         if previous.nodes.get(key) != updated.nodes.get(key))
-        self.refresh()
+        # 组内重排可以把原先相距很远的成员收拢。各分屏都应留在用户正在看的位置。
+        repositioned = (replace(previous.graph, positions=updated.graph.positions,
+                                stack_order=updated.graph.stack_order) == updated.graph)
+        self.refresh(keep_viewport=bool(repositioned))
         if self.editor is not None:
             self.editor.base_layout = self.layout_result
             key = self.editor.node_id
@@ -397,7 +400,7 @@ class SceneSyncMixin:
         self._detail_targets_dirty = False
         return None if dirty is None else tuple(dict.fromkeys((*dirty, *changed)))
 
-    def refresh(self) -> None:
+    def refresh(self, *, keep_viewport=False) -> None:
         """用提交事件维护的界面读模型刷新几何，复用按 ID 索引的图元。
 
         局部提交只合并变化实体；只有文档替换才重建完整读模型。这里不能再次读取
@@ -455,9 +458,11 @@ class SceneSyncMixin:
             # 布局边界已覆盖可见节点、节点内图片及普通父子分支线。场景
             # 只记录内容范围，一屏操作余量由视图按当前窗口大小与倍率单独计算。
             self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
-            self.view.update_navigation_rect(center=center)
+            self.view.update_navigation_rect(center=center, keep_visible=keep_viewport)
             self._set_graph_group_items(result)
             if self._virtualized:
+                if self._graph_stacking is not None:
+                    self._sync_graph_stacking()
                 self._sync_viewport(force=True)
             else:
                 self._set_node_items(document, visuals, result)
@@ -500,6 +505,7 @@ class SceneSyncMixin:
         if rect is None:
             return
         item = NodeItem(self._document.nodes[key], self._visuals[key], self._document.theme, self)
+        item.group_title = key in self.layout_result.group_frames
         self.scene.addItem(item)
         self.node_items[key] = item
         item.setPos(rect.x, rect.y)
@@ -600,6 +606,10 @@ class SceneSyncMixin:
             else:
                 # 视觉未变也同步实体引用，正文导航等读取当前快照，但不使 Qt 几何失效。
                 item.node, item.theme = document.nodes[key], document.theme
+            if item.group_title != (key in result.group_frames):
+                item.group_title = key in result.group_frames
+                item.update()
+            item.opaque_image = self.graph is not None and item.node.is_image_node
             item.setSelected(self.is_node_selected(key))
             # 平移和缩放不改变按钮的场景几何；只在实体、尺寸、主题或布局变化时
             # 重建控件路径。选中、悬停产生的可见性变化仍由各自事件即时同步。
@@ -611,26 +621,43 @@ class SceneSyncMixin:
         self.view._update_selection_decoration()
 
     def _set_graph_group_items(self, result: LayoutResult) -> None:
-        """按布局顺序同步组框，让内层框叠在外层框上，并保留节点和连线的优先级。
-
-        同一图元用于正式状态和预览，切页时移除已经失效的组。同级按声明顺序
-        叠放，保证撤销及跨视图刷新后的落点层级与绘制一致。
-        """
+        """复用正式状态和拖动预览的组框，切页时移除失效图元。"""
         frames = result.group_frames
         for key in self.graph_group_items.keys() - frames.keys():
             self.scene.removeItem(self.graph_group_items.pop(key))
         if not frames:
             return
         accent = self.ui_colors.accent
-        for index, (key, frame) in enumerate(frames.items()):
+        background = self._canvas_background(self.ui_colors)
+        for key, frame in frames.items():
             item = self.graph_group_items.get(key)
             if item is None:
-                item = GraphGroupItem(frame, accent=accent)
+                item = GraphGroupItem(frame, accent=accent, border=self.ui_colors.border, background=background)
                 self.scene.addItem(item)
                 self.graph_group_items[key] = item
             else:
-                item.sync(frame, accent=accent)
-            item.setZValue(-2 + 0.5 * index / len(frames))
+                item.sync(frame, accent=accent, border=self.ui_colors.border, background=background)
+            item.set_group_selected(self.is_node_selected(key))
+
+    def _sync_graph_stacking(self):
+        graph = self.view.node_drag.preview_graph or self.graph
+        if graph is None:
+            if self._graph_stacking is not None:
+                self._graph_stacking = None
+                for item in self.node_items.values():
+                    item.setZValue(5)
+                for item in self.branch_items.values():
+                    item.setZValue(-1)
+            return
+        if self._graph_stacking is None or self._graph_stacking.graph is not graph:
+            self._graph_stacking = GraphStacking(graph)
+        stack = self._graph_stacking
+        for items, ranks in ((self.graph_group_items, stack.frames), (self.branch_items, stack.edges),
+                             (self.node_items, stack.nodes)):
+            for key, item in items.items():
+                item.setZValue(ranks[key])
+        if self.editor is not None and self.editor.node_id in stack.nodes:
+            self.editor.setZValue(stack.nodes[self.editor.node_id] + 0.5)
 
     def _set_branch_items(self, result) -> None:
         """同步预览或提交后的分支图元，并给图页的普通连线应用适配背景的灰蓝色。
@@ -653,4 +680,5 @@ class SceneSyncMixin:
             else:
                 self.branch_items[key].set_branch(branch)
             self.branch_items[key].setPos(0, 0)
+        self._sync_graph_stacking()
         self.view.graph_edge_edit.sync_visibility()

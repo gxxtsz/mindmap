@@ -6,8 +6,9 @@ from pathlib import Path
 from time import monotonic
 from weakref import ref
 
-from PySide6.QtCore import QEvent, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen
+from mindmap_qt_render.graph_groups import GraphGroupItem
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QGraphicsView
 from shiboken6 import isValid
 
@@ -213,7 +214,97 @@ class MindMapView(QGraphicsView):
             item = item.node_item
         if isinstance(item, NodeEditor):
             return item.node_id
-        return item.node.id if isinstance(item, NodeItem) else None
+        return item.node.id if isinstance(item, NodeItem) else self.graph_group_at(position)
+
+    def graph_object_at(self, position, *, layout, stacking, moving=(), roots=(), retain=None, borders=False):
+        """按实际叠放顺序命中。拖动时借用起始布局，跳过移动对象并检查后代组循环。"""
+        if position is None or stacking is None:
+            return None
+        point = self.mapToScene(position)
+        margin = 4 / self.transform().m11()
+        for key in reversed(stacking.objects):
+            frame = layout.group_frames.get(key)
+            if frame is None:
+                if key in moving:
+                    continue
+                box = layout.nodes[key]
+                if (box.x <= point.x() <= box.right and box.y <= point.y() <= box.bottom
+                        and self.owner.node_items[key].contains(point - QPointF(box.x, box.y))):
+                    return key
+            elif key not in roots:
+                box = frame.bounds
+                pad = margin if borders or retain == key else 0
+                rect = QRectF(box.x - pad, box.y - pad, box.width + 2 * pad, box.height + 2 * pad)
+                if rect.contains(point):
+                    outline = QPainterPath()
+                    outline.addRoundedRect(rect, 8 + pad, 8 + pad)
+                    if outline.contains(point):
+                        return key
+        return None
+
+    def graph_group_at(self, position, *, include_body=False):
+        """在可见的最前方组上区分标题、边框和内容，边框热区使用固定视口像素。"""
+        if not self.owner.graph_group_items:
+            return None
+        layout = self.owner.layout_result
+        key = self.graph_object_at(position, layout=layout, stacking=self.owner._graph_stacking, borders=True)
+        frame = layout.group_frames.get(key)
+        if frame is not None:
+            point = self.mapToScene(position)
+            box = frame.bounds
+            margin = 4 / self.transform().m11()
+            if (include_body or point.y() <= frame.header.bottom or point.y() >= box.bottom - margin
+                    or point.x() <= box.x + margin or point.x() >= box.right - margin):
+                return key
+        return None
+
+    def graph_visible_region(self, rank, bounds, *, pixel_ratio=None):
+        """返回视口矩形中未被更前方的组框、卡片或编辑器遮住的部分。"""
+        visible = QPainterPath()
+        visible.addRect(bounds)
+        cover = QPainterPath()
+        cover.setFillRule(Qt.FillRule.WindingFill)
+        transform = self.viewportTransform()
+        scene_rect = transform.inverted()[0].mapRect(bounds)
+        pixel = 1 / (self.transform().m11() * (pixel_ratio or self.viewport().devicePixelRatioF()))
+        for item in self.scene().items(scene_rect, Qt.ItemSelectionMode.IntersectsItemBoundingRect):
+            if item.zValue() <= rank:
+                continue
+            if isinstance(item, GraphGroupItem):
+                shape = item.shape()
+            elif isinstance(item, NodeItem):
+                shape = item.visual.card_outline(pixel_size=pixel)
+            elif isinstance(item, NodeEditor):
+                shape = item.shape()
+            else:
+                continue
+            cover.addPath(item.deviceTransform(transform).map(shape))
+        return visible.subtracted(cover) if not cover.isEmpty() else visible
+
+    def graph_point_visible(self, rank, position):
+        point = QPointF(position)
+        area = QRectF(point.x() - 1, point.y() - 1, 2, 2)
+        return self.graph_visible_region(rank, area).contains(point)
+
+    def selected_handle_visible(self, position):
+        if self.owner.graph is None:
+            return True
+        item = self.owner.node_items.get(self.owner.current_node_id())
+        return item is not None and self.graph_point_visible(item.zValue(), position)
+
+    def clip_graph_decoration(self, painter, bounds, *, item=None):
+        """在已有的画笔保存范围内，按所属节点裁剪局部装饰，保留调用方的绘制坐标。"""
+        if self.owner.graph is None:
+            return
+        if item is None:
+            item = self.owner.node_items.get(self.owner.current_node_id())
+            if item is None:
+                return
+        transform = painter.worldTransform()
+        painter.resetTransform()
+        clip = self.graph_visible_region(item.zValue(), bounds, pixel_ratio=painter.device().devicePixelRatioF())
+        painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
+        painter.setWorldTransform(transform)
 
     def _set_attachment_drop_node(self, node_id):
         if node_id != self._attachment_drop_node:
@@ -294,12 +385,13 @@ class MindMapView(QGraphicsView):
             if not self._viewport_sync_depth:
                 self.owner._viewport_changed()
 
-    def update_navigation_rect(self, *, center: QPointF | None = None) -> None:
+    def update_navigation_rect(self, *, center: QPointF | None = None, keep_visible=False) -> None:
         """按当前可见内容重算导航范围，四周各留一屏可平移余量。
 
         场景范围由组件提供，只包含布局结果；视图范围另加按当前倍率换算的一屏
         宽度和高度，不累计历史边界或当前位置，因此内容减少后也能收缩。center
-        为希望保留的场景中心，省略时保留当前中心；越界由内部滚动条自动钳制。
+        为希望保留的场景中心，省略时保留当前中心。keep_visible 让本次节点重排也
+        容纳原视口，其他操作越界时由滚动条钳制。
         此方法仅调整视图，不修改文档、布局、缩放比例或导出的内容范围。
         """
         if self.scene() is None or self.viewport().size().isEmpty():
@@ -307,8 +399,12 @@ class MindMapView(QGraphicsView):
         visible = self.mapToScene(self.viewport().rect()).boundingRect()
         width, height = visible.width(), visible.height()
         center = visible.center() if center is None else center
+        bounds = self.scene().sceneRect().adjusted(-width, -height, width, height)
+        if keep_visible:
+            visible.moveCenter(center)
+            bounds = bounds.united(visible)
         with self._batch_viewport_changes():
-            self.setSceneRect(self.scene().sceneRect().adjusted(-width, -height, width, height))
+            self.setSceneRect(bounds)
             self.centerOn(center)
 
     def scrollContentsBy(self, dx, dy):
@@ -462,7 +558,7 @@ class MindMapView(QGraphicsView):
             if hovered.fold_control.contains_button(self.mapToScene(position)):
                 hit = hovered.fold_control
         if self.panning or dragging:
-            shape = Qt.CursorShape.ClosedHandCursor
+            shape = Qt.CursorShape.ForbiddenCursor if self.node_drag.graph_drop_blocked else Qt.CursorShape.ClosedHandCursor
         elif self._pan_button != Qt.MouseButton.NoButton:
             shape = Qt.CursorShape.OpenHandCursor
         elif position is None or not self.viewport().rect().contains(position):
@@ -483,6 +579,8 @@ class MindMapView(QGraphicsView):
                 if (self.owner.current_page_kind in ("inspiration", "graph")
                         or item.node.id not in (self.owner.document_view.root_id, self.owner.focus_id)):
                     shape = Qt.CursorShape.OpenHandCursor
+            elif self.owner.editable and self.graph_group_at(position) is not None:
+                shape = Qt.CursorShape.OpenHandCursor
         self.viewport().setCursor(shape)
 
     def cancel_interaction(self):
@@ -549,6 +647,13 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         position = event.position().toPoint()
+        if self.owner.is_editing and event.button() == Qt.MouseButton.LeftButton:
+            hit = self.itemAt(position)
+            if isinstance(hit, GraphGroupItem):
+                self.owner.finish_edit(commit=True)
+                if self.owner.is_editing or self.itemAt(position) is not hit:
+                    event.accept()
+                    return
         if (event.button() == Qt.MouseButton.LeftButton and not event.modifiers()
                 and self.group_resize.hit_test(position)):
             self.owner.call(lambda: self.group_resize.begin(position))
@@ -600,8 +705,14 @@ class MindMapView(QGraphicsView):
             return
         if isinstance(item, NodeItem) and event.button() == Qt.MouseButton.LeftButton:
             # 多选节点中的一个被拖动时保持整组选择，普通点击仍采用 Qt 的选择规则。
-            if item.isSelected() and self.owner.selection_count > 1 and not event.modifiers():
+            preserve = not event.modifiers() or (self.owner.graph is not None
+                                                  and event.modifiers() == Qt.KeyboardModifier.ShiftModifier)
+            if item.isSelected() and self.owner.selection_count > 1 and preserve:
                 self._selection_click = item.node.id
+                event.accept()
+            elif self.owner.graph is not None and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
+                self.owner.select_nodes([item.node.id])
                 event.accept()
             else:
                 with self.owner._scene_selection_event(
@@ -618,6 +729,22 @@ class MindMapView(QGraphicsView):
                 self.press_position = event.position().toPoint()
                 self.drag_origin = self.mapToScene(self.press_position)
             self.update_cursor(event.position().toPoint())
+            return
+        group = self.graph_group_at(position)
+        if group is not None and event.button() == Qt.MouseButton.LeftButton and not isinstance(item, NodeEditor):
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.owner.select_nodes(set(self.owner.selected_node_ids()) ^ {group})
+            elif not self.owner.is_node_selected(group):
+                self.owner.select_nodes([group])
+            elif self.owner.selection_count > 1:
+                self._selection_click = group
+            if self.owner.is_node_selected(group) and self.owner.editable and not self.owner.is_editing:
+                self.press_node = group
+                self.press_position = position
+                self.drag_origin = self.mapToScene(position)
+            self.update_cursor(position)
+            event.accept()
             return
         with self.owner._scene_selection_event(
             replace=not isinstance(item, NodeEditor)
@@ -690,7 +817,7 @@ class MindMapView(QGraphicsView):
                     self.owner.call(lambda: self.owner.start_external_branch_drag(roots))
                     event.accept()
                     return
-                self.node_drag.update(event.position().toPoint())
+                self.node_drag.update(event.position().toPoint(), event.modifiers())
                 self.update_cursor(event.position().toPoint())
                 event.accept()
                 return
@@ -737,7 +864,7 @@ class MindMapView(QGraphicsView):
             return
         if self.node_drag.active:
             self._selection_click = None
-            drop = self.node_drag.finish(event.position().toPoint())
+            drop = self.node_drag.finish(event.position().toPoint(), event.modifiers())
             self.press_node = None
             # 节点按下可能由场景接管，配对释放解除图元捕获后才能提交。
             with self.owner._scene_selection_event():
@@ -762,6 +889,14 @@ class MindMapView(QGraphicsView):
                 self.graph_edge_edit.handle_at(position) or not event.modifiers() and (
                     self.text_resize.hit_test(position) or self.group_resize.hit_test(position))):
             self.mousePressEvent(event)
+            return
+        if event.button() == Qt.MouseButton.LeftButton and isinstance(self.itemAt(position), GraphGroupItem):
+            if not event.modifiers() and self.owner.editable and self.graph_group_at(position) is None:
+                group = self.graph_group_at(position, include_body=True)
+                if group is not None and self.owner.graph_edge_at(position) is None:
+                    point = self.mapToScene(position)
+                    self.owner.call(lambda: self.owner.add_graph_group_member(group, (point.x(), point.y())))
+            event.accept()
             return
         if (event.button() == Qt.MouseButton.LeftButton and self.owner.current_page_kind == "inspiration"
                 and self.itemAt(event.position().toPoint()) is None and self.owner.editable):
@@ -796,16 +931,28 @@ class MindMapView(QGraphicsView):
         item = self.itemAt(position)
         if isinstance(item, (FoldControlItem, PageControlItem)):
             item = item.node_item
-        if isinstance(item, NodeItem):
+        if isinstance(item, NodeItem) and not item.group_title:
             if not item.isSelected():
                 self.owner.select_nodes([item.node.id])
-            self.owner.context_menu(global_position)
+            if self.owner.graph is not None:
+                self.owner.context_menu(global_position, node_id=item.node.id)
+            else:
+                self.owner.context_menu(global_position)
+            return
+        group = item.node.id if isinstance(item, NodeItem) else self.graph_group_at(position)
+        if group is None and self.owner.call(lambda: self.owner.graph_edge_context_menu(position, global_position)):
+            return
+        group = group or self.graph_group_at(position, include_body=True)
+        self.graph_edge_edit.clear_selection()
+        if group is not None:
+            self.owner.context_menu(global_position, group_id=group)
         else:
-            if not self.owner.call(lambda: self.owner.graph_edge_context_menu(position, global_position)):
-                self.graph_edge_edit.clear_selection()
-                self.owner.context_menu(global_position, on_canvas=True)
+            self.owner.context_menu(global_position, on_canvas=True)
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift and self.node_drag.set_keep_graph_layer(True):
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape and (
                 self.press_node is not None or self._active_resize is not None
                 or self.node_drag.external_active or self.graph_edge_edit.active):
@@ -845,6 +992,12 @@ class MindMapView(QGraphicsView):
             event.accept()
         else:
             super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift and self.node_drag.set_keep_graph_layer(False):
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
 
     def _update_selection_decoration(self, *_args):
         """使新旧外框范围失效，覆盖文字伸缩、节点移动和移除，不触碰场景几何。
@@ -897,6 +1050,8 @@ class MindMapView(QGraphicsView):
             accent.setAlpha(36)
             painter.setBrush(accent)
             outline = target.visual.card_outline(pixel_size=1 / self.transform().m11())
+            bounds = target.deviceTransform(self.viewportTransform()).mapRect(outline.boundingRect())
+            self.clip_graph_decoration(painter, bounds.adjusted(-2, -2, 2, 2), item=target)
             painter.drawPath(target.mapToScene(outline))
             painter.restore()
         # 缩放及滚动可能只重绘视图而不发出 scene.changed；记住实际显示的位置，
@@ -907,3 +1062,4 @@ class MindMapView(QGraphicsView):
         self.graph_edge_edit.paint(painter)
         self.text_resize.paint(painter)
         self.group_resize.paint(painter)
+        self.node_drag.paint_graph_hint(painter)

@@ -680,12 +680,16 @@ class DocumentEditor(InspirationEditorMixin):
             raise MindMapError("请选择有效的图节点")
         wanted = graph.subtree_ids(wanted)
         nodes = tuple(node for node in graph.nodes if node.id in wanted)
-        edges = tuple(edge for edge in graph.edges if edge.source in wanted and edge.target in wanted)
+        # 单独复制组内成员和外部节点时，两端在片段中可能已经同层。
         groups = tuple(group for group in graph.groups if group.id in wanted)
+        copied = NodeGraph(nodes, groups=groups).project_edges(
+            edge for edge in graph.original_edges() if edge.source in wanted and edge.target in wanted)
+        # 只复制一部分成员时，它们可能提升到片段顶层，仍须保留原先各组之间的前后关系。
+        copied = copied.with_stack_order(key for kind, key in graph.stacking_walk() if kind != "title" and key in wanted)
         selected = {key for node in nodes if node.document_node_id
                     for key in self.document.owned_descendants(node.document_node_id)}
         fragment = MindMapDocument.new("图剪贴板", text_format="plain")
-        fragment.root.extension_pages[GRAPH_PAGE_TYPE] = NodeGraph(nodes, edges, groups=groups).to_record()
+        fragment.root.extension_pages[GRAPH_PAGE_TYPE] = copied.to_record()
         self._copy_owned_contents(fragment, selected, self.document)
         return fragment
 
@@ -753,11 +757,7 @@ class DocumentEditor(InspirationEditorMixin):
         nodes = tuple(replace(entry, id=local_mapping[entry.id],
                               document_node_id=mapping.get(entry.document_node_id))
                       for entry in source.nodes)
-        edges = tuple(replace(edge, source=local_mapping[edge.source], target=local_mapping[edge.target])
-                      for edge in source.edges)
-        groups = tuple(group.remap(local_mapping) for group in source.groups)
-        updated = replace(current, nodes=(*current.nodes, *nodes), edges=(*current.edges, *edges),
-                          groups=(*current.groups, *groups))
+        updated = current.append_fragment(source, nodes, local_mapping)
         self._state.set_graph(owner_id, updated.to_record())
         self._restore_fragment_references(fragment, mapping)
         return list(local_mapping.values())

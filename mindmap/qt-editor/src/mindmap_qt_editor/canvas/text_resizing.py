@@ -37,7 +37,7 @@ class TextWidthResizeController:
                 or owner._applying_engine_event or owner._refreshing):
             return None
         node = owner._selected_text_node()
-        return owner.node_items.get(node.id) if node is not None else None
+        return owner.node_items.get(node.id) if node is not None and node.id not in owner.graph_group_items else None
 
     def _viewport_rect(self, item, visual: NodeVisual) -> QRectF:
         rect = item.mapRectToScene(QRectF(0, 0, visual.width, visual.height))
@@ -61,7 +61,8 @@ class TextWidthResizeController:
 
     def hit_test(self, position: QPoint | None) -> bool:
         """查询视口点是否命中宽度手柄，附页、折叠和出线把手优先各自响应。"""
-        if position is None or not self._current_handle_rect().contains(QPointF(position)):
+        if (position is None or not self._current_handle_rect().contains(QPointF(position))
+                or not self.view.selected_handle_visible(position)):
             return False
         hit = self.view.itemAt(position)
         if isinstance(hit, PageControlItem) or self.view.graph_edge_edit.handle_at(position) is not None:
@@ -182,6 +183,8 @@ class TextWidthResizeController:
             return
         painter.save()
         try:
+            bounds = handle if self._preview is None else handle.united(self._viewport_rect(self._item, self._preview))
+            self.view.clip_graph_decoration(painter, bounds.adjusted(-2, -2, 2, 2))
             accent = self.view.owner._document.theme.accent
             if self._preview is not None:
                 item = self._item

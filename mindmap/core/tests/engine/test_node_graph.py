@@ -139,7 +139,8 @@ def test_legacy_graph_groups_migrate_colliding_ids_edges_and_document_bindings(t
     path = tmp_path / "升级"
     save_directory(restored.document, path)
     assert MindMapEngine(load_directory(path)).node_graph(owner) == graph
-    assert to_dict(load_directory(path))["schema_version"] == 13
+    assert to_dict(load_directory(path))["schema_version"] == 14
+    assert graph.edge_origins[GraphEdge("g1", "g3")] == (GraphEdge("g1", "a"), GraphEdge("g1", "b"))
 
 
 def test_graph_group_reparent_promotes_to_nearest_layer_without_mutating_on_conflict():
@@ -156,6 +157,20 @@ def test_graph_group_reparent_promotes_to_nearest_layer_without_mutating_on_conf
     with pytest.raises(MindMapError, match="不能放入自身或后代"):
         graph.with_group_parents({"g": "h"})
     assert graph.parent_groups()["a"] == "g" and graph.edges[0] == GraphEdge("a", "h")
+
+
+def test_group_link_preserves_its_own_edge_when_a_member_link_merges_into_it():
+    direct, member = GraphEdge("g", "c"), GraphEdge("a", "c")
+    graph = NodeGraph(tuple(GraphNode(key, key) for key in "gac"), (direct, member), groups=(GraphGroup("g"),))
+    grouped = graph.with_group_parents({"a": "g"})
+    assert grouped.edges == (direct,) and grouped.edge_origins == {direct: (direct, member)}
+    assert grouped.with_group_parents({"a": None}).edges == graph.edges
+    without_member = grouped.with_content(tuple(node for node in graph.nodes if node.id != "a"), grouped.edges)
+    assert without_member.edges == (direct,) and not without_member.edge_origins
+    data = grouped.to_data()
+    data["edge_origins"].insert(0, ["g", "c", [["g", "c"]]])
+    with pytest.raises(MindMapError, match="重复"):
+        NodeGraph.from_data(data)
 
 
 def test_graph_image_creation_uses_the_source_nodes_scope():

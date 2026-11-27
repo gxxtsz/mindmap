@@ -24,14 +24,18 @@ from mindmap_core import (
 from mindmap_core.attachments import BINARY_MEDIA_TYPE
 from mindmap_core.graph import (
     GRAPH_ATTACHMENT_VERSION,
+    GRAPH_EDGE_ORIGIN_VERSION,
     GRAPH_GROUP_VERSION,
     GRAPH_IMAGE_VERSION,
+    GRAPH_STACK_VERSION,
     LEGACY_GRAPH_GROUP_VERSION,
     NodeGraph,
 )
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
+_GRAPH_STACK_SCHEMA_VERSION = 15
+_GRAPH_ORIGIN_SCHEMA_VERSION = 14
 _GRAPH_GROUP_SCHEMA_VERSION = 13
 _LEGACY_GROUP_SCHEMA_VERSION = 12
 _GRAPH_IMAGE_SCHEMA_VERSION = 11
@@ -66,7 +70,7 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
-    可连线的图分组需要版本 13，图图片节点需要版本 11，文件附件需要版本 10，
+    转接线来源需要版本 14，可连线的图分组需要版本 13，图图片节点需要版本 11，文件附件需要版本 10，
     图节点格式和固定宽度需要版本 9，图节点绑定需要版本 8，
     普通图和扩展详情至少使用版本 7，页面引用至少使用版本 6。编码时省略空字段。
     """
@@ -167,6 +171,10 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                 if name == "nodes" and isinstance(entity.extension_pages, dict):
                     graph = entity.extension_pages.get(GRAPH_PAGE_TYPE)
                     if isinstance(graph, dict):
+                        if version < _GRAPH_STACK_SCHEMA_VERSION and graph.get("version") == GRAPH_STACK_VERSION:
+                            raise MindMapError("图节点叠放顺序需要文档版本 15")
+                        if version < _GRAPH_ORIGIN_SCHEMA_VERSION and graph.get("version") == GRAPH_EDGE_ORIGIN_VERSION:
+                            raise MindMapError("连线来源需要文档版本 14")
                         if version < _GRAPH_GROUP_SCHEMA_VERSION and graph.get("version") == GRAPH_GROUP_VERSION:
                             raise MindMapError("可连线的图分组需要版本 13 文档格式")
                         if graph.get("version") == LEGACY_GRAPH_GROUP_VERSION:

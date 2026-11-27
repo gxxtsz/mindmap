@@ -9,7 +9,7 @@ from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication
 
-from .items import NodeItem, PageControlItem
+from .items import PageControlItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +65,8 @@ class GraphGroupResizeController:
     def hit_test(self, position: QPoint | None) -> bool:
         """判断是否命中手柄，仍让重叠的卡片、页按钮和接线手柄响应自身手势。"""
         return (position is not None and self._handle_rect().contains(QPointF(position))
-                and not isinstance(self.view.itemAt(position), (NodeItem, PageControlItem))
+                and self.view.selected_handle_visible(position)
+                and not isinstance(self.view.itemAt(position), PageControlItem)
                 and self.view.graph_edge_edit.handle_at(position) is None)
 
     def begin(self, position: QPoint) -> None:
@@ -134,6 +135,7 @@ class GraphGroupResizeController:
             return
         painter.save()
         try:
+            self.view.clip_graph_decoration(painter, handle)
             painter.resetTransform()
             painter.setPen(QPen(QColor(self.view.owner.ui_colors.accent), 1.5))
             painter.setBrush(self.view.scene().backgroundBrush())

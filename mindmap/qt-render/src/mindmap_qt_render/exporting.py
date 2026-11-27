@@ -11,7 +11,7 @@ from PySide6.QtGui import QColor, QImage, QPageSize, QPainter, QPdfWriter
 from PySide6.QtSvg import QSvgGenerator, QSvgRenderer
 from PySide6.QtWidgets import QGraphicsScene
 
-from .graph_groups import GraphGroupItem
+from .graph_groups import GraphGroupItem, GraphStacking
 from .items import NodeItem
 from .rendering import BranchItem, VisualFactory
 
@@ -45,15 +45,27 @@ def export_document(
               layout_registry.layout(document, sizes, expand_all=expand_all))
     scene = QGraphicsScene()
     scene.setBackgroundBrush(QColor(document.theme.background))
-    for frame in layout.group_frames.values():
-        scene.addItem(GraphGroupItem(frame, accent=document.theme.accent))
+    graph = getattr(document, "graph", None)
+    stacking = GraphStacking(graph) if graph is not None else None
+    for key, frame in layout.group_frames.items():
+        item = GraphGroupItem(frame, accent=document.theme.accent, border=document.theme.border,
+                              background=document.theme.background)
+        if stacking is not None:
+            item.setZValue(stacking.frames[key])
+        scene.addItem(item)
     for key, rect in layout.nodes.items():
         item = NodeItem(document.nodes[key], visuals[key], document.theme)
+        item.group_title = key in layout.group_frames
+        if stacking is not None:
+            item.opaque_image = item.node.is_image_node
+            item.setZValue(stacking.nodes[key])
         item.setPos(rect.x, rect.y)
         scene.addItem(item)
-    for curve in layout.branches.values():
+    for key, curve in layout.branches.items():
         item = BranchItem(curve)
-        if isinstance(curve, Curve):
+        if stacking is not None:
+            item.setZValue(stacking.edges[key])
+        elif isinstance(curve, Curve):
             # 旧导出器在节点之后以默认层级绘制 Curve，边界接点的覆盖顺序也属于
             # 兼容外观；保留该顺序，新显式路径则使用图元默认的节点下方层级。
             item.setZValue(0)

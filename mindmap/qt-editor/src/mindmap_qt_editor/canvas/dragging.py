@@ -15,11 +15,13 @@ from mindmap_core import (
     LayoutResult,
     MindMapDocument,
     MindMapEngine,
+    MindMapError,
     MindMapForestView,
     NodeGraph,
     Rect,
 )
 from mindmap_core.layouts.graph import move_graph_nodes
+from mindmap_qt_render.graph_groups import GraphStacking
 from mindmap_qt_render.rendering import branch_path
 from PySide6.QtCore import (
     QEasingCurve,
@@ -27,11 +29,13 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
+    Qt,
     QTimer,
     QVariantAnimation,
 )
-from PySide6.QtGui import QPainterPath
+from PySide6.QtGui import QColor, QPainterPath
 
 from .branch_drag import encode_branch_drag
 from .drag_preview import _DragLayer
@@ -184,6 +188,8 @@ class _GraphDrag:
     layout: LayoutResult
     roots: tuple[str, ...]
     moving: set[str]
+    stacking: GraphStacking
+    raised: NodeGraph
 
 
 @dataclass(frozen=True)
@@ -194,7 +200,14 @@ class _GraphDrop:
     content_version: int
     graph: NodeGraph
     positions: dict[str, tuple[float, float]]
-    destinations: dict[str, str | None]
+    updated: NodeGraph
+
+
+@dataclass(frozen=True)
+class _GroupDestination:
+    key: str | None
+    graph: NodeGraph | None
+    hint: str
 
 
 class NodeDragController(QObject):
@@ -217,6 +230,8 @@ class NodeDragController(QObject):
         self._last_scale = None
         self._offset = QPointF()
         self._graph_drag = None
+        self._keep_graph_layer = False
+        self._group_destination: _GroupDestination | None = None
         self._display_nodes = {}
         self._content_version = 0
         self._animation = QVariantAnimation(self)
@@ -235,6 +250,21 @@ class NodeDragController(QObject):
     @property
     def active(self):
         return self.ghost is not None or self._graph_drag is not None
+
+    @property
+    def preview_graph(self):
+        return self._graph_drag.raised if self._graph_drag is not None else None
+
+    def set_keep_graph_layer(self, keep):
+        """在原地切换 Shift 时重新判断冻结布局中的接收组。"""
+        if self._graph_drag is None:
+            return False
+        if keep != self._keep_graph_layer:
+            self._keep_graph_layer = keep
+            self._group_destination = None
+            self._update_group_destination(self._graph_drag, self._pointer)
+            self.view.update_cursor(self._pointer)
+        return True
 
     @property
     def external_active(self):
@@ -262,11 +292,12 @@ class NodeDragController(QObject):
             selected = set(keys)
             covered = graph.subtree_ids(key for group in graph.groups if group.id in selected
                                         for key in group.member_ids)
-            roots = tuple(key for key in keys if key not in covered)
+            roots = tuple(key for key in self.owner._graph_stacking.objects if key in selected and key not in covered)
             # 与树拖动共用阈值、捕获、边缘滚动和取消时机。图内只计算位置差量，
             # 预览移动原图元并随手势重算相连边，无需创建另一套拖动影像。
             self._graph_drag = _GraphDrag(self.owner.current_page_id, graph, self.owner.layout_result,
-                                          roots, selected | covered)
+                                          roots, selected | covered, self.owner._graph_stacking, graph.raised_nodes(roots))
+            self.owner._sync_graph_stacking()
             self._origin = QPointF(origin)
             self._offset = QPointF()
             return True
@@ -510,12 +541,14 @@ class NodeDragController(QObject):
             return QRectF(axis - thickness / 2, rect.center[1] - length / 2, thickness, length)
         return QRectF(rect.center[0] - length / 2, axis - thickness / 2, length, thickness)
 
-    def update(self, position):
+    def update(self, position, modifiers=None):
         """只更新稳定落点、影像和滚动；悬停不试算文档、不测量、不启动布局动画。"""
         if not self.active:
             return
         if self._graph_drag is not None:
             self._pointer = QPoint(position)
+            if modifiers is not None:
+                self.set_keep_graph_layer(bool(modifiers & Qt.KeyboardModifier.ShiftModifier))
             offset = self.view.mapToScene(position) - self._origin
             if offset != self._offset:
                 self._offset = offset
@@ -528,9 +561,7 @@ class NodeDragController(QObject):
                 }
                 result = move_graph_nodes(drag.layout, drag.graph.edges, positions, group_frames=frames)
                 self.owner._show_edit_layout(result)
-                targets = set(self._graph_drop_targets(drag, positions).values())
-                for key, item in self.owner.graph_group_items.items():
-                    item.set_drop_highlight(key in targets)
+            self._update_group_destination(self._graph_drag, position)
             self._update_edge_scroll(self.view.viewport().rect().contains(position))
             return
         if self.external_active and not self.owner.can_receive_branch_drag(self._external_mime):
@@ -587,26 +618,61 @@ class NodeDragController(QObject):
         return {key: (layout.nodes[key].x + self._offset.x(), layout.nodes[key].y + self._offset.y())
                 for key in keys}
 
-    def _graph_drop_targets(
-        self, drag: _GraphDrag, positions: dict[str, tuple[float, float]],
-    ) -> dict[str, str | None]:
-        """按拖动根的卡片中心命中冻结的组内容区，使用实际绘制顺序。
+    def _update_group_destination(self, drag, position):
+        """整批按指针选择一个目标。边缘滞回避免抖动，只有换组才试算连线与归属。"""
+        previous = self._group_destination
+        target = None
+        if not self._keep_graph_layer and drag.stacking.frames:
+            key = self.view.graph_object_at(position, layout=drag.layout, stacking=drag.stacking,
+                                            moving=drag.moving, roots=drag.roots,
+                                            retain=previous.key if previous else None)
+            target = key if key in drag.stacking.frames else drag.stacking.parents.get(key)
+        if previous is not None and previous.key == target:
+            return
+        graph = drag.graph
+        try:
+            updated = graph if self._keep_graph_layer else graph.with_group_parents(dict.fromkeys(drag.roots, target))
+            hint = "保持原层叠放" if self._keep_graph_layer else ""
+            if updated is not graph:
+                if target is None:
+                    hint = "松开移到顶层"
+                else:
+                    parents = graph.parent_groups()
+                    to_parent = all(parents.get(parents.get(key)) == target for key in drag.roots)
+                    hint = "松开移到父组" if to_parent else f"松开加入『{self.owner.document_view.nodes[target].text}』"
+        except MindMapError as error:
+            updated, hint = None, str(error)
+        self._group_destination = _GroupDestination(target, updated, hint)
+        for key, item in self.owner.graph_group_items.items():
+            item.set_drop_highlight(updated is not None and key == target)
+        self.view.viewport().update()
 
-        None 表示回到顶层。被拖动的组及其全部后代不参与命中。预览高亮和正式
-        释放共用这一判断，任一所拖子树的内部归属保持不变。
-        """
-        if not drag.layout.group_frames:
-            return {}
-        frames = tuple((key, frame.body) for key, frame in reversed(tuple(drag.layout.group_frames.items()))
-                       if key not in drag.moving)
-        targets = {}
-        for key in drag.roots:
-            point = positions[key]
-            node = drag.layout.nodes[key]
-            x, y = point[0] + node.width / 2, point[1] + node.height / 2
-            targets[key] = next((group for group, frame in frames
-                                 if frame.x <= x <= frame.right and frame.y <= y <= frame.bottom), None)
-        return targets
+    @property
+    def graph_drop_blocked(self):
+        return self._group_destination is not None and self._group_destination.graph is None
+
+    def paint_graph_hint(self, painter):
+        destination = self._group_destination
+        if destination is None or not destination.hint:
+            return
+        viewport = self.view.viewport().rect()
+        painter.save()
+        try:
+            painter.resetTransform()
+            metrics = painter.fontMetrics()
+            text = metrics.elidedText(destination.hint, Qt.TextElideMode.ElideRight, max(1, viewport.width() - 24))
+            width, height = metrics.horizontalAdvance(text) + 16, metrics.height() + 8
+            x = max(2, min(self._pointer.x() + 12, viewport.width() - width - 2))
+            y = max(2, min(self._pointer.y() - height - 8, viewport.height() - height - 2))
+            rect = QRect(x, y, width, height)
+            colors = self.owner.ui_colors
+            painter.setBrush(QColor(colors.surface))
+            painter.setPen(QColor(colors.error if self.graph_drop_blocked else colors.accent))
+            painter.drawRoundedRect(rect, 5, 5)
+            painter.setPen(QColor(colors.text))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        finally:
+            painter.restore()
 
     def _start_reflow(self, start_nodes):
         """正式提交和选择恢复结束后播放一次动画，命中与文档均使用最终布局。
@@ -737,16 +803,20 @@ class NodeDragController(QObject):
         self._content_version += 1
         self.view.cancel_interaction()
 
-    def finish(self, position):
+    def finish(self, position, modifiers=None):
         """按释放坐标再次判定并记录动画起点，配对释放鼠标捕获后才提交命令。"""
-        self.update(position)
+        self.update(position, modifiers)
         if self._graph_drag is not None:
             drag = self._graph_drag
             drop = None
             if self._offset != QPointF() and self.view.viewport().rect().contains(position):
                 positions = self._graph_positions(drag.layout, drag.moving)
-                destinations = self._graph_drop_targets(drag, positions)
-                drop = _GraphDrop(drag.page_id, self._content_version, drag.graph, positions, destinations)
+                destination = self._group_destination
+                if destination.graph is None:
+                    self.owner.error_occurred.emit(destination.hint)
+                else:
+                    updated = destination.graph.raised_nodes(drag.roots)
+                    drop = _GraphDrop(drag.page_id, self._content_version, drag.graph, positions, updated)
             self.cancel()
             return drop
         drop = None
@@ -783,8 +853,8 @@ class NodeDragController(QObject):
             graph = self.owner._read_active_graph()
             if graph != drop.graph:
                 return False
-            # 先同时校验父层和转接。任一拖动根不合法时整批坐标与归属均不保存。
-            updated = graph.with_group_parents(drop.destinations)
+            # 图快照仍一致，复用松手前已经校验过的整批归属和连线。
+            updated = drop.updated
             if updated.groups != graph.groups:
                 updated = self.owner._keep_graph_placement(updated, drop.positions)
             else:
@@ -869,6 +939,8 @@ class NodeDragController(QObject):
         self._scroll_timer.stop()
         if self._graph_drag is not None:
             drag, self._graph_drag = self._graph_drag, None
+            self._keep_graph_layer = False
+            self._group_destination = None
             if not self.owner._disposed:
                 for item in self.owner.graph_group_items.values():
                     item.set_drop_highlight(False)

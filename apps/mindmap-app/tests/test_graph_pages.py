@@ -6,16 +6,16 @@ from dataclasses import replace
 import pytest
 from mindmap_app.app import build_window
 from mindmap_core import GraphEdge, GraphGroup, MindMapEngine, MindMapError, NodeGraph
-from mindmap_core.formats import load_directory, save_directory
+from mindmap_core.formats import load_directory, load_document, save_directory, save_document
 from mindmap_core.formats.graph import format_graph_text, parse_graph_text
 from mindmap_core.node_pages import graph_page_id
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QTimer
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QFocusEvent, QImage, QInputMethodEvent, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialogButtonBox,
-    QInputDialog,
+    QGraphicsSimpleTextItem,
     QLabel,
     QMenu,
     QMessageBox,
@@ -57,6 +57,12 @@ def _edge_point(canvas, edge):
     return canvas.view.mapFromScene(path.pointAtPercent(0.5))
 
 
+def _viewport_region(view, point, radius):
+    image = QImage(view.viewport().size(), QImage.Format.Format_ARGB32)
+    view.viewport().render(image)
+    return image.copy(point.x() - radius, point.y() - radius, radius * 2 + 1, radius * 2 + 1)
+
+
 def _pointer_event(canvas, kind, position, button=Qt.MouseButton.NoButton, buttons=Qt.MouseButton.NoButton,
                    *, modifiers=Qt.KeyboardModifier.NoModifier):
     """通过视口发送鼠标事件，显式指定按钮状态，避免依赖系统鼠标所在窗口。"""
@@ -70,6 +76,8 @@ def _outlet_point(canvas, key):
     """按节点实际边界寻找出线把手，途经节点与把手之间的空隙。"""
     view = canvas.view
     rect = canvas.node_items[key].sceneBoundingRect()
+    if key in canvas.graph_group_items:
+        rect = canvas.graph_group_items[key].sceneBoundingRect()
     edge = view.mapFromScene(QPointF(rect.right() - 2, rect.center().y()))
     _pointer_event(canvas, QEvent.Type.MouseMove, _node_point(canvas, key))
     _pointer_event(canvas, QEvent.Type.MouseMove, edge + QPoint(4, 0))
@@ -100,7 +108,7 @@ def _drag_edge(canvas, start, end, *, cancel=None):
     assert not view.graph_edge_edit.active
 
 
-def _choose_graph_menu_action(canvas, position, label, qtbot):
+def _choose_graph_menu_action(canvas, position, label, qtbot, *, first=False):
     """以真实右键和菜单事件选择动作，返回动作是否可用。"""
     enabled = []
     labels = []
@@ -123,37 +131,41 @@ def _choose_graph_menu_action(canvas, position, label, qtbot):
     _pointer_event(canvas, QEvent.Type.MouseButtonPress, position, right, right)
     _pointer_event(canvas, QEvent.Type.MouseButtonRelease, position, right)
     assert enabled, (label, labels, canvas.selected_node_ids(), type(canvas.view.itemAt(position)).__name__)
+    if first:
+        assert labels[0] == label
     result, = enabled
     return result
 
 
-def _start_graph_drag(canvas, start, end):
+def _start_graph_drag(canvas, start, end, *, modifiers=Qt.KeyboardModifier.NoModifier):
     left = Qt.MouseButton.LeftButton
     assert canvas.view.viewport().rect().contains(start) and canvas.view.viewport().rect().contains(end)
-    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
-    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left, modifiers=modifiers)
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left, modifiers=modifiers)
     assert canvas.view.node_drag.active
 
 
-def _release_graph_drag(canvas, end):
-    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.LeftButton)
+def _release_graph_drag(canvas, end, *, modifiers=Qt.KeyboardModifier.NoModifier):
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, Qt.MouseButton.LeftButton, modifiers=modifiers)
     assert not canvas.view.node_drag.active
 
 
-def test_graph_group_title_is_a_node_and_ungroup_keeps_details_and_links(window, qtbot, monkeypatch):
+def test_graph_group_title_is_a_node_and_ungroup_keeps_details_and_links(window, qtbot):
     canvas = _create_graph(window, THREE_NODES + "\na -> c\nb -> c")
     canvas.fit_to_view()
     positions = canvas.layout_result.nodes.copy()
-    monkeypatch.setattr(QInputDialog, "getText", lambda *_args, **_kwargs: ("界面模块", True))
     canvas.select_nodes(["a", "b"])
     revision = canvas.engine.revision
-    assert _choose_graph_menu_action(canvas, _node_point(canvas, "a"), "创建分组…", qtbot)
+    assert _choose_graph_menu_action(canvas, _node_point(canvas, "a"), "编组", qtbot)
     group, = canvas.graph.groups
     assert group == GraphGroup("g1", ("a", "b"))
     assert canvas.graph.edges == (GraphEdge(group.id, "c"),)
     assert canvas.engine.revision == revision + 1
     assert {key: canvas.layout_result.nodes[key] for key in positions} == positions
     assert not canvas.action("graph_create_group").isEnabled()
+    assert canvas.editor is not None
+    qtbot.keyClick(canvas.view, Qt.Key.Key_Escape)
+    assert canvas.editor is None and canvas.document_view.nodes[group.id].text == "分组 1"
 
     canvas.fit_to_view()
     canvas.select_nodes(["c"])
@@ -189,7 +201,8 @@ def test_graph_group_title_is_a_node_and_ungroup_keeps_details_and_links(window,
     canvas.set_editable(True)
     assert _choose_graph_menu_action(canvas, _node_point(canvas, group.id), "解除分组", qtbot)
     assert canvas.graph.groups == () and not canvas.graph_group_items
-    assert canvas.graph.nodes == start_graph.nodes and canvas.graph.edges == start_graph.edges
+    assert canvas.graph.nodes == start_graph.nodes
+    assert canvas.graph.edges == (GraphEdge("a", "c"), GraphEdge("b", "c"))
     assert canvas.document_view.nodes[group.id].detail_page_id == detail
     assert canvas.document_view.nodes[group.id].submap_id == submap
     assert canvas.engine.undo() and canvas.graph == start_graph
@@ -250,10 +263,479 @@ def test_graph_group_drag_moves_title_and_members_together_and_updates_split_vie
     assert right.union(left) == right and other.layout_result == canvas.layout_result
 
 
+def test_local_group_layout_moves_only_direct_members_in_nested_split_view(window, qtbot):
+    source = ('节点 o "外层"\n节点 m "中层"\n节点 i "内层"\n节点 x "甲"\n节点 y "乙"\n'
+              '节点 a "同层项"\n节点 b "直接成员"\n节点 z "外部"\n'
+              '分组 o m b\n分组 m i a\n分组 i x y\nx -> y\ni -> a\nm -> b\no -> z')
+    canvas = _create_graph(window, source)
+    engine = canvas.engine
+    groups = tuple(replace(g, min_size=(265, 180)) if g.id == "i" else g for g in canvas.graph.groups)
+    before = replace(canvas.graph, groups=groups, positions={
+        "x": (210, 125), "y": (65, 74), "a": (450, 90), "b": (-280, 410), "z": (382, 330)})
+    engine.set_node_graph(engine.root_id, before)
+    assert window.documents.active.duplicate()
+    other = window.documents.active.canvas
+    window.host.editor.split_token(window.documents.active.id, Qt.Orientation.Horizontal)
+    qtbot.waitUntil(lambda: other.view.viewport().height() > 200)
+    other.fit_to_view()
+    base = other.layout_result
+    frame = base.group_frames["o"]
+    header = other.view.mapFromScene(QPointF(frame.bounds.right - 14, frame.header.center[1]))
+    other.select_nodes(["z"])
+    qtbot.mouseClick(other.view.viewport(), Qt.MouseButton.LeftButton, pos=header)
+    assert other.selected_node_ids() == ["o"] and other.graph_group_items["o"]._selected
+    assert other.node_items["o"].group_title and other.view.text_resize._selected_item() is None
+    view_state = other.capture_page_view_state()
+    revision = engine.revision
+    assert _choose_graph_menu_action(other, header, "组内自动布局", qtbot, first=True)
+    result = other.layout_result
+    assert engine.revision == revision + 1 and other.graph == canvas.graph
+    assert result.nodes == canvas.layout_result.nodes and result.nodes["z"] == base.nodes["z"]
+    assert result.group_frames["o"].bounds.x == pytest.approx(frame.bounds.x)
+    assert result.group_frames["o"].bounds.y == pytest.approx(frame.bounds.y)
+    box, old = result.group_frames["m"].bounds, base.group_frames["m"].bounds
+    dx, dy = box.x - old.x, box.y - old.y
+    assert dx or dy
+    for key in ("m", "i", "a", "x", "y"):
+        assert result.nodes[key] == base.nodes[key].translated(dx, dy)
+    assert result.branches["x->y"] == base.branches["x->y"].translated(dx, dy)
+    assert other.capture_page_view_state()["center"] == pytest.approx(view_state["center"], abs=1)
+    assert other.zoom_factor == view_state["zoom"]
+    after = other.graph
+    other.auto_layout_graph_group("o")
+    assert engine.revision == revision + 1 and other.graph == after
+    assert engine.undo() and canvas.graph == other.graph == before
+    assert engine.redo() and canvas.graph == other.graph == after
+    other.auto_layout_graph()
+    assert not other.graph.positions
+    for key, parent in other.graph.parent_groups().items():
+        content = other.layout_result.group_frames[parent].body
+        child = other.layout_result.group_frames.get(key)
+        box = child.bounds if child else other.layout_result.nodes[key]
+        assert content.union(box) == content
+    assert not other.layout_result.group_frames["o"].bounds.intersects(other.layout_result.nodes["z"])
+
+
+def test_top_level_menu_arranges_roots_as_rigid_blocks_in_both_views(window, qtbot):
+    source = ('节点 o "外层"\n节点 m "中层"\n节点 i "登录方式"\n节点 a "密码"\n节点 b "短信"\n'
+              '节点 c "扫码"\n节点 x "帮助"\n节点 y "账号"\n节点 z "入口"\n节点 w "完成"\n'
+              '分组 o m y\n分组 m i x\n分组 i a b c\na -> b\nb -> c\ni -> x\nm -> y\nz -> o\no -> w')
+    canvas = _create_graph(window, source)
+    engine = canvas.engine
+    before = replace(canvas.graph, positions={
+        "a": (170, 250), "b": (50, 160), "c": (100, 175), "x": (270, 165), "y": (45, 105),
+        "z": (350, -110), "w": (-75, 65)})
+    engine.set_node_graph(engine.root_id, before)
+    assert window.documents.active.duplicate()
+    other = window.documents.active.canvas
+    window.host.editor.split_token(window.documents.active.id, Qt.Orientation.Horizontal)
+    qtbot.waitUntil(other.isVisible)
+    other.fit_to_view()
+    base = other.layout_result
+    viewport = other.capture_page_view_state()
+    revision = engine.revision
+    assert _choose_graph_menu_action(other, _node_point(other, "z"), "顶层自动布局", qtbot)
+    result = other.layout_result
+    assert result == canvas.layout_result and engine.revision == revision + 1
+    old = base.group_frames["o"].bounds
+    box = result.group_frames["o"].bounds
+    dx, dy = box.x - old.x, box.y - old.y
+    assert dx or dy
+    for key in ("o", "m", "i"):
+        assert result.group_frames[key].bounds == base.group_frames[key].bounds.translated(dx, dy)
+    for key in before.subtree_ids(["o"]):
+        assert result.nodes[key] == base.nodes[key].translated(dx, dy)
+    for key in ("a->b", "b->c", "i->x", "m->y"):
+        actual, expected = result.branches[key], base.branches[key].translated(dx, dy)
+        assert replace(actual, arrow=None) == replace(expected, arrow=None)
+        for point, translated in zip(actual.arrow, expected.arrow, strict=True):
+            assert point == pytest.approx(translated, abs=1e-9)
+    z, w = result.nodes["z"], result.nodes["w"]
+    assert z.bottom < box.y and box.bottom < w.y
+    assert (min(z.x, box.x, w.x), min(z.y, box.y, w.y)) == (
+        min(base.nodes["z"].x, old.x, base.nodes["w"].x), min(base.nodes["z"].y, old.y, base.nodes["w"].y))
+    assert other.capture_page_view_state()["center"] == pytest.approx(viewport["center"], abs=1)
+    assert other.zoom_factor == viewport["zoom"]
+    assert _choose_graph_menu_action(other, QPoint(3, 3), "顶层自动布局", qtbot)
+    assert engine.revision == revision + 1 and other.layout_result == result
+    assert engine.undo() and other.layout_result == canvas.layout_result == base
+    assert engine.redo() and other.layout_result == canvas.layout_result == result
+
+
+@pytest.mark.parametrize("source", ["", '节点 a "独立"', '节点 g "唯一组"\n节点 a "唯一成员"\n分组 g a'])
+def test_top_level_layout_requires_two_roots(window, qtbot, source):
+    canvas = _create_graph(window, source)
+    revision = canvas.engine.revision
+    assert not _choose_graph_menu_action(canvas, QPoint(4, 4), "顶层自动布局", qtbot)
+    canvas.auto_layout_graph_top_level()
+    assert canvas.engine.revision == revision
+
+
+def test_shift_drag_stacks_node_and_group_both_ways_and_updates_at_rest(window, qtbot):
+    source = ('节点 g "登录方式"\n节点 a "密码"\n节点 b "短信"\n节点 n "这是一张较宽的外部卡片"\n'
+              '节点 z "结束"\n分组 g a b\na -> b\nn -> z')
+    canvas = _create_graph(window, source)
+    view = canvas.view
+    engine = canvas.engine
+    before = replace(canvas.graph, groups=(GraphGroup("g", ("a", "b"), (335, 175)),),
+                     positions={"a": (25, 75), "b": (165, 100), "n": (465, 115), "z": (500, 240)})
+    engine.set_node_graph(engine.root_id, before)
+    canvas.fit_to_view()
+    left = Qt.MouseButton.LeftButton
+    shift = Qt.KeyboardModifier.ShiftModifier
+    group = canvas.layout_result.group_frames["g"].bounds
+    node = canvas.layout_result.nodes["n"]
+    start = _node_point(canvas, "g")
+    delta = QPointF(node.center[0] - group.right, node.center[1] - group.bottom + 25)
+    end = view.mapFromScene(view.mapToScene(start) + delta)
+    overlap = view.mapFromScene(QPointF(node.center[0] - 16, node.center[1]))
+    assert view.itemAt(overlap) == canvas.node_items["n"]
+    revision = engine.revision
+    qtbot.mouseClick(view.viewport(), left, pos=start)
+    assert canvas.graph == before and engine.revision == revision
+    _start_graph_drag(canvas, start, end)
+    assert view.itemAt(overlap) == canvas.graph_group_items["g"] and canvas.graph == before
+    qtbot.keyClick(view, Qt.Key.Key_Escape)
+    _release_graph_drag(canvas, end)
+    assert view.itemAt(overlap) == canvas.node_items["n"] and engine.revision == revision
+    _start_graph_drag(canvas, start, end)
+    _release_graph_drag(canvas, end)
+    grouped = canvas.graph
+    assert engine.revision == revision + 1 and grouped.groups == before.groups
+    assert view.itemAt(overlap) == canvas.graph_group_items["g"]
+    assert view.graph_group_at(overlap, include_body=True) == "g"
+    qtbot.mouseClick(view.viewport(), left, pos=overlap)
+    assert not canvas.selected_node_ids() and canvas.graph == grouped
+
+    opaque = _viewport_region(view, overlap, 4)
+    canvas.node_items["n"].hide()
+    assert _viewport_region(view, overlap, 4) == opaque
+    canvas.node_items["n"].show()
+    # 从仍然露出的半张卡片开始拖动，松手位置落在成员正文上。
+    exposed = view.mapFromScene(QPointF(node.right - 10, node.center[1]))
+    target = _node_point(canvas, "a")
+    assert view.itemAt(exposed) == canvas.node_items["n"]
+    end = target + exposed - _node_point(canvas, "n")
+    _start_graph_drag(canvas, exposed, end, modifiers=shift)
+    assert view.node_drag._group_destination.hint == "保持原层叠放"
+    qtbot.keyRelease(view, Qt.Key.Key_Shift)
+    assert view.node_drag._group_destination.key == "g" and canvas.graph_group_items["g"]._highlighted
+    qtbot.keyPress(view, Qt.Key.Key_Shift)
+    assert view.node_drag._group_destination.hint == "保持原层叠放" and not canvas.graph_group_items["g"]._highlighted
+    _release_graph_drag(canvas, end, modifiers=shift)
+    qtbot.keyRelease(view, Qt.Key.Key_Shift)
+    assert engine.revision == revision + 2 and canvas.graph.groups == before.groups
+    assert view.itemAt(target) == canvas.node_items["n"] and view.graph_group_at(target, include_body=True) is None
+    qtbot.mouseClick(view.viewport(), left, pos=target)
+    assert canvas.selected_node_ids() == ["n"]
+    opaque = _viewport_region(view, target, 6)
+    canvas.node_items["a"].hide()
+    assert _viewport_region(view, target, 6) == opaque
+    canvas.node_items["a"].show()
+    raised = canvas.graph
+    assert engine.undo() and canvas.graph == grouped and view.itemAt(overlap) == canvas.graph_group_items["g"]
+    assert engine.redo() and canvas.graph == raised and view.itemAt(target) == canvas.node_items["n"]
+
+
+def test_multiple_shift_drag_keeps_each_parent_and_sibling_order_in_split_view(window, qtbot):
+    source = ('节点 a "甲"\n节点 b "乙"\n节点 c "丙"\n节点 n "外部"\n节点 z "另一项"\n'
+              '节点 g "容器"\n分组 g a b c\n叠放 b a c n g z')
+    canvas = _create_graph(window, source)
+    engine = canvas.engine
+    before = replace(canvas.graph, positions={"a": (130, 55), "b": (55, 55), "c": (220, 60),
+                                              "n": (220, 260), "z": (50, 260)})
+    engine.set_node_graph(engine.root_id, before)
+    assert window.documents.active.duplicate()
+    other = window.documents.active.canvas
+    window.host.editor.split_token(window.documents.active.id, Qt.Orientation.Horizontal)
+    qtbot.waitUntil(other.isVisible)
+    other.fit_to_view()
+    other.select_nodes(["a", "b", "n"])
+    start = _node_point(other, "n")
+    end = _node_point(other, "b")
+    shift = Qt.KeyboardModifier.ShiftModifier
+    revision = engine.revision
+    base = other.layout_result
+    _start_graph_drag(other, start, end, modifiers=shift)
+    assert canvas.node_items["n"].zValue() < canvas.node_items["g"].zValue()
+    assert other.node_items["n"].zValue() > other.node_items["g"].zValue()
+    _release_graph_drag(other, end, modifiers=shift)
+    committed = other.graph
+    assert engine.revision == revision + 1 and committed == canvas.graph
+    assert committed.groups == before.groups and committed.nodes == before.nodes
+    assert committed.stacking_children() == {None: ["g", "z", "n"], "g": ["c", "b", "a"]}
+    dx = other.layout_result.nodes["n"].x - base.nodes["n"].x
+    dy = other.layout_result.nodes["n"].y - base.nodes["n"].y
+    for key in ("n", "a", "b"):
+        assert other.layout_result.nodes[key] == base.nodes[key].translated(dx, dy)
+    assert other.layout_result == canvas.layout_result
+    assert canvas.node_items["n"].zValue() > canvas.node_items["g"].zValue()
+    assert engine.undo() and canvas.graph == other.graph == before
+    assert engine.redo() and canvas.graph == other.graph == committed
+
+
+def test_opaque_group_body_hides_edges_handles_and_nodes_from_picking(window, qtbot):
+    source = ('节点 a "成员"\n节点 n "遮住的节点"\n节点 z "终点"\n节点 p "拖入项"\n节点 g "组"\n'
+              '分组 g a\nn -> z')
+    canvas = _create_graph(window, source)
+    view = canvas.view
+    edge = GraphEdge("n", "z")
+    graph = replace(canvas.graph, groups=(GraphGroup("g", ("a",), (310, 220)),),
+                    positions={"a": (5, 5), "n": (112, 24), "z": (440, 24), "p": (465, 160)})
+    canvas.engine.set_node_graph(canvas.engine.root_id, graph)
+    canvas.fit_to_view()
+    hidden = _node_point(canvas, "n")
+    line = view.mapFromScene(canvas.branch_items[edge.key].path().pointAtPercent(0.2))
+    assert view.itemAt(hidden) == view.itemAt(line) == canvas.graph_group_items["g"]
+    assert canvas.graph_edge_at(line) is None
+    assert not canvas._graph_edges_in_rect(QRect(line - QPoint(2, 2), line + QPoint(2, 2)))
+    controls = view.graph_edge_edit
+    canvas.select_nodes([])
+    background = _viewport_region(view, line, 4)
+    controls.select_edge(edge)
+    assert not any(handle.moving_source for handle in controls._handles())
+    assert _viewport_region(view, line, 4) == background
+    left = Qt.MouseButton.LeftButton
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, hidden - QPoint(20, 10), left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, hidden + QPoint(20, 10), buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, hidden + QPoint(20, 10), left)
+    assert not canvas.selected_node_ids() and not controls.selected_edges
+    qtbot.mouseDClick(view.viewport(), left, pos=hidden)
+    qtbot.mouseRelease(view.viewport(), left, pos=hidden)
+    added = canvas.editor.node_id
+    assert added != "n" and canvas.graph.parent_groups()[added] == "g"
+    canvas.finish_edit(commit=False)
+    assert canvas.engine.undo() and canvas.graph == graph
+    canvas.apply_graph_text(format_graph_text(graph.raised_nodes(["n"])))
+    assert view.itemAt(hidden) == canvas.node_items["n"]
+    _start_graph_drag(canvas, _node_point(canvas, "p"), hidden)
+    assert view.node_drag._group_destination.key is None
+    _release_graph_drag(canvas, hidden)
+    assert "p" not in canvas.graph.parent_groups()
+
+
+def test_stack_order_roundtrips_file_text_and_both_clipboards(window, tmp_path):
+    source = '节点 a "甲"\n节点 b "乙"\n节点 g "组"\n节点 n "外"\n分组 g a b'
+    canvas = _create_graph(window, source)
+    legacy = canvas.graph.to_record()
+    assert legacy["version"] == 7 and "stack_order" not in legacy["data"]
+    assert NodeGraph.from_data(legacy["data"], version=7).stacking_children() == {None: ["g", "n"], "g": ["a", "b"]}
+    canvas.apply_graph_text(source + "\n叠放 b a n g")
+    graph = canvas.graph
+    assert graph.stacking_children() == {None: ["n", "g"], "g": ["b", "a"]}
+    assert [node.id for node in graph.nodes] == ["a", "b", "g", "n"]
+    assert parse_graph_text(format_graph_text(graph)).stack_order == graph.stack_order
+    archive = tmp_path / "叠放.mindmap"
+    save_document(canvas.engine.document, archive)
+    assert MindMapEngine(load_document(archive)).node_graph(canvas.engine.root_id) == graph
+    folder = tmp_path / "目录图"
+    save_directory(canvas.engine.document, folder)
+    assert MindMapEngine(load_directory(folder)).node_graph(canvas.engine.root_id) == graph
+    canvas.select_nodes(["n", "g"])
+    canvas.copy()
+    clipboard = QApplication.clipboard()
+    text = clipboard.text()
+    for plain in (False, True):
+        if plain:
+            mime = QMimeData()
+            mime.setText(text)
+            clipboard.setMimeData(mime)
+        a, b, g, n = canvas.paste()
+        scopes = canvas.graph.stacking_children()
+        assert scopes[None][-2:] == [n, g] and scopes[g] == [b, a] and scopes["g"] == ["b", "a"]
+    # 单独取出前方组的一个成员，粘贴后仍位于原来在它后方的普通节点之上。
+    canvas.select_nodes(["a", "n"])
+    canvas.copy()
+    partial = parse_graph_text(clipboard.text())
+    assert not partial.groups and partial.stacking_children()[None] == ["n", "a"]
+
+
+def test_transparent_graph_image_in_front_covers_group_title(window):
+    canvas = _create_graph(window, '节点 a "成员"\n节点 g "登录方式"\n分组 g a')
+    engine = canvas.engine
+    image_id = engine.add_graph_image_node(engine.root_id, "g", b'<svg xmlns="http://www.w3.org/2000/svg" '
+                                          b'width="160" height="120"/>', width=160)
+    title = canvas.layout_result.nodes["g"]
+    group = canvas.layout_result.group_frames["g"].bounds
+    graph = replace(canvas.graph, positions={key: (box.x, box.y) for key, box in canvas.layout_result.nodes.items()})
+    engine.set_node_graph(engine.root_id, replace(graph, positions={**graph.positions, image_id: (group.x, group.y)}))
+    canvas.fit_to_view()
+    canvas.select_nodes([])
+    view = canvas.view
+    point = view.mapFromScene(QPointF(*title.center))
+    assert view.itemAt(point) == canvas.node_items[image_id]
+    pixels = QImage(view.viewport().size(), QImage.Format.Format_ARGB32)
+    view.viewport().render(pixels)
+    assert {pixels.pixelColor(point + QPoint(dx, dy)).name() for dx in range(-6, 7) for dy in range(-4, 5)} == {
+        canvas.scene.backgroundBrush().color().name()}
+
+
+def test_group_header_body_shortcuts_and_member_creation(window, qtbot):
+    canvas = _create_graph(window, THREE_NODES)
+    canvas.engine.set_node_graph(canvas.engine.root_id, replace(
+        canvas.graph, positions={"a": (-140, 0), "b": (0, 0), "c": (360, 0)}))
+    canvas.fit_to_view()
+    view = canvas.view
+    boxes = canvas.layout_result.nodes
+    region = boxes["a"].union(boxes["b"])
+    start = view.mapFromScene(QPointF(region.x - 7, region.y - 7))
+    end = view.mapFromScene(QPointF(region.right + 7, region.bottom + 7))
+    left = Qt.MouseButton.LeftButton
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left)
+    assert canvas.selected_node_ids() == ["a", "b"]
+    qtbot.keyClick(view, Qt.Key.Key_G, Qt.KeyboardModifier.ControlModifier)
+    group, = canvas.graph.groups
+    assert canvas.editor.node_id == group.id
+    canvas.editor.setPlainText("登录方式")
+    qtbot.keyClick(view, Qt.Key.Key_Return)
+    assert canvas.document_view.nodes[group.id].text == "登录方式" and canvas.editor is None
+    canvas._set_graph_group_size(group.id, (380, 290))
+    canvas.fit_to_view()
+    name = _node_point(canvas, group.id)
+    qtbot.mouseDClick(view.viewport(), left, pos=name)
+    qtbot.mouseRelease(view.viewport(), left, pos=name)
+    assert canvas.editor.node_id == group.id and canvas.editor.textCursor().selectedText() == "登录方式"
+    qtbot.keyClick(view, Qt.Key.Key_Escape)
+    f = canvas.layout_result.group_frames[group.id]
+    base = canvas.layout_result.nodes.copy()
+    region = base["a"].union(base["b"])
+    start = view.mapFromScene(QPointF(region.x - 5, region.y - 5))
+    end = view.mapFromScene(QPointF(region.right + 5, region.bottom + 5))
+    assert view.graph_group_at(start, include_body=True) == group.id
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left)
+    assert canvas.selected_node_ids() == ["a", "b"]
+    title = view.mapFromScene(QPointF(f.bounds.right - 14, f.header.center[1]))
+    end = title + QPoint(-28, 17)
+    _start_graph_drag(canvas, title, end)
+    _release_graph_drag(canvas, end)
+    dx = canvas.layout_result.nodes["a"].x - base["a"].x
+    dy = canvas.layout_result.nodes["a"].y - base["a"].y
+    assert dx and dy and canvas.layout_result.nodes["b"] == base["b"].translated(dx, dy)
+    assert canvas.layout_result.nodes["c"] == base["c"]
+    f = canvas.layout_result.group_frames[group.id]
+    point = view.mapFromScene(QPointF(f.bounds.right - 35, f.bounds.bottom - 35))
+    assert view.graph_group_at(point) is None and view.graph_group_at(point, include_body=True) == group.id
+    expected = view.mapToScene(point)
+    qtbot.mouseDClick(view.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    qtbot.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    member = canvas.editor.node_id
+    canvas.finish_edit(commit=True)
+    assert canvas.graph.parent_groups()[member] == group.id and not canvas.graph.edges
+    assert canvas.graph.positions[member] == pytest.approx((expected.x(), expected.y()), abs=2)
+    f = canvas.layout_result.group_frames[group.id]
+    point = view.mapFromScene(QPointF(f.bounds.x + 8, f.body.center[1]))
+    assert _choose_graph_menu_action(canvas, point, "新建组内节点", qtbot)
+    assert canvas.graph.parent_groups()[canvas.editor.node_id] == group.id
+    canvas.finish_edit(commit=True)
+    window.activateWindow()
+    qtbot.waitUntil(window.isActiveWindow)
+    canvas.fit_to_view()
+    frame = canvas.layout_result.group_frames[group.id]
+    rim = view.mapFromScene(QPointF(frame.bounds.x, frame.body.center[1]))
+    qtbot.mouseClick(view.viewport(), left, pos=rim)
+    assert canvas.selected_node_ids() == [group.id] and canvas.action("graph_ungroup").isEnabled()
+    qtbot.keyClick(view, Qt.Key.Key_F2)
+    assert canvas.editor is not None and canvas.editor.node_id == group.id
+    qtbot.keyClick(view, Qt.Key.Key_Escape)
+    qtbot.keyClick(view, Qt.Key.Key_G, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert not canvas.graph.groups and group.id not in canvas.document_view.nodes
+    assert member in canvas.document_view.nodes
+
+
+def test_right_click_on_one_of_two_selected_groups_can_group_both(window, qtbot):
+    canvas = _create_graph(window, '节点 x "一组"\n节点 y "二组"\n分组 x\n分组 y')
+    canvas.select_nodes(["x", "y"])
+    canvas.fit_to_view()
+    assert _choose_graph_menu_action(canvas, _node_point(canvas, "x"), "编组", qtbot)
+    group = canvas.editor.node_id
+    assert canvas.graph.parent_groups() == {"x": group, "y": group}
+
+
+def test_empty_and_single_group_layout_preserves_a_distant_viewport(window, qtbot):
+    canvas = _create_graph(window, '节点 o "空组"\n节点 g "单成员组"\n节点 a "成员"\n分组 o\n分组 g a')
+    initial = replace(canvas.graph, positions={"o": (-200, 50), "g": (0, 0), "a": (3500, 1600)})
+    canvas.engine.set_node_graph(canvas.engine.root_id, initial)
+    canvas.fit_to_view()
+    revision = canvas.engine.revision
+    assert not _choose_graph_menu_action(canvas, _node_point(canvas, "o"), "组内自动布局", qtbot, first=True)
+    canvas.auto_layout_graph_group("o")
+    assert canvas.engine.revision == revision
+    canvas.reset_zoom()
+    canvas.view.centerOn(QPointF(*canvas.layout_result.nodes["a"].center))
+    state = canvas.capture_page_view_state()
+    bounds = canvas.layout_result.group_frames["g"].bounds
+    canvas.auto_layout_graph_group("g")
+    rect = canvas.layout_result.group_frames["g"].bounds
+    assert (rect.x, rect.y) == (bounds.x, bounds.y) and rect.width < bounds.width and rect.height < bounds.height
+    assert canvas.graph.positions["a"] != initial.positions["a"]
+    assert canvas.capture_page_view_state()["center"] == pytest.approx(state["center"], abs=1)
+    assert canvas.zoom_factor == state["zoom"]
+    canvas.auto_layout_graph_group("g")
+    assert canvas.engine.revision == revision + 1
+    assert canvas.engine.undo() and canvas.graph == initial
+
+
+def test_group_layout_can_expand_across_an_external_node(window):
+    source = (FOUR_NODES + '\n节点 g "内组"\n节点 o "外组"\n分组 g a b c\n分组 o g\na -> b\nb -> c')
+    canvas = _create_graph(window, source)
+    positions = {"g": (30, 75), "o": (0, 0), **dict.fromkeys("abc", (60, 140))}
+    canvas.engine.set_node_graph(canvas.engine.root_id, replace(canvas.graph, positions=positions))
+    before = canvas.layout_result.group_frames
+    inner = before["g"].bounds
+    positions["d"] = (inner.x + 12, inner.bottom + 1)
+    canvas.engine.set_node_graph(canvas.engine.root_id, replace(canvas.graph, positions=positions))
+    outside = canvas.layout_result.nodes["d"]
+    assert not inner.intersects(outside)
+    canvas.auto_layout_graph_group("g")
+    after = canvas.layout_result.group_frames
+    assert after["g"].bounds.intersects(outside) and canvas.layout_result.nodes["d"] == outside
+    assert (after["g"].bounds.x, after["g"].bounds.y) == (inner.x, inner.y)
+    assert after["o"].bounds.height > before["o"].bounds.height
+
+
+def test_nested_group_drag_previews_innermost_parent_top_level_and_cycle(window, qtbot):
+    canvas = _create_graph(window, '节点 o "外层"\n节点 g "登录方式"\n节点 a "密码"\n节点 z "短信"\n分组 o g\n分组 g a')
+    groups = (GraphGroup("o", ("g",), (480, 350)), GraphGroup("g", ("a",), (200, 145)))
+    initial = replace(canvas.graph, groups=groups, positions={"o": (0, 0), "g": (65, 110),
+                                                               "a": (95, 192), "z": (625, 215)})
+    canvas.engine.set_node_graph(canvas.engine.root_id, initial)
+    canvas.fit_to_view()
+    view = canvas.view
+    inner = canvas.layout_result.group_frames["g"].bounds
+    target = view.mapFromScene(QPointF(inner.right - 12, inner.bottom - 12))
+    qtbot.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=_node_point(canvas, "o"))
+    _start_graph_drag(canvas, _node_point(canvas, "o"), target)
+    assert view.node_drag.graph_drop_blocked and "后代" in view.node_drag._group_destination.hint
+    qtbot.keyClick(view, Qt.Key.Key_Escape)
+    _release_graph_drag(canvas, target)
+    assert canvas.graph == initial
+    _start_graph_drag(canvas, _node_point(canvas, "z"), target)
+    assert view.node_drag._group_destination.hint == "松开加入『登录方式』"
+    assert [key for key, item in canvas.graph_group_items.items() if item._highlighted] == ["g"]
+    _release_graph_drag(canvas, target)
+    assert canvas.graph.parent_groups()["z"] == "g"
+    outer = canvas.layout_result.group_frames["o"]
+    target = view.mapFromScene(QPointF(outer.bounds.right - 22, outer.body.y + 18))
+    _start_graph_drag(canvas, _node_point(canvas, "z"), target)
+    assert view.node_drag._group_destination.hint == "松开移到父组"
+    _release_graph_drag(canvas, target)
+    assert canvas.graph.parent_groups()["z"] == "o"
+    canvas.fit_to_view()
+    target = view.viewport().rect().bottomRight() - QPoint(6, 6)
+    _start_graph_drag(canvas, _node_point(canvas, "z"), target)
+    assert view.node_drag._group_destination.hint == "松开移到顶层"
+    _release_graph_drag(canvas, target)
+    assert "z" not in canvas.graph.parent_groups()
+
+
 def test_graph_node_drag_uses_frozen_topmost_boxes_and_keeps_empty_group(window):
     source = FOUR_NODES + '\n节点 e "甲"\n节点 f "乙"\n分组 g1 "左组" a b\n分组 g2 "右组" c d'
     canvas = _create_graph(window, source)
-    positions = {"a": (0, 0), "b": (180, 130), "c": (90, 40), "d": (255, 160), "e": (0, 250), "f": (170, 250)}
+    positions = {"a": (0, 0), "b": (25, 130), "c": (90, 40), "d": (255, 160), "e": (0, 250), "f": (170, 250)}
     graph = replace(canvas.graph, positions=positions)
     canvas.engine.set_node_graph(canvas.engine.root_id, graph)
     canvas.reset_zoom()
@@ -266,13 +748,13 @@ def test_graph_node_drag_uses_frozen_topmost_boxes_and_keeps_empty_group(window)
     end = canvas.view.mapFromScene(QPointF(42, 100))
     _start_graph_drag(canvas, _node_point(canvas, "e"), end)
     assert canvas.layout_result.group_frames == frames and canvas.graph == graph
-    assert all(item._highlighted for item in canvas.graph_group_items.values())
+    assert [key for key, item in canvas.graph_group_items.items() if item._highlighted] == ["g1"]
     _release_graph_drag(canvas, end)
-    assert canvas.graph.groups == (GraphGroup("g1", ("a", "b", "e")), GraphGroup("g2", ("c", "d", "f")))
+    assert canvas.graph.groups == (GraphGroup("g1", ("a", "b", "e", "f")), GraphGroup("g2", ("c", "d")))
     assert canvas.engine.revision == revision + 1
     assert not any(item._highlighted for item in canvas.graph_group_items.values())
 
-    canvas.select_nodes(["e"])
+    canvas.select_nodes(["e", "f"])
     outside = canvas.view.mapFromScene(QPointF(350, 245))
     _start_graph_drag(canvas, _node_point(canvas, "e"), outside)
     _release_graph_drag(canvas, outside)
@@ -340,6 +822,75 @@ def test_graph_group_clipboard_rebuilds_complete_groups_for_native_and_text_past
     assert [group.id for group in target.graph.groups] == ids and "g1" in target.document_view.nodes
 
 
+def test_group_origins_survive_reopen_clipboards_and_explicit_edge_edits(window, tmp_path, qtbot):
+    canvas = _create_graph(window, FOUR_NODES + "\na -> c\nb -> c")
+    initial_edges = canvas.graph.edges
+    canvas.select_nodes(["a", "b"])
+    g = canvas.create_graph_group()
+    canvas.finish_edit(commit=False)
+    visible = GraphEdge(g, "c")
+    grouped = canvas.graph
+    assert grouped.edges == (visible,) and grouped.edge_origins == {visible: initial_edges}
+    assert set(canvas.branch_items) == {visible.key}
+    assert not any(isinstance(child, QGraphicsSimpleTextItem) and child.text() == "2 条"
+                   for child in canvas.branch_items[visible.key].childItems())
+    folder = tmp_path / "还原组内连线"
+    save_directory(canvas.engine.document, folder)
+    archive = tmp_path / "原端点.mindmap"
+    save_document(canvas.engine.document, archive)
+    assert MindMapEngine(load_document(archive)).node_graph(canvas.engine.root_id) == grouped
+    assert window.open_path(folder)
+    canvas = window.application.canvas
+    canvas.open_node_graph(canvas.engine.root_id)
+    assert canvas.graph == grouped
+    assert canvas.graph.with_group_parents({"a": None}).edges == (initial_edges[0], visible)
+    canvas.select_nodes([g])
+    canvas.ungroup_graph_node()
+    assert canvas.graph.edges == initial_edges
+    assert canvas.engine.undo() and canvas.graph == grouped
+    canvas.select_nodes(["a", "c"])
+    canvas.copy()
+    partial = parse_graph_text(QApplication.clipboard().text())
+    assert not partial.groups and partial.edges == (GraphEdge("a", "c"),)
+    canvas.select_nodes([g, "c"])
+    canvas.copy()
+    text = QApplication.clipboard().text()
+    assert parse_graph_text(text).edge_origins == {visible: initial_edges}
+    for plain in (False, True):
+        if plain:
+            mime = QMimeData()
+            mime.setText(text)
+            QApplication.clipboard().setMimeData(mime)
+        a, b, c, group = canvas.paste()
+        assert canvas.graph.edge_origins[GraphEdge(group, c)] == (GraphEdge(a, c), GraphEdge(b, c))
+        canvas.select_nodes([group])
+        canvas.ungroup_graph_node()
+        assert GraphEdge(a, c) in canvas.graph.edges and GraphEdge(b, c) in canvas.graph.edges
+        assert group not in canvas.document_view.nodes
+        assert canvas.engine.undo() and canvas.engine.undo() and canvas.graph == grouped
+    canvas.fit_to_view()
+    qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=_edge_point(canvas, visible))
+    assert canvas.view.graph_edge_edit.selected_edge == visible
+    qtbot.keyClick(canvas.view, Qt.Key.Key_Delete)
+    canvas.select_nodes([g])
+    canvas.ungroup_graph_node()
+    assert not canvas.graph.edges and not canvas.graph.edge_origins and g not in canvas.document_view.nodes
+    assert canvas.engine.undo() and canvas.engine.undo() and canvas.graph == grouped
+    replacement = GraphEdge(g, "d")
+    canvas.fit_to_view()
+    qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=_edge_point(canvas, visible))
+    _drag_edge(canvas, _endpoint_point(canvas, visible), _node_point(canvas, "d"))
+    canvas.select_nodes([g])
+    canvas.ungroup_graph_node()
+    assert canvas.graph.edges == (replacement,) and g in canvas.document_view.nodes and not canvas.graph.edge_origins
+    legacy = replace(grouped, edge_origins={}).to_record()
+    assert legacy["version"] == 7
+    canvas.engine.set_node_graph(canvas.engine.root_id, NodeGraph.from_data(legacy["data"], version=7))
+    canvas.select_nodes([g])
+    canvas.ungroup_graph_node()
+    assert canvas.graph.edges == (visible,) and g in canvas.document_view.nodes
+
+
 def test_graph_group_edges_accept_peer_nodes_and_reject_cross_scope_drag_and_reconnect(window):
     canvas = _create_graph(window, FOUR_NODES + '\n节点 g1 "模块"\n分组 g1 a b')
     canvas.fit_to_view()
@@ -363,6 +914,7 @@ def test_graph_group_edges_accept_peer_nodes_and_reject_cross_scope_drag_and_rec
     canvas.select_nodes(["c"])
     end = canvas.view.mapFromScene(QPointF(*layout.group_frames["g1"].body.center))
     _start_graph_drag(canvas, _node_point(canvas, "c"), end)
+    assert canvas.view.node_drag.graph_drop_blocked and "无法转接" in canvas.view.node_drag._group_destination.hint
     _release_graph_drag(canvas, end)
     assert errors and "无法转接" in errors[-1]
     assert canvas.graph == before and canvas.layout_result == layout and canvas.engine.revision == revision
@@ -371,6 +923,9 @@ def test_graph_group_edges_accept_peer_nodes_and_reject_cross_scope_drag_and_rec
     added = canvas.add_graph_node(connect_from_selection=True)
     canvas.finish_edit(commit=True)
     assert canvas.graph.parent_groups()[added] == "g1" and GraphEdge("a", added) in canvas.graph.edges
+    canvas.fit_to_view()
+    _drag_edge(canvas, _outlet_point(canvas, "g1"), _node_point(canvas, "d"))
+    assert GraphEdge("g1", "d") in canvas.graph.edges
 
 
 def test_graph_edge_dialog_lists_targets_in_the_selected_source_scope(window):

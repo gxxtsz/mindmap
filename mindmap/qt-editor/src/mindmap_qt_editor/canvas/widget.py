@@ -201,6 +201,8 @@ class MindMapWidget(
         self.toolbar.setVisible(toolbar)
         self.node_items, self.branch_items = {}, {}
         self.graph_group_items = {}
+        self._graph_stacking = None
+        self._group_menu_point = None
         self.editor = None
         self.focus_id = None
         self._refreshing = False
@@ -564,11 +566,16 @@ class MindMapWidget(
             ("remove_attachment", "移除附件", None, lambda w: w.remove_node_attachment(), True),
             ("graph_text", "编辑图文本…", None, lambda w: w.edit_graph_text(), False),
             ("graph_add_edge", "添加连线…", None, lambda w: w.choose_graph_edge(), True),
-            ("graph_create_group", "创建分组…", None, lambda w: w.create_graph_group(), True),
+            ("graph_create_group", "编组", None, lambda w: w.create_graph_group(), True),
             ("graph_ungroup", "解除分组", None, lambda w: w.ungroup_graph_node(), True),
+            ("graph_layout_group", "组内自动布局", None, lambda w: w.auto_layout_graph_group(w.current_node_id()), True),
+            ("graph_add_member", "新建组内节点", None,
+             lambda w: w.add_graph_group_member(w.current_node_id(), w._group_menu_point), True),
+            ("graph_delete_group", "删除整组…", None, lambda w: w.delete_selected(), True),
             ("graph_reset_group_size", "恢复自动大小", None, lambda w: w._set_graph_group_size(
                 w.current_node_id(), None), True),
-            ("graph_auto_layout", "DOT 自动布局", None, lambda w: w.auto_layout_graph(), True),
+            ("graph_auto_layout", "整图自动布局", None, lambda w: w.auto_layout_graph(), True),
+            ("graph_layout_top_level", "顶层自动布局", None, lambda w: w.auto_layout_graph_top_level(), True),
             ("graph_remove", "删除此图…", None, lambda w: w.confirm_remove_graph(), True),
         ]
         for key, label, shortcut, callback, mutating in definitions:
@@ -1449,16 +1456,30 @@ class MindMapWidget(
             else:
                 self.layout_registry.layout(page, sizes)
 
-    def context_menu(self, global_position, *, on_canvas: bool = False):
+    def context_menu(self, global_position, *, on_canvas: bool = False, group_id: str | None = None,
+                     node_id: str | None = None):
         """在屏幕全局位置显示菜单。鼠标命中背景时传 on_canvas=True，仅显示页面级动作。
 
-        默认按当前选择区分单节点及多选，键盘可直接调用。复用原动作及权限。关闭后
-        释放临时菜单和子菜单，动作仍由画布持有。调用需在存活画布的 GUI 线程执行。
+        默认使用当前选择。传入 group_id 时，局部操作作用于点中的组，同层多选可
+        继续编组。关闭后释放临时菜单与子菜单。调用需在存活画布的 GUI 线程执行。
         """
+        grouping = ()
+        if group_id is not None:
+            if self.is_node_selected(group_id) and self._actions["graph_create_group"].isEnabled():
+                grouping = tuple(self.selected_node_ids())
+            self.select_nodes([group_id])
         menu = QMenu(self)
         try:
-            for title, keys in self._context_menu_groups(on_canvas or not self.selection_count):
+            if self.graph is not None and not on_canvas:
+                pos = self.view.mapToScene(self.view.viewport().mapFromGlobal(global_position))
+                self._group_menu_point = (pos.x(), pos.y())
+            for title, keys in self._context_menu_groups(on_canvas or not self.selection_count, node_id=node_id):
                 actions = [self._actions[key] for key in keys if self._actions[key].isVisible()]
+                if grouping and "graph_ungroup" in keys:
+                    # 右键所点组仍可单独重排，同层多选也保留编组入口。
+                    action = QAction(self._actions["graph_create_group"].text(), menu)
+                    action.triggered.connect(lambda: self.call(lambda: self.create_graph_group(grouping)))
+                    actions.insert(0, action)
                 if not actions:
                     continue
                 if title:
@@ -1469,12 +1490,13 @@ class MindMapWidget(
                     menu.addActions(actions)
             menu.exec(global_position)
         finally:
+            self._group_menu_point = None
             if isValid(menu):
                 menu.deleteLater()
 
-    def _context_menu_groups(self, on_canvas):
+    def _context_menu_groups(self, on_canvas, *, node_id=None):
         if self.graph is not None:
-            return self._graph_context_menu_groups(on_canvas)
+            return self._graph_context_menu_groups(on_canvas, node_id)
         if on_canvas:
             groups = [
                 ("", ("fit", "center", "reset_zoom", "zoom_in", "zoom_out")),

@@ -1,6 +1,7 @@
 """节点图的有向关系和持久状态，供引擎、文本编解码和布局共用。"""
 
 import re
+from collections import defaultdict
 from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from itertools import count
@@ -14,6 +15,8 @@ GRAPH_ATTACHMENT_VERSION = 4
 GRAPH_IMAGE_VERSION = 5
 LEGACY_GRAPH_GROUP_VERSION = 6
 GRAPH_GROUP_VERSION = 7
+GRAPH_EDGE_ORIGIN_VERSION = 8
+GRAPH_STACK_VERSION = 9
 # 滚动条的原生范围为有符号整数，限制持久坐标以预留 400% 缩放和完整视口余量。
 _MAX_GRAPH_COORDINATE = 100_000_000
 
@@ -60,6 +63,10 @@ class GraphEdge:
         """产生布局图元的稳定键；节点标识语法排除了箭头中的大于号。"""
         return f"{self.source}->{self.target}"
 
+    def remap(self, node_ids: Mapping[str, str]) -> "GraphEdge":
+        """用粘贴时分配的新标识重建两端，保留方向。"""
+        return GraphEdge(node_ids[self.source], node_ids[self.target])
+
 
 @dataclass(frozen=True, slots=True)
 class GraphGroup:
@@ -92,6 +99,87 @@ class NodeGraph:
     edges: tuple[GraphEdge, ...] = ()
     positions: dict[str, Point] = field(default_factory=dict)
     groups: tuple[GraphGroup, ...] = ()
+    # 只为发生转接的可见线保存原始端点。同一束里可以同时含有用户直接连到组上的线。
+    edge_origins: dict[GraphEdge, tuple[GraphEdge, ...]] = field(default_factory=dict)
+    # 从后向前的叠放顺序，未显式排列的新增节点接在末尾。只在同一直接父层内比较。
+    stack_order: tuple[str, ...] = ()
+
+    def stacked_ids(self) -> tuple[str, ...]:
+        """返回完整的叠放顺序，未显式排序的节点依声明顺序续在末尾。"""
+        ordered = set(self.stack_order)
+        return (*self.stack_order, *(node.id for node in self.nodes if node.id not in ordered))
+
+    def stacking_children(self) -> dict[str | None, list[str]]:
+        """各父层从后向前的直属对象，顶层用 None 表示。"""
+        parents = self.parent_groups()
+        children = defaultdict(list)
+        for key in self.stacked_ids():
+            children[parents.get(key)].append(key)
+        return dict(children)
+
+    def stacking_walk(self) -> Iterable[tuple[str, str]]:
+        """从后向前遍历整图，每个组在其成员之前和之后各产生一次事件。"""
+        children = self.stacking_children()
+        groups = {group.id for group in self.groups}
+        pending = [(key, False) for key in reversed(children.get(None, ()))]
+        while pending:
+            key, closing = pending.pop()
+            if closing:
+                yield "title", key
+            elif key in groups:
+                yield "frame", key
+                pending.append((key, True))
+                pending.extend((child, False) for child in reversed(children.get(key, ())))
+            else:
+                yield "node", key
+
+    def with_stack_order(self, order: Iterable[str]) -> "NodeGraph":
+        updated = replace(self, stack_order=tuple(order))
+        default = replace(self, stack_order=())
+        if updated.stacking_children() == default.stacking_children():
+            updated = default
+        return self if updated.stack_order == self.stack_order else updated
+
+    def raised_nodes(self, keys: Iterable[str]) -> "NodeGraph":
+        """把拖动根提到各自父层的前方，keys 按拖动前的绘制顺序传入。"""
+        keys = tuple(keys)
+        selected = set(keys)
+        order = self.stacked_ids()
+        parents = self.parent_groups()
+        scopes = defaultdict(list)
+        for key in order:
+            if key not in selected:
+                scopes[parents.get(key)].append(key)
+        for key in keys:
+            scopes[parents.get(key)].append(key)
+        reordered = {scope: iter(siblings) for scope, siblings in scopes.items()}
+        raised = tuple(next(reordered[parents.get(key)]) for key in order)
+        return self if raised == order else self.with_stack_order(raised)
+
+    def original_edges(self) -> Iterable[GraphEdge]:
+        """按可见线的声明顺序遍历实际来源，普通线直接使用其自身端点。"""
+        for edge in self.edges:
+            yield from self.edge_origins.get(edge, (edge,))
+
+    def project_edges(self, originals: Iterable[GraphEdge]) -> "NodeGraph":
+        """按当前分组生成唯一的同层连线，同时记住以后可以还原的端点。"""
+        parents = self.parent_groups()
+        bundles: dict[GraphEdge, list[GraphEdge]] = {}
+        for origin in originals:
+            bundles.setdefault(_project_edge(origin, parents), []).append(origin)
+        return replace(self, edges=tuple(bundles), edge_origins={
+            edge: tuple(origins) for edge, origins in bundles.items() if origins != [edge]})
+
+    def append_fragment(self, fragment: "NodeGraph", nodes: tuple[GraphNode, ...],
+                        mapping: Mapping[str, str]) -> "NodeGraph":
+        """追加已分配新标识及附页绑定的节点，统一重映射可见线、来源和成员。"""
+        origins = {edge.remap(mapping): tuple(item.remap(mapping) for item in items)
+                   for edge, items in fragment.edge_origins.items()}
+        updated = replace(self, nodes=(*self.nodes, *nodes),
+                       edges=(*self.edges, *(edge.remap(mapping) for edge in fragment.edges)),
+                       groups=(*self.groups, *(group.remap(mapping) for group in fragment.groups)),
+                       edge_origins={**self.edge_origins, **origins})
+        return updated.with_stack_order((*self.stacked_ids(), *(mapping[key] for key in fragment.stacked_ids())))
 
     def with_content(self, nodes: tuple[GraphNode, ...], edges: tuple[GraphEdge, ...]) -> "NodeGraph":
         """替换节点和连线，按仍存在的局部 ID 保留手动位置、绑定、附件和分组。
@@ -109,12 +197,21 @@ class NodeGraph:
         )
         groups = tuple(replace(group, member_ids=tuple(key for key in group.member_ids if key in ids))
                        for group in self.groups if group.id in ids)
-        return replace(self, nodes=nodes, edges=edges, groups=groups,
-                       positions={key: point for key, point in self.positions.items() if key in ids})
+        updated = replace(self, nodes=nodes, groups=groups, stack_order=tuple(k for k in self.stack_order if k in ids),
+                          positions={key: point for key, point in self.positions.items() if key in ids})
+        if not self.edge_origins:
+            return replace(updated, edges=edges)
+        return updated.project_edges(origin for edge in edges for origin in self.edge_origins.get(edge, (edge,))
+                                     if origin.source in ids and origin.target in ids)
 
     def parent_groups(self) -> dict[str, str]:
         """返回直接成员到父组的映射。顶层节点没有条目，结果可由调用方独立使用。"""
         return {key: group.id for group in self.groups for key in group.member_ids}
+
+    def top_level_ids(self) -> tuple[str, ...]:
+        """按布局使用的声明顺序返回顶层节点和组。"""
+        parents = self.parent_groups()
+        return tuple(node.id for node in self.nodes if node.id not in parents)
 
     def subtree_ids(self, roots: Iterable[str]) -> set[str]:
         """返回指定节点及其分组后代的局部标识集合，重复选择同一分支只计一次。"""
@@ -155,7 +252,7 @@ class NodeGraph:
         groups = tuple(replace(group, member_ids=(
             *(key for key in group.member_ids if key not in moved), *incoming.get(group.id, ()),
         )) for group in self.groups)
-        return replace(self, groups=groups, edges=promote_graph_edges(self.edges, parents))
+        return replace(self, groups=groups).project_edges(self.original_edges())
 
     def to_data(self) -> dict:
         """编码为独立 JSON 对象，省略默认值、空附件和空分组表。
@@ -186,6 +283,12 @@ class NodeGraph:
                 "positions": {key: list(point) for key, point in self.positions.items()},
                 "hidden_node_ids": [],
             }
+            if self.stack_order:
+                data["stack_order"] = list(self.stack_order)
+            if self.edge_origins:
+                data["edge_origins"] = [
+                    [edge.source, edge.target, [[item.source, item.target] for item in origins]]
+                    for edge, origins in self.edge_origins.items()]
             if not isinstance(self.groups, tuple):
                 raise MindMapError("图分组必须以元组提供")
             if self.groups:
@@ -205,11 +308,15 @@ class NodeGraph:
     def to_record(self) -> dict:
         """为原生图写入满足全部字段的最低版本，并返回独立记录。
 
-        可连线的分组需要版本七，图片节点需要版本五，附件需要版本四，
+        转接线来源需要版本八，可连线的分组需要版本七，图片节点需要版本五，附件需要版本四，
         Markdown 或固定宽度需要版本三，附页绑定需要版本二。
         """
         data = self.to_data()
-        if self.groups:
+        if self.stack_order:
+            version = GRAPH_STACK_VERSION
+        elif self.edge_origins:
+            version = GRAPH_EDGE_ORIGIN_VERSION
+        elif self.groups:
             version = GRAPH_GROUP_VERSION
         elif any("image_id" in node or "image_width" in node for node in data["nodes"]):
             version = GRAPH_IMAGE_VERSION
@@ -222,24 +329,28 @@ class NodeGraph:
         return {"version": version, "data": data}
 
     @classmethod
-    def from_data(cls, data: dict, *, version: int = GRAPH_GROUP_VERSION) -> "NodeGraph":
+    def from_data(cls, data: dict, *, version: int = GRAPH_STACK_VERSION) -> "NodeGraph":
         """解码原生节点页，校验局部标识、端点、坐标及分组，失败时抛出中文错误。
 
         version 取自原生图封装。版本二增加可选的文档节点绑定，版本三增加可选的
         正文格式和固定宽度，版本四增加附件引用，版本五增加纯图片节点，
-        版本六的分组在读取时升级为版本七的图节点，并把已有越层线转接到组节点。
+        版本六的分组在读取时升级为组节点，原有越层线的端点进入版本八的来源记录。
         缺省分组表为空。绑定在本图内唯一，存在性和全局所有权由完整文档校验。
         旧筛选字段只读取和校验。
         """
         from .validation import finite, positive_number, validate_fixed_width
 
-        if type(version) is not int or not 1 <= version <= GRAPH_GROUP_VERSION:
+        if type(version) is not int or not 1 <= version <= GRAPH_STACK_VERSION:
             raise MindMapError("不支持的图数据版本")
         fields = {"nodes", "edges", "positions", "hidden_node_ids"}
         allowed_fields = fields | {"groups"} if version >= LEGACY_GRAPH_GROUP_VERSION else fields
+        if version >= GRAPH_EDGE_ORIGIN_VERSION:
+            allowed_fields = allowed_fields | {"edge_origins"}
+        if version >= GRAPH_STACK_VERSION:
+            allowed_fields = allowed_fields | {"stack_order"}
         if (not isinstance(data, dict) or not fields <= data.keys() <= allowed_fields
                 or not all(isinstance(data[key], list) for key in ("nodes", "edges", "hidden_node_ids"))
-                or not isinstance(data.get("groups", []), list)
+                or not isinstance(data.get("groups", []), list) or not isinstance(data.get("edge_origins", []), list)
                 or not isinstance(data["positions"], dict)):
             raise MindMapError("图的数据字段无效")
         nodes = []
@@ -302,7 +413,11 @@ class NodeGraph:
         hidden = data["hidden_node_ids"]
         if (not all(isinstance(key, str) and key in ids for key in hidden) or len(set(hidden)) != len(hidden)):
             raise MindMapError("图的筛选包含重复或未声明的节点")
-        graph = cls(tuple(nodes), tuple(edges), positions)
+        order = data.get("stack_order", [])
+        if (not isinstance(order, list) or not all(isinstance(key, str) and key in ids for key in order)
+                or len(set(order)) != len(order)):
+            raise MindMapError("图节点叠放顺序含有重复或未声明的节点")
+        graph = cls(tuple(nodes), tuple(edges), positions, stack_order=tuple(order))
         if version == LEGACY_GRAPH_GROUP_VERSION:
             legacy = []
             group_ids, grouped_ids = set(), set()
@@ -339,6 +454,28 @@ class NodeGraph:
         for edge in graph.edges:
             if not graph_edge_in_scope(edge, parents):
                 raise MindMapError(f"连线的两端必须处于同一层：{edge.key}")
+        origins = {}
+        for row in data.get("edge_origins", []):
+            if (not isinstance(row, list) or len(row) != 3 or not all(isinstance(k, str) for k in row[:2])
+                    or not isinstance(row[2], list) or not row[2]):
+                raise MindMapError("图连线来源格式无效")
+            edge = GraphEdge(*row[:2])
+            if edge not in edges or edge in origins:
+                raise MindMapError("来源引用的组级连线无效或重复")
+            items = []
+            for pair in row[2]:
+                if (not isinstance(pair, list) or len(pair) != 2
+                        or not all(isinstance(k, str) and k in ids for k in pair)):
+                    raise MindMapError("图连线来源引用了无效的节点")
+                item = GraphEdge(*pair)
+                if _project_edge(item, parents) != edge:
+                    raise MindMapError("图连线来源与当前层级不匹配")
+                items.append(item)
+            if len(set(items)) != len(items):
+                raise MindMapError("图连线来源重复")
+            origins[edge] = tuple(items)
+        if origins:
+            graph = replace(graph, edge_origins={edge: items for edge, items in origins.items() if items != (edge,)})
         return graph
 
 
@@ -414,12 +551,11 @@ def graph_edge_in_scope(edge: GraphEdge, parents: Mapping[str, str]) -> bool:
     return parents.get(edge.source) == parents.get(edge.target)
 
 
-def promote_graph_edges(edges: Iterable[GraphEdge], parents: Mapping[str, str]) -> tuple[GraphEdge, ...]:
-    """把越层线提升到最近的共同父层，保留方向及去重前首条边的顺序。
+def _project_edge(edge: GraphEdge, parents: Mapping[str, str]) -> GraphEdge:
+    """返回原端点在最近共同父层的连线。祖先与后代之间的连线无法转接。"""
+    if graph_edge_in_scope(edge, parents):
+        return edge
 
-    parents 必须已校验为无环的直接父组映射。同层线直接保留。祖先与后代之间的线
-    无法提升为两个同层端点，此时抛出 MindMapError，调用方应取消整批结构变更。
-    """
     def lineage(key: str) -> list[str]:
         path = [key]
         while key in parents:
@@ -427,18 +563,10 @@ def promote_graph_edges(edges: Iterable[GraphEdge], parents: Mapping[str, str]) 
             path.append(key)
         return path[::-1]
 
-    result = {}
-    for edge in edges:
-        if graph_edge_in_scope(edge, parents):
-            result[edge] = None
-            continue
-        for source, target in zip(lineage(edge.source), lineage(edge.target)):
-            if source != target:
-                result[GraphEdge(source, target)] = None
-                break
-        else:
-            raise MindMapError(f"无法转接连线 {edge.key}，两端已成为祖先与后代")
-    return tuple(result)
+    for source, target in zip(lineage(edge.source), lineage(edge.target)):
+        if source != target:
+            return GraphEdge(source, target)
+    raise MindMapError(f"无法转接连线 {edge.key}，两端已成为祖先与后代")
 
 
 def available_graph_group_ids(node_ids: Iterable[str]) -> Iterator[str]:
@@ -448,6 +576,11 @@ def available_graph_group_ids(node_ids: Iterable[str]) -> Iterator[str]:
         key = f"g{index}"
         if key not in used:
             yield key
+
+
+def promote_graph_edges(edges: Iterable[GraphEdge], parents: Mapping[str, str]) -> tuple[GraphEdge, ...]:
+    """按声明顺序返回可见的同层连线。"""
+    return tuple(dict.fromkeys(_project_edge(edge, parents) for edge in edges))
 
 
 def upgrade_legacy_graph_groups(
@@ -466,7 +599,7 @@ def upgrade_legacy_graph_groups(
         nodes.append(GraphNode(group_id, title))
         groups.append(GraphGroup(group_id, members))
     updated = replace(graph, nodes=(*graph.nodes, *nodes), groups=tuple(groups))
-    return replace(updated, edges=promote_graph_edges(graph.edges, updated.parent_groups()))
+    return updated.project_edges(graph.edges)
 
 
 def validate_graph_title(title: object) -> None:

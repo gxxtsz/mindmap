@@ -6,7 +6,7 @@ from dataclasses import replace
 from itertools import chain
 
 from ...geometry import GraphGroupFrame, LayoutResult, Point, Rect
-from ...graph import GraphEdge, GraphGroup
+from ...graph import GraphEdge, GraphGroup, NodeGraph
 from .geometry import _layout_result, _move_graph_edge, build_graph_layout
 
 _PADDING = 16
@@ -123,11 +123,20 @@ def fit_graph_groups(
             key: layout.group_frames[key].bounds if key in layout.group_frames else layout.nodes[key]
             for key in boxes
         }
+        scoped_edges = links[scope]
+        base_branches = layout.branches
+        if scoped_edges and any((box.width, box.height) != (old_boxes[key].width, old_boxes[key].height)
+                                for key, box in boxes.items()):
+            # 子组按手工内容或最小尺寸变宽后，本层接线必须从实际占位计算。否则自动
+            # 排列好的双向线可能退化为自由曲线，挤到锚点左边并在每次重排时推移组框。
+            scope_layout = build_graph_layout({key: (box.width, box.height) for key, box in boxes.items()},
+                                              tuple(scoped_edges), color=layout.branches[scoped_edges[0].key].color)
+            old_boxes, base_branches = scope_layout.nodes, scope_layout.branches
         changed = {key for key, rect in boxes.items() if rect != old_boxes[key]}
         scoped_branches = {}
-        edge_set = set(links[scope])
-        for edge in links[scope]:
-            old = layout.branches[edge.key]
+        edge_set = set(scoped_edges)
+        for edge in scoped_edges:
+            old = base_branches[edge.key]
             scoped_branches[edge.key] = _move_graph_edge(
                 old, old_boxes[edge.source], old_boxes[edge.target], boxes[edge.source], boxes[edge.target],
                 loop=edge.source == edge.target,
@@ -149,3 +158,35 @@ def fit_graph_groups(
         frames[scope] = frame
         nodes[scope] = _title_box(frame, (title.width, title.height))
     return _layout_result(nodes, branches, {key: frames[key] for key in order if key is not None})
+
+
+def layout_group_members(graph: NodeGraph, layout: LayoutResult, group: GraphGroup | None, *, color: str) -> dict[str, Point]:
+    """按实测外框重排一层。顶层锚定对象包围框，组内锚定组框内容区。"""
+    members = graph.top_level_ids() if group is None else group.member_ids
+    if not members or group is None and len(members) < 2:
+        return {}
+    boxes = {key: layout.group_frames[key].bounds if key in layout.group_frames else layout.nodes[key]
+             for key in members}
+    edges = tuple(edge for edge in graph.edges if edge.source in boxes and edge.target in boxes)
+    local = build_graph_layout({key: (box.width, box.height) for key, box in boxes.items()}, edges, color=color)
+    if group is None:
+        left = min(box.x for box in boxes.values()) - min(box.x for box in local.nodes.values())
+        top = min(box.y for box in boxes.values()) - min(box.y for box in local.nodes.values())
+    else:
+        frame = layout.group_frames[group.id]
+        content = _contents(local.nodes, local.branches)
+        left = frame.bounds.x + _PADDING - content.x
+        top = frame.header.bottom + _PADDING - content.y
+    children = {entry.id: entry.member_ids for entry in graph.groups}
+    moved = {}
+    for key, rect in local.nodes.items():
+        dx, dy = left + rect.x - boxes[key].x, top + rect.y - boxes[key].y
+        if abs(dx) < 1e-7 and abs(dy) < 1e-7:
+            continue
+        pending = [key]
+        while pending:
+            member = pending.pop()
+            box = layout.nodes[member]
+            moved[member] = box.x + dx, box.y + dy
+            pending.extend(children.get(member, ()))
+    return moved

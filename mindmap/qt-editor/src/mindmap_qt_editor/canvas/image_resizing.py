@@ -76,7 +76,7 @@ class ImageResizeController:
         中心。只读、多选及正文编辑中无手柄；只在 GUI 线程、视图存活时调用。
         """
         rect = self._viewport_rect()
-        if rect is None or position is None:
+        if rect is None or position is None or not self.view.selected_handle_visible(position):
             return None
         # 使用单独候选列表，不能依赖图元 ItemAt 的缩放后边界。
         candidates = [((QPointF(position) - center).manhattanLength(), index)
@@ -195,6 +195,8 @@ class ImageResizeController:
         if rect is None:
             return
         painter.save()
+        bounds = QRectF(self.view.viewport().rect()) if self.active else rect.adjusted(-6, -6, 6, 6)
+        self.view.clip_graph_decoration(painter, bounds)
         if self.active:
             paint_image_shadow(painter, self._rect, self.view.scene().backgroundBrush().color())
             self._visual.paint_image(painter, self._rect)

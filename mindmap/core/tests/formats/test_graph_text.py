@@ -30,6 +30,19 @@ def test_graph_group_text_roundtrips_quoted_names_and_forward_references():
     assert '分组 team app core' in output and parse_graph_text(output) == graph
 
 
+def test_group_origin_rows_follow_regrouping_and_are_discarded_on_manual_edge_edits():
+    text = ('节点 g "组"\n节点 a "甲"\n节点 b "乙"\n节点 c "丙"\n节点 d "丁"\n'
+            '分组 g a b\ng -> c\n来源 g c a c\n来源 g c b c')
+    graph = parse_graph_text(text)
+    assert graph.edge_origins == {GraphEdge("g", "c"): (GraphEdge("a", "c"), GraphEdge("b", "c"))}
+    assert parse_graph_text(format_graph_text(graph)) == graph
+    moved = parse_graph_text(text.replace("分组 g a b", "分组 g b"))
+    assert moved.edges == (GraphEdge("a", "c"), GraphEdge("g", "c"))
+    for arrow, expected in (("g -> d", (GraphEdge("g", "d"),)), ("", ())):
+        edited = parse_graph_text(text.replace("g -> c", arrow))
+        assert edited.edges == expected and not edited.edge_origins
+
+
 def test_nested_and_empty_groups_roundtrip_with_explicit_nodes():
     source = '分组 g h a\n分组 h\n节点 a "甲"\n节点 g "外层"\n节点 h "空组"\na -> h'
     graph = parse_graph_text(source)
@@ -56,6 +69,9 @@ def test_nested_and_empty_groups_roundtrip_with_explicit_nodes():
     ('节点 a "甲"\n节点 g "组"\n分组 g a\ng -> a', "第 4 行.*同一层"),
     ('节点 g "组"\n分组 g g', "第 2 行.*形成循环"),
     ('节点 g "组"\n分组 g no_such_node', "第 2 行.*未声明"),
+    ('节点 a "甲"\n叠放 a a', "第 2 行.*重复"),
+    ('节点 a "甲"\n叠放 a b', "第 2 行.*未声明"),
+    ('节点 a "甲"\n叠放 a\n叠放 a', "第 3 行.*重复声明"),
 ])
 def test_graph_text_errors_name_original_line(text, message):
     with pytest.raises(MindMapError, match=message):

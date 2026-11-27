@@ -3,7 +3,12 @@
 from dataclasses import replace
 
 from mindmap_core import GraphEdge, GraphGroup, GraphNode, NodeGraph
-from mindmap_core.layouts.graph import build_graph_layout, graph_layout, move_graph_nodes
+from mindmap_core.layouts.graph import (
+    build_graph_layout,
+    graph_layout,
+    layout_group_members,
+    move_graph_nodes,
+)
 from mindmap_core.layouts.graph.constraints import SpanConstraint, minimize_spans
 from mindmap_core.layouts.graph.layers import LayeredLayout, build_layout
 
@@ -144,3 +149,20 @@ def test_group_layout_contains_nested_boxes_and_routes_arrows_to_frame_edges():
     assert manual.group_frames["g"].bounds.x < manual.group_frames["h"].bounds.x
     for frame in manual.group_frames.values():
         assert manual.bounds.union(frame.bounds) == manual.bounds
+
+
+def test_group_layout_uses_the_actual_subgroup_size_when_routing_and_is_repeatable():
+    sizes = dict.fromkeys("abcymio", (80, 32))
+    edges = (GraphEdge("a", "b"), GraphEdge("a", "m"))
+    groups = (GraphGroup("o", ("a", "b", "m")), GraphGroup("m", ("c", "i")), GraphGroup("i", ("y",)))
+    graph = NodeGraph(tuple(GraphNode(key, key) for key in sizes), edges, {"c": (-242, 194), "y": (120, -163)}, groups)
+    automatic = build_graph_layout(sizes, edges, color="#334455", groups=groups)
+    before = graph_layout(graph, automatic)
+    assert before.group_frames["m"].bounds.width > automatic.group_frames["m"].bounds.width
+    positions = {key: (box.x, box.y) for key, box in before.nodes.items()}
+    moves = layout_group_members(graph, before, groups[0], color="#334455")
+    updated = replace(graph, positions=positions | moves)
+    after = graph_layout(updated, automatic)
+    outer = before.group_frames["o"].bounds
+    assert (after.group_frames["o"].bounds.x, after.group_frames["o"].bounds.y) == (outer.x, outer.y)
+    assert layout_group_members(updated, after, groups[0], color="#334455") == {}

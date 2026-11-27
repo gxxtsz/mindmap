@@ -118,6 +118,8 @@ class InlineEditingMixin:
         item.update()
         node = self._document.nodes[node_id] if self.graph is not None else self.engine.get_node(node_id)
         self.editor = NodeEditor(self, node, item.visual)
+        if self.graph is not None:
+            self.editor.setZValue(item.zValue() + 0.5)
         self.editor.setPos(item.pos() + item.visual.text_position)
         self.scene.addItem(self.editor)
         self.editor.sync_geometry()

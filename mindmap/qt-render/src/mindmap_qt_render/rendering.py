@@ -330,7 +330,7 @@ class NodeVisual:
 
     def paint(
         self, painter: QPainter, node: Node, *, selected=False, editing=False, controls=True,
-        page_controls=True, accent="#3478d5", text_highlight=True
+        page_controls=True, accent="#3478d5", text_highlight=True, group_title=False
     ):
         """绘制节点正文、内嵌页面图标及可选的外侧折叠标记，不修改文档。
 
@@ -361,11 +361,12 @@ class NodeVisual:
             # 独立调用仍可请求原有描边；画布把交互高亮交给前景层，正式边框不随
             # 选中或文字焦点变化，避免把根节点同色的加粗描边和新外框重复绘制。
             highlighted = text_highlight and (selected or editing)
-            painter.setPen(
-                QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
-            )
-            painter.setBrush(self.background)
-            painter.drawRoundedRect(self.card_rect(), NODE_CARD_RADIUS, NODE_CARD_RADIUS)
+            if not group_title:
+                painter.setPen(
+                    QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
+                )
+                painter.setBrush(self.background)
+                painter.drawRoundedRect(self.card_rect(), NODE_CARD_RADIUS, NODE_CARD_RADIUS)
             self.paint_image(painter)
             if not editing:
                 draw_text(painter, self.text, self.text_position, self.text_color)

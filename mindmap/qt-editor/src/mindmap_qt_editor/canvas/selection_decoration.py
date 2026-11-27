@@ -82,7 +82,7 @@ class SelectionDecoration:
             return self._frame
         frame, bounds = [], QRectF()
         for key, item in owner.node_items.items():
-            if (not owner.is_node_selected(key) and key != editor_id or item.node.is_image_node
+            if (not owner.is_node_selected(key) and key != editor_id or item.node.is_image_node or item.group_title
                     or not item.isVisible() or item.effectiveOpacity() <= 0):
                 continue
             mapping = item.deviceTransform(transform)
@@ -136,9 +136,12 @@ def paint_node_selection(view, painter: QPainter) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
         opacity = painter.opacity()
         for item, origin, gap, ring in frame:
+            painter.save()
+            view.clip_graph_decoration(painter, ring.boundingRect().translated(origin), item=item)
             painter.setWorldTransform(QTransform.fromTranslate(origin.x(), origin.y()))
             painter.setOpacity(opacity * item.effectiveOpacity())
             painter.fillPath(gap, background)
             painter.fillPath(ring, QColor(item.theme.accent))
+            painter.restore()
     finally:
         painter.restore()

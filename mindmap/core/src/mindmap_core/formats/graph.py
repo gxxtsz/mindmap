@@ -22,6 +22,8 @@ _NODE = re.compile(rf"节点[ \t]+({GRAPH_NODE_ID})[ \t]+(.+)")
 _EDGE = re.compile(rf"({GRAPH_NODE_ID})[ \t]*->[ \t]*({GRAPH_NODE_ID})")
 _LEGACY_GROUP = re.compile(rf'分组[ \t]+({GRAPH_NODE_ID})[ \t]+("(?:[^"\\]|\\.)*")(?:[ \t]+(.*))?')
 _GROUP = re.compile(rf"分组[ \t]+({GRAPH_NODE_ID})(?:[ \t]+((?:{GRAPH_NODE_ID})(?:[ \t]+{GRAPH_NODE_ID})*))?")
+_ORIGIN = re.compile(r"来源" + (rf"[ \t]+({GRAPH_NODE_ID})" * 4))
+_STACK = re.compile(rf"叠放[ \t]+((?:{GRAPH_NODE_ID})(?:[ \t]+{GRAPH_NODE_ID})*)")
 _QT_TEXT_ESCAPES = str.maketrans({"\u00a0": r"\u00a0", "\u2028": r"\u2028", "\u2029": r"\u2029"})
 
 
@@ -37,7 +39,10 @@ def parse_graph_text(text: str) -> NodeGraph:
         raise MindMapError("图文本必须是字符串")
     nodes: dict[str, GraphNode] = {}
     edges: dict[GraphEdge, int] = {}
+    origins: dict[GraphEdge, dict[GraphEdge, int]] = {}
     groups: list[tuple[GraphGroup, int]] = []
+    order = ()
+    order_line = 0
     legacy = []
     for line_no, raw in enumerate(text.removeprefix("\ufeff").split("\n"), 1):
         line = raw.strip()
@@ -65,6 +70,18 @@ def parse_graph_text(text: str) -> NodeGraph:
         elif match := _GROUP.fullmatch(line):
             key, members = match.groups()
             groups.append((GraphGroup(key, tuple((members or "").split())), line_no))
+        elif match := _STACK.fullmatch(line):
+            if order:
+                raise MindMapError(f"第 {line_no} 行：叠放顺序重复声明")
+            order = tuple(match[1].split())
+            order_line = line_no
+        elif match := _ORIGIN.fullmatch(line):
+            source, target, first, last = match.groups()
+            items = origins.setdefault(GraphEdge(source, target), {})
+            item = GraphEdge(first, last)
+            if item in items:
+                raise MindMapError(f"第 {line_no} 行：连线来源重复")
+            items[item] = line_no
         elif match := _EDGE.fullmatch(line):
             edge = GraphEdge(*match.groups())
             if edge in edges:
@@ -78,10 +95,15 @@ def parse_graph_text(text: str) -> NodeGraph:
             if key not in nodes:
                 raise MindMapError(f"第 {line_no} 行：连线引用了未声明的节点（{key}）")
     group_ids: set[str] = set()
+    declared = nodes.keys() | {key for key, _, _, _ in legacy}
+    if len(set(order)) != len(order) or not set(order) <= declared:
+        raise MindMapError(f"第 {order_line} 行：叠放顺序含有重复或未声明的节点")
     grouped_ids: set[str] = set()
     if legacy and groups:
         raise MindMapError(f"第 {max(legacy[0][3], groups[0][1])} 行：请统一使用一种分组声明")
     if legacy:
+        if origins:
+            raise MindMapError("旧分组语法不支持连线来源")
         for key, title, members, line_no in legacy:
             try:
                 validate_legacy_graph_group(key, title, members, nodes, group_ids, grouped_ids)
@@ -89,8 +111,9 @@ def parse_graph_text(text: str) -> NodeGraph:
                 raise MindMapError(f"第 {line_no} 行：{error}") from error
             group_ids.add(key)
             grouped_ids.update(members)
-        return upgrade_legacy_graph_groups(NodeGraph(tuple(nodes.values()), tuple(edges)),
-                                           [(key, title, members) for key, title, members, _ in legacy])
+        upgraded = upgrade_legacy_graph_groups(NodeGraph(tuple(nodes.values()), tuple(edges)),
+                                               [(key, title, members) for key, title, members, _ in legacy])
+        return upgraded.with_stack_order(order) if order else upgraded
     for group, line_no in groups:
         try:
             validate_graph_group(group, node_ids=nodes, group_ids=group_ids, grouped_ids=grouped_ids)
@@ -98,7 +121,7 @@ def parse_graph_text(text: str) -> NodeGraph:
             raise MindMapError(f"第 {line_no} 行：{error}") from error
         group_ids.add(group.id)
         grouped_ids.update(group.member_ids)
-    graph = NodeGraph(tuple(nodes.values()), tuple(edges), groups=tuple(group for group, _ in groups))
+    graph = NodeGraph(tuple(nodes.values()), tuple(edges), groups=tuple(group for group, _ in groups), stack_order=order)
     parents = graph.parent_groups()
     if (cycle := graph_membership_cycle(parents)) is not None:
         line_no = next(line for group, line in groups if group.id == cycle)
@@ -106,7 +129,18 @@ def parse_graph_text(text: str) -> NodeGraph:
     for edge, line_no in edges.items():
         if not graph_edge_in_scope(edge, parents):
             raise MindMapError(f"第 {line_no} 行：连线的两端必须处于同一层（{edge.key}）")
-    return graph
+    if not origins:
+        return graph
+    # 改接或删除可见线后，其旧来源自动失效。改动分组声明时则从原端点重新投影。
+    original_edges = []
+    for edge in graph.edges:
+        for item, line_no in origins.get(edge, {edge: edges[edge]}).items():
+            if item.source not in nodes or item.target not in nodes:
+                raise MindMapError(f"第 {line_no} 行：连线来源引用了未声明的节点")
+            original_edges.append(item)
+    if len(set(original_edges)) != len(original_edges):
+        raise MindMapError("同一原始连线不能重复声明")
+    return graph.project_edges(original_edges)
 
 
 def format_graph_text(graph: NodeGraph) -> str:
@@ -125,4 +159,10 @@ def format_graph_text(graph: NodeGraph) -> str:
     if lines and graph.groups:
         lines.append("")
     lines.extend(" ".join(("分组", group.id, *group.member_ids)) for group in graph.groups)
+    if graph.edge_origins:
+        lines.append("")
+        lines.extend(f"来源 {edge.source} {edge.target} {item.source} {item.target}"
+                     for edge, items in graph.edge_origins.items() for item in items)
+    if graph.stack_order:
+        lines.extend(("", " ".join(("叠放", *graph.stack_order))))
     return "\n".join(lines)

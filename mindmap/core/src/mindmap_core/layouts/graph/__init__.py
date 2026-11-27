@@ -4,9 +4,12 @@ from ...geometry import LayoutResult, Point
 from ...graph import GraphEdge, GraphGroup, NodeGraph
 from .geometry import build_graph_layout as _build_graph_layout
 from .geometry import graph_child_position, move_graph_nodes
-from .groups import build_grouped_layout, fit_graph_groups
+from .groups import build_grouped_layout, fit_graph_groups, layout_group_members
 
-__all__ = ["build_graph_layout", "fit_graph_groups", "graph_child_position", "graph_layout", "move_graph_nodes"]
+__all__ = [
+    "build_graph_layout", "fit_graph_groups", "graph_child_position", "graph_layout",
+    "layout_group_members", "move_graph_nodes",
+]
 
 
 def build_graph_layout(
@@ -15,7 +18,7 @@ def build_graph_layout(
 ) -> LayoutResult:
     """从节点实测尺寸、有向边及可选分组计算图的自动布局。
 
-    sizes 提供全部节点卡片的逻辑宽高，包含组标题卡片。存在分组时先排最内层，
+    sizes 提供全部节点和组标题的逻辑宽高。存在分组时先排最内层，
     组间使用整个外框占位和接线。
     """
     if groups:

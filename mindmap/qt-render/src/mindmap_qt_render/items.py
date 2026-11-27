@@ -21,6 +21,8 @@ class NodeItem(QGraphicsObject):
         self.controls = bool(controls)
         self.page_controls = bool(page_controls)
         self.text_highlight = bool(text_highlight)
+        self.group_title = False
+        self.opaque_image = False
         self.editing = False
         self.setZValue(5)
         self.setFlags(
@@ -70,6 +72,9 @@ class NodeItem(QGraphicsObject):
 
     def paint(self, painter, option, widget=None):
         """借用当前画笔绘制只读视觉，按宿主开关决定是否显示文本内置高亮。"""
+        if self.opaque_image:
+            # 图中的图片节点整块参与叠放，透明像素显示画布底色。
+            painter.fillRect(self.visual.image_rect, self.scene().backgroundBrush())
         self.visual.paint(
             painter,
             self.node,
@@ -79,4 +84,5 @@ class NodeItem(QGraphicsObject):
             page_controls=self.page_controls,
             accent=self.theme.accent,
             text_highlight=self.text_highlight,
+            group_title=self.group_title,
         )
