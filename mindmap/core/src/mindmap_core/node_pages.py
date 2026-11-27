@@ -191,6 +191,7 @@ class NodePagesMixin:
         同一局部 ID 保留既有附页，标题变化同步到关联的树页根。格式和固定宽度取自
         graph 的节点快照，格式也供新建附页初始化标题使用。删掉图节点会同时删除其
         附页。新绑定由创建附页或粘贴操作建立，调用方不能直接指定归属。
+        分组表由 graph 提供，移除节点时须同时移除其分组成员引用。
         详情页内只允许更新已存在的旧图。成功后历史包含图及全部受影响的文档实体。
         """
         def action(node_id, graph, page_id):
@@ -226,10 +227,11 @@ class NodePagesMixin:
         self._execute("remove_node_graph", action, node_id=node_id, page_id=page_id)
 
     def copy_graph_fragment(self, owner_id: str, node_ids: Iterable[str]) -> "MindMapDocument":
-        """复制指定图的局部节点、内部连线及附属内容，返回独立的剪贴板文档。
+        """复制指定图的局部节点、内部连线、完整分组及附属内容，返回独立的剪贴板文档。
 
         文档的合成根承载复制的图，附件和图片资源随片段复制。调用不会建立新绑定、
-        改变选择或写入历史；失效图及局部 ID 抛出 MindMapError。
+        改变选择或写入历史。只有全部成员都被选择时才复制分组。失效图及局部 ID
+        抛出 MindMapError。
         """
         graph = self.node_graph(owner_id)
         if graph is None:
@@ -241,8 +243,9 @@ class NodePagesMixin:
     ) -> list[str]:
         """向指定图粘贴独立片段，返回新分配的局部节点 ID，整个操作可一次撤销。
 
-        片段必须由单个合成根承载图；校验通过后在目标中复制页面、图节点绑定
-        和内部引用。include_pages 为 False 时只复制图节点、连线和直接关联的附件。
+        片段必须由单个合成根承载图。校验通过后在目标中复制页面、图节点绑定
+        和内部引用，并重新分配分组及其成员标识。include_pages 为 False 时只复制
+        图节点、连线、分组和直接关联的附件。
         资源按内容哈希复用，失败回滚所有修改，片段保持原样。
         """
         def action(node_id, fragment, page_id, include_pages):

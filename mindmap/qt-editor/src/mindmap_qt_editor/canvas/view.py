@@ -13,6 +13,7 @@ from shiboken6 import isValid
 
 from .dragging import NodeDragController
 from .graph_edge_editing import GraphEdgeEditController
+from .graph_group_resizing import GraphGroupResizeController
 from .image_resizing import ImageResizeController
 from .items import (
     FOLD_HIDE_DELAY,
@@ -65,6 +66,7 @@ class MindMapView(QGraphicsView):
         self._attachment_drag_file = None
         self._attachment_drop_node = None
         self.graph_edge_edit = GraphEdgeEditController(self)
+        self.group_resize = GraphGroupResizeController(self)
         self.image_resize = ImageResizeController(self)
         self.text_resize = TextWidthResizeController(self)
         self._selection_bounds = QRect()
@@ -103,6 +105,8 @@ class MindMapView(QGraphicsView):
         """借用当前认领鼠标的尺寸控制器，供移动和释放事件统一路由。"""
         if self.text_resize.active:
             return self.text_resize
+        if self.group_resize.active:
+            return self.group_resize
         return self.image_resize if self.image_resize.active else None
 
     def event(self, event):
@@ -111,8 +115,8 @@ class MindMapView(QGraphicsView):
         if (
             event.type() == QEvent.Type.ShortcutOverride
             and event.key() == Qt.Key.Key_Escape
-            and (self.press_node is not None or self._active_resize is not None or self.node_drag.external_active
-                 or self.graph_edge_edit.active)
+            and (self.press_node is not None or self._active_resize is not None
+                 or self.node_drag.external_active or self.graph_edge_edit.active)
         ):
             event.accept()
             return True
@@ -220,6 +224,7 @@ class MindMapView(QGraphicsView):
         """滚轮模式仅影响视图；Ctrl 始终临时缩放，不改写用户选择的模式。"""
         self.image_resize.cancel()
         self.text_resize.cancel()
+        self.group_resize.cancel()
         pixels = event.pixelDelta().y()
         angle = event.angleDelta().y()
         if not pixels and not angle:
@@ -253,6 +258,7 @@ class MindMapView(QGraphicsView):
         """
         self.image_resize.cancel()
         self.text_resize.cancel()
+        self.group_resize.cancel()
         # 切页的初始定位可能还在零间隔队列中。先完成可见页的待处理定位，再接受
         # 用户缩放，避免后续编辑缓存页面状态时把刚设置的倍率恢复成 100%。
         if self.owner._view_reset_pending and self.isVisible():
@@ -423,6 +429,10 @@ class MindMapView(QGraphicsView):
                 and self.press_node is None and not self.graph_edge_edit.owns_left_button
                 and self.text_resize.hit_test(position)):
             resize_cursor = Qt.CursorShape.SizeHorCursor
+        if (self.group_resize.active or self._pan_button == Qt.MouseButton.NoButton
+                and self.press_node is None and not self.graph_edge_edit.owns_left_button
+                and self.group_resize.hit_test(position)):
+            resize_cursor = Qt.CursorShape.SizeFDiagCursor
         dragging = self.node_drag.active
         if resize_cursor is not None and not self.panning and not dragging:
             self._set_hovered_node(None, immediate=True)
@@ -491,6 +501,7 @@ class MindMapView(QGraphicsView):
         self.graph_edge_edit.cancel()
         self.image_resize.cancel()
         self.text_resize.cancel()
+        self.group_resize.cancel()
         grabber = self.scene().mouseGrabberItem()
         if isinstance(grabber, NodeItem):
             grabber.ungrabMouse()
@@ -538,6 +549,12 @@ class MindMapView(QGraphicsView):
             event.accept()
             return
         position = event.position().toPoint()
+        if (event.button() == Qt.MouseButton.LeftButton and not event.modifiers()
+                and self.group_resize.hit_test(position)):
+            self.owner.call(lambda: self.group_resize.begin(position))
+            self.update_cursor(position)
+            event.accept()
+            return
         if (event.button() == Qt.MouseButton.LeftButton and not event.modifiers()
                 and self.text_resize.hit_test(position)):
             self.owner.call(lambda: self.text_resize.begin(position))
@@ -655,9 +672,10 @@ class MindMapView(QGraphicsView):
             self.update_cursor(position)
             event.accept()
             return
-        if self.press_node and event.buttons() & Qt.MouseButton.LeftButton:
+        pressed = self.press_node is not None
+        if pressed and event.buttons() & Qt.MouseButton.LeftButton:
             if (
-                not self.node_drag.active
+                self.owner.editable and not self.node_drag.active
                 and (event.position().toPoint() - self.press_position).manhattanLength()
                 >= QApplication.startDragDistance()
             ):
@@ -676,7 +694,7 @@ class MindMapView(QGraphicsView):
                 self.update_cursor(event.position().toPoint())
                 event.accept()
                 return
-        elif self.press_node:
+        elif pressed:
             # 捕获丢失后仍可能收到没有左键状态的移动，不能留下悬挂预览和计时器。
             self.cancel_interaction()
         with self.owner._scene_selection_event():
@@ -721,8 +739,7 @@ class MindMapView(QGraphicsView):
             self._selection_click = None
             drop = self.node_drag.finish(event.position().toPoint())
             self.press_node = None
-            # 节点预览由视图自己处理，但按下事件曾交给场景选择。必须让场景收到
-            # 配对的释放事件，解除图元捕获，随后光标才能按释放位置重新命中。
+            # 节点按下可能由场景接管，配对释放解除图元捕获后才能提交。
             with self.owner._scene_selection_event():
                 super().mouseReleaseEvent(event)
             if drop is not None:
@@ -742,7 +759,8 @@ class MindMapView(QGraphicsView):
         """按钮双击仍按独立点击处理，不把事件交给正文的双击编辑入口。"""
         position = event.position().toPoint()
         if event.button() == Qt.MouseButton.LeftButton and (
-                self.graph_edge_edit.handle_at(position) or not event.modifiers() and self.text_resize.hit_test(position)):
+                self.graph_edge_edit.handle_at(position) or not event.modifiers() and (
+                    self.text_resize.hit_test(position) or self.group_resize.hit_test(position))):
             self.mousePressEvent(event)
             return
         if (event.button() == Qt.MouseButton.LeftButton and self.owner.current_page_kind == "inspiration"
@@ -789,8 +807,8 @@ class MindMapView(QGraphicsView):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and (
-                self.press_node is not None or self._active_resize is not None or self.node_drag.external_active
-                or self.graph_edge_edit.active):
+                self.press_node is not None or self._active_resize is not None
+                or self.node_drag.external_active or self.graph_edge_edit.active):
             self.cancel_interaction()
             event.accept()
             return
@@ -846,6 +864,7 @@ class MindMapView(QGraphicsView):
         if self.owner._disposed:
             return
         current = selection_bounds(self).united(self.text_resize.decoration_bounds())
+        current = current.united(self.group_resize.decoration_bounds())
         dirty = self._pending_selection_bounds.united(self._selection_bounds).united(current)
         self._pending_selection_bounds = QRect()
         self._selection_bounds = current
@@ -883,6 +902,8 @@ class MindMapView(QGraphicsView):
         # 缩放及滚动可能只重绘视图而不发出 scene.changed；记住实际显示的位置，
         # 使随后的局部移动仍能完整擦除旧外框，而非使用缩放前的视口坐标。
         self._selection_bounds = self._selection_decoration.bounds.united(self.text_resize.decoration_bounds())
+        self._selection_bounds = self._selection_bounds.united(self.group_resize.decoration_bounds())
         self.image_resize.paint(painter)
         self.graph_edge_edit.paint(painter)
         self.text_resize.paint(painter)
+        self.group_resize.paint(painter)

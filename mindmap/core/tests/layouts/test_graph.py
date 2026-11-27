@@ -1,7 +1,9 @@
 """验证图的分层顺序、交叉优化、路径避让及箭头方向。"""
 
-from mindmap_core import GraphEdge
-from mindmap_core.layouts.graph import build_graph_layout, move_graph_nodes
+from dataclasses import replace
+
+from mindmap_core import GraphEdge, GraphGroup, GraphNode, NodeGraph
+from mindmap_core.layouts.graph import build_graph_layout, graph_layout, move_graph_nodes
 from mindmap_core.layouts.graph.constraints import SpanConstraint, minimize_spans
 from mindmap_core.layouts.graph.layers import LayeredLayout, build_layout
 
@@ -109,3 +111,36 @@ def test_free_movement_reroutes_incident_edges_and_preserves_others():
     assert moved.branches["b->c"] == initial.branches["b->c"]
     assert moved.branches["a->b"].start != moved.branches["b->a"].end
     assert moved.branches["a->a"].arrow[0][1] == moved.nodes["a"].bottom
+
+
+def test_group_layout_contains_nested_boxes_and_routes_arrows_to_frame_edges():
+    sizes = {**dict.fromkeys("abce", (80, 32)), "g": (240, 40), "h": (90, 34)}
+    edges = tuple(GraphEdge(*pair) for pair in ("eg", "ah", "bc", "cb", "bb"))
+    groups = (GraphGroup("g", ("a", "h")), GraphGroup("h", ("b", "c"), (280, 250)))
+    graph = NodeGraph(tuple(GraphNode(key, key) for key in sizes), edges, groups=groups)
+    automatic = build_graph_layout(sizes, edges, color="#334455", groups=groups)
+    first, second = (automatic.group_frames[group.id].bounds for group in groups)
+    assert list(automatic.group_frames) == ["g", "h"]
+    assert first.width > sizes["g"][0] and second.width >= 280 and second.height >= 250
+    assert first.union(second) == first
+    assert not first.intersects(automatic.nodes["e"])
+    for group in groups:
+        frame = automatic.group_frames[group.id]
+        for key in group.member_ids:
+            node = automatic.group_frames[key].bounds if key in automatic.group_frames else automatic.nodes[key]
+            assert frame.header.bottom <= node.y <= node.bottom <= frame.bounds.bottom
+            assert frame.bounds.x <= node.x <= node.right <= frame.bounds.right
+    for edge in edges:
+        branch = automatic.branches[edge.key]
+        target = (automatic.group_frames[edge.target].bounds if edge.target in automatic.group_frames
+                  else automatic.nodes[edge.target])
+        x, y = branch.arrow[0]
+        assert branch.end == (x, y)
+        assert target.x <= x <= target.right and target.y <= y <= target.bottom
+        assert x in (target.x, target.right) or y in (target.y, target.bottom)
+    manual = graph_layout(replace(graph, positions={"b": (-600, -300)}), automatic)
+    assert manual.nodes["b"].x == -600
+    assert manual.group_frames["h"].bounds.x < manual.nodes["b"].x
+    assert manual.group_frames["g"].bounds.x < manual.group_frames["h"].bounds.x
+    for frame in manual.group_frames.values():
+        assert manual.bounds.union(frame.bounds) == manual.bounds

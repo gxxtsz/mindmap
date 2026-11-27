@@ -1,11 +1,13 @@
 """图页的读模型、编辑命令和临时预览，操作都落在当前思维导图画布上。"""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 
-from mindmap_core import GraphEdge, GraphNode, MindMapError, NodeGraph
+from mindmap_core import GraphEdge, GraphGroup, GraphNode, MindMapError, NodeGraph
 from mindmap_core.formats import decode_document
 from mindmap_core.formats.graph import format_graph_text, parse_graph_text
+from mindmap_core.geometry import Point
+from mindmap_core.graph import available_graph_group_ids, graph_edge_in_scope, validate_graph_group_title
 from mindmap_core.layouts.graph import build_graph_layout, graph_layout
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE, graph_page_id, parse_graph_page_id
 from PySide6.QtCore import QMimeData, QPoint, QRect, Qt
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QInputDialog,
     QLabel,
     QMenu,
     QMessageBox,
@@ -51,6 +54,14 @@ def _unused_node_ids(nodes, count):
         if key not in used:
             keys.append(key)
     return keys
+
+
+def _can_group_nodes(graph: NodeGraph, node_ids: Iterable[str]) -> bool:
+    """在同一个父层选中至少两个节点时可以创建分组，组节点也能参与。"""
+    keys = set(node_ids)
+    parents = graph.parent_groups()
+    return (len(keys) >= 2 and keys <= {node.id for node in graph.nodes}
+            and len({parents.get(key) for key in keys}) == 1)
 
 
 class _GraphTextEditor(QPlainTextEdit):
@@ -89,14 +100,37 @@ class GraphCanvasMixin:
         """
         return len(self.view.graph_edge_edit.selected_edges) if self.graph is not None else 0
 
-    def _calculate_graph_layout(self, sizes):
-        """拓扑和节点尺寸相同时复用分层结果，手动位置变化只更新显示路径。"""
-        graph = self.graph
-        color = self._document.theme.accent
-        key = (tuple(sizes.items()), graph.edges, color)
+    def _calculate_graph_layout(self, sizes, *, graph: NodeGraph | None = None, color: str | None = None):
+        """在自动布局上应用手动坐标，返回节点、连线、组框和完整范围。
+
+        画布默认使用活动图和文档颜色。导出及候选操作可提供独立快照及其连线颜色，
+        sizes 须按该快照测量。调用仅刷新自动布局缓存，在 GUI 线程执行。
+        """
+        graph = self.graph if graph is None else graph
+        return graph_layout(graph, self._automatic_graph_layout(sizes, graph, color=color))
+
+    def _automatic_graph_layout(self, sizes, graph: NodeGraph, *, color: str | None = None):
+        """按尺寸、拓扑、分组及标题复用分层结果，也可试算待提交的分组变更。"""
+        color = self._document.theme.accent if color is None else color
+        if graph.groups:
+            sizes = {node.id: sizes[node.id] for node in graph.nodes}
+        key = (tuple(sizes.items()), graph.edges, graph.groups, color)
         if self._graph_layout_cache is None or self._graph_layout_cache[0] != key:
-            self._graph_layout_cache = (key, build_graph_layout(dict(sizes), graph.edges, color=color))
-        return graph_layout(graph, self._graph_layout_cache[1])
+            automatic = build_graph_layout(dict(sizes), graph.edges, color=color, groups=graph.groups)
+            self._graph_layout_cache = key, automatic
+        return self._graph_layout_cache[1]
+
+    def _keep_graph_placement(self, graph: NodeGraph, placed: Mapping[str, Point] | None = None) -> NodeGraph:
+        """按当前正式画布保留现有节点坐标，可用 placed 为拖动节点指定提交位置。
+
+        创建组、改归属或调框时固定画布位置，避免自动分层改变其他节点的摆放。
+        新创建的组标题由组内内容推导位置。DOT 重排可清除这些坐标。
+        """
+        ids = {node.id for node in graph.nodes}
+        positions = {key: (rect.x, rect.y) for key, rect in self.layout_result.nodes.items() if key in ids}
+        if placed:
+            positions.update(placed)
+        return replace(graph, positions=positions)
 
     def _update_graph_actions(self, editing):
         """两种页面共用动作和快捷键，图页按局部选择与只读状态调整权限。"""
@@ -111,6 +145,16 @@ class GraphCanvasMixin:
             actions[key].setVisible(in_graph)
             actions[key].setEnabled(in_graph and not editing and (
                 key == "graph_text" or can_edit and (key == "graph_remove" or bool(graph.nodes))))
+        create_group = actions["graph_create_group"]
+        group_selection = in_graph and self.selection_count >= 2
+        create_group.setVisible(group_selection)
+        create_group.setEnabled(bool(group_selection and can_edit and _can_group_nodes(graph, self.selected_node_ids())))
+        group = (next((item for item in graph.groups if item.id == self.current_node_id()), None)
+                 if in_graph and self.selection_count == 1 else None)
+        actions["graph_ungroup"].setVisible(group is not None)
+        actions["graph_ungroup"].setEnabled(group is not None and can_edit)
+        actions["graph_reset_group_size"].setVisible(group is not None)
+        actions["graph_reset_group_size"].setEnabled(group is not None and can_edit and group.min_size is not None)
         action = actions["node_graph"]
         node = self._document.nodes.get(self.current_node_id())
         eligible = self.selection_count == 1 and node is not None and not node.is_image_node
@@ -136,8 +180,11 @@ class GraphCanvasMixin:
         groups = [("", (add_node, "graph_add_edge", "graph_text", "graph_auto_layout"))]
         if not on_canvas:
             groups.append(("", ("edit", "toggle_text_format", "reset_node_width", "cut", "copy", "paste", "delete")))
+            if self.selection_count >= 2:
+                groups.append(("", ("graph_create_group",)))
             if self.selection_count == 1:
                 groups.append(("页面", _GRAPH_NODE_PAGE_ACTIONS))
+                groups.append(("", ("graph_ungroup", "graph_reset_group_size")))
                 groups.append(("", ("remove_attachment",)))
         else:
             groups.append(("", ("paste", "fit", "center", "reset_zoom", "zoom_in", "zoom_out")))
@@ -224,13 +271,86 @@ class GraphCanvasMixin:
         self.engine.set_node_graph(actual[1], graph)
 
     @document_interaction
+    def create_graph_group(self) -> str | None:
+        """将至少两个同层节点放入新组，返回组节点标识或 None。
+
+        在可编辑画布的 GUI 线程调用。打开组名对话框前冻结节点和图身份。取消时
+        返回 None。图变化或无法转接的连线抛出 MindMapError。成功时在原层加入
+        组节点，一次提交成员、接线和位置，随后选中新组标题。
+        """
+        self._ensure_editable()
+        self._prepare_page_navigation()
+        target = self._graph_target()
+        graph = self._read_active_graph(target)
+        keys = tuple(self.selected_node_ids())
+        if not _can_group_nodes(graph, keys):
+            raise MindMapError("请选择至少两个同层图节点")
+        key = next(available_graph_group_ids(node.id for node in graph.nodes))
+        title, accepted = QInputDialog.getText(self, "创建分组", "分组名称", text=f"分组 {key[1:]}")
+        if not accepted:
+            return None
+        title = title.strip()
+        validate_graph_group_title(title)
+        updated = replace(graph, nodes=(*graph.nodes, GraphNode(key, title, text_format="markdown")),
+                          groups=(*graph.groups, GraphGroup(key)))
+        parent = graph.parent_groups().get(keys[0])
+        updated = updated.with_group_parents({key: parent, **dict.fromkeys(keys, key)})
+        self._commit_graph_group_edit(graph, updated, target)
+        self.select_nodes([key])
+        return key
+
+    @document_interaction
+    def ungroup_graph_node(self) -> None:
+        """解除所选节点的分组属性，将直接成员提升到当前层并保留节点正文和附页。"""
+        self._ensure_editable()
+        self._prepare_page_navigation()
+        target = self._graph_target()
+        graph = self._read_active_graph(target)
+        key = self.current_node_id()
+        group = next((entry for entry in graph.groups if entry.id == key), None)
+        if group is None:
+            raise MindMapError("请选择要解除的分组节点")
+        updated = graph.with_group_parents(dict.fromkeys(group.member_ids, graph.parent_groups().get(key)))
+        updated = replace(updated, groups=tuple(entry for entry in updated.groups if entry.id != key))
+        self._commit_graph_group_edit(graph, updated, target)
+
+    @document_interaction
+    def _set_graph_group_size(
+        self, key: str, minimum: Point | None, *, target: tuple[int, str] | None = None,
+        expected: NodeGraph | None = None,
+    ) -> None:
+        """一次保存组框最小宽高，传入 None 恢复完全自适应。
+
+        鼠标操作传入按下时的 target 和 expected 防止覆盖其他视图的更新。最小宽高
+        由引擎按场景逻辑像素校验，组或页面已变化时拒绝提交。
+        """
+        self._ensure_editable()
+        target = self._graph_target() if target is None else target
+        graph = self._read_active_graph(target)
+        if expected is not None and graph != expected:
+            raise MindMapError("图内容已在其他视图更新，请重新调整组框")
+        if key not in {group.id for group in graph.groups}:
+            raise MindMapError("请选择要调整的分组节点")
+        groups = tuple(replace(group, min_size=minimum) if group.id == key else group for group in graph.groups)
+        self._commit_graph_group_edit(graph, replace(graph, groups=groups), target)
+
+    def _commit_graph_group_edit(self, original: NodeGraph, updated: NodeGraph, target: tuple[int, str]) -> None:
+        """在 GUI 线程按原图身份提交一次组结构或尺寸编辑。"""
+        self._ensure_editable()
+        if self._read_active_graph(target) != original:
+            raise MindMapError("图内容已在其他视图更新，请重新操作")
+        if updated != original:
+            self.view.cancel_interaction()
+            self._write_active_graph(self._keep_graph_placement(updated), target)
+
+    @document_interaction
     def auto_layout_graph(self) -> None:
         """让当前节点图恢复内置 DOT 分层布局，并将发起操作的视图调整为适应窗口。
 
         在画布的 GUI 线程调用。当前页须为非空、可编辑的图，且没有正在编辑的
         节点正文或面板输入法候选，否则抛出 MindMapError。取消拖动预览后读取
-        正式图，一次事务清空手动坐标，保留节点和连线。其他标签随事务同步，
-        撤销可恢复全部原坐标。布局使用实测节点尺寸及完整连线，后续编辑会继续重排。
+        正式图，一次事务清空手动坐标，保留节点、连线和分组。其他标签随事务同步，
+        撤销可恢复全部原坐标。布局使用实测尺寸及完整连线，把同组节点排在一起。
         已处于自动布局时只适应窗口，不写入历史。调用返回 None。
         """
         self._ensure_editable()
@@ -269,6 +389,8 @@ class GraphCanvasMixin:
         ids = {node.id for node in current.nodes}
         if replacement.source not in ids or replacement.target not in ids:
             raise MindMapError("起点或终点已删除，请重新操作")
+        if not graph_edge_in_scope(replacement, current.parent_groups()):
+            raise MindMapError("连线的两端必须处于同一层")
         if replacement in current.edges:
             raise MindMapError("这条连线已存在")
         edges = list(current.edges)
@@ -302,16 +424,18 @@ class GraphCanvasMixin:
 
     @document_interaction
     def add_graph_node(self, *, connect_from_selection=False) -> str:
-        """新增图节点并使用原地编辑器。Tab 可从单选节点接一条出边，Enter 新增独立节点。"""
+        """新建图节点并进入原地编辑。Tab 在选中节点同层创建连接，Enter 在顶层新增。"""
         self._ensure_editable()
         self._prepare_page_navigation()
         graph = self._read_active_graph()
         key = _unused_node_ids(graph.nodes, 1)[0]
         nodes = (*graph.nodes, GraphNode(key, "新节点", text_format="markdown"))
-        edges = graph.edges
+        updated = graph.with_content(nodes, graph.edges)
         if connect_from_selection and self.selection_count == 1:
-            edges = (*edges, GraphEdge(self.current_node_id(), key))
-        self._write_active_graph(graph.with_content(nodes, edges))
+            source = self.current_node_id()
+            updated = replace(updated, edges=(*updated.edges, GraphEdge(source, key)))
+            updated = updated.with_group_parents({key: graph.parent_groups().get(source)})
+        self._write_active_graph(updated)
         self.begin_edit(key)
         return key
 
@@ -328,13 +452,15 @@ class GraphCanvasMixin:
         self._write_active_graph(replace(graph, nodes=nodes))
 
     def _delete_graph_nodes(self, ids, *, copied=False):
-        """一次删除节点、连线及附页。剪切已将完整内容放入剪贴板，无需删除确认。"""
+        """一次删除节点、组后代、连线及附页。剪切前剪贴板已包含整个子树。"""
         target = self._graph_target()
         graph = self._read_active_graph(target)
-        ids = set(ids)
+        selected = set(ids)
+        ids = graph.subtree_ids(selected)
+        members = graph.subtree_ids(key for group in graph.groups if group.id in selected for key in group.member_ids)
         nodes = tuple(node for node in graph.nodes if node.id not in ids)
         edges = tuple(edge for edge in graph.edges if edge.source not in ids and edge.target not in ids)
-        if copied or self._confirm_graph_node_removal(graph, ids):
+        if copied or self._confirm_graph_node_removal(graph, ids, member_count=len(members)):
             self._write_active_graph(graph.with_content(nodes, edges), target)
 
     def _graph_owned_page_counts(self, graph: NodeGraph, ids) -> tuple[int, int, int]:
@@ -351,17 +477,18 @@ class GraphCanvasMixin:
                 child_graph += GRAPH_PAGE_TYPE in node.extension_pages
         return detail, submap, child_graph
 
-    def _confirm_graph_node_removal(self, graph: NodeGraph, ids) -> bool:
-        """移除带附页节点前确认范围，确认后核对图身份、权限及期间的内容变化。
+    def _confirm_graph_node_removal(self, graph: NodeGraph, ids, *, member_count: int = 0) -> bool:
+        """删除组后代或附页前确认范围，确认后核对图身份、权限及期间的内容变化。
 
         取消返回 False，普通节点无需弹窗。只读、切页或其他标签修改后不提交删除。
         """
         details, submaps, graphs = self._graph_owned_page_counts(graph, ids)
-        if not (details or submaps or graphs):
+        if not (member_count or details or submaps or graphs):
             return True
+        members = f"（其中 {member_count} 个组内成员）" if member_count else ""
         return self._confirm_page_deletion(
             "删除图节点及附属页面",
-            f"将删除 {len(ids)} 个图节点及其关联连线，以及 {details} 张详情页、"
+            f"将删除 {len(ids)} 个图节点{members}及其关联连线，以及 {details} 张详情页、"
             f"{submaps} 张子导图、{graphs} 张图。\n删除后可以撤销。",
         )
 
@@ -397,7 +524,7 @@ class GraphCanvasMixin:
             if not include_pages:
                 revision = self._branch_content_revision
                 if QMessageBox.question(
-                        self, "粘贴到详情页中的图", "是否只粘贴图节点、连线和附件？附页仍保留在剪贴板。",
+                        self, "粘贴到详情页中的图", "是否只粘贴图节点、连线、分组和附件？附页仍保留在剪贴板。",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                         QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                     return []
@@ -420,15 +547,17 @@ class GraphCanvasMixin:
         remap = {node.id: key for node, key in zip(fragment.nodes, keys, strict=True)}
         nodes = (*graph.nodes, *(replace(node, id=remap[node.id]) for node in fragment.nodes))
         edges = (*graph.edges, *(GraphEdge(remap[edge.source], remap[edge.target]) for edge in fragment.edges))
-        self._write_active_graph(graph.with_content(nodes, edges), target)
+        groups = tuple(group.remap(remap) for group in fragment.groups)
+        updated = graph.with_content(nodes, edges)
+        self._write_active_graph(replace(updated, groups=(*graph.groups, *groups)), target)
         self.reveal_nodes(keys)
         return keys
 
     @document_interaction
     def apply_graph_text(self, text: str) -> bool:
-        """替换图的节点源码和连线，保留同一局部 ID 的格式、宽度、附页与手动坐标。
+        """替换图的节点源码、连线和分组，保留同一局部 ID 的格式、宽度、附页与手动坐标。
 
-        新的局部 ID 使用 Markdown 格式。输入解析后按当前图和权限校验，删除带附页
+        分组以输入声明为准。新的局部 ID 使用 Markdown 格式。输入解析后按当前图和权限校验，删除带附页
         节点时先确认范围。取消返回 False，成功或内容相同返回 True。只读、输入法
         候选或目标变化时抛出 MindMapError。
         """
@@ -443,7 +572,13 @@ class GraphCanvasMixin:
         previous = {node.id: node for node in graph.nodes}
         nodes = tuple(replace(previous[node.id], title=node.title) if node.id in previous
                       else replace(node, text_format="markdown") for node in parsed.nodes)
-        self._write_active_graph(graph.with_content(nodes, parsed.edges), target)
+        minima = {group.id: group.min_size for group in graph.groups}
+        groups = tuple(replace(group, min_size=minima.get(group.id)) for group in parsed.groups)
+        updated = replace(graph.with_content(nodes, parsed.edges), groups=groups)
+        if (updated.groups != graph.groups and updated.nodes == graph.nodes and updated.edges == graph.edges):
+            self.view.cancel_interaction()
+            updated = self._keep_graph_placement(updated)
+        self._write_active_graph(updated, target)
         return True
 
     def edit_graph_text(self) -> None:
@@ -456,6 +591,8 @@ class GraphCanvasMixin:
         dialog.resize(640, 440)
         layout = QVBoxLayout(dialog)
         hint = QLabel('用 节点 app "应用" 声明节点，用 app -> core 连接两个已声明的节点。'
+                      '用 节点 g1 "模块" 定义组节点，再用 分组 g1 app core 声明成员。'
+                      '连线两端须同层，删除分组行可解组。'
                       '保留节点标识可保留附页。', dialog)
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -485,7 +622,7 @@ class GraphCanvasMixin:
                     if editor.composing:
                         raise MindMapError("请先完成输入法候选")
                     graph = self._read_active_graph(target)
-                    if (graph.nodes, graph.edges) != (original.nodes, original.edges):
+                    if (graph.nodes, graph.edges, graph.groups) != (original.nodes, original.edges, original.groups):
                         raise MindMapError("图内容已在其他视图更新，请复制草稿后重新打开")
                     if not self.apply_graph_text(editor.source_text()):
                         return
@@ -518,16 +655,31 @@ class GraphCanvasMixin:
         source, destination = QComboBox(dialog), QComboBox(dialog)
         source.setAccessibleName("起点")
         destination.setAccessibleName("终点")
+        labels = {}
         for node in graph.nodes:
             label = " ".join(node.title.splitlines()) or "（空标题）"
-            for field in (source, destination):
-                field.addItem(f"{label}（{node.id}）", node.id)
+            labels[node.id] = f"{label}（{node.id}）"
+            source.addItem(labels[node.id], node.id)
         selected = self.selected_node_ids()
         first = selected[0] if selected else graph.nodes[0].id
-        second = selected[1] if len(selected) > 1 else next(
-            (node.id for node in graph.nodes if node.id != first), first)
+        second = selected[1] if len(selected) > 1 else None
+        parents = graph.parent_groups()
+
+        def sync_destination():
+            start = source.currentData()
+            wanted = destination.currentData() if destination.count() else second
+            destination.clear()
+            for key, label in labels.items():
+                if parents.get(start) == parents.get(key):
+                    destination.addItem(label, key)
+            index = destination.findData(wanted)
+            if index < 0:
+                index = next((i for i in range(destination.count()) if destination.itemData(i) != start), 0)
+            destination.setCurrentIndex(index)
+
         source.setCurrentIndex(source.findData(first))
-        destination.setCurrentIndex(destination.findData(second))
+        source.currentIndexChanged.connect(sync_destination)
+        sync_destination()
         layout.addRow("起点", source)
         layout.addRow("终点", destination)
         error = QLabel(dialog)

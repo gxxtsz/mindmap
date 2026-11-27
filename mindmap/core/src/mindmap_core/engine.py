@@ -857,9 +857,9 @@ class MindMapEngine(NodePagesMixin):
     def add_graph_image_node(
         self, graph_owner_id: str, source_id: str, data: bytes, *, width: float, position: Point | None = None,
     ) -> str:
-        """原子创建图中的 SVG 图片及其入边，返回新图节点的局部标识。
+        """在起点的直接父层原子创建 SVG 图片和入边，返回新节点的局部标识。
 
-        source_id 是落点的局部标识，position 是可选的逻辑坐标。界面调用方负责
+        source_id 是落点的局部标识，position 是可选的场景逻辑坐标。界面调用方负责
         先校验 SVG 内容。整次创建只记录一次历史，资源与图一起保存和撤销。
         """
         page_id = graph_page_id(graph_owner_id) if isinstance(graph_owner_id, str) and graph_owner_id else None

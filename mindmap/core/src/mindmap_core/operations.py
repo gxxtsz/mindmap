@@ -569,7 +569,7 @@ class DocumentEditor(InspirationEditorMixin):
             self._state.set_asset(asset.id, asset)
 
     def add_graph_image_node(self, graph_owner_id, source_id, data, width, position, page_id) -> str:
-        """在同一事务内创建图图片节点、关联资源并从落点新增连线。"""
+        """在起点同层创建图图片节点，并在同一事务内登记资源和连线。"""
         if page_id is None:
             raise MindMapError("图的所属节点标识无效")
         record = self.node(graph_owner_id).extension_pages.get(GRAPH_PAGE_TYPE)
@@ -588,6 +588,7 @@ class DocumentEditor(InspirationEditorMixin):
         positions = graph.positions if position is None else {**graph.positions, key: position}
         updated = replace(graph, nodes=(*graph.nodes, node), edges=(*graph.edges, GraphEdge(source_id, key)),
                           positions=positions)
+        updated = updated.with_group_parents({key: graph.parent_groups().get(source_id)})
         self._store_asset(asset)
         self._state.set_graph(graph_owner_id, updated.to_record())
         return key
@@ -669,20 +670,22 @@ class DocumentEditor(InspirationEditorMixin):
         fragment.validate()
 
     def copy_graph_fragment(self, graph: NodeGraph, node_ids) -> MindMapDocument:
-        """生成包含图节点、内部连线和全部附页的独立剪贴板文档。
+        """生成包含选中节点、所选分组的全部后代、内部连线和附页的剪贴板文档。
 
         选中节点按原声明顺序复制，片段根只负责挂载图。跨片段引用保留来源令牌，
         由粘贴接口按普通导图的规则恢复。手动坐标由粘贴目标重新布局。
         """
         wanted = set(node_ids)
-        nodes = tuple(node for node in graph.nodes if node.id in wanted)
-        if not nodes or len(nodes) != len(wanted):
+        if not wanted or not wanted.issubset(node.id for node in graph.nodes):
             raise MindMapError("请选择有效的图节点")
+        wanted = graph.subtree_ids(wanted)
+        nodes = tuple(node for node in graph.nodes if node.id in wanted)
         edges = tuple(edge for edge in graph.edges if edge.source in wanted and edge.target in wanted)
+        groups = tuple(group for group in graph.groups if group.id in wanted)
         selected = {key for node in nodes if node.document_node_id
                     for key in self.document.owned_descendants(node.document_node_id)}
         fragment = MindMapDocument.new("图剪贴板", text_format="plain")
-        fragment.root.extension_pages[GRAPH_PAGE_TYPE] = NodeGraph(nodes, edges).to_record()
+        fragment.root.extension_pages[GRAPH_PAGE_TYPE] = NodeGraph(nodes, edges, groups=groups).to_record()
         self._copy_owned_contents(fragment, selected, self.document)
         return fragment
 
@@ -728,10 +731,10 @@ class DocumentEditor(InspirationEditorMixin):
                 self._restore_clipboard_references(targets, mapping)
 
     def paste_graph_fragment(self, owner_id, current, fragment, source, *, include_pages: bool) -> list[str]:
-        """将已校验图剪贴板片段追加到目标图，重建局部和文档标识，返回新增局部 ID。
+        """将已校验图剪贴板片段追加到目标图，重建局部和文档标识，返回新增节点局部 ID。
 
         详情页中的旧图只能粘贴没有绑定的普通图内容。所有节点、页面、引用和资源
-        同属外层事务，任一步失败均由引擎回滚。
+        同属外层事务，任一步失败均由引擎回滚。分组及成员引用随节点标识一同重建。
         """
         if include_pages and any(entry.document_node_id for entry in source.nodes):
             self.require_page_owner(owner_id)
@@ -752,7 +755,9 @@ class DocumentEditor(InspirationEditorMixin):
                       for entry in source.nodes)
         edges = tuple(replace(edge, source=local_mapping[edge.source], target=local_mapping[edge.target])
                       for edge in source.edges)
-        updated = replace(current, nodes=(*current.nodes, *nodes), edges=(*current.edges, *edges))
+        groups = tuple(group.remap(local_mapping) for group in source.groups)
+        updated = replace(current, nodes=(*current.nodes, *nodes), edges=(*current.edges, *edges),
+                          groups=(*current.groups, *groups))
         self._state.set_graph(owner_id, updated.to_record())
         self._restore_fragment_references(fragment, mapping)
         return list(local_mapping.values())

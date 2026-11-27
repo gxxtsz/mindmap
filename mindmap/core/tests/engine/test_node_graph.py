@@ -3,7 +3,15 @@
 from dataclasses import replace
 
 import pytest
-from mindmap_core import GraphEdge, GraphNode, MindMapEngine, MindMapError, NodeGraph, OperationRejected
+from mindmap_core import (
+    GraphEdge,
+    GraphGroup,
+    GraphNode,
+    MindMapEngine,
+    MindMapError,
+    NodeGraph,
+    OperationRejected,
+)
 from mindmap_core.formats import (
     from_dict,
     load_directory,
@@ -71,6 +79,126 @@ def test_graph_image_record_validates_resource_and_rolls_back_invalid_creation()
         from_dict(record)
 
 
+def test_graph_group_persistence_preserves_resources_versions_and_legacy_graph(tmp_path):
+    engine = MindMapEngine()
+    owner = engine.root_id
+    engine.set_node_graph(owner, NodeGraph((GraphNode("a", "组员"),), positions={"a": (20, -55)}))
+    legacy = to_dict(engine.document)
+    assert legacy["schema_version"] == 7
+    assert MindMapEngine(from_dict(legacy)).node_graph(owner).groups == ()
+
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>'
+    picture = engine.add_graph_image_node(owner, "a", svg, width=32)
+    base = engine.node_graph(owner)
+    graph = replace(base, nodes=(*base.nodes, GraphNode("g1", "含图片的组")),
+                    groups=(GraphGroup("g1", ("a", picture), (340, 280)),))
+    engine.set_node_graph(owner, graph)
+    document = engine.document
+    payload = to_dict(document)
+    assert payload["schema_version"] == 13
+    assert payload["nodes"][0]["extension_pages"]["graph"]["version"] == 7
+    assert from_dict(payload) == document
+    folder = tmp_path / "导图分组"
+    archive = tmp_path / "导图分组.mindmap"
+    save_directory(document, folder)
+    save_document(document, archive)
+    for loaded in (load_directory(folder), load_document(archive)):
+        assert loaded == document
+        assert MindMapEngine(loaded).node_graph(owner) == graph
+    payload["schema_version"] = 12
+    with pytest.raises(MindMapError, match="分组需要版本 13"):
+        from_dict(payload)
+    with pytest.raises(MindMapError, match="数据字段"):
+        NodeGraph.from_data(graph.to_data(), version=5)
+
+
+def test_legacy_graph_groups_migrate_colliding_ids_edges_and_document_bindings(tmp_path):
+    engine = MindMapEngine()
+    owner = engine.root_id
+    engine.set_node_graph(owner, NodeGraph(
+        tuple(GraphNode(key, key) for key in ("a", "b", "c", "g1")),
+        (GraphEdge("g1", "a"), GraphEdge("g1", "b"), GraphEdge("b", "g1"), GraphEdge("a", "b")),
+        {"a": (30, 40)},
+    ))
+    detail = engine.create_graph_node_page(owner, "a", kind="detail")
+    original = engine.node_graph(owner)
+    payload = to_dict(engine.document)
+    payload["schema_version"] = 12
+    record = payload["nodes"][0]["extension_pages"]["graph"]
+    record["version"] = 6
+    record["data"]["groups"] = [
+        {"id": "g1", "title": "旧组", "member_ids": ["a", "b"]},
+        {"id": "g2", "title": "独立组", "member_ids": ["c"]},
+    ]
+    restored = MindMapEngine(from_dict(payload))
+    graph = restored.node_graph(owner)
+    assert graph.nodes[:4] == original.nodes and graph.positions == original.positions
+    assert graph.groups == (GraphGroup("g3", ("a", "b")), GraphGroup("g2", ("c",)))
+    assert graph.edges == (GraphEdge("g1", "g3"), GraphEdge("g3", "g1"), GraphEdge("a", "b"))
+    assert restored.page_document(detail).root.text == "a"
+    path = tmp_path / "升级"
+    save_directory(restored.document, path)
+    assert MindMapEngine(load_directory(path)).node_graph(owner) == graph
+    assert to_dict(load_directory(path))["schema_version"] == 13
+
+
+def test_graph_group_reparent_promotes_to_nearest_layer_without_mutating_on_conflict():
+    graph = NodeGraph(
+        tuple(GraphNode(key, key) for key in "xgabhi"),
+        (GraphEdge("a", "h"), GraphEdge("b", "i"), GraphEdge("i", "b"), GraphEdge("x", "g")),
+        groups=(GraphGroup("g", ("a", "h")), GraphGroup("h", ("b", "i"))),
+    )
+    moved = graph.with_group_parents({"b": "g"})
+    assert moved.edges == (GraphEdge("a", "h"), GraphEdge("b", "h"), GraphEdge("h", "b"), GraphEdge("x", "g"))
+    assert moved.parent_groups() == {"a": "g", "h": "g", "b": "g", "i": "h"}
+    with pytest.raises(MindMapError, match="无法转接连线 a->h"):
+        graph.with_group_parents({"a": "h"})
+    with pytest.raises(MindMapError, match="不能放入自身或后代"):
+        graph.with_group_parents({"g": "h"})
+    assert graph.parent_groups()["a"] == "g" and graph.edges[0] == GraphEdge("a", "h")
+
+
+def test_graph_image_creation_uses_the_source_nodes_scope():
+    engine = MindMapEngine()
+    owner = engine.root_id
+    engine.set_node_graph(owner, NodeGraph((GraphNode("a", "成员"), GraphNode("g", "组")),
+                                          groups=(GraphGroup("g", ("a",)),)))
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"/>'
+    inside = engine.add_graph_image_node(owner, "a", svg, width=32)
+    outside = engine.add_graph_image_node(owner, "g", svg, width=32)
+    graph = engine.node_graph(owner)
+    assert graph.parent_groups() == {"a": "g", inside: "g"}
+    assert graph.edges == (GraphEdge("a", inside), GraphEdge("g", outside))
+    assert len(engine.document.assets) == 1
+
+
+def test_graph_clipboard_remaps_nested_groups_and_the_group_attachment_page():
+    source = MindMapEngine()
+    owner = source.root_id
+    graph = NodeGraph(
+        (GraphNode("a", "甲"), GraphNode("b", "乙"), GraphNode("g", "来源"), GraphNode("h", "内层")),
+        (GraphEdge("a", "h"),), groups=(GraphGroup("g", ("a", "h"), (340, 240)), GraphGroup("h", ("b",))),
+    )
+    source.set_node_graph(owner, graph)
+    source.create_graph_node_page(owner, "g", kind="detail")
+    partial = source.copy_graph_fragment(owner, ["b"])
+    assert MindMapEngine(partial).node_graph(partial.root_id).groups == ()
+
+    target = MindMapEngine()
+    existing = NodeGraph((GraphNode("n1", "目标"),), groups=(GraphGroup("n1"),))
+    target.set_node_graph(target.root_id, existing)
+    serialized = from_dict(to_dict(source.copy_graph_fragment(owner, ["g"])))
+    first, second, outer, inner = target.paste_graph_fragment(target.root_id, serialized)
+    current = target.node_graph(target.root_id)
+    assert current.groups == (*existing.groups, GraphGroup(outer, (first, inner), (340, 240)),
+                              GraphGroup(inner, (second,)))
+    assert current.edges == (GraphEdge(first, inner),)
+    copied = target.graph_node_document_id(target.root_id, outer)
+    assert copied and target.get_node(copied).detail_page_id
+    assert target.undo() and target.node_graph(target.root_id) == existing
+    assert target.redo() and target.node_graph(target.root_id) == current
+
+
 def test_graph_node_format_and_width_roundtrip_with_bound_pages_and_clipboard(tmp_path):
     engine = MindMapEngine()
     owner = engine.root_id
@@ -114,6 +242,15 @@ def test_graph_node_format_and_width_roundtrip_with_bound_pages_and_clipboard(tm
     {"edges": (GraphEdge("a", "missing"),)},
     {"positions": {"a": (float("inf"), 0)}},
     {"positions": {"a": (1e300, 0)}},
+    {"groups": (GraphGroup("missing"),)},
+    {"groups": (GraphGroup("a", (), (0, 35)),)},
+    {"groups": (GraphGroup("a", ("missing",)),)},
+    {"groups": (GraphGroup("a", ("a", "a")),)},
+    {"groups": (GraphGroup("a", ("a",)),)},
+    {"nodes": (GraphNode("a", "甲"), GraphNode("b", "乙")),
+     "groups": (GraphGroup("a", ("b",)), GraphGroup("b", ("a",)))},
+    {"nodes": (GraphNode("a", "甲"), GraphNode("b", "乙")),
+     "groups": (GraphGroup("a", ("b",)),), "edges": (GraphEdge("a", "b"),)},
 ])
 def test_invalid_graph_aborts_outer_transaction(patch):
     engine = MindMapEngine()

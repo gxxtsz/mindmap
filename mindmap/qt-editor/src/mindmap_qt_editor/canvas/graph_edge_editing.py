@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from math import hypot, sqrt
 
 from mindmap_core import GraphEdge, NodeGraph
+from mindmap_core.graph import graph_edge_in_scope
 from mindmap_qt_render.rendering import branch_arrow_path
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
@@ -39,6 +40,7 @@ class _EdgeDrag:
     target: tuple[int, str]
     graph: NodeGraph
     edges: frozenset[GraphEdge]
+    parents: dict[str, str]
     press: QPoint
 
 
@@ -89,8 +91,11 @@ class GraphEdgeEditController:
         return (owner.graph is not None and not owner._disposed and owner.editable and owner.editor is None
                 and not owner._refreshing and not self.view.text_resize.active)
 
-    def _node_rect(self, key: str) -> QRectF:
-        rect = self.owner.layout_result.nodes[key]
+    def _node_rect(self, key: str, *, connection=False) -> QRectF:
+        """返回视口中的卡片矩形，接线目标则使用组节点的外框。"""
+        layout = self.owner.layout_result
+        frame = layout.group_frames.get(key) if connection else None
+        rect = frame.bounds if frame else layout.nodes[key]
         return self.view.viewportTransform().mapRect(QRectF(rect.x, rect.y, rect.width, rect.height))
 
     def _outlet(self) -> _Handle | None:
@@ -193,7 +198,7 @@ class GraphEdgeEditController:
     def press_left(self, position: QPoint, modifiers: Qt.KeyboardModifier) -> bool:
         """认领按下的改接、Ctrl 点选或 Shift 框选手势，返回是否消费左键。
 
-        普通点击优先命中把手和节点，Ctrl 点选跳过改接把手，Shift 在空白处按下
+        普通点击优先命中把手、节点和组标题，Ctrl 点选跳过改接把手，Shift 在空白处按下
         进入选线框。其他点击交给原有节点选择和节点框选。
         """
         self.owns_left_button = False
@@ -210,7 +215,8 @@ class GraphEdgeEditController:
             self.view.setFocus(Qt.FocusReason.MouseFocusReason)
             # 分屏抢到焦点时，旧标签可能先提交文字草稿。放弃这次过期命中，仍接收配对释放。
             if self._can_edit() and self.owner.graph is graph:
-                self._drag = _EdgeDrag(handle, target, graph, frozenset(graph.edges), QPoint(position))
+                self._drag = _EdgeDrag(handle, target, graph, frozenset(graph.edges), graph.parent_groups(),
+                                       QPoint(position))
                 self._pointer = QPoint(position)
                 self._moved = False
         else:
@@ -260,7 +266,7 @@ class GraphEdgeEditController:
         key = item.node.id
         handle = drag.handle
         edge = (GraphEdge(key, handle.fixed_node) if handle.moving_source else GraphEdge(handle.fixed_node, key))
-        return (key, edge) if edge not in drag.edges else None
+        return (key, edge) if edge not in drag.edges and graph_edge_in_scope(edge, drag.parents) else None
 
     def release(self, position: QPoint) -> None:
         """以松手坐标重做命中，清除预览后更新选线或提交一次改接。"""
@@ -316,7 +322,7 @@ class GraphEdgeEditController:
         return self._related_edges
 
     def _paint_highlights(self, painter: QPainter, color: QColor, *, outline: QColor | None = None) -> None:
-        """在视口坐标中绘制高亮线身和箭头，并裁去被卡片或编辑器遮住的部分。
+        """在视口坐标中绘制高亮线身和箭头，避开卡片、组名及编辑器。
 
         裁剪使用卡片实际绘制的圆角与边框，端口外侧的线身和箭头尖端均能完整上色。
         节点关联边只叠加主题色。直接选线使用更粗的描边，并先画一圈画布底色，
@@ -425,9 +431,9 @@ class GraphEdgeEditController:
 
     def _paint_preview(self, painter: QPainter, drag: _EdgeDrag, color: QColor) -> None:
         """用操作对应的颜色绘制跟随指针的虚线，命中合法节点时贴边并指向实际终点。"""
-        fixed = self._node_rect(drag.handle.fixed_node)
+        fixed = self._node_rect(drag.handle.fixed_node, connection=True)
         candidate = self._candidate(drag, self._pointer)
-        moving = self._node_rect(candidate[0]) if candidate is not None else None
+        moving = self._node_rect(candidate[0], connection=True) if candidate is not None else None
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if moving is not None:
             painter.setPen(QPen(color, 2))
@@ -442,7 +448,8 @@ class GraphEdgeEditController:
         else:
             handle = drag.handle
             if handle.original is None:
-                start = QPointF(fixed.right(), fixed.center().y())
+                card = self._node_rect(handle.fixed_node)
+                start = QPointF(card.right(), card.center().y())
             else:
                 # 改接只移动被拖动的一端，虚线另一端继续从正式连线的原锚点出发。
                 branch = self.owner.layout_result.branches[handle.original.key]

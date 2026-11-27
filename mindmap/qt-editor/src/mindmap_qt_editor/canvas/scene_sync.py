@@ -5,6 +5,7 @@ from dataclasses import replace
 from mindmap_core import ChangeEvent, ChangeSet, LayoutResult, Rect
 from mindmap_core.layouts import create_incremental_layout, supports_incremental_layout
 from mindmap_core.node_pages import parse_graph_page_id
+from mindmap_qt_render.graph_groups import GraphGroupItem
 from mindmap_qt_render.rendering import BranchItem
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor
@@ -455,6 +456,7 @@ class SceneSyncMixin:
             # 只记录内容范围，一屏操作余量由视图按当前窗口大小与倍率单独计算。
             self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
             self.view.update_navigation_rect(center=center)
+            self._set_graph_group_items(result)
             if self._virtualized:
                 self._sync_viewport(force=True)
             else:
@@ -607,6 +609,28 @@ class SceneSyncMixin:
             item.setPos(rect.x, rect.y)
         self._projected_selection = self._selected_ids.intersection(self.node_items)
         self.view._update_selection_decoration()
+
+    def _set_graph_group_items(self, result: LayoutResult) -> None:
+        """按布局顺序同步组框，让内层框叠在外层框上，并保留节点和连线的优先级。
+
+        同一图元用于正式状态和预览，切页时移除已经失效的组。同级按声明顺序
+        叠放，保证撤销及跨视图刷新后的落点层级与绘制一致。
+        """
+        frames = result.group_frames
+        for key in self.graph_group_items.keys() - frames.keys():
+            self.scene.removeItem(self.graph_group_items.pop(key))
+        if not frames:
+            return
+        accent = self.ui_colors.accent
+        for index, (key, frame) in enumerate(frames.items()):
+            item = self.graph_group_items.get(key)
+            if item is None:
+                item = GraphGroupItem(frame, accent=accent)
+                self.scene.addItem(item)
+                self.graph_group_items[key] = item
+            else:
+                item.sync(frame, accent=accent)
+            item.setZValue(-2 + 0.5 * index / len(frames))
 
     def _set_branch_items(self, result) -> None:
         """同步预览或提交后的分支图元，并给图页的普通连线应用适配背景的灰蓝色。

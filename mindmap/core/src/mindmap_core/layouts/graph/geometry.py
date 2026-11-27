@@ -2,9 +2,10 @@
 
 import math
 from collections import defaultdict
+from collections.abc import Mapping
 from itertools import chain, pairwise
 
-from ...geometry import BranchPath, LayoutResult, PathCommand, Point, Rect
+from ...geometry import BranchPath, GraphGroupFrame, LayoutResult, PathCommand, Point, Rect
 from ...graph import GraphEdge
 from .constraints import SpanConstraint, minimize_spans
 from .layers import LayeredLayout, build_layout
@@ -279,11 +280,14 @@ def build_graph_layout(sizes: dict[str, Point], edges: tuple[GraphEdge, ...], *,
     return _layout_result(boxes, branches)
 
 
-def _layout_result(nodes, branches) -> LayoutResult:
+def _layout_result(nodes, branches, group_frames=None) -> LayoutResult:
+    """合并节点、箭头和组框范围，保留绘制所需的逻辑像素边距。"""
+    frames = {} if group_frames is None else group_frames
     bounds = None
-    for rect in chain(nodes.values(), (branch.bounds for branch in branches.values())):
+    for rect in chain(nodes.values(), (branch.bounds for branch in branches.values()),
+                      (frame.bounds for frame in frames.values())):
         bounds = rect if bounds is None else bounds.union(rect)
-    return LayoutResult(nodes, branches, bounds.padded(24) if bounds else Rect(0, 0, 1, 1))
+    return LayoutResult(nodes, branches, bounds.padded(24) if bounds else Rect(0, 0, 1, 1), frames)
 
 
 def _free_edge(source: Rect, target: Rect, color: str, *, loop: bool, paired: bool) -> BranchPath:
@@ -316,33 +320,73 @@ def _free_edge(source: Rect, target: Rect, color: str, *, loop: bool, paired: bo
     return BranchPath(start, end, (PathCommand("M", (start,)), curve), color, arrow=arrow)
 
 
-def move_graph_nodes(layout: LayoutResult, edges: tuple[GraphEdge, ...], positions: dict[str, Point]) -> LayoutResult:
-    """叠加手动坐标或拖动草稿，只改动实际移动的矩形和受影响的连线。"""
+def _move_graph_edge(
+    branch: BranchPath, old_source: Rect, old_target: Rect, source: Rect, target: Rect, *, loop: bool, paired: bool,
+) -> BranchPath:
+    """整体平移时保留原路径，其余有效端点变化按新矩形布线。"""
+    dx, dy = source.x - old_source.x, source.y - old_source.y
+    if ((source.width, source.height) == (old_source.width, old_source.height)
+            and (target.width, target.height) == (old_target.width, old_target.height)
+            and math.isclose(dx, target.x - old_target.x, abs_tol=1e-7)
+            and math.isclose(dy, target.y - old_target.y, abs_tol=1e-7)):
+        return branch.translated(dx, dy)
+    return _free_edge(source, target, branch.color, loop=loop, paired=paired)
+
+
+def move_graph_nodes(
+    layout: LayoutResult, edges: tuple[GraphEdge, ...], positions: dict[str, Point], *,
+    group_frames: Mapping[str, GraphGroupFrame] | None = None,
+) -> LayoutResult:
+    """叠加节点坐标，更新受影响的矩形、连线及范围，返回独立的展示结果。
+
+    positions 只需包含移动节点，坐标为左上角。默认沿用原组框以稳定拖动命中；
+    整组预览可显式传入已平移的 group_frames。正式布局按提交后的成员重新计算框。
+    """
+    frames = layout.group_frames if group_frames is None else group_frames
     moved = {key for key, point in positions.items() if key in layout.nodes
              and point != (layout.nodes[key].x, layout.nodes[key].y)}
-    if not moved:
+    if not moved and frames == layout.group_frames:
         return layout
     nodes, branches = dict(layout.nodes), dict(layout.branches)
     for key in moved:
         nodes[key] = Rect(*positions[key], nodes[key].width, nodes[key].height)
     edge_set = set(edges)
+    changed = moved | {key for key, frame in frames.items() if frame != layout.group_frames.get(key)}
     for edge in edges:
         branch = branches.get(edge.key)
-        if branch is not None and (edge.source in moved or edge.target in moved):
-            branches[edge.key] = _free_edge(nodes[edge.source], nodes[edge.target], branch.color,
-                                           loop=edge.source == edge.target,
-                                           paired=GraphEdge(edge.target, edge.source) in edge_set)
-    return _layout_result(nodes, branches)
+        if branch is not None and (edge.source in changed or edge.target in changed):
+            source = frames[edge.source].bounds if edge.source in frames else nodes[edge.source]
+            target = frames[edge.target].bounds if edge.target in frames else nodes[edge.target]
+            old_source = (layout.group_frames[edge.source].bounds if edge.source in layout.group_frames
+                          else layout.nodes[edge.source])
+            old_target = (layout.group_frames[edge.target].bounds if edge.target in layout.group_frames
+                          else layout.nodes[edge.target])
+            loop, paired = edge.source == edge.target, GraphEdge(edge.target, edge.source) in edge_set
+            branches[edge.key] = (_move_graph_edge(
+                branch, old_source, old_target, source, target, loop=loop, paired=paired,
+            ) if frames else _free_edge(source, target, branch.color, loop=loop, paired=paired))
+    return _layout_result(nodes, branches, frames)
 
 
-def graph_child_position(layout: LayoutResult, source_id: str, child_id: str) -> Point:
-    """从落点下方按层间距查找第一个能放下新节点的位置。"""
-    source, child = layout.nodes[source_id], layout.nodes[child_id]
+def graph_child_position(
+    layout: LayoutResult, source_id: str, child_id: str, *, parents: Mapping[str, str] | None = None,
+) -> Point:
+    """在起点同层按层间距查找新节点坐标，组节点用外框参与避让。
+
+    parents 记录各节点的直接父组，顶层节点无条目。起点和新节点必须属于同一层，
+    返回坐标为新卡片的场景左上角。
+    """
+    parents = {} if parents is None else parents
+
+    def box(key: str) -> Rect:
+        return layout.group_frames[key].bounds if key in layout.group_frames else layout.nodes[key]
+
+    source, child = box(source_id), box(child_id)
     x = source.center[0] - child.width / 2
     y = source.bottom + _RANK_GAP
     obstacles = sorted(
-        (rect for key, rect in layout.nodes.items()
-         if key != child_id and rect.x < x + child.width and x < rect.right),
+        (rect for key in layout.nodes if key != child_id and parents.get(key) == parents.get(child_id)
+         and (rect := box(key)).x < x + child.width and x < rect.right),
         key=lambda rect: rect.y,
     )
     for rect in obstacles:

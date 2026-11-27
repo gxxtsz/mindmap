@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 from mindmap_core import FileAttachment, MindMapError, NodeGraph
 from mindmap_core.formats import MAX_ARCHIVE_BYTES, validate_directory_capacity
-from mindmap_core.layouts.graph import build_graph_layout, graph_child_position, graph_layout
+from mindmap_core.layouts.graph import graph_child_position
 from mindmap_core.models import SVG_MEDIA_TYPE, Asset
 from mindmap_core.node_pages import parse_graph_page_id
 from PySide6.QtCore import QRectF, QTimer, QUrl
@@ -184,9 +184,8 @@ class AttachmentActionsMixin:
             if self.graph is not None and self.graph.positions:
                 page = candidate.page_view(self.current_page_id)
                 _, sizes = self.factory.measure(page)
-                automatic = build_graph_layout(sizes, page.graph.edges, color=page.theme.accent)
-                layout = graph_layout(page.graph, automatic)
-                position = graph_child_position(layout, node_id, key)
+                layout = self._calculate_graph_layout(sizes, graph=page.graph, color=page.theme.accent)
+                position = graph_child_position(layout, node_id, key, parents=page.graph.parent_groups())
                 self.engine.set_node_graph(parse_graph_page_id(self.current_page_id),
                                            replace(page.graph, positions={**page.graph.positions, key: position}))
             validate_directory_capacity(candidate)

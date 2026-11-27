@@ -30,7 +30,6 @@ from mindmap_core.layouts import (
     create_incremental_layout,
     supports_incremental_layout,
 )
-from mindmap_core.layouts.graph import build_graph_layout, graph_layout
 from mindmap_core.models import graph_image_ids
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 from mindmap_qt_render.exporting import export_document
@@ -201,6 +200,7 @@ class MindMapWidget(
         layout.addWidget(self._view_card)
         self.toolbar.setVisible(toolbar)
         self.node_items, self.branch_items = {}, {}
+        self.graph_group_items = {}
         self.editor = None
         self.focus_id = None
         self._refreshing = False
@@ -564,6 +564,10 @@ class MindMapWidget(
             ("remove_attachment", "移除附件", None, lambda w: w.remove_node_attachment(), True),
             ("graph_text", "编辑图文本…", None, lambda w: w.edit_graph_text(), False),
             ("graph_add_edge", "添加连线…", None, lambda w: w.choose_graph_edge(), True),
+            ("graph_create_group", "创建分组…", None, lambda w: w.create_graph_group(), True),
+            ("graph_ungroup", "解除分组", None, lambda w: w.ungroup_graph_node(), True),
+            ("graph_reset_group_size", "恢复自动大小", None, lambda w: w._set_graph_group_size(
+                w.current_node_id(), None), True),
             ("graph_auto_layout", "DOT 自动布局", None, lambda w: w.auto_layout_graph(), True),
             ("graph_remove", "删除此图…", None, lambda w: w.confirm_remove_graph(), True),
         ]
@@ -821,6 +825,7 @@ class MindMapWidget(
         self._ui_colors_override = colors
         self._apply_ui_theme()
         if self.graph is not None:
+            self._set_graph_group_items(self.layout_result)
             if previous_background != self.scene.backgroundBrush().color():
                 self._set_branch_items(self.layout_result)
             self.view.viewport().update()
@@ -1361,8 +1366,7 @@ class MindMapWidget(
                                              inspiration_root_id=self.current_inspiration_root_id)
         if self.graph is not None:
             def layout_provider(sizes):
-                automatic = build_graph_layout(sizes, document.graph.edges, color=document.theme.accent)
-                return graph_layout(document.graph, automatic)
+                return self._calculate_graph_layout(sizes, graph=document.graph, color=document.theme.accent)
 
             export_document(document, path, layout_registry=self.layout_registry, scale=scale,
                             layout_provider=layout_provider)

@@ -160,7 +160,7 @@ class InlineEditingMixin:
             self.view.ensureVisible(editor.mapRectToScene(cursor), 24, 24)
 
     def _show_edit_layout(self, result):
-        """同步临时节点及连接线，保持倍率和视口中心；结束编辑时也复用此处恢复。
+        """同步临时节点、连接线和组框，保持倍率和视口中心，结束编辑时也复用此处恢复。
 
         Qt 更新场景范围可能同步触发滚动回调，批量更新期间先屏蔽视口同步及
         选择信号，避免混用新旧布局。大图仍只实例化屏内节点和正在编辑的节点。
@@ -173,6 +173,7 @@ class InlineEditingMixin:
             bounds = result.bounds
             self.scene.setSceneRect(QRectF(bounds.x, bounds.y, bounds.width, bounds.height))
             self.view.update_navigation_rect(center=center)
+            self._set_graph_group_items(result)
             if self._virtualized:
                 self._sync_viewport(force=True)
             else:

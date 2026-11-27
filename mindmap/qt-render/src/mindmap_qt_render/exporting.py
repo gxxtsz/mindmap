@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QImage, QPageSize, QPainter, QPdfWriter
 from PySide6.QtSvg import QSvgGenerator, QSvgRenderer
 from PySide6.QtWidgets import QGraphicsScene
 
+from .graph_groups import GraphGroupItem
 from .items import NodeItem
 from .rendering import BranchItem, VisualFactory
 
@@ -26,7 +27,8 @@ def export_document(
     detail_page_resolver 是可选的只读共享详情解析函数，接收节点 ID 并返回
     （实际归属节点 ID，详情页 ID 或 None），供单页快照显示页外共享入口。
     省略时取节点自身引用；解析只影响图标与尺寸，不修改快照或保存文件内容。
-    layout_provider 可按本次测量的尺寸提供只读布局，图页用它复用箭头和手动坐标。
+    layout_provider 可按本次测量的尺寸提供只读布局。图页通过它传入分组框、
+    节点位置和箭头几何。未传入时使用 layout_registry 计算页面布局。
     """
     target = Path(path).absolute()
     if not document.nodes:
@@ -43,6 +45,8 @@ def export_document(
               layout_registry.layout(document, sizes, expand_all=expand_all))
     scene = QGraphicsScene()
     scene.setBackgroundBrush(QColor(document.theme.background))
+    for frame in layout.group_frames.values():
+        scene.addItem(GraphGroupItem(frame, accent=document.theme.accent))
     for key, rect in layout.nodes.items():
         item = NodeItem(document.nodes[key], visuals[key], document.theme)
         item.setPos(rect.x, rect.y)

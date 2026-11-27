@@ -7,7 +7,7 @@ from .engine import MindMapEngine, SaveSnapshot
 from .errors import MindMapError, OperationRejected
 from .events import ChangeEvent
 from .geometry import BranchPath, Curve, LayoutResult, PathCommand, Point, Rect
-from .graph import GraphEdge, GraphNode, NodeGraph
+from .graph import GraphEdge, GraphGroup, GraphNode, NodeGraph
 from .history import ChangeSet, NodeMove, NodePlacement
 from .loading import ValidatedDocument
 from .models import (
@@ -51,6 +51,7 @@ __all__ = [
     "FormatRegistration",
     "FormatRegistry",
     "GraphEdge",
+    "GraphGroup",
     "GraphNode",
     "LayoutAlgorithm",
     "LayoutConfig",

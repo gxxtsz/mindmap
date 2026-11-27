@@ -386,9 +386,15 @@ engine.undo()
 
 `GraphNode.title` 保存正文源码，`text_format` 指定纯文本或 Markdown，`fixed_width` 指定逻辑像素宽度。树节点使用 `Node.text_format` 和 `Node.style["fixed_width"]`。固定正文宽度可取 40 至 1200，省略时按内容测量。图数据版本三和完整 JSON 文档版本九支持这两项图节点属性，旧图的缺省值为纯文本和自动宽度。
 
+`NodeGraph.groups` 保存 `GraphGroup(id, member_ids, min_size)`。组标识引用同图的文字节点，正文和附页归该节点。成员可包含其他组节点，也可为空。节点最多有一个直接父组，父组关系必须无环。可选的 `min_size` 是场景逻辑像素的最小宽高。连线的两个端点必须处于同一直接父层。
+
+`NodeGraph.with_group_parents` 以节点标识到目标组标识的映射试算归属。使用 `None` 表示顶层。越层线提升到最近共同层级，保留方向并合并重复边，祖先到后代的冲突使整次命令失败。调用方通过 `set_node_graph` 一次提交结果及手动坐标。
+
+分组写入图数据版本七，完整 JSON 和原生归档使用文档版本十三。版本六的分组打开时生成组节点，保留原节点标识、手动坐标和附页，已有越层线转接到组节点。目录的页扩展记录重写时使用新版本。图文本用 `节点 g1 "核心模块"` 和 `分组 g1 app core` 分别声明节点与成员，`分组 g1` 声明空组。原生记录保存组框的手动下限。
+
 `create_graph_node_page(owner_id, local_id, kind=...)` 接受 `detail`、`submap` 或 `graph`，返回新页面 ID。首次创建为图节点分配文档节点 ID，写入图数据版本二起支持的 `document_node_id`。文档节点表保存附页入口，原生页面表及资源表保存页面内容。通过 `graph_node_document_id` 查到文档节点后，可复用既有附页查询和删除接口。删除图节点会在同一事务移除其附页。
 
-`copy_graph_fragment` 返回由合成根承载图的独立文档，`paste_graph_fragment` 把它附加到已有图并返回新局部 ID。普通树和图节点的片段复制均重建文档节点、页面及片段内部引用。
+`copy_graph_fragment` 返回由合成根承载图的独立文档，`paste_graph_fragment` 把它附加到已有图并返回新局部 ID。选中组节点时片段包含全部后代、附页、内部连线和组框最小宽高。粘贴时一起重建组节点和成员标识、文档节点、页面及片段内部引用。
 
 ```python
 from mindmap_core.formats.graph import parse_graph_text
@@ -399,6 +405,6 @@ engine.remove_node_graph(node_id)
 engine.undo()
 ```
 
-查询返回独立快照。写入统一经过事务、前置钩子、撤销历史与变更通知。节点复制和子导图转换保留页面所有权。图使用保留类型 `graph`，读写原生数据时校验节点、连线和坐标。旧筛选字段继续按版本一读取，写出时清空。外部专用详情页使用通用 JSON 封装。
+查询返回独立快照。写入统一经过事务、前置钩子、撤销历史与变更通知。节点复制和子导图转换保留页面所有权。图使用保留类型 `graph`，读写原生数据时校验节点、连线、坐标和分组。旧筛选字段继续按版本一读取，写出时清空。外部专用详情页使用通用 JSON 封装。
 
 `extension_page_id(node_id, type_id)` 与 `parse_extension_page_id()` 位于 `mindmap_core.node_pages`，用于最近访问和会话恢复。扩展 ID 是导航身份，不是独立节点树；使用 `engine.page_summary()` 查询其摘要，使用 `extension_page()` 读取内容。

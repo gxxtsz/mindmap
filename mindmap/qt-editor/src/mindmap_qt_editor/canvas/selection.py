@@ -163,6 +163,7 @@ class NodeSelectionMixin:
             self._sync_viewport()
         self.view.image_resize.cancel()
         self.view.text_resize.cancel()
+        self.view.group_resize.cancel()
         self.view._update_selection_decoration()
         self.view.viewport().update()
         self._cancel_branch_menu()
