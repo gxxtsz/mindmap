@@ -488,7 +488,7 @@ def test_opaque_group_body_hides_edges_handles_and_nodes_from_picking(window, qt
     line = view.mapFromScene(canvas.branch_items[edge.key].path().pointAtPercent(0.2))
     assert view.itemAt(hidden) == view.itemAt(line) == canvas.graph_group_items["g"]
     assert canvas.graph_edge_at(line) is None
-    assert not canvas._graph_edges_in_rect(QRect(line - QPoint(2, 2), line + QPoint(2, 2)))
+    assert canvas._graph_objects_in_rect(QRect(line - QPoint(2, 2), line + QPoint(2, 2))) == (set(), set())
     controls = view.graph_edge_edit
     canvas.select_nodes([])
     background = _viewport_region(view, line, 4)
@@ -871,7 +871,11 @@ def test_group_origins_survive_reopen_clipboards_and_explicit_edge_edits(window,
     canvas.fit_to_view()
     qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, pos=_edge_point(canvas, visible))
     assert canvas.view.graph_edge_edit.selected_edge == visible
+    qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier,
+                     pos=_node_point(canvas, "d"))
+    assert canvas.selected_node_ids() == ["d"] and canvas.view.graph_edge_edit.selected_edges == {visible}
     qtbot.keyClick(canvas.view, Qt.Key.Key_Delete)
+    assert "d" not in canvas.document_view.nodes and not canvas.graph.edge_origins
     canvas.select_nodes([g])
     canvas.ungroup_graph_node()
     assert not canvas.graph.edges and not canvas.graph.edge_origins and g not in canvas.document_view.nodes
@@ -1002,20 +1006,25 @@ def test_graph_group_resize_preview_persists_minimum_and_adapts_after_drops(wind
     assert canvas.graph.positions == {} and canvas.graph.groups[0].min_size == minimum
 
 
-def test_deleting_group_confirms_nested_members_and_owned_pages(window, monkeypatch):
-    canvas = _create_graph(window, THREE_NODES + '\n节点 g "外层"\n节点 h "内层"\n'
-                           '分组 g a h\n分组 h b\nc -> g')
+def test_deleting_group_confirms_nested_members_and_owned_pages(window, monkeypatch, qtbot):
+    canvas = _create_graph(window, FOUR_NODES + '\n节点 g "外层"\n节点 h "内层"\n'
+                           '分组 g a h\n分组 h b\nc -> g\nd -> c')
     engine = canvas.engine
     detail = engine.create_graph_node_page(engine.root_id, "h", kind="detail")
-    canvas.select_nodes(["g"])
+    canvas.fit_to_view()
+    canvas.select_nodes(["g", "h"])
+    edge = GraphEdge("d", "c")
+    canvas.view.graph_edge_edit.select_edge(edge, toggle=True)
     messages = []
     answers = iter((QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes))
     monkeypatch.setattr(QMessageBox, "question", lambda *_args: (messages.append(_args[2]), next(answers))[1])
     before = canvas.graph
-    canvas.delete_selected()
+    assert _choose_graph_menu_action(canvas, _node_point(canvas, "g"), "删除所选", qtbot)
     assert canvas.graph == before and "3 个组内成员" in messages[-1] and "1 张详情页" in messages[-1]
+    assert "另外选中的 1 条连线" in messages[-1]
+    assert set(canvas.selected_node_ids()) == {"g", "h"} and canvas.view.graph_edge_edit.selected_edges == {edge}
     canvas.delete_selected()
-    assert tuple(canvas.document_view.nodes) == ("c",)
+    assert tuple(canvas.document_view.nodes) == ("c", "d")
     assert canvas.graph.edges == () and canvas.graph.groups == () and engine.page_summary(detail) is None
     assert engine.undo() and canvas.graph == before and engine.page_summary(detail) is not None
 
@@ -1726,7 +1735,7 @@ def test_ctrl_selects_edges_and_delete_commits_one_change(window, qtbot):
     assert canvas.graph.edges == (middle,)
 
 
-def test_shift_edge_box_replaces_and_appends_without_changing_node_box(window, qtbot):
+def test_shift_edge_box_replaces_and_appends_alongside_mixed_node_box(window, qtbot):
     """从空白处框到线身可选线，取消和迟到的释放保留已完成的选择。"""
     canvas = _create_graph(window, CHAIN)
     canvas.fit_to_view()
@@ -1752,6 +1761,8 @@ def test_shift_edge_box_replaces_and_appends_without_changing_node_box(window, q
         _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left, modifiers=modifiers)
         assert not controls.active and not controls._rubber_band.isVisible()
 
+    box_edge(first, Qt.KeyboardModifier.NoModifier)
+    assert controls.selected_edges == {first} and not canvas.selected_node_ids()
     canvas.select_nodes(["a", "b"])
     box_edge(first, shift)
     assert controls.selected_edges == {first} and not canvas.selected_node_ids()
@@ -1774,8 +1785,159 @@ def test_shift_edge_box_replaces_and_appends_without_changing_node_box(window, q
     _pointer_event(canvas, QEvent.Type.MouseButtonPress, rect.topLeft(), left, left)
     _pointer_event(canvas, QEvent.Type.MouseMove, rect.bottomRight(), buttons=left)
     _pointer_event(canvas, QEvent.Type.MouseButtonRelease, rect.bottomRight(), left)
-    assert canvas.selected_node_ids() == ["c"] and not controls.selected_edges
+    assert canvas.selected_node_ids() == ["c"] and controls.selected_edges == {middle, last}
     assert canvas.engine.revision == revision
+
+
+@pytest.mark.parametrize("finish", ["release", "escape", "focus"])
+def test_mixed_marquee_highlights_while_growing_and_shrinking(window, qtbot, finish):
+    canvas = _create_graph(window, CHAIN)
+    window.manager.set_theme("light")
+    canvas.fit_to_view()
+    view = canvas.view
+    first, middle, last = canvas.graph.edges
+    left, ctrl = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier
+    qtbot.mouseClick(view.viewport(), left, pos=_edge_point(canvas, last))
+    qtbot.mouseClick(view.viewport(), left, ctrl, pos=_node_point(canvas, "d"))
+    assert canvas.selected_node_ids() == ["d"] and view.graph_edge_edit.selected_edges == {last}
+    revision = canvas.engine.revision
+    box = view.mapFromScene(canvas.node_items["b"].sceneBoundingRect()).boundingRect()
+    start = QPoint(box.left() - 12, box.center().y())
+    node_only = box.center() + QPoint(0, 3)
+    with_edge = _edge_point(canvas, middle) + QPoint(5, 2)
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
+
+    observed = []
+
+    def read_selection(*_):
+        observed.append((canvas.selected_node_ids(), view.graph_edge_edit.selected_edges))
+
+    canvas.selection_changed.connect(read_selection)
+    canvas.graph_edge_selection_changed.connect(read_selection)
+    _pointer_event(canvas, QEvent.Type.MouseMove, with_edge, buttons=left)
+    assert observed and all(pair == (["b"], {middle}) for pair in observed)
+    assert canvas.node_items["b"].isSelected() and not canvas.node_items["d"].isSelected()
+    assert "已选 1 个节点、1 条连线" in window.status_label.text()
+    assert view.graph_edge_edit._rubber_band.isVisible()
+    # 在选框外取色，验证同一帧中明确选中的线和节点另一侧的关联线各自高亮。
+    for edge, percent, color in ((middle, 0.8, "#ac5208"), (first, 0.5, canvas.ui_colors.accent)):
+        point = view.mapFromScene(canvas.branch_items[edge.key].path().pointAtPercent(percent))
+        image = _viewport_region(view, point, 5)
+        assert QColor(color) in [image.pixelColor(x, y) for x in range(image.width()) for y in range(image.height())]
+    _pointer_event(canvas, QEvent.Type.MouseMove, node_only, buttons=left)
+    assert canvas.selected_node_ids() == ["b"] and not view.graph_edge_edit.selected_edges
+    assert "已选 1 个节点、0 条连线" in window.status_label.text()
+    if finish == "escape":
+        qtbot.keyClick(view, Qt.Key.Key_Escape)
+    elif finish == "focus":
+        QApplication.sendEvent(view, QFocusEvent(QEvent.Type.FocusOut))
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, with_edge, left)
+    assert not view.graph_edge_edit._rubber_band.isVisible()
+    expected = (["b"], {middle}) if finish == "release" else (["d"], {last})
+    assert (canvas.selected_node_ids(), view.graph_edge_edit.selected_edges) == expected
+    assert canvas.engine.revision == revision
+
+
+def test_ctrl_box_appends_and_ctrl_click_toggles_only_the_hit_object(window, qtbot):
+    canvas = _create_graph(window, CHAIN)
+    canvas.fit_to_view()
+    canvas.set_editable(False)
+    view = canvas.view
+    left = Qt.MouseButton.LeftButton
+    ctrl, shift = Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.ShiftModifier
+    first, middle, last = canvas.graph.edges
+    canvas.select_nodes(["a"])
+    view.graph_edge_edit.select_edge(first, toggle=True)
+    before = canvas.engine.revision
+
+    def box(rect, modifiers):
+        _pointer_event(canvas, QEvent.Type.MouseButtonPress, rect.topLeft(), left, left, modifiers=modifiers)
+        _pointer_event(canvas, QEvent.Type.MouseMove, rect.bottomRight(), buttons=left, modifiers=modifiers)
+        _pointer_event(canvas, QEvent.Type.MouseButtonRelease, rect.bottomRight(), left, modifiers=modifiers)
+
+    region = view.mapFromScene(canvas.node_items["c"].sceneBoundingRect()).boundingRect().adjusted(-7, -7, 7, 7)
+    box(region, ctrl | shift)
+    assert canvas.selected_node_ids() == ["a"] and view.graph_edge_edit.selected_edges == {first, middle, last}
+    box(region, ctrl)
+    assert canvas.selected_node_ids() == ["a", "c"] and view.graph_edge_edit.selected_edges == {first, middle, last}
+    qtbot.mouseClick(view.viewport(), left, ctrl, pos=_edge_point(canvas, first))
+    for key in ("c", "a"):
+        qtbot.mouseClick(view.viewport(), left, ctrl, pos=_node_point(canvas, key))
+    assert not canvas.selected_node_ids() and view.graph_edge_edit.selected_edges == {middle, last}
+    qtbot.keyClick(view, Qt.Key.Key_Delete)
+    assert canvas.engine.revision == before and not canvas.action("delete").isEnabled()
+
+
+def test_marquee_selects_only_fully_enclosed_visible_groups(window):
+    canvas = _create_graph(window, '节点 o "外层"\n节点 i "内层"\n节点 a "甲"\n节点 b "乙"\n'
+                           '节点 z "同层项"\n分组 o i z\n分组 i a b\na -> b')
+    positions = {"a": (50, 75), "b": (180, 160), "z": (370, 240)}
+    canvas.engine.set_node_graph(canvas.engine.root_id, replace(canvas.graph, positions=positions))
+    canvas.fit_to_view()
+    view = canvas.view
+    frame = canvas.layout_result.group_frames["i"]
+    start = view.mapFromScene(QPointF(frame.bounds.x - 7, frame.bounds.y - 7))
+    header = view.mapFromScene(QPointF(*frame.header.center))
+    end = view.mapFromScene(QPointF(frame.bounds.right + 3, frame.bounds.bottom + 3))
+    left = Qt.MouseButton.LeftButton
+    assert view.graph_group_at(start, include_body=True) == "o" and view.graph_group_at(start) is None
+    _pointer_event(canvas, QEvent.Type.MouseButtonPress, start, left, left)
+    _pointer_event(canvas, QEvent.Type.MouseMove, header, buttons=left)
+    assert not canvas.selected_node_ids()
+    _pointer_event(canvas, QEvent.Type.MouseMove, end, buttons=left)
+    assert set(canvas.selected_node_ids()) == {"i", "a", "b"}
+    assert view.graph_edge_edit.selected_edges == {GraphEdge("a", "b")}
+    _pointer_event(canvas, QEvent.Type.MouseMove, end - QPoint(12, 0), buttons=left)
+    assert set(canvas.selected_node_ids()) == {"a", "b"}
+    _pointer_event(canvas, QEvent.Type.MouseButtonRelease, end, left)
+    assert set(canvas.selected_node_ids()) == {"i", "a", "b"}
+
+
+@pytest.mark.parametrize("entry", ["keyboard", "node_menu", "edge_menu"])
+def test_mixed_batch_delete_is_one_change_across_split_views(window, qtbot, entry):
+    original = window.documents.active
+    canvas = _create_graph(window, CHAIN)
+    positions = {"a": (0, 0), "b": (180, -105), "c": (180, 245), "d": (425, 245)}
+    canvas.engine.set_node_graph(canvas.engine.root_id, replace(canvas.graph, positions=positions))
+    before = canvas.graph
+    first, middle, last = before.edges
+    assert original.duplicate()
+    session = window.documents.active
+    window.host.editor.split_token(session.id, Qt.Orientation.Horizontal)
+    other = session.canvas
+    qtbot.waitUntil(lambda: other.view.viewport().height() > 200)
+    other.fit_to_view()
+    canvas.select_nodes(["d"])
+    for edge in (first, last):
+        canvas.view.graph_edge_edit.select_edge(edge, toggle=True)
+    view = other.view
+    left, ctrl = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier
+    a, line = _node_point(other, "a"), _edge_point(other, middle)
+    if entry == "keyboard":
+        card = view.mapFromScene(other.node_items["a"].sceneBoundingRect()).boundingRect()
+        start = QPoint(card.left() - 8, a.y() + card.height() // 4)
+        end = line + QPoint(6, 4)
+        _pointer_event(other, QEvent.Type.MouseButtonPress, start, left, left)
+        _pointer_event(other, QEvent.Type.MouseMove, end, buttons=left)
+        _pointer_event(other, QEvent.Type.MouseButtonRelease, end, left)
+    else:
+        qtbot.mouseClick(view.viewport(), left, pos=a)
+        qtbot.mouseClick(view.viewport(), left, ctrl, pos=line)
+    assert other.selected_node_ids() == ["a"] and view.graph_edge_edit.selected_edges == {middle}
+    revision = original.engine.revision
+    if entry == "keyboard":
+        qtbot.keyClick(view, Qt.Key.Key_Delete)
+    else:
+        assert _choose_graph_menu_action(other, a if entry == "node_menu" else line, "删除所选", qtbot)
+    assert other.graph == canvas.graph and other.graph.edges == (last,)
+    assert [node.id for node in other.graph.nodes] == ["b", "c", "d"]
+    assert original.engine.revision == revision + 1
+    assert not other.selected_node_ids() and not view.graph_edge_edit.selected_edges
+    assert canvas.selected_node_ids() == ["d"] and canvas.view.graph_edge_edit.selected_edges == {last}
+    other.action("undo").trigger()
+    assert other.graph == canvas.graph == before
+    other.action("redo").trigger()
+    assert other.graph == canvas.graph and other.graph.edges == (last,)
 
 
 def test_edge_menu_deletes_batch_and_other_views_keep_surviving_selection(window, qtbot):
@@ -1830,7 +1992,7 @@ def test_edge_menu_deletes_batch_and_other_views_keep_surviving_selection(window
     menu.deleteLater()
 
 
-def test_edge_menu_rejects_entire_batch_after_another_view_removes_an_edge(window, qtbot):
+def test_edge_menu_rejects_entire_mixed_selection_after_another_view_removes_an_edge(window, qtbot):
     """菜单打开期间的跨标签修改使批量删除失效，其余待删边仍在原图。"""
     original = window.documents.active
     canvas = _create_graph(window, CHAIN)
@@ -1841,6 +2003,7 @@ def test_edge_menu_rejects_entire_batch_after_another_view_removes_an_edge(windo
     left = Qt.MouseButton.LeftButton
     qtbot.mouseClick(other.view.viewport(), left, pos=_edge_point(other, first))
     qtbot.mouseClick(other.view.viewport(), left, Qt.KeyboardModifier.ControlModifier, pos=_edge_point(other, last))
+    qtbot.mouseClick(other.view.viewport(), left, Qt.KeyboardModifier.ControlModifier, pos=_node_point(other, "d"))
     errors = []
     other.error_occurred.connect(errors.append)
     revision = original.engine.revision
@@ -1857,6 +2020,7 @@ def test_edge_menu_rejects_entire_batch_after_another_view_removes_an_edge(windo
     qtbot.mouseClick(other.view.viewport(), Qt.MouseButton.RightButton, pos=_edge_point(other, first))
     assert other.graph.edges == (middle, last)
     assert other.view.graph_edge_edit.selected_edges == {last}
+    assert other.selected_node_ids() == ["d"] and "d" in other.document_view.nodes
     assert original.engine.revision == revision + 1 and errors == ["所选连线已变化，请重新选择"]
 
 

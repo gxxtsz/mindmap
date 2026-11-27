@@ -44,6 +44,17 @@ class _EdgeDrag:
     press: QPoint
 
 
+@dataclass(frozen=True, slots=True)
+class _SelectionBox:
+    """保留按下时的选区，供追加、缩小选框和取消手势使用。"""
+
+    origin: QPoint
+    nodes: frozenset[str]
+    edges: frozenset[GraphEdge]
+    additive: bool
+    edges_only: bool
+
+
 def _border_toward(rect: QRectF, point: QPointF) -> QPointF:
     """沿矩形中心到指针的方向取边界交点，预览箭头贴在卡片外沿。"""
     center = rect.center()
@@ -58,15 +69,12 @@ class GraphEdgeEditController:
     def __init__(self, view):
         self.view = view
         self.owner = view.owner
-        self._selected_edges: frozenset[GraphEdge] = frozenset()
-        self._related_edges: tuple[GraphEdge, ...] = ()
+        self._related_edges: frozenset[GraphEdge] = frozenset()
         self._related_edges_source: tuple[GraphEdge, ...] | None = None
         self._related_selection_revision = -1
         self._outlet_node: str | None = None
         self._drag: _EdgeDrag | None = None
-        self._box_origin: QPoint | None = None
-        self._box_additive = False
-        self._box_nodes = False
+        self._box: _SelectionBox | None = None
         self._rubber_band: QRubberBand | None = None
         self._pointer = QPoint()
         self._moved = False
@@ -75,17 +83,17 @@ class GraphEdgeEditController:
     @property
     def selected_edges(self) -> frozenset[GraphEdge]:
         """借用本标签明确选中的不可变连线集合，供动作、菜单和前景绘制查询。"""
-        return self._selected_edges
+        return self.owner._selected_edges
 
     @property
     def selected_edge(self) -> GraphEdge | None:
         """仅在选中一条连线时返回该边，供改接把手使用。"""
-        return next(iter(self._selected_edges)) if len(self._selected_edges) == 1 else None
+        return next(iter(self.selected_edges)) if len(self.selected_edges) == 1 else None
 
     @property
     def active(self) -> bool:
         """按下改接把手或开始框选后即为活动手势，包含尚未超过拖动阈值的阶段。"""
-        return self._drag is not None or self._box_origin is not None
+        return self._drag is not None or self._box is not None
 
     def _can_edit(self) -> bool:
         owner = self.owner
@@ -113,7 +121,7 @@ class GraphEdgeEditController:
             return ()
         edge = self.selected_edge
         handles = ()
-        if edge is not None:
+        if edge is not None and not self.owner.selection_count:
             branch = self.owner.layout_result.branches.get(edge.key)
             if branch is not None:
                 transform = self.view.viewportTransform()
@@ -178,42 +186,26 @@ class GraphEdgeEditController:
         return None
 
     def select_edge(self, edge: GraphEdge, *, toggle: bool = False) -> None:
-        """单选当前图中的可见边；toggle 为真时增减这一条边。
-
-        新选择按当前场景过滤，实际选线会清空节点选择。选线只更新本标签和动作状态。
-        """
-        edges = self._selected_edges ^ {edge} if toggle else (edge,)
-        self._select_edges(edges)
-
-    def _select_edges(self, edges: Iterable[GraphEdge], *, clear_nodes: bool = False) -> None:
-        selected = frozenset(edge for edge in edges if edge.key in self.owner.branch_items)
-        if (selected or clear_nodes) and self.owner.selection_count:
-            self.owner.select_nodes([])
-        if selected == self._selected_edges:
-            return
-        self._selected_edges = selected
-        self.owner._update_actions()
-        self.view.viewport().update()
-        self.owner.graph_edge_selection_changed.emit(len(selected))
+        """单选当前图中的连线，Ctrl 点选时只切换该边并保留所选节点。"""
+        if edge.key in self.owner.branch_items:
+            nodes = self.owner._selected_ids if toggle else ()
+            edges = self.selected_edges ^ {edge} if toggle else (edge,)
+            self.owner._set_canvas_selection(nodes, edges)
 
     def clear_selection(self) -> None:
         """丢弃本视图的选线，其他标签及文档历史不受影响。"""
-        if self._selected_edges:
-            self._select_edges(())
+        if self.selected_edges:
+            self.owner._set_canvas_selection(self.owner._selected_ids)
 
     def sync_visibility(self) -> None:
         """更新布局后只剔除已删除的选择，并请求按当前几何重绘高亮。"""
-        if self._selected_edges:
-            self._select_edges(self._selected_edges)
-        if self.owner.graph is not None and (self._selected_edges or self.owner.selection_count):
+        if self.selected_edges:
+            self.owner._set_canvas_selection(self.owner._selected_ids, self.selected_edges)
+        if self.owner.graph is not None and (self.selected_edges or self.owner.selection_count):
             self.view.viewport().update()
 
     def press_left(self, position: QPoint, modifiers: Qt.KeyboardModifier) -> bool:
-        """认领按下的改接、Ctrl 点选或 Shift 框选手势，返回是否消费左键。
-
-        普通点击优先命中把手、节点和组标题，Ctrl 点选跳过改接把手，Shift 在空白处按下
-        进入选线框。其他点击交给原有节点选择和节点框选。
-        """
+        """把手优先处理拖线，节点和组标题保留点击与拖动，空白处开始框选。"""
         self.owns_left_button = False
         if self.owner.graph is None or self.owner.is_editing:
             return False
@@ -221,8 +213,8 @@ class GraphEdgeEditController:
         if isinstance(item, PageControlItem):
             return False
         toggle = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
-        box = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
-        handle = None if toggle or box else self.handle_at(position)
+        edges_only = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        handle = None if toggle or edges_only else self.handle_at(position)
         if handle is not None:
             graph, target = self.owner.graph, self.owner._graph_target()
             self.view.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -233,18 +225,15 @@ class GraphEdgeEditController:
                 self._pointer = QPoint(position)
                 self._moved = False
         else:
-            if not isinstance(item, NodeItem) and self.view.graph_group_at(position) is not None:
-                self.clear_selection()
+            if isinstance(item, NodeItem) or self.view.graph_group_at(position) is not None:
                 return False
-            edge = None if isinstance(item, NodeItem) else self.owner.graph_edge_at(position)
+            edge = self.owner.graph_edge_at(position)
             if edge is None:
-                if isinstance(item, NodeItem) or self.handle_at(position) is not None:
-                    self.clear_selection()
+                if self.handle_at(position) is not None:
                     return False
                 self.view.setFocus(Qt.FocusReason.MouseFocusReason)
-                self._box_origin = QPoint(position)
-                self._box_additive = toggle
-                self._box_nodes = not box
+                self._box = _SelectionBox(QPoint(position), frozenset(self.owner._selected_ids),
+                                          self.selected_edges, toggle, edges_only)
                 self._moved = False
             else:
                 self.view.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -252,24 +241,27 @@ class GraphEdgeEditController:
         self.owns_left_button = True
         return True
 
-    def _box_rect(self, position: QPoint) -> QRect:
-        """取视口内的规范矩形，拖到视口外时以可见区域为界。"""
-        return QRect(self._box_origin, position).normalized().intersected(self.view.viewport().rect())
-
     def move(self, position: QPoint) -> None:
-        """越过系统拖动阈值后更新临时虚线或选线框，松手前保持原选择。"""
+        """越过拖动阈值后按当前矩形重算选区，缩小或反向拖动时及时移出对象。"""
         if self._drag is not None:
             self._pointer = QPoint(position)
             self._moved |= (position - self._drag.press).manhattanLength() >= QApplication.startDragDistance()
             self.view.viewport().update()
-        elif self._box_origin is not None:
-            self._moved |= (position - self._box_origin).manhattanLength() >= QApplication.startDragDistance()
-            if self._moved:
-                if self._rubber_band is None:
-                    self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.view.viewport())
-                    self._rubber_band.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-                self._rubber_band.setGeometry(self._box_rect(position))
-                self._rubber_band.show()
+        elif (box := self._box) is not None:
+            self._moved |= (position - box.origin).manhattanLength() >= QApplication.startDragDistance()
+            if not self._moved:
+                return
+            rect = QRect(box.origin, position).normalized().intersected(self.view.viewport().rect())
+            if self._rubber_band is None:
+                self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.view.viewport())
+                self._rubber_band.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            self._rubber_band.setGeometry(rect)
+            self._rubber_band.show()
+            nodes, edges = self.owner._graph_objects_in_rect(rect, edges_only=box.edges_only)
+            if box.additive:
+                nodes.update(box.nodes)
+                edges.update(box.edges)
+            self.owner._set_canvas_selection(nodes, edges)
 
     def _candidate(self, drag: _EdgeDrag, position) -> tuple[str, GraphEdge] | None:
         if not self._moved or not self.view.viewport().rect().contains(position):
@@ -288,24 +280,14 @@ class GraphEdgeEditController:
     def release(self, position: QPoint) -> None:
         """以松手坐标重做命中，清除预览后更新选线或提交一次改接。"""
         self.owns_left_button = False
-        if self._box_origin is not None:
+        if (box := self._box) is not None:
             self.move(position)
-            rect = self._box_rect(position) if self._moved else QRect()
-            additive = self._box_additive
-            nodes = self._box_nodes
+            if self._box is not box:
+                return
+            self._box = None
+            if not self._moved and not box.additive and not box.edges_only:
+                self.owner._set_canvas_selection(())
             self.cancel()
-            if nodes:
-                selected = set(self.owner.selected_node_ids()) if additive else set()
-                if not rect.isEmpty():
-                    selected.update(item.node.id for item in self.view.items(rect) if isinstance(item, NodeItem)
-                                    and self.owner._graph_item_visible_in_rect(item, rect))
-                self.clear_selection()
-                self.owner.select_nodes(selected)
-            elif not rect.isEmpty():
-                edges = self.owner._graph_edges_in_rect(rect)
-                if additive:
-                    edges |= self._selected_edges
-                self._select_edges(edges, clear_nodes=not additive)
             return
         drag = self._drag
         if drag is None:
@@ -320,34 +302,34 @@ class GraphEdgeEditController:
                 self.select_edge(edge)
 
     def cancel(self) -> None:
-        """丢弃预览、框选和悬停。已认领的左键释放仍由视图消费，保留已完成的选择。"""
-        redraw = self._drag is not None or self._outlet_node is not None
+        """取消框选时恢复起始选择，已认领的迟到释放仍由视图消费。"""
+        box, self._box = self._box, None
+        moved, self._moved = self._moved, False
+        redraw = self._drag is not None or self._outlet_node is not None or moved
         self._drag = self._outlet_node = None
-        self._box_origin = None
-        self._box_nodes = False
         if self._rubber_band is not None:
             self._rubber_band.hide()
-        self._moved = False
+        if box is not None and moved:
+            self.owner._set_canvas_selection(box.nodes, box.edges)
         if redraw:
             self.view.viewport().update()
 
-    def _edges_to_highlight(self) -> Iterable[GraphEdge]:
+    def _node_related_edges(self) -> Iterable[GraphEdge]:
         """仅在拓扑或节点选择变化时查找关联边，平移和缩放复用结果。"""
-        if self._selected_edges:
-            return self._selected_edges
         owner = self.owner
         if not owner.selection_count:
             return ()
         edges = owner.graph.edges
         revision = owner._selection_revision
         if edges is not self._related_edges_source or revision != self._related_selection_revision:
-            self._related_edges = tuple(edge for edge in edges if owner.is_node_selected(edge.source)
-                                        or owner.is_node_selected(edge.target))
+            self._related_edges = frozenset(edge for edge in edges if owner.is_node_selected(edge.source)
+                                            or owner.is_node_selected(edge.target))
             self._related_edges_source = edges
             self._related_selection_revision = revision
-        return self._related_edges
+        return self._related_edges - self.selected_edges if self.selected_edges else self._related_edges
 
-    def _paint_highlights(self, painter: QPainter, color: QColor, *, outline: QColor | None = None) -> None:
+    def _paint_highlights(self, painter: QPainter, edges: Iterable[GraphEdge], color: QColor,
+                          *, outline: QColor | None = None, occluders=None) -> None:
         """在视口坐标中绘制高亮线身和箭头，避开卡片、组名及编辑器。
 
         裁剪使用卡片实际绘制的圆角与边框，端口外侧的线身和箭头尖端均能完整上色。
@@ -355,7 +337,6 @@ class GraphEdgeEditController:
         让选中的线在交叉处与普通线分开。整组选线共用两次绘制顺序，先画完外缘再
         画所有线身和箭头，避免一条选线的外缘截断另一条选线。
         """
-        edges = self._edges_to_highlight()
         if not edges:
             return
         viewport = QRectF(self.view.viewport().rect())
@@ -375,7 +356,8 @@ class GraphEdgeEditController:
             bounds = transform.mapRect(item.boundingRect()).adjusted(-margin, -margin, margin, margin)
             if bounds.intersects(viewport):
                 clip = self.view.graph_visible_region(item.zValue(), bounds.intersected(viewport),
-                                                      pixel_ratio=painter.device().devicePixelRatioF())
+                                                      pixel_ratio=painter.device().devicePixelRatioF(),
+                                                      occluders=occluders)
                 visible.append((transform.map(item.path()), transform.map(branch_arrow_path(branch)), width, clip))
         if not visible:
             return
@@ -404,7 +386,7 @@ class GraphEdgeEditController:
         finally:
             painter.restore()
 
-    def paint(self, painter: QPainter) -> None:
+    def paint(self, painter: QPainter, *, occluders=None) -> None:
         """在当前视口绘制关联边、直接选线及把手，颜色与线宽共同表达选择状态。
 
         出线把手和新建预览使用界面强调色，改接把手和预览随直接选中的线使用琥珀色。
@@ -415,7 +397,7 @@ class GraphEdgeEditController:
             return
         drag = self._drag
         handles = self._handles()
-        if not (self._selected_edges or self.owner.selection_count or drag or handles):
+        if not (self.selected_edges or self.owner.selection_count or drag or handles):
             return
         accent = QColor(self.owner.ui_colors.accent)
         background = self.view.scene().backgroundBrush().color()
@@ -424,10 +406,9 @@ class GraphEdgeEditController:
         painter.save()
         try:
             painter.resetTransform()
-            if self._selected_edges:
-                self._paint_highlights(painter, selected_color, outline=background)
-            else:
-                self._paint_highlights(painter, accent)
+            self._paint_highlights(painter, self._node_related_edges(), accent, occluders=occluders)
+            self._paint_highlights(painter, self.selected_edges, selected_color, outline=background,
+                                   occluders=occluders)
             if drag is not None:
                 if self._moved:
                     color = selected_color if drag.handle.original is not None else accent

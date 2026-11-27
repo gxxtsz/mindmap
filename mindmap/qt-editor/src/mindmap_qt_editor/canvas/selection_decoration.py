@@ -120,7 +120,7 @@ def selection_bounds(view):
     return QRect(view._selection_decoration.bounds)
 
 
-def paint_node_selection(view, painter: QPainter) -> None:
+def paint_node_selection(view, painter: QPainter, *, occluders=None) -> None:
     """绘制 3 像素间隔及 2 像素外框，保持主题、编辑高亮及拖动透明度，返回 None。
 
     view、painter 仅在本次 GUI 绘制借用；外框在视口坐标绘制，10%～400% 缩放及
@@ -137,7 +137,7 @@ def paint_node_selection(view, painter: QPainter) -> None:
         opacity = painter.opacity()
         for item, origin, gap, ring in frame:
             painter.save()
-            view.clip_graph_decoration(painter, ring.boundingRect().translated(origin), item=item)
+            view.clip_graph_decoration(painter, ring.boundingRect().translated(origin), item=item, occluders=occluders)
             painter.setWorldTransform(QTransform.fromTranslate(origin.x(), origin.y()))
             painter.setOpacity(opacity * item.effectiveOpacity())
             painter.fillPath(gap, background)

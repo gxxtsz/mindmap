@@ -7,7 +7,7 @@ from mindmap_core.layouts import create_incremental_layout, supports_incremental
 from mindmap_core.node_pages import parse_graph_page_id
 from mindmap_qt_render.graph_groups import GraphGroupItem, GraphStacking
 from mindmap_qt_render.rendering import BranchItem
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor
 
 from ..theme import graph_edge_colors
@@ -261,6 +261,7 @@ class SceneSyncMixin:
         或其入口被删除时，优先返回仍存在的所属节点或祖先页。纯保存走原有通知路径。
         """
         self.view.node_drag.document_changed()
+        self.view.graph_edge_edit.cancel()
         self.document_changing.emit(event)
         self._cache_page_view()
         page = self.current_page_id
@@ -633,6 +634,7 @@ class SceneSyncMixin:
             item = self.graph_group_items.get(key)
             if item is None:
                 item = GraphGroupItem(frame, accent=accent, border=self.ui_colors.border, background=background)
+                item.setData(Qt.ItemDataRole.UserRole, key)
                 self.scene.addItem(item)
                 self.graph_group_items[key] = item
             else:
@@ -652,10 +654,13 @@ class SceneSyncMixin:
         if self._graph_stacking is None or self._graph_stacking.graph is not graph:
             self._graph_stacking = GraphStacking(graph)
         stack = self._graph_stacking
-        for items, ranks in ((self.graph_group_items, stack.frames), (self.branch_items, stack.edges),
-                             (self.node_items, stack.nodes)):
+        for items, ranks in ((self.graph_group_items, stack.frames), (self.node_items, stack.nodes)):
             for key, item in items.items():
                 item.setZValue(ranks[key])
+        for edge in stack.edge_order:
+            if (item := self.branch_items.get(edge.key)) is not None:
+                item.setZValue(stack.edges[edge.key])
+                item.setData(Qt.ItemDataRole.UserRole, edge)
         if self.editor is not None and self.editor.node_id in stack.nodes:
             self.editor.setZValue(stack.nodes[self.editor.node_id] + 0.5)
 

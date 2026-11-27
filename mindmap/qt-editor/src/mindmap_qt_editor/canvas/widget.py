@@ -571,7 +571,8 @@ class MindMapWidget(
             ("graph_layout_group", "组内自动布局", None, lambda w: w.auto_layout_graph_group(w.current_node_id()), True),
             ("graph_add_member", "新建组内节点", None,
              lambda w: w.add_graph_group_member(w.current_node_id(), w._group_menu_point), True),
-            ("graph_delete_group", "删除整组…", None, lambda w: w.delete_selected(), True),
+            ("graph_delete_group", "删除整组…", None,
+             lambda w: w._delete_graph_selection([w.current_node_id()]), True),
             ("graph_reset_group_size", "恢复自动大小", None, lambda w: w._set_graph_group_size(
                 w.current_node_id(), None), True),
             ("graph_auto_layout", "整图自动布局", None, lambda w: w.auto_layout_graph(), True),
@@ -1133,17 +1134,13 @@ class MindMapWidget(
         页面时先确认，取消则保留选择和文档。分支、附属页面及关联资源由引擎
         一次提交，支持一次撤销及跨视图同步。灵感区的游离根仍可删除。
 
-        图页选中连线时只删除所选连线，选中节点时一同删除相连的线。无选择时
+        图页一次删除所选节点、它们的关联线和另外选中的连线。无选择时
         直接返回，只读时抛出 MindMapError。仅在所属 GUI 线程调用。
         """
         self._ensure_editable()
         ids = self.selected_node_ids()
         if self.graph is not None:
-            edges = self.view.graph_edge_edit.selected_edges
-            if edges:
-                self._delete_graph_edges(edges)
-            elif ids:
-                self._delete_graph_nodes(ids)
+            self._delete_graph_selection(ids, self._selected_edges)
             return
         if not ids:
             return
@@ -1463,23 +1460,26 @@ class MindMapWidget(
         默认使用当前选择。传入 group_id 时，局部操作作用于点中的组，同层多选可
         继续编组。关闭后释放临时菜单与子菜单。调用需在存活画布的 GUI 线程执行。
         """
-        grouping = ()
-        if group_id is not None:
-            if self.is_node_selected(group_id) and self._actions["graph_create_group"].isEnabled():
-                grouping = tuple(self.selected_node_ids())
+        if group_id is not None and not self.is_node_selected(group_id):
             self.select_nodes([group_id])
         menu = QMenu(self)
         try:
             if self.graph is not None and not on_canvas:
                 pos = self.view.mapToScene(self.view.viewport().mapFromGlobal(global_position))
                 self._group_menu_point = (pos.x(), pos.y())
+            if group_id is not None and self.selection_count > 1:
+                # 点击多选中的组时，局部命令指向该组，编组和删除仍使用完整选区。
+                group = next(group for group in self.graph.groups if group.id == group_id)
+                layout = menu.addAction(self._actions["graph_layout_group"].text())
+                layout.setEnabled(bool(self.editable and not self.is_editing and group.member_ids))
+                layout.triggered.connect(lambda: self.call(lambda: self.auto_layout_graph_group(group_id)))
+                member = menu.addAction(self._actions["graph_add_member"].text())
+                member.setEnabled(self.editable and not self.is_editing)
+                point = self._group_menu_point
+                member.triggered.connect(lambda: self.call(lambda: self.add_graph_group_member(group_id, point)))
             for title, keys in self._context_menu_groups(on_canvas or not self.selection_count, node_id=node_id):
-                actions = [self._actions[key] for key in keys if self._actions[key].isVisible()]
-                if grouping and "graph_ungroup" in keys:
-                    # 右键所点组仍可单独重排，同层多选也保留编组入口。
-                    action = QAction(self._actions["graph_create_group"].text(), menu)
-                    action.triggered.connect(lambda: self.call(lambda: self.create_graph_group(grouping)))
-                    actions.insert(0, action)
+                actions = [self._graph_delete_menu_action(menu) if key == "delete" and self.graph is not None
+                           else self._actions[key] for key in keys if self._actions[key].isVisible()]
                 if not actions:
                     continue
                 if title:

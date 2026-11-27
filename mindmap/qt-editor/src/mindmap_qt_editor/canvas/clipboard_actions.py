@@ -88,7 +88,7 @@ class ClipboardActionsMixin:
         if self.graph is not None:
             if self.selection_count:
                 self._copy_graph_nodes()
-                self._delete_graph_nodes(self.selected_node_ids(), copied=True)
+                self._delete_graph_selection(self.selected_node_ids(), copied=True)
             return
         if self.current_page_kind != "inspiration" and self.is_node_selected(self._document.root_id):
             raise MindMapError("不能剪切根节点")

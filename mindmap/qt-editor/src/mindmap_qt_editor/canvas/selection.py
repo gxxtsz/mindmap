@@ -10,6 +10,8 @@ class NodeSelectionMixin:
 
     def _init_selection(self):
         self._selected_ids = set()
+        self._selected_edges = frozenset()
+        self._notified_edges = frozenset()
         self._ordered_selection = ()
         self._notified_selection = ()
         self._projected_selection = set()
@@ -86,14 +88,25 @@ class NodeSelectionMixin:
         return True
 
     def _project_selection(self):
-        """只更新现存图元；回收或恢复屏外图元不能反向改变逻辑选择。"""
+        """只同步选中状态变化的现存图元，拖框时无需刷新整图。"""
         blocked = self.scene.blockSignals(True)
         try:
-            for key, item in self.node_items.items():
-                item.setSelected(key in self._selected_ids)
-            self._projected_selection = self._selected_ids.intersection(self.node_items)
+            for key in self._projected_selection ^ self._selected_ids:
+                if (item := self.node_items.get(key)) is not None:
+                    item.setSelected(key in self._selected_ids)
+            self._projected_selection = {key for key in self._selected_ids if key in self.node_items}
         finally:
             self.scene.blockSignals(blocked)
+
+    def _set_canvas_selection(self, node_ids, edges=()):
+        """一起更新节点、连线和图元后再通知宿主，拖框预览可直接调用。"""
+        self._selected_edges = frozenset(edge for edge in edges if edge.key in self.branch_items)
+        if self._store_selection(self._filter_selection(node_ids)):
+            if self._virtualized:
+                self._sync_viewport()
+            else:
+                self._project_selection()
+        self._notify_selection()
 
     def select_nodes(self, node_ids) -> None:
         """用当前布局内的有效标识替换选择；折叠后代和聚焦之外的节点被过滤。
@@ -103,13 +116,7 @@ class NodeSelectionMixin:
         一次 selection_changed(list)，重复相同选择不重复通知。仅在 GUI 线程调用。
         """
         self.view.cancel_interaction()
-        self.view.graph_edge_edit.clear_selection()
-        self._store_selection(self._filter_selection(node_ids))
-        if self._virtualized:
-            self._sync_viewport()
-        else:
-            self._project_selection()
-        self._notify_selection()
+        self._set_canvas_selection(node_ids)
 
     def select_all_nodes(self) -> None:
         """选择当前页已展开的全部布局节点，包含屏外节点；不跨页、不改变折叠状态。
@@ -148,6 +155,7 @@ class NodeSelectionMixin:
         current = {item.node.id for item in self.scene.selectedItems() if isinstance(item, NodeItem)}
         if replace or (clear_empty and not current):
             ids = current
+            self._selected_edges = frozenset()
         else:
             ids = (self._selected_ids - self._projected_selection) | current
         self._projected_selection = current
@@ -158,12 +166,14 @@ class NodeSelectionMixin:
         if self._refreshing or self._disposed:
             return
         ordered = self._selection_in_order()
-        if ordered:
-            self.view.graph_edge_edit.clear_selection()
-        if ordered == self._notified_selection:
+        edges = self._selected_edges
+        nodes_changed = ordered != self._notified_selection
+        edges_changed = edges != self._notified_edges
+        if not (nodes_changed or edges_changed):
             return
         self._notified_selection = ordered
-        if self._virtualized:
+        self._notified_edges = edges
+        if nodes_changed and self._virtualized:
             self._sync_viewport()
         self.view.image_resize.cancel()
         self.view.text_resize.cancel()
@@ -173,4 +183,7 @@ class NodeSelectionMixin:
         self._cancel_branch_menu()
         self._update_actions()
         self.view.update_cursor()
-        self.selection_changed.emit(list(ordered))
+        if nodes_changed:
+            self.selection_changed.emit(list(ordered))
+        if edges_changed:
+            self.graph_edge_selection_changed.emit(len(edges))

@@ -31,6 +31,32 @@ from .text_resizing import TextWidthResizeController
 MIN_ZOOM = 0.1
 
 
+class _GraphOcclusion:
+    """按视口网格索引遮挡轮廓，只在本次命中或绘制期间使用。"""
+
+    def __init__(self, area, records):
+        self.area = QRectF(area)
+        self.cells = {}
+        for key, record in enumerate(records):
+            _rank, bounds, _outline = record
+            for cell in self._overlapping_cells(bounds):
+                self.cells.setdefault(cell, {})[key] = record
+
+    def _overlapping_cells(self, bounds):
+        rect = self.area.intersected(bounds).toAlignedRect()
+        if not rect.isEmpty():
+            cell_size = 96
+            for row in range(rect.top() // cell_size, rect.bottom() // cell_size + 1):
+                for column in range(rect.left() // cell_size, rect.right() // cell_size + 1):
+                    yield row, column
+
+    def nearby(self, bounds):
+        nearby = {}
+        for cell in self._overlapping_cells(bounds):
+            nearby.update(self.cells.get(cell, ()))
+        return nearby.values()
+
+
 class MindMapView(QGraphicsView):
     def _draw_inspiration_empty(self, painter):
         """空想法画布显示侧栏与双击新建指引；仅属于界面，不参与保存和导出。"""
@@ -258,17 +284,12 @@ class MindMapView(QGraphicsView):
                 return key
         return None
 
-    def graph_visible_region(self, rank, bounds, *, pixel_ratio=None):
-        """返回视口矩形中未被更前方的组框、卡片或编辑器遮住的部分。"""
-        visible = QPainterPath()
-        visible.addRect(bounds)
-        cover = QPainterPath()
-        cover.setFillRule(Qt.FillRule.WindingFill)
+    def _graph_cover_paths(self, items, pixel_ratio, *, above=None):
         transform = self.viewportTransform()
-        scene_rect = transform.inverted()[0].mapRect(bounds)
         pixel = 1 / (self.transform().m11() * (pixel_ratio or self.viewport().devicePixelRatioF()))
-        for item in self.scene().items(scene_rect, Qt.ItemSelectionMode.IntersectsItemBoundingRect):
-            if item.zValue() <= rank:
+        for item in items:
+            rank = item.zValue()
+            if above is not None and rank <= above:
                 continue
             if isinstance(item, GraphGroupItem):
                 shape = item.shape()
@@ -278,7 +299,28 @@ class MindMapView(QGraphicsView):
                 shape = item.shape()
             else:
                 continue
-            cover.addPath(item.deviceTransform(transform).map(shape))
+            outline = item.deviceTransform(transform).map(shape)
+            yield rank, outline.boundingRect(), outline
+
+    def graph_occluders(self, items, *, pixel_ratio=None):
+        """一次收集候选图元的遮挡轮廓，供同一选框或同一帧的所有对象复用。"""
+        return _GraphOcclusion(self.viewport().rect(), self._graph_cover_paths(items, pixel_ratio))
+
+    def graph_visible_region(self, rank, bounds, *, pixel_ratio=None, occluders=None):
+        """返回视口矩形中未被更前方的组框、卡片或编辑器遮住的部分。"""
+        if occluders is None:
+            scene_rect = self.viewportTransform().inverted()[0].mapRect(bounds)
+            items = self.scene().items(scene_rect, Qt.ItemSelectionMode.IntersectsItemBoundingRect)
+            candidates = self._graph_cover_paths(items, pixel_ratio, above=rank)
+        else:
+            candidates = occluders.nearby(bounds)
+        visible = QPainterPath()
+        visible.addRect(bounds)
+        cover = QPainterPath()
+        cover.setFillRule(Qt.FillRule.WindingFill)
+        for front_rank, rect, outline in candidates:
+            if front_rank > rank and rect.intersects(bounds):
+                cover.addPath(outline)
         return visible.subtracted(cover) if not cover.isEmpty() else visible
 
     def graph_point_visible(self, rank, position):
@@ -292,7 +334,7 @@ class MindMapView(QGraphicsView):
         item = self.owner.node_items.get(self.owner.current_node_id())
         return item is not None and self.graph_point_visible(item.zValue(), position)
 
-    def clip_graph_decoration(self, painter, bounds, *, item=None):
+    def clip_graph_decoration(self, painter, bounds, *, item=None, occluders=None):
         """在已有的画笔保存范围内，按所属节点裁剪局部装饰，保留调用方的绘制坐标。"""
         if self.owner.graph is None:
             return
@@ -302,7 +344,8 @@ class MindMapView(QGraphicsView):
                 return
         transform = painter.worldTransform()
         painter.resetTransform()
-        clip = self.graph_visible_region(item.zValue(), bounds, pixel_ratio=painter.device().devicePixelRatioF())
+        clip = self.graph_visible_region(item.zValue(), bounds, pixel_ratio=painter.device().devicePixelRatioF(),
+                                         occluders=occluders)
         painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
         painter.setWorldTransform(transform)
 
@@ -707,7 +750,8 @@ class MindMapView(QGraphicsView):
             # 多选节点中的一个被拖动时保持整组选择，普通点击仍采用 Qt 的选择规则。
             preserve = not event.modifiers() or (self.owner.graph is not None
                                                   and event.modifiers() == Qt.KeyboardModifier.ShiftModifier)
-            if item.isSelected() and self.owner.selection_count > 1 and preserve:
+            multiple = self.owner.selection_count > 1 or self.owner.graph_edge_selection_count
+            if item.isSelected() and multiple and preserve:
                 self._selection_click = item.node.id
                 event.accept()
             elif self.owner.graph is not None and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
@@ -734,10 +778,11 @@ class MindMapView(QGraphicsView):
         if group is not None and event.button() == Qt.MouseButton.LeftButton and not isinstance(item, NodeEditor):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                self.owner.select_nodes(set(self.owner.selected_node_ids()) ^ {group})
+                self.owner._set_canvas_selection(
+                    self.owner._selected_ids ^ {group}, self.graph_edge_edit.selected_edges)
             elif not self.owner.is_node_selected(group):
                 self.owner.select_nodes([group])
-            elif self.owner.selection_count > 1:
+            elif self.owner.selection_count > 1 or self.owner.graph_edge_selection_count:
                 self._selection_click = group
             if self.owner.is_node_selected(group) and self.owner.editable and not self.owner.is_editing:
                 self.press_node = group
@@ -943,10 +988,10 @@ class MindMapView(QGraphicsView):
         if group is None and self.owner.call(lambda: self.owner.graph_edge_context_menu(position, global_position)):
             return
         group = group or self.graph_group_at(position, include_body=True)
-        self.graph_edge_edit.clear_selection()
         if group is not None:
             self.owner.context_menu(global_position, group_id=group)
         else:
+            self.graph_edge_edit.clear_selection()
             self.owner.context_menu(global_position, on_canvas=True)
 
     def keyPressEvent(self, event):
@@ -1039,7 +1084,11 @@ class MindMapView(QGraphicsView):
             painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter,
                              "按 Tab 添加节点，或右键选择“编辑图文本”")
             painter.restore()
-        paint_node_selection(self, painter)
+        occluders = None
+        if self.owner.graph is not None and self.owner.selection_count + self.owner.graph_edge_selection_count > 1:
+            items = self.items(self.viewport().rect(), Qt.ItemSelectionMode.IntersectsItemBoundingRect)
+            occluders = self.graph_occluders(items, pixel_ratio=painter.device().devicePixelRatioF())
+        paint_node_selection(self, painter, occluders=occluders)
         target = self.owner.node_items.get(self._attachment_drop_node)
         if target is not None:
             painter.save()
@@ -1059,7 +1108,7 @@ class MindMapView(QGraphicsView):
         self._selection_bounds = self._selection_decoration.bounds.united(self.text_resize.decoration_bounds())
         self._selection_bounds = self._selection_bounds.united(self.group_resize.decoration_bounds())
         self.image_resize.paint(painter)
-        self.graph_edge_edit.paint(painter)
+        self.graph_edge_edit.paint(painter, occluders=occluders)
         self.text_resize.paint(painter)
         self.group_resize.paint(painter)
         self.node_drag.paint_graph_hint(painter)

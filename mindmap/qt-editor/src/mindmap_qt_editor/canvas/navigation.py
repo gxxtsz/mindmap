@@ -527,11 +527,11 @@ class PageNavigationMixin:
         event = ChangeEvent("切换导图页面", (), self.engine.revision, "navigation")
         if notify:
             self.document_changing.emit(event)
+        self.view.cancel_interaction()
         if cache:
             self._cache_page_view()
         old_page = self.current_page_id
         self.view.graph_edge_edit.clear_selection()
-        self.view.cancel_interaction()
         self._cancel_branch_menu()
         self._view_reset_timer.stop()
         self._view_reset_pending = False
