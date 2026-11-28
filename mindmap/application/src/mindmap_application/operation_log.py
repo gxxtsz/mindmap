@@ -2,6 +2,7 @@
 from pathlib import PureWindowsPath
 
 from mindmap_core import ChangeEvent, NodeMove
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 
 
 def describe_display(message):
@@ -31,7 +32,7 @@ _OPERATION_NAMES = {
     "convert_descendants_to_submap": "后代转为子导图",
     "convert_submap_to_descendants": "子导图转为节点后代",
     "create_detail_page": "创建详情页", "remove_detail_page": "删除详情页",
-    "set_submap_favorite": "修改子导图收藏",
+    "set_submap_favorite": "修改子导图收藏", "set_node_favorite": "修改节点收藏",
     "set_page_reference": "设置页面引用",
     "set_extension_page": "更新扩展详情页", "remove_extension_page": "删除扩展详情页",
     "set_node_graph": "更新节点图", "remove_node_graph": "删除节点图", "paste_graph_fragment": "粘贴图节点",
@@ -168,6 +169,31 @@ def _describe_node_structure(event: ChangeEvent) -> list[str]:
     return descriptions
 
 
+def _describe_node_favorite(pairs, *, forward: bool) -> tuple[str, str] | None:
+    """从事务两端取得收藏动作和实际节点名称，按撤销方向使用对应的结果。
+
+    图节点的收藏保存在所属图记录里。比较两端的局部标识和收藏值，避免把图的
+    所属节点当作收藏对象。标识仍存在时才描述收藏变化，图片使用类型作为名称。
+    """
+    for old, new in pairs:
+        start, end = (old, new) if forward else (new, old)
+        if start is None or end is None:
+            continue
+        if start.favorite != end.favorite:
+            title = "图片节点" if end.is_image_node else _node_title(end.text, end.id, limit=60)
+            return ("收藏节点" if end.favorite else "取消收藏节点"), title
+        before = start.extension_pages.get(GRAPH_PAGE_TYPE)
+        after = end.extension_pages.get(GRAPH_PAGE_TYPE)
+        if before and after:
+            favorites = {node["id"]: node.get("favorite", False) for node in before["data"]["nodes"]}
+            for node in after["data"]["nodes"]:
+                key, favorite = node["id"], node.get("favorite", False)
+                if key in favorites and favorites[key] != favorite:
+                    title = "图片节点" if "image_id" in node else _node_title(node["title"], key, limit=60)
+                    return ("收藏节点" if favorite else "取消收藏节点"), title
+    return None
+
+
 def describe_change(event: ChangeEvent) -> str:
     """从一次已提交事件生成中文摘要，不查询引擎或保留收到的变化集。
 
@@ -189,6 +215,11 @@ def describe_change(event: ChangeEvent) -> str:
         descriptions.extend(text for text in movements if text)
     nodes = event.changes.collections.get("nodes", {}) if event.changes is not None else {}
     pairs = list(nodes.values())
+    if event.operation == "set_node_favorite":
+        favorite = _describe_node_favorite(pairs, forward=event.forward)
+        if favorite is not None:
+            action, title = favorite
+            return f"{prefix}{action}：{title}"
     if event.operation == "set_page_reference" and pairs:
         old, new = pairs[0]
         if old is not None and new is not None:

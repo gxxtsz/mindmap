@@ -408,7 +408,7 @@ def test_close_before_initialization_releases_canvas(empty_window, tmp_path, ope
 def test_outline_header_stays_icon_only_after_empty_start_and_session_switch(empty_window, tmp_path):
     """空白页先创建大纲标题，再打开和切换导图时，延迟绑定的动作仍只显示图标。"""
     window = empty_window
-    button, = window.manager.panel("outline").action_buttons
+    button, favorite_button = window.manager.panel("outline").action_buttons
 
     def check(session):
         """验证实际按钮的显示、菜单交互和层级提示均绑定当前会话。"""
@@ -417,6 +417,9 @@ def test_outline_header_stays_icon_only_after_empty_start_and_session_switch(emp
         assert button.popupMode() == QToolButton.ToolButtonPopupMode.InstantPopup
         assert button.defaultAction().menu() is session.panels.outline.depth_menu
         assert button.toolTip() == session.panels.outline.depth_action.toolTip()
+        assert favorite_button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
+        assert not favorite_button.icon().isNull() and favorite_button.size() == QSize(28, 28)
+        assert favorite_button.isCheckable() and not favorite_button.isChecked()
 
     first = create(window, tmp_path / "第一份")
     window.manager.activate("outline", focus=False)
@@ -429,7 +432,7 @@ def test_outline_header_stays_icon_only_after_empty_start_and_session_switch(emp
     check(first)
     assert window.manager.close_document(first.id)
     assert window.manager.close_document(second.id)
-    assert not button.isEnabled()
+    assert not button.isEnabled() and not favorite_button.isEnabled()
     third = create(window, tmp_path / "重新打开")
     check(third)
 

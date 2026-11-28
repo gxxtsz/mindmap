@@ -486,9 +486,10 @@ class PageNavigationMixin:
 
         return remove
 
-    def _prepare_page_navigation(self):
+    def _prepare_page_navigation(self, composing_message: str = "请先完成输入法候选，再切换导图页面"):
+        """检查输入法候选并提交有效的面板与正文草稿，供切页和节点操作共用。"""
         if self.is_composing or not all(guard() for guard in tuple(self._navigation_guards)):
-            raise MindMapError("请先完成输入法候选，再切换导图页面")
+            raise MindMapError(composing_message)
         self.edits_flush_requested.emit()
         self.finish_edit(commit=True)
 

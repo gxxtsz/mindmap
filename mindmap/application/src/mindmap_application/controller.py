@@ -57,6 +57,8 @@ class MindMapController(QObject):
             stack.addWidget(QLabel("没有打开的导图"))
             setattr(self, "_" + name + "_stack", stack)
         self._depth_action = QAction("显示层级", self)
+        self._outline_mode_action = QAction("全部大纲", self, checkable=True)
+        self._outline_mode_action.triggered.connect(self._set_outline_favorite_mode)
         self._new_inspiration_action = QAction("新建想法", self)
         self._new_inspiration_action.triggered.connect(self._new_inspiration)
         self.sessions = MindMapSessions(self)
@@ -65,7 +67,8 @@ class MindMapController(QObject):
         context.ui.register_status(StatusItemSpec("mindmap.view", self._status_controls,
                                                  lambda: self.active_session is not None))
         self.git_sync = GitSyncController(self)
-        headers = {"outline": (self._depth_action,), "inspiration": (self._new_inspiration_action,)}
+        headers = {"outline": (self._depth_action, self._outline_mode_action),
+                   "inspiration": (self._new_inspiration_action,)}
         for identifier, title, stack, icon, position, shortcut in (
             ("outline", "大纲", self._outline_stack, "outline", "left_top", "Alt+1"),
             ("favorites", "收藏", self._favorites_stack, "favorites", "left_top", "Alt+4"),
@@ -260,7 +263,7 @@ class MindMapController(QObject):
         self._status_controls.set_ui_colors(
             colors, compact=self.context.ui.compact, fit_icon=self.context.ui.theme_icon("fit-view"),
         )
-        self._sync_depth_action()
+        self._sync_outline_actions()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         """在主窗口处理鼠标侧键，避免子控件先取得焦点并改变活动分屏。
@@ -379,7 +382,8 @@ class MindMapController(QObject):
         canvas.wheel_mode_changed.connect(self._save_wheel_mode)
         canvas.edraw_paste_options_changed.connect(self._save_edraw_paste_options)
         panels.outline.display_depth_changed.connect(self._save_outline_depth)
-        panels.outline.depth_action.changed.connect(self._sync_depth_action)
+        panels.outline.depth_action.changed.connect(self._sync_outline_actions)
+        panels.outline.favorites_action.changed.connect(self._sync_outline_actions)
         session.inspiration.new_action.changed.connect(self._sync_new_inspiration_action)
         canvas.set_properties_handler(lambda: self._show_properties(session))
         colors = self.ui_colors
@@ -438,18 +442,35 @@ class MindMapController(QObject):
         """当前会话独立保留层级，最近值只作为后续新会话默认值。"""
         self.preferences.setValue("outline/display_depth", 0 if depth is None else depth)
         self.preferences.sync()
-        self._sync_depth_action()
+        self._sync_outline_actions()
 
 
-    def _sync_depth_action(self):
-        """只在有活动导图时显示层级入口，空白页不提供无效的文字占位。"""
-        source = self.panels.outline.depth_action if self.panels else None
-        self._depth_action.setEnabled(source is not None)
-        self._depth_action.setVisible(source is not None)
-        self._depth_action.setMenu(source.menu() if source else None)
-        self._depth_action.setIcon(source.icon() if source else QIcon())
-        self._depth_action.setText(source.text() if source else "显示层级")
-        self._depth_action.setToolTip(source.toolTip() if source else "没有打开的导图")
+    def _set_outline_favorite_mode(self, enabled: bool) -> None:
+        """处理共享标题栏的星标点击，只改变当前活动标签的浏览模式。"""
+        session = self.active_session
+        if not self._disposed and session and not session.disposed:
+            session.panels.outline.set_favorites_only(enabled)
+
+
+    def _sync_outline_actions(self):
+        """标题栏同步活动标签的层级与收藏动作，空白页隐藏两个入口。
+
+        后台标签发出变化时仍从活动面板读状态。只同步界面属性，不触发点击，
+        使分屏各自保留模式并在激活时回显，收藏模式下层级入口随面板禁用。
+        """
+        outline = self.panels.outline if self.panels else None
+        for action, source, label in (
+            (self._depth_action, outline.depth_action if outline else None, "显示层级"),
+            (self._outline_mode_action, outline.favorites_action if outline else None, "全部大纲"),
+        ):
+            action.setVisible(source is not None)
+            action.setEnabled(source is not None and source.isEnabled())
+            action.setMenu(source.menu() if source else None)
+            action.setIcon(source.icon() if source else QIcon())
+            action.setText(source.text() if source else label)
+            action.setToolTip(source.toolTip() if source else "没有打开的导图")
+            if action.isCheckable():
+                action.setChecked(source is not None and source.isChecked())
 
 
     def _new_inspiration(self):
@@ -493,7 +514,7 @@ class MindMapController(QObject):
         canvas = session.canvas if session and not session.pages.active else None
         self._status_controls.bind_canvas(canvas)
         self._status_controls.set_canvas_controls_visible(session is None or not session.pages.active)
-        self._sync_depth_action()
+        self._sync_outline_actions()
         self._sync_new_inspiration_action()
         self._sync_document()
         # 欢迎页临时暂停依赖导图的侧栏，不把“没有文档”写成用户主动隐藏面板。

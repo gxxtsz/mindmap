@@ -25,6 +25,7 @@ from mindmap_core.attachments import BINARY_MEDIA_TYPE
 from mindmap_core.graph import (
     GRAPH_ATTACHMENT_VERSION,
     GRAPH_EDGE_ORIGIN_VERSION,
+    GRAPH_FAVORITE_VERSION,
     GRAPH_GROUP_VERSION,
     GRAPH_IMAGE_VERSION,
     GRAPH_STACK_VERSION,
@@ -33,7 +34,8 @@ from mindmap_core.graph import (
 )
 from mindmap_core.node_pages import GRAPH_PAGE_TYPE
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
+_NODE_FAVORITE_SCHEMA_VERSION = 16
 _GRAPH_STACK_SCHEMA_VERSION = 15
 _GRAPH_ORIGIN_SCHEMA_VERSION = 14
 _GRAPH_GROUP_SCHEMA_VERSION = 13
@@ -54,6 +56,8 @@ def _node_record(node: Node) -> dict:
         record.pop("page_reference_root_id")
     if node.attachment is None:
         record.pop("attachment")
+    if not node.favorite:
+        record.pop("favorite")
     if not node.extension_pages:
         record.pop("extension_pages")
     elif graph := record["extension_pages"].get(GRAPH_PAGE_TYPE):
@@ -70,7 +74,8 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
 
     节点树使用 root_id + nodes 的邻接表表达，避免深层嵌套超出 JSON 递归限制。
     默认内嵌资源；容器写入时由调用方关闭内嵌并将原始字节写入 assets/。
-    转接线来源需要版本 14，可连线的图分组需要版本 13，图图片节点需要版本 11，文件附件需要版本 10，
+    节点收藏需要版本 16，图节点叠放顺序需要版本 15，转接线来源需要版本 14。
+    可连线的图分组需要版本 13，图图片节点需要版本 11，文件附件需要版本 10，
     图节点格式和固定宽度需要版本 9，图节点绑定需要版本 8，
     普通图和扩展详情至少使用版本 7，页面引用至少使用版本 6。编码时省略空字段。
     """
@@ -91,6 +96,8 @@ def to_dict(document: MindMapDocument, *, embed_assets: bool = True) -> dict:
     nodes = []
     for node in document.nodes.values():
         record = _node_record(node)
+        if node.favorite:
+            version = max(version, _NODE_FAVORITE_SCHEMA_VERSION)
         if node.attachment is not None:
             version = max(version, _ATTACHMENT_SCHEMA_VERSION)
         if node.extension_pages:
@@ -163,6 +170,8 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                     raise MindMapError("页面引用需要版本 6 文档格式")
                 if version < 7 and name == "nodes" and "extension_pages" in record:
                     raise MindMapError("节点附属数据需要版本 7 文档格式")
+                if version < _NODE_FAVORITE_SCHEMA_VERSION and name == "nodes" and "favorite" in record:
+                    raise MindMapError("节点收藏需要文档版本 16")
                 if name == "nodes" and "attachment" in record:
                     if version < _ATTACHMENT_SCHEMA_VERSION:
                         raise MindMapError("节点附件需要版本 10 文档格式")
@@ -171,6 +180,9 @@ def _from_dict(data: dict, *, resources=None, copy_input=False,
                 if name == "nodes" and isinstance(entity.extension_pages, dict):
                     graph = entity.extension_pages.get(GRAPH_PAGE_TYPE)
                     if isinstance(graph, dict):
+                        if (version < _NODE_FAVORITE_SCHEMA_VERSION
+                                and graph.get("version") == GRAPH_FAVORITE_VERSION):
+                            raise MindMapError("图节点收藏需要文档版本 16")
                         if version < _GRAPH_STACK_SCHEMA_VERSION and graph.get("version") == GRAPH_STACK_VERSION:
                             raise MindMapError("图节点叠放顺序需要文档版本 15")
                         if version < _GRAPH_ORIGIN_SCHEMA_VERSION and graph.get("version") == GRAPH_EDGE_ORIGIN_VERSION:

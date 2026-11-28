@@ -17,6 +17,7 @@ LEGACY_GRAPH_GROUP_VERSION = 6
 GRAPH_GROUP_VERSION = 7
 GRAPH_EDGE_ORIGIN_VERSION = 8
 GRAPH_STACK_VERSION = 9
+GRAPH_FAVORITE_VERSION = 10
 # 滚动条的原生范围为有符号整数，限制持久坐标以预留 400% 缩放和完整视口余量。
 _MAX_GRAPH_COORDINATE = 100_000_000
 
@@ -31,7 +32,8 @@ class GraphNode:
     fixed_width 是不含留白及附页按钮的固定正文宽度，单位为逻辑像素，范围为 40 至 1200。
     None 表示按内容自动测量。构造和旧图解码默认使用纯文本与自动宽度。
     attachment 保存关联文件的名称及文档内资源标识。纯图片节点通过 image_id
-    引用文档内 SVG，image_width 保存其逻辑显示宽度。
+    引用文档内 SVG，image_width 保存其逻辑显示宽度。favorite 是图内节点自己的
+    收藏状态，与节点绑定的文档实体及附属页面分别保存，旧记录缺省为 False。
     """
 
     id: str
@@ -42,6 +44,7 @@ class GraphNode:
     attachment: FileAttachment | None = None
     image_id: str | None = None
     image_width: float | None = None
+    favorite: bool = False
 
     def asset_ids(self):
         """遍历图节点直接引用的文档资源。"""
@@ -276,6 +279,10 @@ class NodeGraph:
                     record["image_id"] = node.image_id
                 if node.image_width is not None:
                     record["image_width"] = node.image_width
+                if not isinstance(node.favorite, bool):
+                    raise MindMapError("图节点收藏状态必须为布尔值")
+                if node.favorite:
+                    record["favorite"] = True
                 nodes.append(record)
             data = {
                 "nodes": nodes,
@@ -308,11 +315,14 @@ class NodeGraph:
     def to_record(self) -> dict:
         """为原生图写入满足全部字段的最低版本，并返回独立记录。
 
-        转接线来源需要版本八，可连线的分组需要版本七，图片节点需要版本五，附件需要版本四，
+        节点收藏需要版本十，叠放顺序需要版本九，转接线来源需要版本八。
+        可连线的分组需要版本七，图片节点需要版本五，附件需要版本四，
         Markdown 或固定宽度需要版本三，附页绑定需要版本二。
         """
         data = self.to_data()
-        if self.stack_order:
+        if any("favorite" in node for node in data["nodes"]):
+            version = GRAPH_FAVORITE_VERSION
+        elif self.stack_order:
             version = GRAPH_STACK_VERSION
         elif self.edge_origins:
             version = GRAPH_EDGE_ORIGIN_VERSION
@@ -329,18 +339,19 @@ class NodeGraph:
         return {"version": version, "data": data}
 
     @classmethod
-    def from_data(cls, data: dict, *, version: int = GRAPH_STACK_VERSION) -> "NodeGraph":
+    def from_data(cls, data: dict, *, version: int = GRAPH_FAVORITE_VERSION) -> "NodeGraph":
         """解码原生节点页，校验局部标识、端点、坐标及分组，失败时抛出中文错误。
 
         version 取自原生图封装。版本二增加可选的文档节点绑定，版本三增加可选的
         正文格式和固定宽度，版本四增加附件引用，版本五增加纯图片节点，
         版本六的分组在读取时升级为组节点，原有越层线的端点进入版本八的来源记录。
+        版本十允许节点携带布尔收藏状态，缺省为 False。
         缺省分组表为空。绑定在本图内唯一，存在性和全局所有权由完整文档校验。
         旧筛选字段只读取和校验。
         """
         from .validation import finite, positive_number, validate_fixed_width
 
-        if type(version) is not int or not 1 <= version <= GRAPH_STACK_VERSION:
+        if type(version) is not int or not 1 <= version <= GRAPH_FAVORITE_VERSION:
             raise MindMapError("不支持的图数据版本")
         fields = {"nodes", "edges", "positions", "hidden_node_ids"}
         allowed_fields = fields | {"groups"} if version >= LEGACY_GRAPH_GROUP_VERSION else fields
@@ -366,6 +377,8 @@ class NodeGraph:
             allowed.add("attachment")
         if version >= GRAPH_IMAGE_VERSION:
             allowed.update(("image_id", "image_width"))
+        if version >= GRAPH_FAVORITE_VERSION:
+            allowed.add("favorite")
         for record in data["nodes"]:
             if not isinstance(record, dict) or not required <= record.keys() <= allowed:
                 raise MindMapError("图节点必须包含标识和标题")
@@ -393,8 +406,11 @@ class NodeGraph:
                 positive_number(image_width, "图片宽度")
                 if title or document_id is not None or fixed_width is not None or text_format != "plain":
                     raise MindMapError("纯图片图节点只能保存图片内容与尺寸")
+            favorite = record.get("favorite", False)
+            if not isinstance(favorite, bool):
+                raise MindMapError("图节点收藏状态必须为布尔值")
             nodes.append(GraphNode(key, title, document_id, text_format, fixed_width, attachment,
-                                   image_id, image_width))
+                                   image_id, image_width, favorite))
         edges = {}
         for pair in data["edges"]:
             if (not isinstance(pair, list) or len(pair) != 2

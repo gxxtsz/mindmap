@@ -1,4 +1,4 @@
-"""完整导图大纲：树模型仅浏览结构，选择请求交给工作区执行定位。"""
+"""当前页的全部大纲与收藏路径，选择请求交给工作区执行定位。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from copy import copy
 
 from PySide6.QtCore import QAbstractItemModel, QItemSelection, QItemSelectionModel, QModelIndex, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup
-from PySide6.QtWidgets import QAbstractItemView, QMenu
+from PySide6.QtWidgets import QAbstractItemView, QLabel, QMenu, QVBoxLayout
 
 from mindmap_qt_editor.icons import toolbar_icon
 from mindmap_qt_editor.theme import UiColors, apply_ui_palette, menu_styles, outline_colors
@@ -20,10 +20,17 @@ class OutlineModel(QAbstractItemModel):
 
     def __init__(self, document, parent=None):
         super().__init__(parent)
+        self.favorites_only = False
+        self._favorite_children = None
+        self._copy_document(document)
+        self._favorite_ids = {key for key, node in document.nodes.items() if node.favorite}
+        self._reindex()
+
+    def _copy_document(self, document):
+        """借用节点和资源，单独保存字典以便安全应用后续差量。"""
         self.document = copy(document)
         self.document.nodes = document.nodes.copy()
         self.document.assets = document.assets.copy()
-        self._reindex()
 
     def _reindex(self):
         self.parents = self.document.parents()
@@ -31,28 +38,77 @@ class OutlineModel(QAbstractItemModel):
         # 防止引擎快照替换后旧字符串被回收，导致 Qt 在查询 parent 时访问悬空指针。
         self.identifiers = {key: index for index, key in enumerate(self.document.nodes, 1)}
         self.keys = {index: key for key, index in self.identifiers.items()}
-        self.rows = {
+        self._full_rows = {
             child: row for node in self.document.nodes.values() for row, child in enumerate(node.children)
         }
-        self.rows.update({root: row for row, root in enumerate(self.document.root_ids)})
+        self._full_rows.update({root: row for row, root in enumerate(self.document.root_ids)})
         self._next_identifier = len(self.identifiers) + 1
+        self._update_projection()
+
+    def set_favorites_only(self, enabled: bool) -> None:
+        """切换可查询的行集合，重置 Qt 索引且保留整页节点数据和正式父索引。"""
+        if enabled != self.favorites_only:
+            self.beginResetModel()
+            self.favorites_only = enabled
+            self._update_projection()
+            self.endResetModel()
+
+    def _update_projection(self) -> bool:
+        """从收藏节点沿正式父链合并路径，按原行号排列保留节点，返回路径是否变化。"""
+        if not self.favorites_only:
+            self.rows = self._full_rows
+            self._favorite_children = None
+            return False
+        retained = set()
+        siblings = {}
+        for favorite in self._favorite_ids:
+            key = favorite
+            while key is not None and key not in retained:
+                retained.add(key)
+                parent = self.parents.get(key)
+                siblings.setdefault(parent, []).append(key)
+                key = parent
+        children = {parent: tuple(sorted(keys, key=self._full_rows.__getitem__))
+                    for parent, keys in siblings.items()}
+        changed = children != self._favorite_children
+        self._favorite_children = children
+        self.rows = {key: row for keys in children.values() for row, key in enumerate(keys)}
+        return changed
+
+    def children_for(self, parent):
+        """返回当前模式下直接子行的稳定节点 ID；None 返回顶层行。"""
+        if self._favorite_children is not None:
+            return self._favorite_children.get(parent, ())
+        return self.document.nodes[parent].children if parent is not None else self.document.root_ids
 
     def apply_changes(self, event):
         """按提交差量维护稳定标识、父级和行号；文本/折叠不扫描整棵树。
 
-        结构变化沿用 Qt 模型重置语义，但只重建实际改变父级的索引。文档字典由
-        模型独立持有，节点只读共享，避免画布原地应用差量后丢失比较基线。
+        结构或当前模式下的收藏变化先通知 Qt 重置。返回是否重置、首次出现的
+        分支和收藏路径是否变化，供视图分别恢复展开、选择和滚动。
         """
         delta = event.changes.collections.get("nodes", {})
         index = 1 if event.forward else 0
-        structural = any(pair[0] is None or pair[1] is None or pair[0].children != pair[1].children
-                         for pair in delta.values())
+        changes = event.changes
+        structural = (
+            "root_id" in changes.settings or "inspiration" in changes.settings
+            or any(old is None or new is None or old.children != new.children for old, new in delta.values())
+        )
+        favorites = {key: bool(pair[index] and pair[index].favorite) for key, pair in delta.items()
+                     if bool(pair[0] and pair[0].favorite) != bool(pair[1] and pair[1].favorite)}
         fresh = {key for key, pair in delta.items() if pair[index] is not None and pair[index].children
                  and (pair[1 - index] is None or not pair[1 - index].children)}
-        if structural:
+        was_roots = self.document.root_ids if structural else ()
+        reset = structural or (self.favorites_only and bool(favorites))
+        if reset:
             self.beginResetModel()
         try:
-            event.changes.apply(self.document, forward=event.forward)
+            changes.apply(self.document, forward=event.forward)
+            for key, favorite in favorites.items():
+                if favorite:
+                    self._favorite_ids.add(key)
+                else:
+                    self._favorite_ids.discard(key)
             if structural:
                 for key, pair in delta.items():
                     old = pair[1 - index]
@@ -60,12 +116,12 @@ class OutlineModel(QAbstractItemModel):
                         for child in old.children:
                             if self.parents.get(child) == key:
                                 self.parents.pop(child)
-                                self.rows.pop(child, None)
+                                self._full_rows.pop(child, None)
                     if pair[index] is None:
                         identifier = self.identifiers.pop(key, None)
                         self.keys.pop(identifier, None)
                         self.parents.pop(key, None)
-                        self.rows.pop(key, None)
+                        self._full_rows.pop(key, None)
                     elif key not in self.identifiers:
                         identifier = self._next_identifier
                         self._next_identifier += 1
@@ -75,20 +131,23 @@ class OutlineModel(QAbstractItemModel):
                     node = pair[index]
                     if node is not None:
                         for row, child in enumerate(node.children):
-                            self.parents[child], self.rows[child] = key, row
-            else:
-                for key, pair in delta.items():
-                    if pair[0].text != pair[1].text:
-                        model_index = self.index_for(key)
-                        self.dataChanged.emit(model_index, model_index,
-                                              [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole])
+                            self.parents[child], self._full_rows[child] = key, row
+                for root in was_roots:
+                    if root not in self.parents:
+                        self._full_rows.pop(root, None)
+                self._full_rows.update({root: row for row, root in enumerate(self.document.root_ids)})
+            paths_changed = self._update_projection() if reset else False
+            if not reset:
+                for key, (old, new) in delta.items():
+                    if old.text != new.text:
+                        self._notify_text_changed(key)
         finally:
-            if structural:
+            if reset:
                 self.endResetModel()
-        return structural, fresh
+        return reset, fresh, paths_changed
 
     def replace_document(self, document):
-        """仅在结构变化时重置模型；普通文本变化不丢失用户的树展开和滚动状态。"""
+        """同步整页快照，返回是否重置及收藏路径是否变化；正文变化沿用原有行索引。"""
         structural = (
             document.root_ids != self.document.root_ids or document.nodes.keys() != self.document.nodes.keys()
         )
@@ -96,25 +155,32 @@ class OutlineModel(QAbstractItemModel):
             structural = any(
                 node.children != self.document.nodes[key].children for key, node in document.nodes.items()
             )
-        if structural:
+        favorites = {key for key, node in document.nodes.items() if node.favorite}
+        reset = structural or (self.favorites_only and favorites != self._favorite_ids)
+        if reset:
             self.beginResetModel()
-            self.document = copy(document)
-            self.document.nodes = document.nodes.copy()
-            self.document.assets = document.assets.copy()
-            self._reindex()
-            self.endResetModel()
-        else:
-            old = self.document
-            self.document = copy(document)
-            self.document.nodes = document.nodes.copy()
-            self.document.assets = document.assets.copy()
-            for key, node in document.nodes.items():
-                if node.text != old.nodes[key].text:
-                    index = self.index_for(key)
-                    self.dataChanged.emit(
-                        index, index, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole]
-                    )
-        return structural
+        old, old_paths = self.document, self._favorite_children
+        try:
+            self._copy_document(document)
+            self._favorite_ids = favorites
+            if structural:
+                self._reindex()
+            elif reset:
+                self._update_projection()
+            else:
+                for key, node in document.nodes.items():
+                    if node.text != old.nodes[key].text:
+                        self._notify_text_changed(key)
+        finally:
+            if reset:
+                self.endResetModel()
+        return reset, old_paths != self._favorite_children
+
+    def _notify_text_changed(self, key):
+        """只通知当前模式中实际存在的行，已过滤节点留待后续重建时显示。"""
+        index = self.index_for(key)
+        if index.isValid():
+            self.dataChanged.emit(index, index, [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole])
 
     def index_for(self, node_id):
         if node_id not in self.rows:
@@ -127,11 +193,7 @@ class OutlineModel(QAbstractItemModel):
     def index(self, row, column, parent=QModelIndex()):
         if column != 0 or row < 0 or (parent.isValid() and parent.column() != 0):
             return QModelIndex()
-        children = (
-            self.document.nodes[self.node_id(parent)].children
-            if parent.isValid()
-            else self.document.root_ids
-        )
+        children = self.children_for(self.node_id(parent))
         return self.index_for(children[row]) if row < len(children) else QModelIndex()
 
     def parent(self, index):
@@ -139,9 +201,7 @@ class OutlineModel(QAbstractItemModel):
         return self.index_for(key) if key else QModelIndex()
 
     def rowCount(self, parent=QModelIndex()):
-        if parent.isValid():
-            return len(self.document.nodes[self.node_id(parent)].children) if parent.column() == 0 else 0
-        return len(self.document.root_ids)
+        return 0 if parent.isValid() and parent.column() != 0 else len(self.children_for(self.node_id(parent)))
 
     def columnCount(self, parent=QModelIndex()):
         return 1
@@ -162,7 +222,7 @@ class OutlineModel(QAbstractItemModel):
 
 
 class OutlinePanel(SidebarTreeView):
-    """完整树的独立视图；展开按钮只影响本面板，不写入文档折叠状态。"""
+    """当前页大纲的独立视图，过滤和展开属于标签内的浏览状态。"""
 
     nodes_selected = Signal(list)
     display_depth_changed = Signal(object)
@@ -179,6 +239,7 @@ class OutlinePanel(SidebarTreeView):
         self._selection_order = None
         self._ui_colors_override = ui_colors
         self._display_depth = 2
+        self._full_outline_state = None
         # 菜单和标题栏共用动作；动作由面板持有，宿主只创建按钮，不接管生命周期。
         self.depth_menu = QMenu(self)
         self.depth_action = QAction("2层", self)
@@ -194,8 +255,17 @@ class OutlinePanel(SidebarTreeView):
             self._depth_actions[depth] = action
             action.triggered.connect(lambda checked=False, value=depth: self.set_display_depth(value))
         self._depth_actions[2].setChecked(True)
+        self.favorites_action = QAction("全部大纲", self, checkable=True)
+        self.favorites_action.triggered.connect(self.set_favorites_only)
         self.tree_model = OutlineModel(canvas.document_view, self)
         self.setModel(self.tree_model)
+        self._page_key = self._current_page_key()
+        self.empty_label = QLabel("本页暂无收藏节点", self.viewport())
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        empty_layout = QVBoxLayout(self.viewport())
+        empty_layout.addWidget(self.empty_label)
+        self.empty_label.hide()
         self._expanded_ids = set()
         self.expanded.connect(lambda index: self._expanded_ids.add(self.tree_model.node_id(index)))
         self.collapsed.connect(lambda index: self._expanded_ids.discard(self.tree_model.node_id(index)))
@@ -213,6 +283,73 @@ class OutlinePanel(SidebarTreeView):
         self.set_theme(canvas.document_view.theme)
 
     @property
+    def favorites_only(self) -> bool:
+        """查询本标签的大纲模式，True 表示只显示收藏路径，默认 False。"""
+        return self.tree_model.favorites_only
+
+    def set_favorites_only(self, enabled: bool) -> None:
+        """在 GUI 线程切换本标签的全部大纲和收藏节点大纲，可在只读时使用。
+
+        进入时自动展开当前页保留的路径；同页返回时恢复全部大纲的展开和滚动。
+        此操作仅同步可见选择，不定位画布或写入文档。重复设置不重置大纲，
+        非布尔值抛出 ValueError 并保留原模式。宿主也可直接使用 favorites_action。
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError("大纲收藏模式必须为布尔值")
+        if enabled == self.favorites_only:
+            return
+        horizontal, vertical = self.horizontalScrollBar(), self.verticalScrollBar()
+        if enabled:
+            branches = set(self.tree_model.parents.values())
+            expanded = {key: key in self._expanded_ids for key in branches}
+            self._full_outline_state = (expanded, horizontal.value(), vertical.value())
+        saved = self._full_outline_state if not enabled else None
+        self._syncing = True
+        try:
+            self.tree_model.set_favorites_only(enabled)
+            self._expanded_ids.clear()
+            if enabled:
+                self.depth_menu.close()
+            self.depth_action.setEnabled(not enabled)
+            self._apply_display_depth(saved[0] if saved else None)
+        finally:
+            self._syncing = False
+        if not enabled:
+            self._full_outline_state = None
+        self._selection_snapshot = None
+        self._selection_order = None
+        self.sync_selection(self.canvas.selected_node_ids())
+        if saved is not None:
+            self.doItemsLayout()
+            horizontal.setValue(saved[1])
+            vertical.setValue(saved[2])
+        self._sync_empty_state()
+        self._sync_favorites_action()
+
+    def _current_page_key(self):
+        """可用时读取宿主的页标识，防止同名图节点或空图误用前一页的浏览状态。"""
+        return getattr(self.canvas, "current_page_id", None), self.canvas.document_view.root_id
+
+    def _sync_empty_state(self):
+        """只在收藏投影为空时显示提示，并为键盘及辅助技术提供相同说明。"""
+        empty = self.favorites_only and not self.tree_model.children_for(None)
+        self.empty_label.setVisible(empty)
+        self.setAccessibleDescription(self.empty_label.text() if empty else "")
+
+    def _sync_favorites_action(self):
+        """以填实或空心星标表示当前模式，中文提示说明点击后会进入的模式。"""
+        enabled = self.favorites_only
+        active, target = ("收藏节点大纲", "全部大纲") if enabled else ("全部大纲", "收藏节点大纲")
+        colors = self._tree_colors
+        self.favorites_action.setText(active)
+        self.favorites_action.setToolTip(f"当前为{active}，点击切换到{target}")
+        self.favorites_action.setChecked(enabled)
+        self.favorites_action.setIcon(toolbar_icon(
+            "favorite_on" if enabled else "favorite", colors.accent if enabled else colors.muted,
+            colors.muted, colors.text,
+        ))
+
+    @property
     def display_depth(self) -> int | None:
         """最后应用的层级预设：根主题为第1层，None 表示所有层。
 
@@ -224,6 +361,7 @@ class OutlinePanel(SidebarTreeView):
         """应用1～9层或所有层；重复设置也重新应用，但只在偏好变化时发出信号。
 
         本接口仅改变大纲视图，不调用引擎、不导航画布；只读时也可使用。
+        收藏模式中的外部调用更新全部大纲的预设，在切回时应用。
         非法值抛出 ValueError，且保持原有状态。宿主自行通过信号持久化本机偏好。
         """
         if depth is not None and (type(depth) is not int or not 1 <= depth <= 9):
@@ -233,18 +371,23 @@ class OutlinePanel(SidebarTreeView):
         self.depth_action.setText("所有层" if depth is None else f"{depth}层")
         self.depth_action.setToolTip(f"显示层级数：{self.depth_action.text()}")
         self._depth_actions[depth].setChecked(True)
-        self._apply_display_depth()
+        if self.favorites_only:
+            if self._full_outline_state is not None:
+                _, x, y = self._full_outline_state
+                self._full_outline_state = (None, x, y)
+        else:
+            self._apply_display_depth()
         if changed:
             self.display_depth_changed.emit(depth)
 
     def _nodes_with_depth(self):
         """以显式栈迭代整棵树，避免深层导图触发 Python 递归上限。"""
-        document = self.tree_model.document
-        pending = [(root, 1) for root in reversed(document.root_ids)]
+        model = self.tree_model
+        pending = [(root, 1) for root in reversed(model.children_for(None))]
         while pending:
             key, depth = pending.pop()
             yield key, depth
-            pending.extend((child, depth + 1) for child in reversed(document.nodes[key].children))
+            pending.extend((child, depth + 1) for child in reversed(model.children_for(key)))
 
     def _apply_display_depth(self, previous=None):
         """已有分支恢复原状态，其余分支按深度初始化；省略 previous 时重套整个预设。
@@ -257,10 +400,10 @@ class OutlinePanel(SidebarTreeView):
         self.setUpdatesEnabled(False)
         try:
             for key, depth in self._nodes_with_depth():
-                if self.tree_model.document.nodes[key].children:
+                if self.tree_model.children_for(key):
                     expanded = (
                         previous[key] if previous is not None and key in previous
-                        else self._display_depth is None or depth < self._display_depth
+                        else self.favorites_only or self._display_depth is None or depth < self._display_depth
                     )
                     self.setExpanded(self.tree_model.index_for(key), expanded)
         finally:
@@ -269,6 +412,8 @@ class OutlinePanel(SidebarTreeView):
 
     def _is_visible(self, key):
         """检查祖先是否全部展开；不能用 scrollTo 探测可见性，因为 Qt 会主动展开祖先。"""
+        if key not in self.tree_model.rows:
+            return False
         parent = self.tree_model.parents.get(key)
         while parent is not None:
             if not self.isExpanded(self.tree_model.index_for(parent)):
@@ -298,7 +443,7 @@ class OutlinePanel(SidebarTreeView):
         for ranges, adding in ((deselected, False), (selected, True)):
             for part in ranges:
                 parent = model.node_id(part.parent())
-                children = model.document.nodes[parent].children if parent else model.document.root_ids
+                children = model.children_for(parent)
                 ids = children[part.top():part.bottom() + 1]
                 if adding:
                     self._selected_ids.update(ids)
@@ -315,12 +460,13 @@ class OutlinePanel(SidebarTreeView):
         """一次提交包括隐藏节点在内的选择，保留当前项、展开状态并避免信号循环。
 
         ids 为树序标识快照，只在调用期间借用。按同父连续行合并 QItemSelection，
-        单列模型不使用 Rows 标志，避免 Qt 重复展开范围。重复快照无需再次同步。
+        单列模型不使用 Rows 标志，避免 Qt 重复展开范围。收藏模式跳过被过滤的
+        节点，画布仍保留正式选择。重复快照无需再次同步。
         """
         if self._syncing:
             return
         model = self.tree_model
-        ids = tuple(key for key in ids if key in model.document.nodes)
+        ids = tuple(key for key in ids if key in model.rows)
         if ids == self._selection_snapshot:
             return
         self._syncing = True
@@ -330,7 +476,7 @@ class OutlinePanel(SidebarTreeView):
                 groups.setdefault(model.parents.get(key), []).append(model.rows[key])
             selection = QItemSelection()
             for parent, rows in groups.items():
-                children = model.document.nodes[parent].children if parent else model.document.root_ids
+                children = model.children_for(parent)
                 rows.sort()
                 first = last = rows[0]
                 for row in rows[1:]:
@@ -343,22 +489,23 @@ class OutlinePanel(SidebarTreeView):
             self.selectionModel().select(selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
             self._selected_ids = set(ids)
             self._selection_snapshot = ids
-            if ids and ids[0] in self.tree_model.document.nodes:
+            if ids:
                 index = self.tree_model.index_for(ids[0])
                 self.selectionModel().setCurrentIndex(index, QItemSelectionModel.SelectionFlag.NoUpdate)
                 # 隐藏选择也保留 currentIndex，但只滚动第一个可见选中项。
-                visible = next((key for key in ids if key in self.tree_model.document.nodes
-                                and self._is_visible(key)), None)
+                visible = next((key for key in ids if self._is_visible(key)), None)
                 if visible is not None:
                     self.scrollTo(self.tree_model.index_for(visible))
+            else:
+                self.selectionModel().clearCurrentIndex()
         finally:
             self._syncing = False
 
     def _document_changed(self, event):
-        """同步宿主当前页；新增分支按所选层级初始化，已有分支保留手动展开状态。
+        """同步差量或整页快照，并按当前模式恢复展开、滚动和选择。
 
-        宿主可提供增量变化或整页快照，两种通知都必须识别新分支及首次拥有孩子的
-        原叶节点。只有替换文档、切页或根列表变化才对整棵树重新应用层级预设。
+        全部大纲的新分支按层级预设初始化；收藏模式在切页或路径变化时展开路径。
+        浏览期间普通的文字通知不会更改两种模式各自的展开状态。
         """
         # 保存只改变历史保存标记，既不改变树也不改变主题；无需重新扫描所有节点。
         if event.kind == "saved":
@@ -367,9 +514,12 @@ class OutlinePanel(SidebarTreeView):
         try:
             previous = set(self._expanded_ids)
             scroll = self.verticalScrollBar().value()
-            page_changed = self.tree_model.document.root_ids != self.canvas.document_view.root_ids
+            page_key = self._current_page_key()
+            page_changed = event.kind in ("reset", "navigation") or self._page_key != page_key
+            self._page_key = page_key
+            roots_changed = self.tree_model.document.root_ids != self.canvas.document_view.root_ids
             if event.changes is not None:
-                changed, fresh = self.tree_model.apply_changes(event)
+                changed, fresh, paths_changed = self.tree_model.apply_changes(event)
             else:
                 document = self.canvas.document_view
                 old_nodes = self.tree_model.document.nodes
@@ -378,31 +528,38 @@ class OutlinePanel(SidebarTreeView):
                 # 即使已选择“所有层”也不显示后代。普通增量通知仍沿用上面的差量路径。
                 fresh = {key for key, node in document.nodes.items()
                          if node.children and (key not in old_nodes or not old_nodes[key].children)}
-                changed = self.tree_model.replace_document(document)
-            # reset 即使结构完全相同，也代表整份导图替换，必须重新应用预设。
-            if event.kind in ("reset", "navigation") or page_changed:
+                changed, paths_changed = self.tree_model.replace_document(document)
+            if page_changed:
+                self._full_outline_state = None
+            elif self._full_outline_state is not None:
+                expanded = self._full_outline_state[0]
+                if expanded is not None:
+                    for key in fresh:
+                        expanded.pop(key, None)
+            if changed:
                 self._expanded_ids.clear()
+            if page_changed or (paths_changed if self.favorites_only else roots_changed):
                 self._apply_display_depth()
                 self.verticalScrollBar().setValue(scroll)
             elif changed:
-                self._expanded_ids.clear()
                 for key in previous:
-                    node = self.tree_model.document.nodes.get(key)
-                    if node is not None and node.children:
+                    if key in self.tree_model.rows and self.tree_model.children_for(key):
                         self.setExpanded(self.tree_model.index_for(key), True)
-                for key in fresh - previous:
-                    depth, current = 1, key
-                    while current in self.tree_model.parents:
-                        depth += 1
-                        current = self.tree_model.parents[current]
-                    self.setExpanded(self.tree_model.index_for(key),
-                                     self._display_depth is None or depth < self._display_depth)
+                if not self.favorites_only:
+                    for key in fresh - previous:
+                        depth, current = 1, key
+                        while current in self.tree_model.parents:
+                            depth += 1
+                            current = self.tree_model.parents[current]
+                        self.setExpanded(self.tree_model.index_for(key),
+                                         self._display_depth is None or depth < self._display_depth)
                 self.verticalScrollBar().setValue(scroll)
         finally:
             self._syncing = False
-        if changed:
+        if changed or page_changed:
             self._selection_snapshot = None
             self._selection_order = None
+        self._sync_empty_state()
         self.set_theme(self.canvas.document_view.theme)
         self.sync_selection(self.canvas.selected_node_ids())
 
@@ -432,5 +589,7 @@ class OutlinePanel(SidebarTreeView):
         # 标题入口只呈现低对比度线条图标，当前层级由悬停提示和菜单勾选表达。
         # 图标随界面色板刷新，不读取导图主题之外的全局样式，明暗宿主保持一致。
         self.depth_action.setIcon(toolbar_icon("outline_depth", colors.muted, colors.muted, colors.text))
+        self._sync_favorites_action()
+        self.empty_label.setStyleSheet(f"color: {colors.muted};")
         self.depth_menu.setStyleSheet(menu_styles(colors))
         apply_ui_palette(self.depth_menu, colors)

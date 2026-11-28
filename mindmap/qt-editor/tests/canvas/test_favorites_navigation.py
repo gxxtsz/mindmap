@@ -1,13 +1,15 @@
 """收藏星标、节点入口、跨页历史及输入法保护的原生画布交互。"""
 
 import pytest
-from mindmap_core import MindMapEngine, MindMapError, Theme
+from mindmap_core import GraphGroup, GraphNode, MindMapEngine, MindMapError, NodeGraph, Theme
+from mindmap_core.formats.graph import format_graph_text
+from mindmap_core.node_pages import graph_page_id
 from mindmap_qt_editor.canvas import MindMapWidget
 from mindmap_qt_editor.panels import MindMapPanels
 from mindmap_qt_editor.theme import ui_colors
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QInputMethodEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
 
 @pytest.fixture
@@ -126,3 +128,114 @@ def test_favorites_do_not_reset_page_views_and_undo_uses_origin_page(favorite_ca
     canvas.engine.undo()
     assert canvas.current_page_id == page and not canvas.engine.is_submap_favorite(page)
     assert canvas.view.transform() == before
+
+
+def _click_node_menu(canvas, qtbot, key, text):
+    """通过真实画布右键打开菜单并点击指定的节点收藏动作。"""
+    node = canvas.node_items[key]
+    point = canvas.view.mapFromScene(node.sceneBoundingRect().center())
+    clicked = []
+
+    def choose():
+        menus = canvas.findChildren(QMenu, options=Qt.FindChildOption.FindDirectChildrenOnly)
+        if not menus:
+            return
+        menu = menus[-1]
+        action = next((action for action in menu.actions() if action.text() == text), None)
+        if action is not None and action.isEnabled():
+            qtbot.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center())
+            clicked.append(text)
+        else:
+            menu.close()
+
+    QTimer.singleShot(0, choose)
+    qtbot.mouseClick(canvas.view.viewport(), Qt.MouseButton.RightButton, pos=point)
+    assert clicked == [text]
+
+
+def test_tree_and_graph_node_favorite_from_canvas_menu(favorite_canvas, qtbot):
+    canvas, panels, owner, page = favorite_canvas
+    engine, tree = canvas.engine, panels.outline
+    revision = engine.revision
+    tree.set_favorites_only(True)
+    assert engine.revision == revision
+    _click_node_menu(canvas, qtbot, owner, "收藏节点")
+    assert engine.get_node(owner).favorite and canvas.node_items[owner].visual.favorite
+    assert not engine.is_submap_favorite(page)
+    assert tree.tree_model.index_for(owner).isValid()
+    _click_node_menu(canvas, qtbot, owner, "取消收藏节点")
+    assert not engine.get_node(owner).favorite and tree.tree_model.rowCount() == 0
+
+    engine.set_node_graph(owner, NodeGraph(
+        (GraphNode("b", "先声明"), GraphNode("g", "分组标题"), GraphNode("a", "组内普通节点")),
+        groups=(GraphGroup("g", ("a",)),),
+    ))
+    canvas.navigate_to(graph_page_id(owner))
+    QApplication.processEvents()
+    canvas.fit_to_view()
+    QApplication.processEvents()
+    _click_node_menu(canvas, qtbot, "g", "收藏节点")
+    _click_node_menu(canvas, qtbot, "b", "收藏节点")
+    model = tree.tree_model
+    assert [model.node_id(model.index(row, 0)) for row in range(model.rowCount())] == ["b", "g"]
+    assert model.rowCount(model.index_for("g")) == 0
+    assert canvas.node_items["g"].group_title and canvas.node_items["g"].visual.favorite
+    assert canvas.apply_graph_text(format_graph_text(canvas.graph).replace("先声明", "保留局部标识后改名"))
+    assert model.index_for("b").data() == "保留局部标识后改名"
+    _click_node_menu(canvas, qtbot, "b", "取消收藏节点")
+    assert model.rowCount() == 1
+    assert engine.undo() and model.index_for("b").isValid()
+    assert engine.redo() and not model.index_for("b").isValid()
+    canvas.select_nodes(["g"])
+    canvas.ungroup_graph_node()
+    assert model.index_for("g").isValid() and canvas.document_view.nodes["g"].favorite
+    assert not canvas.node_items["g"].group_title
+    canvas.navigate_to(page)
+    assert tree.favorites_only and model.rowCount() == 0
+    canvas.action("favorite_node").trigger()
+    assert model.rowCount() == 1 and engine.page_document(page).root.favorite
+    detail = engine.create_detail_page(owner)
+    canvas.navigate_to(detail)
+    canvas.action("favorite_node").trigger()
+    assert model.rowCount() == 1 and engine.page_document(detail).root.favorite
+    thought = engine.add_inspiration("独立想法", position=(0, 0))
+    canvas.show_inspiration(thought)
+    canvas.action("favorite_node").trigger()
+    assert model.index_for(thought).isValid() and engine.get_node(thought).favorite
+
+
+def test_node_favorite_rejects_uncommitted_ime_and_multiselect(favorite_canvas):
+    canvas, panels, owner, _page = favorite_canvas
+    action = canvas.action("favorite_node")
+    canvas.select_nodes([owner, canvas.engine.root_id])
+    assert not action.isVisible()
+    canvas.select_nodes([owner])
+    canvas.begin_edit(owner)
+    canvas.editor.setPlainText("当前草稿")
+    canvas.scene.sendEvent(canvas.editor, QInputMethodEvent("候选", []))
+    before = canvas.engine.document
+    with pytest.raises(MindMapError, match="输入法候选"):
+        canvas.toggle_node_favorite()
+    assert canvas.engine.document == before and canvas.is_composing and not action.isEnabled()
+    canvas.finish_edit(commit=False)
+    field = panels.properties.fields["style.font_family"].lineEdit()
+    QApplication.sendEvent(field, QInputMethodEvent("字体候选", []))
+    with pytest.raises(MindMapError, match="输入法候选"):
+        canvas.toggle_node_favorite()
+    assert canvas.engine.document == before and panels.is_composing
+    QApplication.sendEvent(field, QInputMethodEvent())
+    action.trigger()
+    assert canvas.engine.get_node(owner).favorite
+
+
+def test_cut_paste_starts_new_node_without_favorite_and_undo_restores_source(favorite_canvas):
+    """通过实际剪贴板入口验证剪切生成新节点及原节点撤销后的收藏。"""
+    canvas, _panels, owner, _page = favorite_canvas
+    engine = canvas.engine
+    engine.set_node_favorite(owner, True)
+    canvas.select_nodes([owner])
+    canvas.cut()
+    [new] = canvas.paste()
+    assert new != owner and not engine.get_node(new).favorite
+    assert engine.undo() and engine.undo()
+    assert engine.get_node(owner).favorite

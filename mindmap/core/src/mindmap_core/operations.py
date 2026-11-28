@@ -8,7 +8,7 @@ from dataclasses import fields, replace
 from .attachments import BINARY_MEDIA_TYPE, FileAttachment
 from .branch_styles import apply_branch_style, branch_style_targets
 from .errors import MindMapError
-from .graph import GraphEdge, GraphNode, NodeGraph, validate_graph_title
+from .graph import GRAPH_FAVORITE_VERSION, GraphEdge, GraphNode, NodeGraph, validate_graph_title
 from .inspiration import InspirationEditorMixin
 from .models import (
     SVG_MEDIA_TYPE,
@@ -20,7 +20,7 @@ from .models import (
     new_id,
     node_asset_ids,
 )
-from .node_pages import GRAPH_PAGE_TYPE, graph_members
+from .node_pages import GRAPH_PAGE_TYPE
 from .transactions import DocumentState
 from .validation import validate_page_reference
 
@@ -163,7 +163,7 @@ class DocumentEditor(InspirationEditorMixin):
 
         allowed = {item.name for item in fields(Node)} - {
             "id", "children", "submap_id", "detail_page_id", "page_reference_root_id", "extension_pages",
-            "attachment",
+            "attachment", "favorite",
         }
         if patch.keys() - allowed:
             raise MindMapError("包含不可直接修改的节点字段")
@@ -326,7 +326,7 @@ class DocumentEditor(InspirationEditorMixin):
         空属性沿用入口即可；非默认且不同的属性保守保留，不尝试覆盖或拼接。
         图片尺寸仅在根实际引用图片时有意义，避免空图片宽度制造多余层级。
         """
-        if root.submap_id or root.detail_page_id or root.extension_pages:
+        if root.favorite or root.submap_id or root.detail_page_id or root.extension_pages:
             return True
         if root.image_id and (root.image_id != owner.image_id or root.image_width != owner.image_width):
             return True
@@ -622,6 +622,33 @@ class DocumentEditor(InspirationEditorMixin):
         if asset is not None:
             self._store_asset(asset)
 
+    def set_node_favorite(self, node_id, favorite, graph_owner_id, page_id=None) -> None:
+        """在当前事务内更新指定节点的收藏，状态相同时沿用原实体及图记录。
+
+        树节点由文档 ID 定位，图节点由所属节点及局部 ID 定位。仅修改图内记录，
+        因此无附页的图节点也能收藏，已有附页的图节点保留原绑定。
+        """
+        if graph_owner_id is None:
+            node = self.node(node_id)
+            if node_id in self._state.graph_nodes:
+                raise MindMapError("请用所属图和局部标识指定图节点")
+            if node.favorite != favorite:
+                self.edit(node_id).favorite = favorite
+            return
+
+        record = self.node(graph_owner_id).extension_pages.get(GRAPH_PAGE_TYPE)
+        if record is None:
+            raise MindMapError("节点图不存在")
+        graph = NodeGraph.from_data(record["data"], version=record["version"])
+        for index, entry in enumerate(graph.nodes):
+            if entry.id == node_id:
+                if entry.favorite != favorite:
+                    nodes = list(graph.nodes)
+                    nodes[index] = replace(entry, favorite=favorite)
+                    self._state.set_graph(graph_owner_id, replace(graph, nodes=tuple(nodes)).to_record())
+                return
+        raise MindMapError("图节点不存在")
+
     def copy_fragment(self, node_ids) -> MindMapDocument:
         """建立跨实例剪贴板文档，保留选中子树的层级、节点属性和所需图片资源。"""
         roots = self.roots(node_ids)
@@ -697,7 +724,8 @@ class DocumentEditor(InspirationEditorMixin):
         """分配新文档 ID 并登记选中的实体，返回新旧节点 ID 映射。
 
         合成根由调用方决定如何附着，普通树与图粘贴都复用同一套重映射。图的局部
-        ID 在内部嵌套页保持不变，所有跨实体引用按新的全局 ID 改写。
+        ID 在内部嵌套页保持不变，所有跨实体引用按新的全局 ID 改写。新实体及它们
+        拥有的图节点均从未收藏状态开始，片段和来源实体可继续使用原来的状态。
         """
         mapping = {node_id: new_id() for node_id in fragment.nodes if node_id in selected}
         pages = [page for page in fragment.iter_pages() if page.owner_id in mapping]
@@ -707,14 +735,19 @@ class DocumentEditor(InspirationEditorMixin):
         for node_id, new in mapping.items():
             node = deepcopy(fragment.nodes[node_id])
             node.id, node.children = new, [mapping[x] for x in node.children]
+            node.favorite = False
             node.submap_id = page_mapping.get(node.submap_id)
             node.detail_page_id = page_mapping.get(node.detail_page_id)
             node.page_reference_root_id = root_mapping.get(node.page_reference_root_id)
             record = node.extension_pages.get(GRAPH_PAGE_TYPE)
-            if graph_members(record):
+            if record is not None:
                 for entry in record["data"]["nodes"]:
                     if "document_node_id" in entry:
                         entry["document_node_id"] = mapping[entry["document_node_id"]]
+                    entry.pop("favorite", None)
+                if record["version"] == GRAPH_FAVORITE_VERSION:
+                    node.extension_pages[GRAPH_PAGE_TYPE] = NodeGraph.from_data(
+                        record["data"], version=record["version"]).to_record()
             self._state.put_node(node)
             asset_ids.update(node_asset_ids(node))
         for page in pages:
@@ -755,7 +788,7 @@ class DocumentEditor(InspirationEditorMixin):
             local_mapping[entry.id] = f"n{index}"
             index += 1
         nodes = tuple(replace(entry, id=local_mapping[entry.id],
-                              document_node_id=mapping.get(entry.document_node_id))
+                              document_node_id=mapping.get(entry.document_node_id), favorite=False)
                       for entry in source.nodes)
         updated = current.append_fragment(source, nodes, local_mapping)
         self._state.set_graph(owner_id, updated.to_record())

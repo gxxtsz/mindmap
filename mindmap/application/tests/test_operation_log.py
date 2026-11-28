@@ -7,7 +7,7 @@ import pytest
 from mindmap_app.app import build_window
 from mindmap_application import documents as sessions_module
 from mindmap_application.operation_log import describe_change
-from mindmap_core import BranchStyle, LayoutConfig, MindMapError, Theme
+from mindmap_core import BranchStyle, GraphNode, LayoutConfig, MindMapEngine, MindMapError, NodeGraph, Theme
 from mindmap_core.formats import directory_version
 from PySide6.QtCore import QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage
@@ -39,6 +39,19 @@ def log_window(qtbot, tmp_path):
 def entries(window):
     """只读取得已呈现的日志，空占位文字不算一条操作记录。"""
     return window.operation_log.plain_text().splitlines()
+
+
+def test_favorite_log_names_graph_node_and_reflects_undo_direction():
+    """图页所属节点只负责保存记录，日志使用实际收藏节点及重放后的状态。"""
+    engine = MindMapEngine()
+    owner = engine.add_child(engine.root_id, "图页入口")
+    engine.set_node_graph(owner, NodeGraph((GraphNode("n", "图内目标"),)))
+    messages = []
+    engine.subscribe(lambda event: messages.append(describe_change(event)))
+    engine.set_node_favorite("n", True, graph_owner_id=owner)
+    engine.undo()
+    engine.redo()
+    assert messages == ["收藏节点：「图内目标」", "撤销：取消收藏节点：「图内目标」", "重做：收藏节点：「图内目标」"]
 
 
 def create(window, path):

@@ -192,7 +192,7 @@ class GraphCanvasMixin:
             edit_actions = ("graph_ungroup", "cut", "copy", "paste")
             if self._selected_edges:
                 edit_actions += ("delete",)
-            return [("", ("graph_layout_group", "graph_add_member", "edit", "graph_reset_group_size")),
+            return [("", ("graph_layout_group", "graph_add_member", "edit", "favorite_node", "graph_reset_group_size")),
                     ("", edit_actions), ("页面", _GRAPH_NODE_PAGE_ACTIONS),
                     ("", ("remove_attachment",)), ("", ("undo", "redo")), ("", ("graph_delete_group",))]
         add_node = "add_sibling" if on_canvas else "add_child"
@@ -202,7 +202,8 @@ class GraphCanvasMixin:
         layout_actions = ("graph_layout_top_level", "graph_auto_layout") if at_top else ("graph_auto_layout",)
         groups = [("", (add_node, "graph_add_edge", "graph_text", *layout_actions))]
         if not on_canvas:
-            groups.append(("", ("edit", "toggle_text_format", "reset_node_width", "cut", "copy", "paste", "delete")))
+            groups.append(("", ("edit", "toggle_text_format", "reset_node_width", "favorite_node", "cut", "copy",
+                                "paste", "delete")))
             if self.selection_count >= 2:
                 groups.insert(0, ("", ("graph_create_group",)))
             if self.selection_count == 1:
@@ -314,7 +315,7 @@ class GraphCanvasMixin:
 
     @document_interaction
     def ungroup_graph_node(self) -> None:
-        """把成员提升到父层并还原连线，有独立连接、附件或附页的标题转为普通节点。"""
+        """把成员提升到父层并还原连线，已收藏或有独立内容的标题转为普通节点。"""
         self._ensure_editable()
         self._prepare_page_navigation()
         target = self._graph_target()
@@ -326,7 +327,7 @@ class GraphCanvasMixin:
         updated = graph.with_group_parents(dict.fromkeys(group.member_ids, graph.parent_groups().get(key)))
         updated = replace(updated, groups=tuple(entry for entry in updated.groups if entry.id != key))
         node = self._document.nodes[key]
-        keep_title = (node.attachment or node.detail_page_id or node.submap_id or node.extension_pages
+        keep_title = (node.favorite or node.attachment or node.detail_page_id or node.submap_id or node.extension_pages
                       or any(key in (edge.source, edge.target) for edge in updated.original_edges()))
         if not keep_title:
             updated = updated.with_content(tuple(node for node in updated.nodes if node.id != key), updated.edges)
@@ -616,7 +617,7 @@ class GraphCanvasMixin:
 
     @document_interaction
     def apply_graph_text(self, text: str) -> bool:
-        """替换图的节点源码、连线和分组，保留同一局部 ID 的格式、宽度、附页与手动坐标。
+        """替换图的节点源码、连线和分组，保留同一局部 ID 的格式、宽度、收藏、附页与手动坐标。
 
         分组以输入声明为准。新的局部 ID 使用 Markdown 格式。输入解析后按当前图和权限校验，删除带附页
         节点时先确认范围。取消返回 False，成功或内容相同返回 True。只读、输入法

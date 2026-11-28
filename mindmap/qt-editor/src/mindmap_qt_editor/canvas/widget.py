@@ -31,7 +31,7 @@ from mindmap_core.layouts import (
     supports_incremental_layout,
 )
 from mindmap_core.models import graph_image_ids
-from mindmap_core.node_pages import GRAPH_PAGE_TYPE
+from mindmap_core.node_pages import GRAPH_PAGE_TYPE, parse_graph_page_id
 from mindmap_qt_render.exporting import export_document
 from mindmap_qt_render.rendering import VisualFactory, decode_image
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
@@ -546,6 +546,7 @@ class MindMapWidget(
              lambda w: w.convert_submap_to_descendants(), True),
             ("enter_submap", "进入子导图", None, lambda w: w.enter_submap(), False),
             ("favorite_submap", "收藏子导图", None, lambda w: w.toggle_submap_favorite(), True),
+            ("favorite_node", "收藏节点", None, lambda w: w.toggle_node_favorite(), True),
             ("delete_submap", "删除子导图…", None, lambda w: w.delete_submap(), True),
             ("create_detail_page", "添加详情页", None, lambda w: w.create_detail_page(), True),
             ("enter_detail_page", "查看详情页", None, lambda w: w.enter_detail_page(), False),
@@ -658,10 +659,16 @@ class MindMapWidget(
         reset_width = self._actions["reset_node_width"]
         reset_width.setVisible(selected_text is not None and "fixed_width" in selected_text.style)
         reset_width.setEnabled(reset_width.isVisible() and self.editable and not editing)
-        attachment_node = self._document.nodes.get(self.current_node_id()) if self.selection_count == 1 else None
+        single_node = self._document.nodes.get(self.current_node_id()) if self.selection_count == 1 else None
         remove_attachment = self._actions["remove_attachment"]
-        remove_attachment.setVisible(attachment_node is not None and attachment_node.attachment is not None)
+        remove_attachment.setVisible(single_node is not None and single_node.attachment is not None)
         remove_attachment.setEnabled(remove_attachment.isVisible() and self.editable and not editing)
+        favorite = self._actions["favorite_node"]
+        favorite.setVisible(single_node is not None)
+        favorite.setEnabled(favorite.isVisible() and self.editable and not editing)
+        checked = single_node is not None and single_node.favorite
+        favorite.setText("取消收藏节点" if checked else "收藏节点")
+        set_action_icon(favorite, "favorite_on" if checked else "favorite", self._ui_colors)
         self._update_graph_actions(editing)
         if self.graph is not None:
             self._sync_navigation()
@@ -774,6 +781,27 @@ class MindMapWidget(
     def _ensure_editable(self):
         if not self.editable:
             raise MindMapError("当前画布为只读模式")
+
+    @document_interaction
+    def toggle_node_favorite(self) -> None:
+        """切换当前页单个选中节点的收藏，供画布菜单在 GUI 线程调用。
+
+        操作先检查编辑权限和输入法候选，然后提交有效草稿并复查原目标。只读、
+        多选、候选未结束或目标已失效时抛出 MindMapError。成功返回 None，由引擎
+        保存收藏和历史并同步共享视图，页面位置及画布选择由当前视图继续管理。
+        """
+        self._ensure_editable()
+        key = self.current_node_id()
+        if self.selection_count != 1 or key not in self._document.nodes:
+            raise MindMapError("请选择一个要收藏或取消收藏的节点")
+        target = self.engine.document_generation, self._view_key()
+        self._prepare_page_navigation("请先完成输入法候选，再修改节点收藏")
+        self._ensure_editable()
+        if (self._disposed or target != (self.engine.document_generation, self._view_key())
+                or key not in self._document.nodes):
+            raise MindMapError("要修改收藏的节点已失效")
+        self.engine.set_node_favorite(key, not self._document.nodes[key].favorite,
+                                      graph_owner_id=parse_graph_page_id(self.current_page_id))
 
     def _engine_changed(self, event):
         """引擎已提交而读模型尚未同步时，暂停路径查询，避免访问刚删除的旧选择。"""
@@ -1513,7 +1541,8 @@ class MindMapWidget(
                 ("", self._custom_actions),
             ]
         return [
-            ("", ("add_child", "add_sibling", "edit", "toggle_text_format", "reset_node_width", "properties")),
+            ("", ("add_child", "add_sibling", "edit", "toggle_text_format", "reset_node_width", "properties",
+                  "favorite_node")),
             ("", ("cut", "copy", "paste", "delete")),
             ("节点结构", ("insert_parent", "move_up", "move_down", "fold")),
             ("页面", ("create_submap", "convert_descendants_to_submap", "enter_submap",

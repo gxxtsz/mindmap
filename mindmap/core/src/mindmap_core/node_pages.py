@@ -245,7 +245,7 @@ class NodePagesMixin:
 
         片段必须由单个合成根承载图。校验通过后在目标中复制页面、图节点绑定
         和内部引用，并重新分配分组及其成员标识。include_pages 为 False 时只复制
-        图节点、连线、分组和直接关联的附件。
+        图节点、连线、分组和直接关联的附件。粘贴生成的节点和附属页节点默认未收藏。
         资源按内容哈希复用，失败回滚所有修改，片段保持原样。
         """
         def action(node_id, fragment, page_id, include_pages):

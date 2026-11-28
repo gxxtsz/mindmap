@@ -134,3 +134,41 @@ def test_failed_favorite_save_keeps_in_memory_state_and_allows_retry(
         assert session.favorites.model.rows[0][0].page_id == page
     assert window.save()
     assert not session.files.is_dirty and load_directory(session.files.path).metadata["submap_favorites"] == [page]
+
+
+def test_node_favorite_outline_toolbar_is_per_view_and_autosaves(favorite_window, tmp_path, qtbot):
+    """实际标题按钮只切换活动分屏，收藏提交同步两边并写入目录。"""
+    window = favorite_window
+    assert not window.application._outline_mode_action.isVisible()
+    first, page = add_favorite(window, tmp_path / "节点收藏")
+    key = first.engine.add_child(first.engine.root_id, "要收藏的节点")
+    window.manager.activate("outline", focus=False)
+    depth, mode = window.manager.panel("outline").action_buttons
+    QApplication.processEvents()
+    qtbot.mouseClick(mode, Qt.MouseButton.LeftButton)
+    assert mode.isChecked() and mode.text() == "收藏节点大纲" and not depth.isEnabled()
+    assert first.panels.outline.empty_label.isVisible()
+    assert window.manager.duplicate_document(first.id)
+    second = window.application.active_session
+    window.host.editor.split_token(second.id, Qt.Orientation.Horizontal)
+    QApplication.processEvents()
+    assert first.engine is second.engine and first.panels.outline.favorites_only
+    assert not second.panels.outline.favorites_only and not mode.isChecked() and depth.isEnabled()
+    second.canvas.select_nodes([key])
+    second.canvas.action("favorite_node").trigger()
+    assert first.panels.outline.tree_model.index_for(key).isValid()
+    assert first.canvas.node_items[key].visual.favorite and second.canvas.node_items[key].visual.favorite
+    assert first.engine.is_submap_favorite(page)
+    qtbot.waitUntil(lambda: not second.files.is_dirty, timeout=5000)
+    saved = load_directory(second.files.path)
+    assert saved.nodes[key].favorite and saved.metadata["submap_favorites"] == [page]
+
+    window.manager.activate_document(first.id)
+    window.manager.activate("outline", focus=False)
+    QApplication.processEvents()
+    first.canvas.set_editable(False)
+    first.canvas.select_nodes([key])
+    assert not first.canvas.action("favorite_node").isEnabled() and mode.isEnabled()
+    qtbot.mouseClick(mode, Qt.MouseButton.LeftButton)
+    assert not first.panels.outline.favorites_only and depth.isEnabled()
+    assert first.engine.get_node(key).favorite

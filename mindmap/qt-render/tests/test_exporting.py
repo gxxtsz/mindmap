@@ -16,13 +16,15 @@ from mindmap_core import (
     MindMapEngine,
     NodeGraph,
     Rect,
+    Theme,
 )
 from mindmap_core.layouts.graph import build_graph_layout, graph_layout
+from mindmap_core.models import SVG_MEDIA_TYPE
 from mindmap_core.node_pages import graph_page_id
 from mindmap_qt_render import NodeItem, export_document, rendering
 from mindmap_qt_render.graph_groups import GraphGroupItem
 from PySide6.QtCore import QSize
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtSvg import QSvgRenderer
 
@@ -77,6 +79,69 @@ def test_export_with_only_core_layout_protocol(qapp, tmp_path, suffix):
         assert data.startswith(b"%PDF")
     else:
         assert b"<svg" in data
+
+
+@pytest.mark.parametrize("suffix", ["png", "svg", "pdf"])
+def test_favorite_card_fill_and_border_present_in_graphic_exports(qapp, tmp_path, suffix):
+    """三种文件回读都应在实际卡片边缘看到收藏底色和描边。"""
+    engine = MindMapEngine()
+    engine.set_node_favorite(engine.root_id, True)
+    document = engine.document
+    document.layout = LayoutConfig(algorithm_id="single")
+    registry = LayoutRegistry()
+    registry.register(SingleNodeLayout())
+    visual = rendering.VisualFactory().visual(document.root, document.theme, document, is_root=True)
+    size = QSize(ceil(visual.width) + 60, ceil(visual.height) + 60)
+    path = tmp_path / f"收藏节点.{suffix}"
+    export_document(document, path, layout_registry=registry)
+    pixels = _read_export_pixels(path, size)
+    middle = size.height() // 2
+    assert pixels.pixelColor(34, middle).name() == "#fff1c2"
+    assert pixels.pixelColor(31, middle).name() == "#a86308"
+
+
+@pytest.mark.parametrize("dark", [False, True])
+def test_favorite_visual_preserves_geometry_and_styles_group_title_and_image(qapp, dark):
+    """组标题与纯图片共用主题色，原卡片文字、尺寸和保存样式按需还原。"""
+    engine = MindMapEngine()
+    engine.set_theme(Theme.dark() if dark else Theme())
+    root = engine.root_id
+    text_color = "#000000" if dark else "#ffffff"
+    engine.update_node(root, style={"text_color": text_color, "background": "#aaaaaa"})
+    image = engine.add_image_child(root, b'<svg xmlns="http://www.w3.org/2000/svg" width="96" height="48">'
+                                   b'<rect width="96" height="48" fill="#197a66"/></svg>',
+                                   SVG_MEDIA_TYPE, width=96)
+    factory = rendering.VisualFactory()
+    before = engine.document
+    plain, sizes = factory.measure(before)
+    engine.set_node_favorite(root, True)
+    engine.set_node_favorite(image, True)
+    after = engine.document
+    featured, new_sizes = factory.measure(after)
+    assert new_sizes == sizes
+    assert plain[root].text_color.name() == text_color and after.root.style == before.root.style
+    fill, border, foreground = (("#493414", "#f4b84c", "#fff2cf") if dark
+                                else ("#fff1c2", "#a86308", "#2b2115"))
+    assert featured[root].text_color.name() == foreground and featured[root].font == plain[root].font
+    for key in (root, image):
+        visual = featured[key]
+        assert visual.favorite and visual.border_width == 2
+        assert (visual.background.name(), visual.border.name()) == (fill, border)
+        pixels = QImage(ceil(visual.width) + 8, ceil(visual.height) + 8, QImage.Format.Format_ARGB32)
+        pixels.fill(QColor(after.theme.background))
+        painter = QPainter(pixels)
+        painter.translate(4, 4)
+        visual.paint(painter, after.nodes[key], controls=False, group_title=key == root)
+        painter.end()
+        assert pixels.pixelColor(5, pixels.height() // 2).name() == border
+        if key == root:
+            assert pixels.pixelColor(8, pixels.height() // 2).name() == fill
+        else:
+            assert pixels.pixelColor(7, pixels.height() // 2).name() == fill
+            assert pixels.pixelColor(pixels.width() // 2, pixels.height() // 2).name() == "#197a66"
+    engine.set_node_favorite(root, False)
+    restored = engine.document
+    assert factory.visual(restored.root, restored.theme, restored, is_root=True) is plain[root]
 
 
 @pytest.mark.parametrize("suffix", ["png", "svg", "pdf"])

@@ -52,6 +52,34 @@ PAGE_CONTENT_GAP = 8.0
 PAGE_RIGHT_PADDING = 14.0
 # 保留 32×32 的入口命中区域，上下各留 2 个逻辑像素，适配更紧凑的节点。
 PAGE_MIN_HEIGHT = 36.0
+_FAVORITE_BORDER_WIDTH = 2.0
+
+
+def _relative_luminance(color: QColor) -> float:
+    """将 sRGB 色值换算为计算文字对比度所用的相对亮度。"""
+    rgb = color.toRgb().getRgbF()[:3]
+    linear = [channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+              for channel in rgb]
+    return sum(channel * weight for channel, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+
+
+def _favorite_card_colors(theme: Theme, text: QColor) -> tuple[QColor, QColor, QColor]:
+    """根据画布明暗选择收藏填充和描边，原正文色达到阅读对比度时继续使用。
+
+    半透明正文按实际叠加在填充色上的结果计算。返回值仅用于本次绘制，
+    取消收藏后重新从节点和页面主题读取原来的外观。
+    """
+    if QColor(theme.background).lightnessF() < 0.5:
+        fill, border, fallback = QColor("#493414"), QColor("#f4b84c"), QColor("#fff2cf")
+    else:
+        fill, border, fallback = QColor("#fff1c2"), QColor("#a86308"), QColor("#2b2115")
+    if not text.isValid():
+        return fill, border, fallback
+    alpha = text.alphaF()
+    foreground = QColor.fromRgbF(*(channel * alpha + base * (1 - alpha)
+                                    for channel, base in zip(text.toRgb().getRgbF()[:3], fill.getRgbF()[:3])))
+    low, high = sorted((_relative_luminance(foreground), _relative_luminance(fill)))
+    return fill, border, text if (high + 0.05) / (low + 0.05) >= 4.5 else fallback
 
 
 def ensure_fonts() -> None:
@@ -224,12 +252,21 @@ class NodeVisual:
     page_icon_color: QColor | None = None
     # 记录最小高度居中前的内容高度，使编辑草稿增减行数时能准确恢复留白。
     content_height: float = 0.0
-    # 纯图片只绘制原始矩形和临时选中轮廓；默认值兼容旧视觉构造接口。
+    # 两个默认值兼容旧视觉构造接口，收藏纯图片在相同画幅内增加常驻窄框。
     image_only: bool = False
+    favorite: bool = False
 
     def paint_image(self, painter: QPainter, rect: QRectF | None = None) -> None:
-        """共用正式绘制和尺寸预览，使用当前绘画设备的变换绘制图片。"""
+        """共用正式绘制和尺寸预览，收藏的纯图片在目标矩形内保留等比图像和窄框。"""
         bounds = self.image_rect if rect is None else rect
+        if self.image_only and self.favorite and not bounds.isEmpty():
+            side = min(bounds.width(), bounds.height())
+            edge = min(self.border_width, side / 8)
+            painter.fillRect(bounds, self.border)
+            painter.fillRect(bounds.adjusted(edge, edge, -edge, -edge), self.background)
+            scale = 1 - 2 * min(4.0, side / 4) / side
+            dx, dy = bounds.width() * (1 - scale) / 2, bounds.height() * (1 - scale) / 2
+            bounds = bounds.adjusted(dx, dy, -dx, -dy)
         if isinstance(self.image, QSvgRenderer):
             painter.save()
             try:
@@ -341,6 +378,7 @@ class NodeVisual:
         text_highlight 控制文本节点内置的选中及编辑描边，默认保留独立绘制接口的
         既有行为。交互画布传入 False，由视图绘制固定屏幕尺寸的间隔外框；该开关
         不影响 editing 对正文的隐藏，也不影响纯图片的选中轮廓及尺寸手柄。
+        收藏节点使用由工厂计算的正式填充和描边，图组标题也在自己的卡片范围内绘制。
         正文、标签和备注均显式开启文字抗锯齿，不依赖调用方的视图配置。
         绘制结束、纯图片提前返回或绘制异常时均恢复 painter 的全部绘图状态。
         """
@@ -360,8 +398,8 @@ class NodeVisual:
                 return
             # 独立调用仍可请求原有描边；画布把交互高亮交给前景层，正式边框不随
             # 选中或文字焦点变化，避免把根节点同色的加粗描边和新外框重复绘制。
-            highlighted = text_highlight and (selected or editing)
-            if not group_title:
+            highlighted = text_highlight and (selected or editing) and not self.favorite
+            if not group_title or self.favorite:
                 painter.setPen(
                     QPen(QColor(accent) if highlighted else self.border, 2.5 if highlighted else self.border_width)
                 )
@@ -480,8 +518,8 @@ class VisualFactory:
         原有测量行为。解析结果只以是否存在进入缓存，不缓存具体页面或修改节点。
         单页读模型已经投影引用正文；直接绘制完整文档时在这里借用目标根的正文。
         引用按钮只为自身预留几何，图片、标签、样式及其他入口仍取来源节点。
-        纯图片节点仅按 image_width 和原始像素比例测量，无正文、留白、填充及常驻
-        边框，也不使用普通附件的宽高限制；图片字节无效时抛出 MindMapError。
+        纯图片节点仅按 image_width 和原始像素比例测量，收藏样式在同一矩形内绘制。
+        它不使用普通附件的宽高限制；图片字节无效时抛出 MindMapError。
         宿主先创建 QApplication，并在 GUI 线程使用返回的文字文档和图片对象。
         字体保持节点所选的字族、字号和样式，统一优先抗锯齿并减轻像素网格对齐；
         标签和原地编辑继续借用同一策略。倍率与设备像素密度由实际绘制设备处理，
@@ -507,6 +545,7 @@ class VisualFactory:
                 asset is not None and asset.media_type == SVG_MEDIA_TYPE,
                 node.image_width,
                 node.is_image_node,
+                node.favorite,
                 bool(node.children),
                 bool(node.note),
                 bool(node.hyperlink),
@@ -540,6 +579,11 @@ class VisualFactory:
         background = QColor(node.style.get("background", theme.accent if is_root else theme.node_background))
         root_text = "#18212f" if QColor(theme.accent).lightnessF() > 0.65 else "#ffffff"
         text_color = QColor(node.style.get("text_color", root_text if is_root else theme.text))
+        border = QColor(node.style.get("border_color", theme.border))
+        border_width = float(node.style.get("border_width", 1))
+        if node.favorite:
+            background, border, text_color = _favorite_card_colors(theme, text_color)
+            border_width = _FAVORITE_BORDER_WIDTH
         # Markdown 正文单独起段，图标前缀不会破坏标题、列表和代码围栏。
         separator = "\n\n" if markdown else " "
         text = (" ".join(node.icons) + separator if node.icons else "") + body.text
@@ -604,8 +648,8 @@ class VisualFactory:
             text_position,
             text_color,
             background,
-            QColor(node.style.get("border_color", theme.border)),
-            float(node.style.get("border_width", 1)),
+            border,
+            border_width,
             image,
             image_rect,
             tags,
@@ -620,9 +664,12 @@ class VisualFactory:
             ) if target),
             content_height=content_height,
             image_only=node.is_image_node,
+            favorite=node.favorite,
         )
         # 普通底色使用强调色；根节点和自定义底色跟随正文色，避免蓝底蓝图标。
-        visual.page_icon_color = visual.text_color if is_root or node.style.get("background") else QColor(theme.accent)
+        visual.page_icon_color = (
+            text_color if node.favorite or is_root or node.style.get("background") else QColor(theme.accent)
+        )
         if visual.page_kinds and not visual.image_only:
             visual = visual.with_content_size(width, content_height)
         if cache:

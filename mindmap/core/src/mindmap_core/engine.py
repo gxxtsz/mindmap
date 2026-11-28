@@ -343,7 +343,7 @@ class MindMapEngine(NodePagesMixin):
         """将入口拥有的当前一层子导图接回普通后代，成功返回 None。
 
         node_id 必须拥有子导图，否则抛出中文 MindMapError。重复包装根会移除，
-        根有独立属性或附属页面时作为普通子节点保留；更深层页面及其收藏不变。
+        根已收藏或具有独立属性、附属页面时作为普通子节点保留；更深层页面及其收藏不变。
         入口展开，后代使用入口所在页的配置。页面、父引用及该页收藏共用一次
         可撤销事务，失败不留部分修改；不导航，仅在引擎所属线程同步调用。
         """
@@ -882,6 +882,27 @@ class MindMapEngine(NodePagesMixin):
         self._execute("set_node_attachment", self._editor.set_node_attachment, node_id=node_id, file=file,
                       graph_owner_id=graph_owner_id, **origin)
 
+    def set_node_favorite(self, node_id: str, favorite: bool, *, graph_owner_id: str | None = None) -> None:
+        """设置节点收藏状态，供画布菜单及独立宿主在引擎所属线程调用。
+
+        树节点传入文档内的节点 ID。图节点传入图内局部 ID，并通过 graph_owner_id
+        指定拥有该图页的文档节点。同名节点及不同图的相同局部 ID 各自独立。
+        favorite 必须为布尔值。标识无效或前置检查拒绝时抛出 MindMapError，
+        文档和历史保持原状。成功返回 None，重复设置同一状态不产生记录；
+        实际变更与所属页面一并进入撤销历史和保存快照。
+        """
+        if not isinstance(node_id, str) or not node_id:
+            raise MindMapError("节点标识无效")
+        if not isinstance(favorite, bool):
+            raise MindMapError("节点收藏状态必须为布尔值")
+        origin = {}
+        if graph_owner_id is not None:
+            if not isinstance(graph_owner_id, str) or not graph_owner_id:
+                raise MindMapError("图的所属节点标识无效")
+            origin["page_id"] = graph_page_id(graph_owner_id)
+        self._execute("set_node_favorite", self._editor.set_node_favorite, node_id=node_id, favorite=favorite,
+                      graph_owner_id=graph_owner_id, **origin)
+
     def copy_fragment(self, node_ids) -> MindMapDocument:
         """建立包含属性、资源和布局配置的独立剪贴板文档，不修改原文档。"""
         return self._editor.copy_fragment(node_ids)
@@ -891,6 +912,7 @@ class MindMapEngine(NodePagesMixin):
 
         include_pages 默认无损保留附属页面；详情页目标不接受这些页面，宿主可在用户
         确认后显式传入 False，只粘贴普通树和所需资源，来源及传入片段均不被修改。
+        所有新分配标识的节点均从未收藏状态开始，包括附属页及其图节点。
         """
         return self._execute(
             "paste_fragment", self._editor.paste_fragment, parent_id=parent_id, fragment=fragment,

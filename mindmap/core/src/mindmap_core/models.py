@@ -100,6 +100,7 @@ class Node:
     text 保存原文，text_format 决定使用纯文本还是 Markdown 显示。style 中的
     width 为自动测量的换行上限，fixed_width 为可选的固定正文宽度，均使用逻辑
     像素。卡片留白和页面按钮另行计算。metadata 只接受 JSON 数据。
+    favorite 表示本节点的收藏状态，默认未收藏。页面收藏由文档单独管理。
     """
 
     text: str = "新节点"
@@ -125,6 +126,7 @@ class Node:
     # 核心仅校验封装及 JSON 数据，不依赖具体扩展；未安装扩展的内容仍可无损保存。
     extension_pages: dict[str, dict[str, Any]] = field(default_factory=dict)
     attachment: FileAttachment | None = None
+    favorite: bool = False
 
     @property
     def is_image_node(self) -> bool:
@@ -519,7 +521,7 @@ class MindMapGraphView(MindMapPageView):
         for entry in graph.nodes:
             style = {} if entry.fixed_width is None else {"fixed_width": entry.fixed_width}
             node = Node(entry.title, id=entry.id, text_format=entry.text_format, style=style,
-                        attachment=entry.attachment)
+                        attachment=entry.attachment, favorite=entry.favorite)
             if entry.image_id is not None:
                 node.image_id, node.image_width = entry.image_id, entry.image_width
                 node.metadata["image_only"] = True

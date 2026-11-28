@@ -503,12 +503,13 @@ def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
     manager, tree = window.manager, window.application.panels.outline
     manager.activate("outline", focus=False)
     panel = manager.panel("outline")
-    button, = panel.action_buttons
+    button, favorite_button = panel.action_buttons
     assert button.defaultAction() is window.application._depth_action
     assert button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
     assert not button.icon().isNull() and button.width() == 28
     assert button.iconSize() == QSize(14, 14)
-    assert panel.header_layout.indexOf(button) < panel.header_layout.indexOf(panel.more)
+    assert (panel.header_layout.indexOf(button) < panel.header_layout.indexOf(favorite_button)
+            < panel.header_layout.indexOf(panel.more))
     popped = []
 
     def choose_depth():
@@ -529,12 +530,12 @@ def test_outline_header_menu_survives_theme_and_docking(window, qtbot):
         for mode in (ViewMode.UNDOCK, ViewMode.DOCK_PINNED):
             manager.set_view_mode("outline", mode)
             QApplication.processEvents()
-            assert manager.panel("outline").action_buttons == [button]
-            assert button.isVisible() == panel.more.isVisible() == panel.hide_button.isVisible()
+            assert manager.panel("outline").action_buttons == [button, favorite_button]
+            assert button.isVisible() == favorite_button.isVisible() == panel.more.isVisible() == panel.hide_button.isVisible()
             assert button.defaultAction().menu() is tree.depth_menu
     assert window.application.engine.document == before and window.application.engine.revision == revision
-    # 非活动面板离开时三个入口同时消失，悬停、激活或全局常显设置又同时出现。
-    controls = (button, panel.more, panel.hide_button)
+    # 非活动面板离开时标题入口同时消失，悬停、激活或全局常显设置又同时出现。
+    controls = (button, favorite_button, panel.more, panel.hide_button)
     manager.mark_active("properties")
     QApplication.sendEvent(panel, QEvent(QEvent.Type.Leave))
     assert all(control.isHidden() for control in controls)

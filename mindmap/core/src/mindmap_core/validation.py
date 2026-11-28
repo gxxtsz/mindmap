@@ -160,6 +160,8 @@ def validate_node(document, node_id, node, *, json_data=True):
         raise MindMapError("引用页面的根节点标识无效")
     if not isinstance(node.expanded, bool) or node.direction not in (None, "left", "right"):
         raise MindMapError("节点展开状态或方向无效")
+    if not isinstance(node.favorite, bool):
+        raise MindMapError("节点收藏状态必须为布尔值")
     if node.text_format not in ("plain", "markdown"):
         raise MindMapError("文本格式必须是 plain 或 markdown")
     for values in (node.tags, node.icons):
